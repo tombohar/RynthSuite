@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/Plugins/">
+    <Project Path="Plugins/RynthCore.Plugin.RynthAi/RynthCore.Plugin.RynthAi.csproj" />
+  </Folder>
+  <Project Path="../RynthCore/src/RynthCore.PluginCore/RynthCore.PluginCore.csproj" />
+  <Project Path="../RynthCore/src/RynthCore.PluginSdk/RynthCore.PluginSdk.csproj" />
+</Solution>

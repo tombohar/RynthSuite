@@ -1,0 +1,703 @@
+using System;
+using System.Collections.Generic;
+using RynthCore.PluginSdk;
+using RynthCore.Plugin.RynthAi.LegacyUi;
+
+namespace RynthCore.Plugin.RynthAi;
+
+public class BuffManager : IDisposable
+{
+    private readonly RynthCoreHost _host;
+    private readonly LegacyUiSettings _settings;
+    private readonly SpellManager _spellManager;
+    private readonly PlayerVitalsCache _vitals;
+
+    private CharacterSkills? _charSkills;
+    private WorldObjectCache? _worldObjectCache;
+
+    private DateTime _lastCastAttempt = DateTime.MinValue;
+    private bool _isForceRebuffing = false;
+    private int _pendingSpellId = 0;
+
+    private class RamTimerInfo
+    {
+        public DateTime Expiration;
+        public int SpellLevel;
+        public string SpellName = "";
+    }
+
+    /// <summary>
+    /// Buff timer for an enchantment on a specific equipped item (armor/weapon).
+    /// </summary>
+    private class ItemBuffTimerInfo
+    {
+        public uint ObjectId;
+        public string ObjectName = "";
+        public DateTime Expiration;
+        public int SpellLevel;
+        public string SpellName = "";
+    }
+
+    private readonly Dictionary<int, RamTimerInfo> _ramBuffTimers = new();
+    /// <summary>Keyed by (objectId, spellFamily) packed as long.</summary>
+    private readonly Dictionary<long, ItemBuffTimerInfo> _itemBuffTimers = new();
+    private string _buffTimerPath = "";
+
+    private bool _isRechargingMana = false;
+    private bool _isRechargingStamina = false;
+    private bool _isHealingSelf = false;
+
+    /// <summary>Current combat mode — updated from OnCombatModeChange.</summary>
+    public int CurrentCombatMode { get; set; } = CombatMode.NonCombat;
+
+    private readonly List<string> BaseCreatureBuffs = new()
+    {
+        "Strength Self", "Endurance Self", "Coordination Self",
+        "Quickness Self", "Focus Self", "Willpower Self",
+        "Magic Resistance Self", "Invulnerability Self", "Impregnability Self"
+    };
+
+    private readonly Dictionary<AcSkillType, string> CreatureSkillBuffs = new()
+    {
+        { AcSkillType.MeleeDefense, "Invulnerability Self" },
+        { AcSkillType.MissileDefense, "Impregnability Self" },
+        { AcSkillType.MagicDefense, "Magic Resistance Self" },
+        { AcSkillType.HeavyWeapons, "Heavy Weapon Mastery" },
+        { AcSkillType.LightWeapons, "Light Weapon Mastery" },
+        { AcSkillType.FinesseWeapons, "Finesse Weapon Mastery" },
+        { AcSkillType.TwoHandedCombat, "Two Handed Combat Mastery" },
+        { AcSkillType.Shield, "Shield Mastery" },
+        { AcSkillType.DualWield, "Dual Wield Mastery" },
+        { AcSkillType.Recklessness, "Recklessness Mastery" },
+        { AcSkillType.SneakAttack, "Sneak Attack Mastery" },
+        { AcSkillType.DirtyFighting, "Dirty Fighting Mastery" },
+        { AcSkillType.AssessCreature, "Monster Attunement" },
+        { AcSkillType.AssessPerson, "Person Attunement" },
+        { AcSkillType.ArcaneLore, "Arcane Enlightenment" },
+        { AcSkillType.ArmorTinkering, "Armor Tinkering Expertise" },
+        { AcSkillType.ItemTinkering, "Item Tinkering Expertise" },
+        { AcSkillType.MagicItemTinkering, "Magic Item Tinkering Expertise" },
+        { AcSkillType.WeaponTinkering, "Weapon Tinkering Expertise" },
+        { AcSkillType.Salvaging, "Arcanum Salvaging" },
+        { AcSkillType.Run, "Sprint" },
+        { AcSkillType.Jump, "Jumping Mastery" },
+        { AcSkillType.Loyalty, "Fealty" },
+        { AcSkillType.Leadership, "Leadership Mastery" },
+        { AcSkillType.Deception, "Deception Mastery" },
+        { AcSkillType.Healing, "Healing Mastery" },
+        { AcSkillType.Lockpick, "Lockpick Mastery" },
+        { AcSkillType.Cooking, "Cooking Mastery" },
+        { AcSkillType.Fletching, "Fletching Mastery" },
+        { AcSkillType.Alchemy, "Alchemy Mastery" },
+        { AcSkillType.ManaConversion, "Mana Conversion Mastery" },
+        { AcSkillType.CreatureEnchantment, "Creature Enchantment Mastery" },
+        { AcSkillType.ItemEnchantment, "Item Enchantment Mastery" },
+        { AcSkillType.LifeMagic, "Life Magic Mastery" },
+        { AcSkillType.WarMagic, "War Magic Mastery" },
+        { AcSkillType.VoidMagic, "Void Magic Mastery" },
+        { AcSkillType.Summoning, "Summoning Mastery" },
+    };
+
+    public BuffManager(RynthCoreHost host, LegacyUiSettings settings, SpellManager spellManager, PlayerVitalsCache vitals)
+    {
+        _host = host;
+        _settings = settings;
+        _spellManager = spellManager;
+        _vitals = vitals;
+    }
+
+    public void SetCharacterSkills(CharacterSkills skills) => _charSkills = skills;
+    public void SetWorldObjectCache(WorldObjectCache cache) => _worldObjectCache = cache;
+
+    public void SetTimerPath(string charFolder)
+    {
+        _buffTimerPath = System.IO.Path.Combine(charFolder, "bufftimers.txt");
+        LoadBuffTimers();
+    }
+
+    public void SaveBuffTimers()
+    {
+        if (string.IsNullOrEmpty(_buffTimerPath)) return;
+        try
+        {
+            var lines = new List<string>();
+            foreach (var kvp in _ramBuffTimers)
+            {
+                var info = kvp.Value;
+                lines.Add($"{kvp.Key}|{info.Expiration.Ticks}|{info.SpellLevel}|{info.SpellName}");
+            }
+            System.IO.File.WriteAllLines(_buffTimerPath, lines);
+        }
+        catch { }
+    }
+
+    public void LoadBuffTimers()
+    {
+        if (string.IsNullOrEmpty(_buffTimerPath)) return;
+        if (!System.IO.File.Exists(_buffTimerPath)) return;
+        try
+        {
+            _ramBuffTimers.Clear();
+            foreach (string line in System.IO.File.ReadAllLines(_buffTimerPath))
+            {
+                string[] parts = line.Split('|');
+                if (parts.Length < 4) continue;
+                DateTime expiration = new DateTime(long.Parse(parts[1]));
+                int level = int.Parse(parts[2]);
+                string name = parts[3];
+                // Recompute family from stored spell name — handles files saved with the old
+                // non-deterministic String.GetHashCode (randomised per-session in .NET 5+).
+                int family = new SpellInfo(0, name).Family;
+                if (expiration > DateTime.Now)
+                    _ramBuffTimers[family] = new RamTimerInfo { Expiration = expiration, SpellLevel = level, SpellName = name };
+            }
+            if (_ramBuffTimers.Count > 0)
+                _host.WriteToChat($"[RynthAi] Restored {_ramBuffTimers.Count} buff timer(s) from last session.", 1);
+        }
+        catch { }
+    }
+
+    public void Dispose() { }
+
+    public void ForceFullRebuff()
+    {
+        _isForceRebuffing = true;
+        _ramBuffTimers.Clear();
+        SaveBuffTimers();
+        _host.WriteToChat("[RynthAi] Starting Force Rebuff...", 5);
+    }
+
+    public void CancelBuffing()
+    {
+        _isForceRebuffing = false;
+        _isRechargingMana = false;
+        _isRechargingStamina = false;
+        _isHealingSelf = false;
+        _pendingSpellId = 0;
+        _host.WriteToChat("[RynthAi] Sequence cancelled.", 5);
+    }
+
+    public void OnHeartbeat()
+    {
+        if (!_settings.IsMacroRunning) return;
+
+        if ((DateTime.Now - _lastCastAttempt).TotalMilliseconds < 1500)
+        {
+            _settings.CurrentState = "Buffing";
+            return;
+        }
+
+        if (CheckVitals())
+        {
+            _settings.CurrentState = "Buffing";
+            return;
+        }
+
+        if (_settings.EnableBuffing)
+        {
+            if (CheckAndCastSelfBuffs())
+            {
+                _settings.CurrentState = "Buffing";
+                return;
+            }
+
+            if (_isForceRebuffing)
+            {
+                _isForceRebuffing = false;
+                _host.WriteToChat("[RynthAi] Force Rebuff Complete.", 1);
+            }
+        }
+
+        if (_settings.CurrentState == "Buffing")
+            _settings.CurrentState = "Idle";
+    }
+
+    private bool CheckVitals()
+    {
+        int curHealthPct = _vitals.HealthPct;
+        int curManaPct   = _vitals.ManaPct;
+        int curStamPct   = _vitals.StaminaPct;
+
+        if (curHealthPct <= 30 && curStamPct > 20) return AttemptVitalCast("Stamina to Health Self");
+
+        if (curHealthPct <= _settings.HealAt)    _isHealingSelf = true;
+        if (curHealthPct >= _settings.TopOffHP)  _isHealingSelf = false;
+        if (curManaPct <= _settings.GetManaAt)   _isRechargingMana = true;
+        if (curManaPct >= _settings.TopOffMana)  _isRechargingMana = false;
+        if (curStamPct <= _settings.RestamAt)    _isRechargingStamina = true;
+        if (curStamPct >= _settings.TopOffStam)  _isRechargingStamina = false;
+
+        if (_isHealingSelf) return AttemptVitalCast("Heal Self");
+        if (_isRechargingMana && curStamPct > 15) return AttemptVitalCast("Stamina to Mana Self");
+        if (_isRechargingStamina) return AttemptVitalCast("Revitalize Self");
+
+        return false;
+    }
+
+    private bool AttemptVitalCast(string baseName)
+    {
+        int spellId = FindBestSpellId(baseName, AcSkillType.LifeMagic);
+        if (spellId == 0) return false;
+        if (!EnsureMagicMode()) return true;
+        _host.CastSpell((uint)_host.GetPlayerId(), spellId);
+        _lastCastAttempt = DateTime.Now;
+        return true;
+    }
+
+    private bool CheckAndCastSelfBuffs()
+    {
+        List<string> desiredBuffs = BuildDynamicBuffList();
+
+        foreach (string buffBaseName in desiredBuffs)
+        {
+            AcSkillType castSkill = SkillForBuff(buffBaseName);
+            if (!IsSkillUsable(castSkill)) continue;
+
+            int spellId = FindBestSpellId(buffBaseName, castSkill);
+            if (spellId == 0) continue;
+
+            if (!IsBuffActive(spellId))
+            {
+                if (!EnsureMagicMode()) return true;
+
+                _pendingSpellId = spellId;
+
+                var spellInfo = SpellTableStub.GetById(spellId);
+                if (spellInfo != null)
+                    _host.WriteToChat($"[RynthAi] Casting: {spellInfo.Name}", 5);
+
+                _host.CastSpell((uint)_host.GetPlayerId(), spellId);
+                _lastCastAttempt = DateTime.Now;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int FindBestSpellId(string baseName, AcSkillType skill)
+        => _spellManager.GetDynamicSelfBuffId(baseName, skill);
+
+    private static bool IsArmorEnchantment(string name)
+    {
+        string[] armorSpells = {
+            "Impenetrability", "Brogard's Defiance", "Acid Bane", "Olthoi's Bane",
+            "Blade Bane", "Swordsman's Bane", "Swordman's Bane", "Bludgeoning Bane", "Tusker's Bane",
+            "Flame Bane", "Inferno's Bane", "Frost Bane", "Gelidite's Bane",
+            "Lightning Bane", "Astyrrian's Bane", "Piercing Bane", "Archer's Bane"
+        };
+        foreach (string s in armorSpells)
+            if (name.IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        return false;
+    }
+
+    private bool IsBuffActive(int spellId)
+    {
+        var targetSpell = SpellTableStub.GetById(spellId);
+        if (targetSpell == null) return false;
+
+        int targetLevel = GetSpellLevel(targetSpell);
+
+        if (_ramBuffTimers.TryGetValue(targetSpell.Family, out RamTimerInfo? timer))
+        {
+            if (DateTime.Now < timer.Expiration.AddMinutes(-5))
+            {
+                if (timer.SpellLevel >= targetLevel) return true;
+            }
+        }
+
+        if (_isForceRebuffing) return false;
+
+        if (IsArmorEnchantment(targetSpell.Name)) return false;
+
+        // TODO: Check real enchantments from AC memory when available.
+        // For now, rely entirely on RAM timers above.
+
+        return false;
+    }
+
+    private static int GetSpellLevel(SpellInfo spell)
+    {
+        string n = spell.Name;
+        if (n.StartsWith("Incantation")) return 8;
+        if (n.Contains(" VII")) return 7;
+        if (n.Contains(" VI")) return 6;
+        if (n.Contains(" V")) return 5;
+        if (n.Contains(" IV")) return 4;
+        if (n.Contains(" III")) return 3;
+        if (n.Contains(" II")) return 2;
+        if (n.EndsWith(" I") || n.Contains(" I ")) return 1;
+
+        if (n.Contains("Mastery") || n.Contains("Blessing") || n.Contains("Aura of") ||
+            n.Contains("Intervention") || n.Contains("Trance") || n.Contains("Recovery") ||
+            n.Contains("Robustify") || n.Contains("Persistence") || n.Contains("Robustification") ||
+            n.Contains("Might of the Lugians") || n.Contains("Preservance") || n.Contains("Perseverance") ||
+            n.Contains("Honed Control") || n.Contains("Hastening") || n.Contains("Inner Calm") ||
+            n.Contains("Mind Blossom") || n.Contains("Infected Caress") || n.Contains("Elysa's Sight") ||
+            n.Contains("Infected Spirit") || n.Contains("Atlan's Alacrity") || n.Contains("Cragstone's Will") ||
+            n.Contains("Brogard's Defiance") || n.Contains("Olthoi's Bane") || n.Contains("Swordsman's Bane") ||
+            n.Contains("Swordman's Bane") || n.Contains("Tusker's Bane") || n.Contains("Inferno's Bane") ||
+            n.Contains("Gelidite's Bane") || n.Contains("Astyrrian's Bane") || n.Contains("Archer's Bane"))
+            return 7;
+
+        return 1;
+    }
+
+    private int GetArchmageEnduranceCount()
+    {
+        // TODO: Read augmentation count from AC object memory (key 238 on player object)
+        return 0; // STUB
+    }
+
+    private double GetCustomSpellDuration(int spellLevel)
+    {
+        double baseSeconds = 1800;
+        if (spellLevel == 6) baseSeconds = 2700;
+        else if (spellLevel == 7) baseSeconds = 3600;
+        else if (spellLevel == 8) baseSeconds = 5400;
+
+        int augs = GetArchmageEnduranceCount();
+        return baseSeconds * (1.0 + (augs * 0.20));
+    }
+
+    /// <summary>
+    /// Reads active enchantments directly from client memory and refreshes _ramBuffTimers.
+    /// Requires both HasReadPlayerEnchantments and HasGetServerTime to be available.
+    /// Returns the number of timers updated, or -1 if the API is unavailable.
+    /// </summary>
+    public int RefreshFromLiveMemory()
+    {
+        if (!_host.HasReadPlayerEnchantments || !_host.HasGetServerTime)
+            return -1;
+
+        double serverNow = _host.GetServerTime();
+        if (serverNow <= 0)
+            return -1; // No time sync received yet
+
+        const int MaxEnchantments = 512;
+        uint[] spellIds    = new uint[MaxEnchantments];
+        double[] expiryTimes = new double[MaxEnchantments];
+
+        int count = _host.ReadPlayerEnchantments(spellIds, expiryTimes, MaxEnchantments);
+        if (count < 0)
+            return -1;
+
+        _ramBuffTimers.Clear();
+        for (int i = 0; i < count; i++)
+        {
+            var spellInfo = SpellTableStub.GetById((int)spellIds[i]);
+            if (spellInfo == null) continue;
+
+            double remainingSeconds = expiryTimes[i] - serverNow;
+            if (remainingSeconds <= 0) continue;
+
+            // Skip permanent enchantments — they don't need timers and
+            // double.MaxValue would overflow DateTime.AddSeconds.
+            if (remainingSeconds > 86400 * 365) continue;
+
+            int level = GetSpellLevel(spellInfo);
+            _ramBuffTimers[spellInfo.Family] = new RamTimerInfo
+            {
+                Expiration = DateTime.Now.AddSeconds(remainingSeconds),
+                SpellLevel = level,
+                SpellName  = spellInfo.Name,
+            };
+        }
+
+        SaveBuffTimers();
+        return _ramBuffTimers.Count;
+    }
+
+    /// <summary>
+    /// Scans all equipped items and reads their enchantment registries.
+    /// Tracks item-specific buffs (Impenetrability, Banes, etc.) separately from player buffs.
+    /// </summary>
+    private void RefreshEquippedItemEnchantments(double serverNow)
+    {
+        _itemBuffTimers.Clear();
+
+        if (_worldObjectCache == null || !_host.HasReadObjectEnchantments)
+            return;
+
+        try
+        {
+            // Snapshot the inventory to avoid iterating a changing collection
+            var inventorySnapshot = new List<WorldObject>();
+            foreach (var item in _worldObjectCache.GetDirectInventory())
+                inventorySnapshot.Add(item);
+
+            const int MaxEnchantments = 64;
+            uint[] spellIds    = new uint[MaxEnchantments];
+            double[] expiryTimes = new double[MaxEnchantments];
+            int equippedCount = 0;
+
+            foreach (var item in inventorySnapshot)
+            {
+                int wieldedSlot = item.WieldedLocation;
+                if (wieldedSlot == 0) continue; // not equipped
+
+                equippedCount++;
+                uint objectId = unchecked((uint)item.Id);
+                int count;
+                try
+                {
+                    count = _host.ReadObjectEnchantments(objectId, spellIds, expiryTimes, MaxEnchantments);
+                }
+                catch
+                {
+                    continue; // skip items whose weenie can't be read
+                }
+                if (count <= 0) continue;
+
+                for (int i = 0; i < count; i++)
+                {
+                    var spellInfo = SpellTableStub.GetById((int)spellIds[i]);
+                    if (spellInfo == null) continue;
+
+                    double remainingSeconds = expiryTimes[i] - serverNow;
+                    if (remainingSeconds <= 0) continue;
+                    if (remainingSeconds > 86400 * 365) continue; // permanent
+
+                    long key = ((long)objectId << 32) | (uint)spellInfo.Family;
+                    _itemBuffTimers[key] = new ItemBuffTimerInfo
+                    {
+                        ObjectId = objectId,
+                        ObjectName = item.Name,
+                        Expiration = DateTime.Now.AddSeconds(remainingSeconds),
+                        SpellLevel = GetSpellLevel(spellInfo),
+                        SpellName  = spellInfo.Name,
+                    };
+                }
+            }
+
+            _host.Log($"[RynthAi] Item enchant scan: {equippedCount} equipped, {_itemBuffTimers.Count} timed buffs");
+        }
+        catch (Exception ex)
+        {
+            _host.Log($"[RynthAi] Item enchant scan failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Returns the number of tracked item buff timers (equipped items only).
+    /// </summary>
+    public int ItemBuffCount => _itemBuffTimers.Count;
+
+    /// <summary>
+    /// Checks whether a specific equipped item has a given buff family active.
+    /// </summary>
+    public bool HasItemBuff(uint objectId, string spellBaseName)
+    {
+        int family = new SpellInfo(0, spellBaseName).Family;
+        long key = ((long)objectId << 32) | (uint)family;
+        return _itemBuffTimers.TryGetValue(key, out var info) && info.Expiration > DateTime.Now;
+    }
+
+    public void PrintBuffDebug()
+    {
+        int augs = GetArchmageEnduranceCount();
+        _host.WriteToChat($"[RynthAi] Archmage endurance count: {augs}", 1);
+
+        // Try a live refresh of player enchantments
+        double serverNow = _host.HasGetServerTime ? _host.GetServerTime() : 0;
+        if (serverNow > 0 && _host.HasReadPlayerEnchantments)
+        {
+            int refreshed = RefreshFromLiveMemory();
+            _host.WriteToChat($"[RynthAi] Live read: {(refreshed >= 0 ? $"{refreshed} enchantments" : "unavailable (no qualities ptr)")}", 1);
+
+            // TODO: Item enchantment scanning disabled — crashes when reading inventory item
+            // memory via ReadObjectEnchantments. Needs investigation (AV in native InqInt or
+            // GetWeenieObject for certain inventory items). See memory note for details.
+        }
+        else
+        {
+            _host.WriteToChat($"[RynthAi] ServerTime={Math.Round(serverNow)} (no live read: serverTime=0 or API missing)", 1);
+        }
+
+        if (_ramBuffTimers.Count == 0)
+        {
+            _host.WriteToChat("[RynthAi] No buff timers active.", 1);
+            return;
+        }
+
+        _host.WriteToChat($"[RynthAi] -- Player buffs ({_ramBuffTimers.Count}) --", 1);
+        foreach (var kvp in _ramBuffTimers)
+        {
+            var info = kvp.Value;
+            double total = GetCustomSpellDuration(info.SpellLevel);
+            TimeSpan left = info.Expiration - DateTime.Now;
+            double passed = total - left.TotalSeconds;
+            _host.WriteToChat(
+                $"[RynthAi] {info.SpellName} (Lvl {info.SpellLevel}): {Math.Round(passed / 60, 1)}m passed, " +
+                $"{Math.Round(left.TotalMinutes, 1)}m left. Total: {total / 60}m", 1);
+        }
+    }
+
+    private List<string> BuildDynamicBuffList()
+    {
+        var step1_CreatureMastery = new List<string>();
+        var step2_Focus           = new List<string>();
+        var step3_Willpower       = new List<string>();
+        var step4_OtherCreature   = new List<string>();
+        var step5_LifeAndItem     = new List<string>();
+        var step6_WeaponAuras     = new List<string>();
+        var step7_ArmorBanes      = new List<string>();
+
+        foreach (string attr in BaseCreatureBuffs)
+        {
+            if (attr == "Focus Self") step2_Focus.Add(attr);
+            else if (attr == "Willpower Self") step3_Willpower.Add(attr);
+            else step4_OtherCreature.Add(attr);
+        }
+
+        foreach (var kvp in CreatureSkillBuffs)
+        {
+            if (IsSkillUsable(kvp.Key))
+            {
+                if (kvp.Value.Contains("Creature Enchantment Mastery"))
+                    step1_CreatureMastery.Add(kvp.Value);
+                else if (!BaseCreatureBuffs.Contains(kvp.Value))
+                    step4_OtherCreature.Add(kvp.Value);
+            }
+        }
+
+        step5_LifeAndItem.AddRange(new List<string> {
+            "Regeneration Self", "Rejuvenation Self", "Mana Renewal Self",
+            "Armor Self", "Acid Protection Self", "Fire Protection Self",
+            "Cold Protection Self", "Lightning Protection Self",
+            "Blade Protection Self", "Piercing Protection Self",
+            "Bludgeoning Protection Self", "Impregnability Self"
+        });
+
+        step6_WeaponAuras.AddRange(new List<string> {
+            "Blood Drinker Self", "Hermetic Link Self", "Heart Seeker Self",
+            "Spirit Drinker Self", "Swift Killer Self", "Defender Self"
+        });
+
+        step7_ArmorBanes.AddRange(new List<string> {
+            "Impenetrability", "Acid Bane", "Blade Bane", "Bludgeoning Bane",
+            "Flame Bane", "Frost Bane", "Lightning Bane", "Piercing Bane"
+        });
+
+        var final = new List<string>();
+        final.AddRange(step1_CreatureMastery);
+        final.AddRange(step2_Focus);
+        final.AddRange(step3_Willpower);
+        final.AddRange(step4_OtherCreature);
+        final.AddRange(step5_LifeAndItem);
+        final.AddRange(step6_WeaponAuras);
+        final.AddRange(step7_ArmorBanes);
+        return final;
+    }
+
+    /// <summary>
+    /// Called when the engine's enchantment hook fires for an enchantment applied to the player.
+    /// Refreshes timers from live memory when possible; falls back to the hook-supplied duration.
+    /// </summary>
+    public void OnEnchantmentAdded(uint spellId, double durationSeconds)
+    {
+        _pendingSpellId = 0;
+
+        var spellInfo = SpellTableStub.GetById((int)spellId);
+        if (spellInfo == null)
+            return;
+
+        // Prefer live memory read — gives accurate remaining time for all enchantments.
+        // But only trust it if the just-added buff actually shows up there yet.
+        if (RefreshFromLiveMemory() >= 0 &&
+            _ramBuffTimers.TryGetValue(spellInfo.Family, out RamTimerInfo? liveTimer) &&
+            liveTimer.Expiration > DateTime.Now)
+        {
+            return;
+        }
+
+        RecordSpellTimer(spellInfo, durationSeconds);
+    }
+
+    /// <summary>
+    /// Called when the engine's enchantment hook fires for an enchantment removed from the player.
+    /// Clears the buff timer for the corresponding spell family.
+    /// </summary>
+    public void OnEnchantmentRemoved(uint enchantmentId)
+    {
+        var spellInfo = SpellTableStub.GetById((int)enchantmentId);
+        if (spellInfo == null) return;
+
+        if (_ramBuffTimers.Remove(spellInfo.Family))
+            SaveBuffTimers();
+    }
+
+    /// <summary>
+    /// Call from RynthAiPlugin.OnChatWindowText when chat arrives.
+    /// Handles fizzle/fail → resets pending cast state.
+    /// </summary>
+    public void OnChatWindowText(string text, int chatType)
+    {
+        string lower = text.ToLowerInvariant();
+        if (_pendingSpellId != 0 && (lower.Contains("you cast ") || lower.Contains("you say, ")))
+        {
+            var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
+            if (pendingSpell != null)
+                RecordSpellTimer(pendingSpell);
+
+            _pendingSpellId = 0;
+        }
+
+        if (lower.Contains("fizzle") || lower.Contains("fail") ||
+            lower.Contains("component") || lower.Contains("lack the mana"))
+        {
+            _lastCastAttempt = DateTime.MinValue;
+            _pendingSpellId = 0;
+        }
+    }
+
+    private void RecordSpellTimer(SpellInfo spellInfo, double durationSeconds = -1)
+    {
+        if (durationSeconds < 0)
+            durationSeconds = GetCustomSpellDuration(GetSpellLevel(spellInfo));
+
+        if (durationSeconds <= 0)
+            return;
+
+        int level = GetSpellLevel(spellInfo);
+        _ramBuffTimers[spellInfo.Family] = new RamTimerInfo
+        {
+            Expiration = DateTime.Now.AddSeconds(durationSeconds),
+            SpellLevel = level,
+            SpellName = spellInfo.Name,
+        };
+        SaveBuffTimers();
+    }
+
+    // TODO: Replace with real skill training lookup from AC memory
+    private bool IsSkillUsable(AcSkillType s) => _charSkills != null ? _charSkills[s].Training >= 2 : true;
+
+    private static AcSkillType SkillForBuff(string name)
+    {
+        if (name.Contains("Impregnability") || name.Contains("Blood Drinker") ||
+            name.Contains("Hermetic Link") || name.Contains("Heart Seeker") ||
+            name.Contains("Spirit Drinker") || name.Contains("Swift Killer") ||
+            name.Contains("Defender") || name.Contains("Impenetrability") ||
+            name.Contains("Bane"))
+            return AcSkillType.ItemEnchantment;
+
+        if (name.Contains("Protection") || name.Contains("Armor") ||
+            name.Contains("Regeneration") || name.Contains("Rejuvenation") ||
+            name.Contains("Renewal") || name == "Harlune's Blessing" ||
+            name.Contains("Stamina to Mana") || name.Contains("Revitalize") ||
+            name.Contains("Stamina to Health") || name == "Heal Self")
+            return AcSkillType.LifeMagic;
+
+        return AcSkillType.CreatureEnchantment;
+    }
+
+    private bool EnsureMagicMode()
+    {
+        if (CurrentCombatMode == CombatMode.Magic) return true;
+
+        // TODO: When inventory API is available, find and equip wand from ItemRules first.
+        // For now, just switch combat mode directly.
+        _host.ChangeCombatMode(CombatMode.Magic);
+        _lastCastAttempt = DateTime.Now;
+        return false; // Yield tick — let stance animation finish
+    }
+}

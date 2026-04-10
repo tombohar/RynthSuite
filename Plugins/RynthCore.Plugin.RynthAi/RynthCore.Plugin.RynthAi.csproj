@@ -1,0 +1,77 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <OutputType>Library</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IlcOptimizationPreference>Size</IlcOptimizationPreference>
+    <StripSymbols>false</StripSymbols>
+    <RootNamespace>RynthCore.Plugin.RynthAi</RootNamespace>
+    <AssemblyName>RynthCore.Plugin.RynthAi</AssemblyName>
+    <Platforms>x86</Platforms>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Combat\SpellData.txt" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <TrimmerRootAssembly Include="ImGui.NET" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+  </ItemGroup>
+
+  <Target Name="CopyPublishedPluginToEngineOutputs" AfterTargets="Publish" Condition="'$(PublishDir)' != ''">
+    <ItemGroup>
+      <_EnginePluginDir Include="$(MSBuildThisFileDirectory)..\..\..\RynthCore\src\RynthCore.Engine\bin\$(Configuration)\net9.0-windows\win-x86\Plugins\" />
+      <_EnginePluginDir Include="$(MSBuildThisFileDirectory)..\..\..\RynthCore\src\RynthCore.Engine\bin\$(PlatformTarget)\$(Configuration)\net9.0-windows\win-x86\Plugins\" />
+      <_EnginePluginPublishDir Include="$(MSBuildThisFileDirectory)..\..\..\RynthCore\src\RynthCore.Engine\bin\$(Configuration)\net9.0-windows\win-x86\publish\Plugins\" />
+      <_EnginePluginPublishDir Include="$(MSBuildThisFileDirectory)..\..\..\RynthCore\src\RynthCore.Engine\bin\$(PlatformTarget)\$(Configuration)\net9.0-windows\win-x86\publish\Plugins\" />
+    </ItemGroup>
+
+    <MakeDir Directories="@(_EnginePluginDir)" />
+    <MakeDir Directories="@(_EnginePluginPublishDir)" />
+    <Copy
+      SourceFiles="$(PublishDir)$(AssemblyName).dll"
+      DestinationFolder="%(_EnginePluginDir.Identity)"
+      SkipUnchangedFiles="true"
+      Condition="Exists('$(PublishDir)$(AssemblyName).dll')" />
+    <Copy
+      SourceFiles="$(PublishDir)$(AssemblyName).pdb"
+      DestinationFolder="%(_EnginePluginDir.Identity)"
+      SkipUnchangedFiles="true"
+      Condition="Exists('$(PublishDir)$(AssemblyName).pdb')" />
+    <Copy
+      SourceFiles="$(PublishDir)$(AssemblyName).dll"
+      DestinationFolder="%(_EnginePluginPublishDir.Identity)"
+      SkipUnchangedFiles="true"
+      Condition="Exists('$(PublishDir)$(AssemblyName).dll')" />
+    <Copy
+      SourceFiles="$(PublishDir)$(AssemblyName).pdb"
+      DestinationFolder="%(_EnginePluginPublishDir.Identity)"
+      SkipUnchangedFiles="true"
+      Condition="Exists('$(PublishDir)$(AssemblyName).pdb')" />
+  </Target>
+
+  <Target Name="RemoveBundledImGuiNativeFromBuild" AfterTargets="Build">
+    <Delete Files="$(OutputPath)cimgui.dll" Condition="Exists('$(OutputPath)cimgui.dll')" />
+  </Target>
+
+  <Target Name="RemoveBundledImGuiNativeFromPublish" AfterTargets="Publish" Condition="'$(PublishDir)' != ''">
+    <Delete Files="$(PublishDir)cimgui.dll" Condition="Exists('$(PublishDir)cimgui.dll')" />
+  </Target>
+
+</Project>
