@@ -39,6 +39,11 @@ public class CombatManager : IDisposable
     private const double FACE_TIMEOUT_MS = 1000.0; // give up waiting and fire anyway
     private const double FACE_TOLERANCE_DEG = 15.0; // heading error threshold to fire
 
+    // Grace period: keep activeTargetId alive for this long after it disappears from scan,
+    // so a single bad LOS result or scan gap doesn't hand control to navigation.
+    private DateTime _targetLostScanTime = DateTime.MinValue;
+    private const double TARGET_SCAN_GRACE_MS = 1500.0;
+
     private DateTime _lastSpellCast = DateTime.MinValue;
     private const double SPELL_CAST_COOLDOWN_MS = 1500.0;
     private const double ATTACK_SPELL_COOLDOWN_MS = 100.0;
@@ -324,13 +329,11 @@ public class CombatManager : IDisposable
                 blacklistedTargets.ContainsKey(activeTargetId) || _blacklistManager.IsBlacklisted(activeTargetId))
             {
                 activeTargetId = 0;
-                _lastEquippedWeaponId = 0; // Reset equip tracking for next engagement
                 _facingTarget = false;
             }
             else if (_worldFilter.Distance(_host.GetPlayerId() == 0 ? 0 : (int)_host.GetPlayerId(), activeTargetId) > acDistanceLimit * 1.5)
             {
                 activeTargetId = 0;
-                _lastEquippedWeaponId = 0;
                 _facingTarget = false;
             }
         }
@@ -369,19 +372,27 @@ public class CombatManager : IDisposable
         }
         if (!stillScanned)
         {
-            // Active target fell out of scan (LOS blocked, died, moved away, or no valid targets) — drop it
-            activeTargetId = 0;
+            // Give it a grace period before dropping — one bad LOS result or scan gap shouldn't
+            // hand control to navigation mid-fight.
+            if (_targetLostScanTime == DateTime.MinValue)
+                _targetLostScanTime = DateTime.Now;
+
+            if ((DateTime.Now - _targetLostScanTime).TotalMilliseconds > TARGET_SCAN_GRACE_MS)
+            {
+                // Still not in scan after grace period — truly gone (died, moved away, permLOS)
+                activeTargetId = 0;
+                _facingTarget = false;
+                _targetLostScanTime = DateTime.MinValue;
+            }
             return true;
         }
+        _targetLostScanTime = DateTime.MinValue; // back in scan — reset grace timer
 
         var targetObj = _worldFilter[activeTargetId];
         if (targetObj == null) { activeTargetId = 0; return true; }
 
-        if (CurrentCombatMode == CombatMode.NonCombat)
-        {
-            EquipWeaponAndSetStance(targetObj, "Auto");
+        if (!EquipWeaponAndSetStance(targetObj, "Auto"))
             return true;
-        }
 
         if ((DateTime.Now - lastAttackCmd).TotalMilliseconds >= 1000)
         {
@@ -516,11 +527,12 @@ public class CombatManager : IDisposable
 
     private DateTime _lastEquipTime = DateTime.MinValue;
     private DateTime _lastStanceTime = DateTime.MinValue;
-    private int _lastEquippedWeaponId = 0;
 
-    private void EquipWeaponAndSetStance(WorldObject target, string monsterWeakness = "Auto")
+    // Returns true when the correct weapon is wielded and combat mode matches — safe to attack.
+    // Returns false when a weapon swap or stance change is in progress — caller should skip this tick.
+    private bool EquipWeaponAndSetStance(WorldObject target, string monsterWeakness = "Auto")
     {
-        if (target == null) return;
+        if (target == null) return true;
 
         int targetWeaponId = 0;
 
@@ -542,33 +554,34 @@ public class CombatManager : IDisposable
 
         if (targetWeaponId == 0)
             targetWeaponId = FindWandInItems();
-        if (targetWeaponId == 0) return;
+        if (targetWeaponId == 0) return true;
 
         var weaponObj = _worldFilter[targetWeaponId];
-        if (weaponObj == null) return;
+        if (weaponObj == null) return true;
 
-        // Check if weapon is already wielded by the player via PublicWeenieDesc._wielderID
-        bool alreadyWielded = false;
-        if (_host.HasGetObjectWielderInfo && _playerId != 0)
+        int desiredMode = (weaponObj.ObjectClass) switch
         {
-            if (_host.TryGetObjectWielderInfo((uint)targetWeaponId, out uint wielder, out _))
-                alreadyWielded = wielder == _playerId;
-        }
+            AcObjectClass.WandStaffOrb  => CombatMode.Magic,
+            AcObjectClass.MissileWeapon => CombatMode.Missile,
+            AcObjectClass.MeleeWeapon   => CombatMode.Melee,
+            _                           => CombatMode.Melee,
+        };
+
+        // Use CurrentWieldedLocation (stype=10) — has an InqInt fallback that works even
+        // when the phys-obj offset probe hasn't fired yet (unlike TryGetObjectWielderInfo).
+        bool alreadyWielded = weaponObj.Values(LongValueKey.CurrentWieldedLocation, 0) > 0;
+
+        // During the ~30s post-login window both probes may not have fired yet, causing
+        // Values() to return 0 even for genuinely wielded items. If we're already in a
+        // valid combat mode, trust it rather than blocking attacks indefinitely.
+        if (!alreadyWielded && CurrentCombatMode != CombatMode.NonCombat)
+            alreadyWielded = CurrentCombatMode == desiredMode;
 
         if (alreadyWielded)
         {
-            // Weapon is wielded — just ensure correct combat mode
-            int desiredMode = (weaponObj.ObjectClass) switch
-            {
-                AcObjectClass.WandStaffOrb  => CombatMode.Magic,
-                AcObjectClass.MissileWeapon => CombatMode.Missile,
-                AcObjectClass.MeleeWeapon   => CombatMode.Melee,
-                _                           => CombatMode.Melee,
-            };
-
             // Don't enter missile mode without ammo — AC rejects it and cycles stance
             if (desiredMode == CombatMode.Missile && !HasWieldedAmmo())
-                return;
+                return false;
 
             if (CurrentCombatMode != desiredMode &&
                 (DateTime.Now - lastStanceAttempt).TotalMilliseconds > 1000)
@@ -576,7 +589,7 @@ public class CombatManager : IDisposable
                 _host.ChangeCombatMode(desiredMode);
                 lastStanceAttempt = DateTime.Now;
             }
-            return;
+            return CurrentCombatMode == desiredMode;
         }
 
         // Not wielded — equip it (throttled to avoid spam)
@@ -585,6 +598,7 @@ public class CombatManager : IDisposable
             _host.UseObject((uint)targetWeaponId);
             _lastEquipTime = DateTime.Now;
         }
+        return false;
     }
 
     public string GetRaycastStatus()

@@ -390,21 +390,21 @@ public sealed partial class RynthAiPlugin
     {
         if (_objectCache == null) { ChatLine("[RynthAi] Cache not ready."); return; }
 
-        ChatLine($"[RynthAi] HasWielderInfo={Host.HasGetObjectWielderInfo}");
-        ChatLine("[RynthAi] === Wielded Items (direct inventory snapshot) ===");
+        // Use CurrentWieldedLocation (stype=10, InqInt fallback) — more robust than
+        // TryGetObjectWielderInfo which requires the phys-obj offset probe to succeed.
+        ChatLine("[RynthAi] === Wielded Items (inventory cache scan) ===");
         int count = 0;
-        int playerId = unchecked((int)Host.GetPlayerId());
-        foreach (var wo in _objectCache.GetDirectInventory(forceRefresh: true))
+        int total = 0;
+        foreach (var wo in _objectCache.GetInventory())
         {
-            if (wo.WieldedLocation <= 0)
+            total++;
+            int wieldLoc = wo.Values(LongValueKey.CurrentWieldedLocation, 0);
+            if (wieldLoc <= 0)
                 continue;
-            if (playerId != 0 && wo.Wielder != 0 && wo.Wielder != playerId)
-                continue;
-
             count++;
-            ChatLine($"[RynthAi]   0x{(uint)wo.Id:X8} [{wo.ObjectClass}] loc=0x{wo.WieldedLocation:X8} \"{wo.Name}\"");
+            ChatLine($"[RynthAi]   0x{(uint)wo.Id:X8} [{wo.ObjectClass}] loc=0x{wieldLoc:X8} \"{wo.Name}\"");
         }
-        ChatLine($"[RynthAi] {count} wielded item(s) in direct inventory.");
+        ChatLine($"[RynthAi] {count} wielded item(s) out of {total} inventory item(s) in cache.");
         ChatLine($"[RynthAi] CombatMode={_combatManager?.CurrentCombatMode ?? 0} (1=peace 2=melee 4=missile 8=magic)");
     }
 
