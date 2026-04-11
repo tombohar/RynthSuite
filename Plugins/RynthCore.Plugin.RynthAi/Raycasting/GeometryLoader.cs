@@ -60,9 +60,10 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         private ScatterSystem _scatterSystem;
 
         /// <summary>
-        /// Dungeon wall geometry extractor.
+        /// Dungeon wall geometry extractor. Exposed for DungeonMapUI.
         /// </summary>
         private DungeonLOS _dungeonLOS;
+        public DungeonLOS DungeonLOS => _dungeonLOS;
 
         // Statistics
         public int LandblocksCached => _landblockCache.Count;

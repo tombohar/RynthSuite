@@ -12,6 +12,7 @@ public static class DashWindows
     public static bool ShowNavigation;
     public static bool ShowWeapons;
     public static bool ShowLua;
+    public static bool ShowDungeonMap;
 }
 
 public sealed class LegacyUiSettings
@@ -128,6 +129,17 @@ public sealed class LegacyUiSettings
     public int TargetFPSFocused = 60;
     public int TargetFPSBackground = 30;
 
+    // Minimum buffed skill level required to cast spells of each tier.
+    // Defaults are tuned above AC's hard minimums to avoid fizzles.
+    public int MinSkillLevelTier1 = 35;
+    public int MinSkillLevelTier2 = 85;
+    public int MinSkillLevelTier3 = 135;
+    public int MinSkillLevelTier4 = 185;
+    public int MinSkillLevelTier5 = 235;
+    public int MinSkillLevelTier6 = 285;
+    public int MinSkillLevelTier7 = 335;
+    public int MinSkillLevelTier8 = 435;
+
     public List<MonsterRule> MonsterRules { get; set; } = new();
     public List<ItemRule> ItemRules { get; set; } = new();
     public List<BuffRule> BuffRules { get; set; } = new();
@@ -152,6 +164,7 @@ public sealed class LegacyUiSettings
     public bool DashShowNavigation;
     public bool DashShowMacroRules;
     public bool DashShowMonsters;
+    public bool DashShowDungeonMap;
 
     [JsonIgnore]
     public readonly string[] AdvancedTabs =

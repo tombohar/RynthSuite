@@ -40,6 +40,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private uint _currentTargetId;
     private VTankLootProfile? _loadedLootProfile;
     private string _loadedLootProfilePath = string.Empty;
+    private DateTime _loadedLootProfileTime = DateTime.MinValue;
     private static bool _imguiResolverConfigured;
 
     public override int Initialize()
@@ -102,7 +103,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 bool rayOk = raycastRef.Initialize(@"C:\Turbine\Asheron's Call");
                 Log($"RynthAi: raycast init={rayOk} status={raycastRef.StatusMessage}");
                 if (rayOk)
+                {
                     _combatManager?.SetRaycastSystem(raycastRef);
+                    _dashboard?.SetRaycast(raycastRef);
+                }
             }
             catch (Exception ex)
             {
@@ -114,6 +118,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _playerId = Host.GetPlayerId();
         _objectCache?.SetPlayerId(_playerId);
         if (_objectCache != null) _dashboard.SetWorldFilter(_objectCache);
+        if (_objectCache != null) _dashboard.SetWorldObjectCache(_objectCache);
 
         // Load per-character settings — character name comes from the player's object name
         if (_playerId != 0 && Host.HasGetObjectName && Host.TryGetObjectName(_playerId, out string charName) && !string.IsNullOrWhiteSpace(charName))
@@ -127,7 +132,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _vitals = new PlayerVitalsCache();
         _charSkills = new CharacterSkills(Host);
         _charSkills.SetPlayerId(_playerId);
-        _spellManager = new SpellManager(Host);
+        _spellManager = new SpellManager(Host, _dashboard.Settings);
         _spellManager.SetCharacterSkills(_charSkills);
         _spellManager.SetPlayerId(_playerId);
         _spellManager.InitializeNatively();
@@ -510,7 +515,14 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             _navMarkerRenderer?.Render();
 
             if (_windowVisible && _dashboard is not null)
+            {
                 _dashboard.Render();
+                if (_dashboard.CloseRequested)
+                {
+                    _windowVisible = false;
+                    _dashboard.CloseRequested = false;
+                }
+            }
         }
         catch (Exception ex)
         {

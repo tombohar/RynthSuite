@@ -741,7 +741,8 @@ public sealed partial class RynthAiPlugin
             return false;
         }
 
-        if (_loadedLootProfile != null && string.Equals(_loadedLootProfilePath, candidatePath, StringComparison.OrdinalIgnoreCase))
+        if (_loadedLootProfile != null && string.Equals(_loadedLootProfilePath, candidatePath, StringComparison.OrdinalIgnoreCase)
+            && System.IO.File.GetLastWriteTime(candidatePath) == _loadedLootProfileTime)
         {
             profile = _loadedLootProfile;
             return true;
@@ -752,6 +753,7 @@ public sealed partial class RynthAiPlugin
             profile = VTankLootParser.Load(candidatePath);
             _loadedLootProfile = profile;
             _loadedLootProfilePath = candidatePath;
+            _loadedLootProfileTime = System.IO.File.GetLastWriteTime(candidatePath);
             if (_dashboard?.Settings != null)
                 _dashboard.Settings.CurrentLootPath = candidatePath;
 

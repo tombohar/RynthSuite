@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.PluginSdk;
 
 namespace RynthCore.Plugin.RynthAi;
@@ -7,6 +8,7 @@ namespace RynthCore.Plugin.RynthAi;
 public class SpellManager
 {
     private readonly RynthCoreHost _host;
+    private readonly LegacyUiSettings _settings;
     private CharacterSkills? _charSkills;
     private uint _playerId;
 
@@ -77,9 +79,10 @@ public class SpellManager
         { "Piercing Bane", new[] { "Archer's Bane" } },
     };
 
-    public SpellManager(RynthCoreHost host)
+    public SpellManager(RynthCoreHost host, LegacyUiSettings settings)
     {
         _host = host;
+        _settings = settings;
     }
 
     public void SetCharacterSkills(CharacterSkills skills) => _charSkills = skills;
@@ -102,19 +105,19 @@ public class SpellManager
 
     /// <summary>
     /// Returns the highest castable spell tier based on the character's current buffed skill level.
-    /// Thresholds match AC's spell casting requirements:
-    ///   T1=1, T2=50, T3=100, T4=150, T5=200, T6=250, T7=300 (lore), T8=350 (incantation).
+    /// Thresholds come from LegacyUiSettings (MinSkillLevelTier1..8), letting the user pad above
+    /// AC's hard minimums (1/50/100/150/200/250/300/350) to avoid fizzles.
     /// </summary>
     public int GetHighestSpellTier(AcSkillType skill)
     {
         int buffed = _charSkills != null ? _charSkills[skill].Buffed : 250;
-        if (buffed >= 350) return 8;
-        if (buffed >= 300) return 7;
-        if (buffed >= 250) return 6;
-        if (buffed >= 200) return 5;
-        if (buffed >= 150) return 4;
-        if (buffed >= 100) return 3;
-        if (buffed >= 50)  return 2;
+        if (buffed >= _settings.MinSkillLevelTier8) return 8;
+        if (buffed >= _settings.MinSkillLevelTier7) return 7;
+        if (buffed >= _settings.MinSkillLevelTier6) return 6;
+        if (buffed >= _settings.MinSkillLevelTier5) return 5;
+        if (buffed >= _settings.MinSkillLevelTier4) return 4;
+        if (buffed >= _settings.MinSkillLevelTier3) return 3;
+        if (buffed >= _settings.MinSkillLevelTier2) return 2;
         return 1;
     }
 

@@ -25,16 +25,52 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         private DatDatabase _portalDat;
         private DatDatabase _cellDat;
 
-        // Cache: EnvironmentId → parsed CellStruct geometry per structure index
+        // Cache: EnvironmentId → physics CellStruct geometry (for raycasting)
         private readonly Dictionary<uint, Dictionary<uint, CellGeometry>> _envCache =
+            new Dictionary<uint, Dictionary<uint, CellGeometry>>();
+
+        // Cache: EnvironmentId → render CellStruct geometry (for map, portals tagged)
+        private readonly Dictionary<uint, Dictionary<uint, CellGeometry>> _renderEnvCache =
             new Dictionary<uint, Dictionary<uint, CellGeometry>>();
 
         // Cache: landblock → dungeon wall volumes
         private readonly Dictionary<uint, List<BoundingVolume>> _wallCache =
             new Dictionary<uint, List<BoundingVolume>>();
 
+        // Cache: landblock → map polygons (wall + portal, with Z layer)
+        private readonly Dictionary<uint, List<MapPolygon>> _mapCache =
+            new Dictionary<uint, List<MapPolygon>>();
+
+        // Cache: landblock → one MapCell per EnvCell (for gap-free floor fills)
+        private readonly Dictionary<uint, List<MapCell>> _mapCellCache =
+            new Dictionary<uint, List<MapCell>>();
+
         private const int MAX_ENV_CACHE = 50;
         private const int MAX_WALL_CACHE = 20;
+
+        /// <summary>
+        /// A single dungeon polygon in world space, tagged with its cell's Z position
+        /// so the map renderer can group by floor level.
+        /// IsPortal = true means this is a doorway opening (render differently or skip).
+        /// </summary>
+        public class MapPolygon
+        {
+            public Vector3[] Vertices;
+            public float CellX, CellY, CellZ; // world-space cell centre
+            public bool IsPortal;
+        }
+
+        /// <summary>
+        /// World-space centre of an EnvCell, used to draw a filled 10×10-unit floor tile.
+        /// AC dungeon cells are always 10×10 units; filling by cell center eliminates all
+        /// inter-polygon gaps without needing polygon edge geometry.
+        /// </summary>
+        public class MapCell
+        {
+            public float WorldX, WorldY, CellZ;
+            public uint  EnvironmentId;   // 0x0D.... portal.dat id — selects the tile image
+            public float Rotation;        // yaw in radians (CCW, from quaternion RotW/RotZ)
+        }
 
         public void Initialize(DatDatabase portalDat, DatDatabase cellDat)
         {
@@ -59,6 +95,123 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             }
             _wallCache[landblockKey] = walls;
             return walls;
+        }
+
+        /// <summary>
+        /// Gets dungeon polygons for 2D map rendering.
+        /// Each polygon carries its cell's Z so the UI can offer per-floor views.
+        /// Portal polygons are included and flagged so doorways render as openings.
+        /// </summary>
+        public List<MapPolygon> GetDungeonMapPolygons(uint landblockKey)
+        {
+            if (_mapCache.TryGetValue(landblockKey, out var cached))
+                return cached;
+
+            var polys = LoadDungeonMapPolygons(landblockKey);
+
+            if (_mapCache.Count >= MAX_WALL_CACHE)
+            {
+                foreach (var key in _mapCache.Keys) { _mapCache.Remove(key); break; }
+            }
+            _mapCache[landblockKey] = polys;
+            return polys;
+        }
+
+        /// <summary>
+        /// Returns one MapCell per EnvCell in the landblock.
+        /// Each cell centre is at (PosX + globalOffsetX, PosY + globalOffsetY).
+        /// Drawing a 10×10-unit filled square at each centre produces gap-free floor coverage.
+        /// </summary>
+        public List<MapCell> GetDungeonMapCells(uint landblockKey)
+        {
+            if (_mapCellCache.TryGetValue(landblockKey, out var cached)) return cached;
+
+            var cells = LoadDungeonMapCells(landblockKey);
+
+            if (_mapCellCache.Count >= MAX_WALL_CACHE)
+            {
+                foreach (var key in _mapCellCache.Keys) { _mapCellCache.Remove(key); break; }
+            }
+            _mapCellCache[landblockKey] = cells;
+            return cells;
+        }
+
+        private List<MapCell> LoadDungeonMapCells(uint landblockKey)
+        {
+            var result = new List<MapCell>();
+            if (_cellDat == null) return result;
+
+            float gx = ((landblockKey >> 8) & 0xFF) * 192.0f;
+            float gy =  (landblockKey        & 0xFF) * 192.0f;
+
+            var cellIds = _cellDat.GetLandblockCellIds(landblockKey);
+            foreach (uint cellId in cellIds)
+            {
+                byte[] cellData = _cellDat.GetFileData(cellId);
+                if (cellData == null || cellData.Length < 20) continue;
+                try
+                {
+                    var envCell = ParseEnvCellHeader(cellData);
+                    if (envCell == null) continue;
+                    result.Add(new MapCell
+                    {
+                        WorldX        = envCell.PosX + gx,
+                        WorldY        = envCell.PosY + gy,
+                        CellZ         = envCell.PosZ,
+                        EnvironmentId = envCell.EnvironmentId,
+                        Rotation      = 2f * MathF.Atan2(envCell.RotZ, envCell.RotW)
+                    });
+                }
+                catch { }
+            }
+            return result;
+        }
+
+        private List<MapPolygon> LoadDungeonMapPolygons(uint landblockKey)
+        {
+            var result = new List<MapPolygon>();
+            if (_cellDat == null || _portalDat == null) return result;
+
+            float globalOffsetX = ((landblockKey >> 8) & 0xFF) * 192.0f;
+            float globalOffsetY = (landblockKey & 0xFF) * 192.0f;
+
+            var cellIds = _cellDat.GetLandblockCellIds(landblockKey);
+            foreach (uint cellId in cellIds)
+            {
+                byte[] cellData = _cellDat.GetFileData(cellId);
+                if (cellData == null || cellData.Length < 20) continue;
+
+                try
+                {
+                    var envCell = ParseEnvCellHeader(cellData);
+                    if (envCell == null) continue;
+
+                    // Use render geometry so IsPortal tags are preserved (physics upgrade loses them)
+                    var cellGeo = GetCellRenderGeometry(envCell.EnvironmentId, envCell.CellStructureIndex);
+                    if (cellGeo == null || cellGeo.Polygons.Count == 0) continue;
+
+                    foreach (var poly in cellGeo.Polygons)
+                    {
+                        if (poly.Vertices.Count < 3) continue;
+
+                        var worldVerts = new Vector3[poly.Vertices.Count];
+                        for (int i = 0; i < poly.Vertices.Count; i++)
+                            worldVerts[i] = TransformVertex(poly.Vertices[i], envCell, globalOffsetX, globalOffsetY);
+
+                        result.Add(new MapPolygon
+                        {
+                            Vertices  = worldVerts,
+                            CellX     = envCell.PosX + globalOffsetX,
+                            CellY     = envCell.PosY + globalOffsetY,
+                            CellZ     = envCell.PosZ,
+                            IsPortal  = poly.IsPortal
+                        });
+                    }
+                }
+                catch { }
+            }
+
+            return result;
         }
 
         private List<BoundingVolume> LoadDungeonWalls(uint landblockKey)
@@ -93,6 +246,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
 
                     foreach (var poly in cellGeo.Polygons)
                     {
+                        if (poly.IsPortal) continue; // Portals are openings — not solid walls
                         if (poly.Vertices.Count < 3) continue;
 
                         // Transform vertices to world space
@@ -227,6 +381,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         private class CellPolygon
         {
             public List<Vector3> Vertices = new List<Vector3>();
+            public bool IsPortal;
         }
 
         private CellGeometry GetCellGeometry(uint environmentId, uint cellStructIndex)
@@ -254,7 +409,37 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             return result;
         }
 
-        private Dictionary<uint, CellGeometry> ParseEnvironment(byte[] data)
+        /// <summary>
+        /// Returns render-polygon geometry with IsPortal tags preserved.
+        /// Skips the physics-polygon upgrade so portal openings appear as tagged
+        /// line geometry instead of literal holes in the mesh.
+        /// </summary>
+        private CellGeometry GetCellRenderGeometry(uint environmentId, uint cellStructIndex)
+        {
+            if (_renderEnvCache.TryGetValue(environmentId, out var envCells))
+            {
+                if (envCells.TryGetValue(cellStructIndex, out var cached))
+                    return cached;
+            }
+
+            byte[] envData = _portalDat.GetFileData(environmentId);
+            if (envData == null || envData.Length < 8) return null;
+
+            if (envCells == null)
+            {
+                envCells = ParseEnvironment(envData, renderOnly: true);
+                if (_renderEnvCache.Count >= MAX_ENV_CACHE)
+                {
+                    foreach (var key in _renderEnvCache.Keys) { _renderEnvCache.Remove(key); break; }
+                }
+                _renderEnvCache[environmentId] = envCells;
+            }
+
+            envCells.TryGetValue(cellStructIndex, out var result);
+            return result;
+        }
+
+        private Dictionary<uint, CellGeometry> ParseEnvironment(byte[] data, bool renderOnly = false)
         {
             var result = new Dictionary<uint, CellGeometry>();
 
@@ -274,7 +459,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                         if (ms.Position + 4 > ms.Length) break;
                         uint key = reader.ReadUInt32();
 
-                        var geo = ParseCellStruct(reader, ms);
+                        var geo = ParseCellStruct(reader, ms, renderOnly);
                         if (geo != null)
                             result[key] = geo;
                         else
@@ -310,7 +495,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         ///   Header (3 × uint32) → VertexArray → RenderPolygons → PortalIndices → [align]
         ///   → CellBSP → PhysicsPolygons → PhysicsBSP → [DrawingBSP] → [align]
         /// </summary>
-        private CellGeometry ParseCellStruct(BinaryReader reader, MemoryStream ms)
+        private CellGeometry ParseCellStruct(BinaryReader reader, MemoryStream ms, bool renderOnly = false)
         {
             var geo = new CellGeometry();
 
@@ -339,14 +524,15 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 long aligned = (ms.Position + 3) & ~3L;
                 if (aligned <= ms.Length) ms.Position = aligned;
 
-                // Build fallback geometry from rendering polygons (excluding portals)
+                // Build geometry from rendering polygons; tag portals rather than skipping them
+                // so the map renderer can draw doorways as openings.
+                // The raycasting path still excludes portals via IsDoor on BoundingVolume.
                 for (int i = 0; i < renderPolygons.Count; i++)
                 {
                     var poly = renderPolygons[i];
-                    if (portalIndices.Contains(poly.Key)) continue;
                     if (poly.VertexIds == null || poly.VertexIds.Count < 3) continue;
 
-                    var cellPoly = new CellPolygon();
+                    var cellPoly = new CellPolygon { IsPortal = portalIndices.Contains(poly.Key) };
                     foreach (var vid in poly.VertexIds)
                     {
                         if (vertices.ContainsKey(vid))
@@ -355,6 +541,10 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     if (cellPoly.Vertices.Count >= 3)
                         geo.Polygons.Add(cellPoly);
                 }
+
+                // For map rendering, render polygons with portal tags are all we need.
+                if (renderOnly)
+                    return geo;
 
                 // Now attempt to skip Cell BSP and reach physics polygons
                 bool canContinue = SkipBSPTree(reader, ms, BSPTreeType.Cell);
@@ -666,7 +856,10 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         public void FlushCache()
         {
             _wallCache.Clear();
+            _mapCache.Clear();
+            _mapCellCache.Clear();
             _envCache.Clear();
+            _renderEnvCache.Clear();
         }
 
         private static void Log(string msg)

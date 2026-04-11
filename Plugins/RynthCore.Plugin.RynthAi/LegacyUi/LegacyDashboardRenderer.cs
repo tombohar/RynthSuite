@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Linq;
 using System.Numerics;
 using System.Text.Json;
 using ImGuiNET;
 using RynthCore.PluginSdk;
+using RynthCore.Plugin.RynthAi;
 
 namespace RynthCore.Plugin.RynthAi.LegacyUi;
 
@@ -34,6 +36,7 @@ internal sealed class LegacyDashboardRenderer
     private readonly LegacyLuaUi _luaUi;
     private readonly LegacyWeaponsUi _weaponsUi;
     private readonly LegacyMetaUi _metaUi;
+    private readonly DungeonMapUi _dungeonMapUi;
 
     private readonly List<string> _profiles = new();
     private readonly List<string> _navFiles = new();
@@ -49,12 +52,15 @@ internal sealed class LegacyDashboardRenderer
     private bool _wasMinimized;
     private float _bgOpacity = 0.95f;
 
+    public bool CloseRequested { get; internal set; }
+
     // ── Per-character settings persistence ───────────────────────────────────
     private string _charFolder = string.Empty;
     private string _settingsFilePath = string.Empty;
     private string _lastSavedJson = string.Empty;
     private int _saveCheckCounter;
     private const int SaveCheckIntervalFrames = 1; // check every frame for immediate save
+    private bool _firstRender = true;
     private Vector2 _lastWindowPos = new(-1, -1);
     private bool _windowPosRestored;
     private Vector2 _expandedSize = new(430, 452);
@@ -75,6 +81,10 @@ internal sealed class LegacyDashboardRenderer
     private uint _playerMana;
     private uint _playerMaxMana;
 
+    // ── Monster editor (external process) ────────────────────────────────────
+    private FileSystemWatcher? _monsterWatcher;
+    private volatile bool _monsterFileChanged;
+
     public LegacyDashboardRenderer(RynthCoreHost host)
     {
         _host = host;
@@ -83,6 +93,7 @@ internal sealed class LegacyDashboardRenderer
         _luaUi = new LegacyLuaUi(_settings, host);
         _weaponsUi = new LegacyWeaponsUi(_settings, host);
         _metaUi = new LegacyMetaUi(_settings, _navFiles);
+        _dungeonMapUi = new DungeonMapUi(host);
         RefreshAllLists();
     }
 
@@ -91,6 +102,9 @@ internal sealed class LegacyDashboardRenderer
     public void SetWorldFilter(WorldObjectCache cache) => _weaponsUi.SetWorldFilter(cache);
 
     public void SetMissileCraftingManager(MissileCraftingManager mgr) => _advancedSettingsUi.SetMissileCraftingManager(mgr);
+
+    public void SetRaycast(Raycasting.MainLogic raycast) => _dungeonMapUi.SetRaycast(raycast);
+    public void SetWorldObjectCache(WorldObjectCache cache) => _dungeonMapUi.SetWorldObjectCache(cache);
 
     // ── Settings persistence ─────────────────────────────────────────────────
 
@@ -157,6 +171,12 @@ internal sealed class LegacyDashboardRenderer
 
         _windowPosRestored = false; // will apply saved position on next render
         RefreshAllLists();
+
+        // Load MonsterRules from monsters.json (overrides what was in the profile)
+        // and migrate existing rules to that file if it doesn't exist yet.
+        MigrateMonstersToFile();
+        LoadMonstersFromFile();
+        SetupMonsterWatcher();
     }
 
     public void SaveSettings()
@@ -192,6 +212,101 @@ internal sealed class LegacyDashboardRenderer
         catch { }
     }
 
+    // ── monsters.json support ────────────────────────────────────────────────
+
+    private string MonstersFilePath => string.IsNullOrEmpty(_charFolder)
+        ? string.Empty
+        : Path.Combine(_charFolder, "monsters.json");
+
+    /// <summary>
+    /// If monsters.json doesn't exist yet but the profile already has non-default rules,
+    /// write them to monsters.json so the editor can pick them up on first launch.
+    /// </summary>
+    private void MigrateMonstersToFile()
+    {
+        string path = MonstersFilePath;
+        if (string.IsNullOrEmpty(path) || File.Exists(path)) return;
+        if (_settings.MonsterRules.Count <= 1) return; // only Default, nothing to migrate
+
+        try
+        {
+            string json = JsonSerializer.Serialize(_settings.MonsterRules, RynthAiJsonContext.Default.MonsterRuleList);
+            File.WriteAllText(path, json);
+        }
+        catch { }
+    }
+
+    /// <summary>Loads MonsterRules from monsters.json, overriding what came from the profile.</summary>
+    private void LoadMonstersFromFile()
+    {
+        string path = MonstersFilePath;
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+        try
+        {
+            string json  = File.ReadAllText(path);
+            var    rules = JsonSerializer.Deserialize(json, RynthAiJsonContext.Default.MonsterRuleList);
+            if (rules != null && rules.Count > 0)
+                _settings.MonsterRules = rules;
+        }
+        catch { }
+    }
+
+    private void SetupMonsterWatcher()
+    {
+        _monsterWatcher?.Dispose();
+        _monsterWatcher = null;
+
+        string path = MonstersFilePath;
+        if (string.IsNullOrEmpty(path) || !Directory.Exists(_charFolder)) return;
+
+        try
+        {
+            _monsterWatcher = new FileSystemWatcher(_charFolder, "monsters.json")
+            {
+                NotifyFilter       = NotifyFilters.LastWrite,
+                EnableRaisingEvents = true
+            };
+            _monsterWatcher.Changed += (_, _) => _monsterFileChanged = true;
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// Call once per render frame. Hot-reloads MonsterRules when the external editor saves.
+    /// </summary>
+    public void TickMonsterReload()
+    {
+        if (!_monsterFileChanged) return;
+        _monsterFileChanged = false;
+        LoadMonstersFromFile();
+    }
+
+    /// <summary>Launches the standalone Monster Rules editor for the current char folder.</summary>
+    private void LaunchMonsterEditor()
+    {
+        if (string.IsNullOrEmpty(_charFolder))
+        {
+            _host.WriteToChat("[RynthAi] No character loaded — cannot open Monster Editor.", 4);
+            return;
+        }
+
+        // Editor lives at: <RynthAi root>\MonsterEditor\RynthCore.MonsterEditor.exe
+        string rynthAiRoot = Path.GetDirectoryName(Path.GetDirectoryName(_settingsRoot)!)!;
+        string editorExe   = Path.Combine(rynthAiRoot, "MonsterEditor", "RynthCore.MonsterEditor.exe");
+
+        if (!File.Exists(editorExe))
+        {
+            _host.WriteToChat($"[RynthAi] Monster Editor not found: {editorExe}", 4);
+            return;
+        }
+
+        IntPtr r = ShellExecuteW(IntPtr.Zero, "open", editorExe, $"\"{_charFolder}\"", null, 1);
+        _host.WriteToChat($"[RynthAi] ShellExecute={r} exe={editorExe} arg={_charFolder}", 1);
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr ShellExecuteW(IntPtr hwnd, string lpOperation, string lpFile, string lpParameters, string? lpDirectory, int nShowCmd);
+
     private void CaptureTransientUiState()
     {
         _settings.WindowLocked       = _isLocked;
@@ -200,7 +315,7 @@ internal sealed class LegacyDashboardRenderer
         _settings.DashShowLua        = DashWindows.ShowLua;
         _settings.DashShowNavigation = DashWindows.ShowNavigation;
         _settings.DashShowMacroRules = DashWindows.ShowMacroRules;
-        _settings.DashShowMonsters   = DashWindows.ShowMonsters;
+        _settings.DashShowDungeonMap = DashWindows.ShowDungeonMap;
     }
 
     private void ApplyUiStateFromSettings()
@@ -211,7 +326,8 @@ internal sealed class LegacyDashboardRenderer
         DashWindows.ShowLua         = _settings.DashShowLua;
         DashWindows.ShowNavigation  = _settings.DashShowNavigation;
         DashWindows.ShowMacroRules  = _settings.DashShowMacroRules;
-        DashWindows.ShowMonsters    = _settings.DashShowMonsters;
+        DashWindows.ShowMonsters    = false; // launcher, not a window toggle — always starts closed
+        DashWindows.ShowDungeonMap  = _settings.DashShowDungeonMap;
     }
 
     private string GetProfileFilePath(string profileName)
@@ -439,6 +555,7 @@ internal sealed class LegacyDashboardRenderer
         dst.DashShowNavigation       = tmp.DashShowNavigation;
         dst.DashShowMacroRules       = tmp.DashShowMacroRules;
         dst.DashShowMonsters         = tmp.DashShowMonsters;
+        dst.DashShowDungeonMap       = tmp.DashShowDungeonMap;
     }
 
     private static double NormalizeCorpseRangeYards(double value, double fallbackYards)
@@ -503,6 +620,7 @@ internal sealed class LegacyDashboardRenderer
 
     public void Render()
     {
+        if (_firstRender) { _firstRender = false; _host.WriteToChat("[RynthAi] v2 DLL loaded.", 1); }
         RefreshPlayerVitals();
 
         // Periodic dirty-check: serialize settings every ~2s; save if changed
@@ -512,17 +630,30 @@ internal sealed class LegacyDashboardRenderer
             CheckAndSave();
         }
 
+        // Plugin-wide style overrides: mana-blue input/dropdown fields, black checkmarks
+        ImGui.PushStyleColor(ImGuiCol.FrameBg,        new Vector4(0.15f, 0.55f, 0.95f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.FrameBgHovered, new Vector4(0.22f, 0.62f, 1.00f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.FrameBgActive,  new Vector4(0.10f, 0.45f, 0.82f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.CheckMark,      new Vector4(0.00f, 0.00f, 0.00f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.PopupBg,        new Vector4(0.08f, 0.30f, 0.65f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.Header,         new Vector4(0.15f, 0.55f, 0.95f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.HeaderHovered,  new Vector4(0.22f, 0.62f, 1.00f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.HeaderActive,   new Vector4(0.10f, 0.45f, 0.82f, 1.00f));
+
         RenderDashboard();
 
         _metaUi.Render();
-        if (DashWindows.ShowMonsters) RenderPlaceholderWindow("Monsters##RynthAiMonsters", ref DashWindows.ShowMonsters, "Legacy Monsters ImGui window is next in line.");
+        TickMonsterReload();
         _weaponsUi.Render();
 
         // Hooked up the new Lua UI here
         _luaUi.Render();
 
         if (DashWindows.ShowNavigation) _navigationUi.Render();
+        if (DashWindows.ShowDungeonMap) _dungeonMapUi.Render();
         if (_settings.ShowAdvancedWindow) _advancedSettingsUi.Render();
+
+        ImGui.PopStyleColor(8);
     }
 
     private void RenderDashboard()
@@ -531,7 +662,6 @@ internal sealed class LegacyDashboardRenderer
         ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 8.0f);
         ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 6.0f);
         ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0.04f, 0.06f, 0.08f, _bgOpacity));
-        ImGui.PushStyleColor(ImGuiCol.PopupBg, new Vector4(0.08f, 0.10f, 0.13f, 1.0f));
         ImGuiWindowFlags flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoCollapse;
         if (_isMinimized) { flags |= ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoResize; _wasMinimized = true; }
         else if (_isLocked) flags |= ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove;
@@ -575,7 +705,7 @@ internal sealed class LegacyDashboardRenderer
         }
 
         ImGui.End();
-        ImGui.PopStyleColor(2);
+        ImGui.PopStyleColor(1);
         ImGui.PopStyleVar(3);
     }
 
@@ -602,7 +732,7 @@ internal sealed class LegacyDashboardRenderer
         ImGui.SameLine();
         if (ImGui.SmallButton(_isMinimized ? "^" : "_")) _isMinimized = !_isMinimized;
         ImGui.SameLine();
-        if (ImGui.SmallButton("X")) _settings.IsMacroRunning = false;
+        if (ImGui.SmallButton("X")) CloseRequested = true;
         ImGui.Dummy(new Vector2(0, 2));
         if (_isMinimized || !ImGui.BeginTable("HeaderGrid", 2)) return;
 
@@ -761,12 +891,17 @@ internal sealed class LegacyDashboardRenderer
         if (!ImGui.BeginTable("LauncherGridTable", 3, ImGuiTableFlags.SizingStretchSame)) return;
         ImGui.TableNextRow();
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Macro Rules", "gear", ref DashWindows.ShowMacroRules);
-        ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Monsters", "target", ref DashWindows.ShowMonsters);
+        ImGui.TableNextColumn();
+        bool prevMonsters = DashWindows.ShowMonsters;
+        LegacyDashboardDrawing.GridBtn("Monsters", "target", ref DashWindows.ShowMonsters);
+        if (DashWindows.ShowMonsters && !prevMonsters) { _host.WriteToChat("[RynthAi] Monsters clicked.", 1); LaunchMonsterEditor(); DashWindows.ShowMonsters = false; }
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Settings", "wrench", ref _settings.ShowAdvancedWindow);
         ImGui.TableNextRow();
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Navigation", "map", ref DashWindows.ShowNavigation);
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Weapons", "shield", ref DashWindows.ShowWeapons);
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Lua Scripts", "code", ref DashWindows.ShowLua);
+        ImGui.TableNextRow();
+        ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Dungeon Map", "map", ref DashWindows.ShowDungeonMap);
         ImGui.EndTable();
     }
 
