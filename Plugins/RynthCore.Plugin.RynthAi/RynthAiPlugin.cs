@@ -491,6 +491,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "dumpinv":
                 HandleDumpInventoryCommand();
                 break;
+            case "mapdump":
+                HandleMapDumpCommand();
+                break;
             default:
                 eat = 0; // not our command, let it through
                 break;

@@ -24,6 +24,7 @@ namespace RynthCore.Plugin.RynthAi.LegacyUi;
 internal sealed class DungeonMapUi
 {
     private readonly RynthCoreHost _host;
+    private readonly LegacyUiSettings _settings;
     private MainLogic? _raycast;
     private WorldObjectCache? _objectCache;
 
@@ -55,6 +56,14 @@ internal sealed class DungeonMapUi
     private static readonly uint ColPortal        = ImGui.ColorConvertFloat4ToU32(new Vector4(0.90f, 0.45f, 1.00f, 1.00f)); // purple
     private static readonly uint ColPortalRing    = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.75f, 1.00f, 0.70f));
     private static readonly uint ColPortalLabel   = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.88f, 1.00f, 1.00f));
+    private static readonly uint ColDoor          = ImGui.ColorConvertFloat4ToU32(new Vector4(0.75f, 0.55f, 0.25f, 1.00f)); // tan
+    private static readonly uint ColDoorRing      = ImGui.ColorConvertFloat4ToU32(new Vector4(0.90f, 0.75f, 0.50f, 0.70f));
+    private static readonly uint ColDoorLabel     = ImGui.ColorConvertFloat4ToU32(new Vector4(0.95f, 0.85f, 0.65f, 1.00f));
+    private static readonly uint ColMonster       = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.25f, 0.20f, 1.00f)); // red
+    private static readonly uint ColMonsterRing   = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.55f, 0.50f, 0.70f));
+    private static readonly uint ColNpc           = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.85f, 0.20f, 1.00f)); // yellow-gold
+    private static readonly uint ColNpcRing       = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.95f, 0.55f, 0.70f));
+    private static readonly uint ColCreatureLabel = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.90f, 0.90f, 1.00f));
     // Fill colours (semi-transparent)
     private static readonly uint ColFlatFill      = ImGui.ColorConvertFloat4ToU32(new Vector4(0.20f, 0.40f, 0.65f, 0.40f));
     private static readonly uint ColSlopeUpFill   = ImGui.ColorConvertFloat4ToU32(new Vector4(0.55f, 0.12f, 0.08f, 0.40f));
@@ -65,7 +74,7 @@ internal sealed class DungeonMapUi
     private const float FlatNormalThreshold  = 0.95f; // |Nz|/|N| — must exceed to be flat (not a ramp)
     private const byte  NotFloor            = 255;    // sentinel returned by ClassifyPoly
 
-    public DungeonMapUi(RynthCoreHost host) { _host = host; }
+    public DungeonMapUi(RynthCoreHost host, LegacyUiSettings settings) { _host = host; _settings = settings; }
 
     public void SetWorldObjectCache(WorldObjectCache cache) => _objectCache = cache;
 
@@ -589,6 +598,11 @@ internal sealed class DungeonMapUi
         ImGui.SameLine();
         if (ImGui.SmallButton("Reset##mapreset"))
         { _pan = Vector2.Zero; _zoom = 5.0f; _autoFollow = true; _show1U1D = true; }
+
+        ImGui.SameLine(0, 16);
+        ImGui.Checkbox("Doors##mapDoors", ref _settings.MapShowDoors);
+        ImGui.SameLine();
+        ImGui.Checkbox("Creatures##mapCreatures", ref _settings.MapShowCreatures);
     }
 
     // ── Canvas ────────────────────────────────────────────────────────────────
@@ -741,6 +755,90 @@ internal sealed class DungeonMapUi
             }
         }
 
+        // ── Doors ─────────────────────────────────────────────────────────
+        if (_settings.MapShowDoors && _objectCache != null && _host.HasGetObjectPosition)
+        {
+            float gxLBd = ((_cachedLandblock >> 8) & 0xFF) * 192f;
+            float gyLBd = (_cachedLandblock & 0xFF) * 192f;
+
+            foreach (var wo in _objectCache.GetLandscapeObjects())
+            {
+                if ((uint)wo.Id >= 0x80000000u) continue;
+                if (!IsDoorName(wo.Name)) continue;
+                if (!_host.TryGetObjectPosition((uint)wo.Id, out uint dCellId,
+                        out float dox, out float doy, out _)) continue;
+                if ((dCellId >> 16) != _cachedLandblock) continue;
+
+                float dwx = dox + gxLBd;
+                float dwy = doy + gyLBd;
+                float dsx = centre.X + (dwx - playerWX) * _zoom + _pan.X;
+                float dsy = centre.Y - (dwy - playerWY) * _zoom + _pan.Y;
+
+                if (dsx < cxMin - 20 || dsx > cxMax + 20 ||
+                    dsy < cyMin - 20 || dsy > cyMax + 20) continue;
+
+                // Diamond symbol
+                const float Dr = 5.0f;
+                dl.AddQuadFilled(
+                    new Vector2(dsx,      dsy - Dr),
+                    new Vector2(dsx + Dr, dsy),
+                    new Vector2(dsx,      dsy + Dr),
+                    new Vector2(dsx - Dr, dsy),
+                    ColDoor);
+                dl.AddQuad(
+                    new Vector2(dsx,          dsy - Dr - 1.5f),
+                    new Vector2(dsx + Dr + 1.5f, dsy),
+                    new Vector2(dsx,          dsy + Dr + 1.5f),
+                    new Vector2(dsx - Dr - 1.5f, dsy),
+                    ColDoorRing, 1.2f);
+                dl.AddText(new Vector2(dsx + 8f, dsy - 7f), ColDoorLabel, wo.Name.Length > 20 ? wo.Name[..20] + "…" : wo.Name);
+            }
+        }
+
+        // ── Creatures & NPCs ──────────────────────────────────────────────
+        if (_settings.MapShowCreatures && _objectCache != null && _host.HasGetObjectPosition)
+        {
+            const uint STypeCreatureType = 2u;
+            const int  CreatureTypeNpc   = 14;
+            bool canQueryCreatureType    = _host.HasGetObjectIntProperty;
+            float gxLBc = ((_cachedLandblock >> 8) & 0xFF) * 192f;
+            float gyLBc = (_cachedLandblock & 0xFF) * 192f;
+
+            foreach (var wo in _objectCache.GetLandscape())
+            {
+                if (!_host.TryGetObjectPosition((uint)wo.Id, out uint cCellId,
+                        out float cox, out float coy, out _)) continue;
+                if ((cCellId >> 16) != _cachedLandblock) continue;
+
+                float cwx = cox + gxLBc;
+                float cwy = coy + gyLBc;
+                float csx = centre.X + (cwx - playerWX) * _zoom + _pan.X;
+                float csy = centre.Y - (cwy - playerWY) * _zoom + _pan.Y;
+
+                if (csx < cxMin - 20 || csx > cxMax + 20 ||
+                    csy < cyMin - 20 || csy > cyMax + 20) continue;
+
+                bool isNpc = canQueryCreatureType
+                             && _host.TryGetObjectIntProperty((uint)wo.Id, STypeCreatureType, out int ct)
+                             && ct == CreatureTypeNpc;
+
+                var csc = new Vector2(csx, csy);
+                if (isNpc)
+                {
+                    dl.AddCircleFilled(csc, 4f, ColNpc);
+                    dl.AddCircle(csc, 6f, ColNpcRing, 10, 1.2f);
+                }
+                else
+                {
+                    dl.AddCircleFilled(csc, 4f, ColMonster);
+                    dl.AddCircle(csc, 6f, ColMonsterRing, 10, 1.0f);
+                }
+
+                string clabel = wo.Name.Length > 20 ? wo.Name[..20] + "…" : wo.Name;
+                dl.AddText(new Vector2(csx + 7f, csy - 7f), ColCreatureLabel, clabel);
+            }
+        }
+
         // ── Player dot + heading ──────────────────────────────────────────
         var playerScreen = new Vector2(centre.X + _pan.X, centre.Y + _pan.Y);
         dl.AddCircleFilled(playerScreen, 4.0f, ColPlayer);
@@ -776,5 +874,15 @@ internal sealed class DungeonMapUi
                 ImGui.IsWindowHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem))
                 _zoom = Math.Clamp(_zoom + wheel * 0.5f, 1.0f, 20.0f);
         }
+    }
+
+    private static bool IsDoorName(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        return name.Contains("Door",       StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Gate",       StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Portcullis", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Hatch",      StringComparison.OrdinalIgnoreCase)
+            || name.Contains("Trapdoor",   StringComparison.OrdinalIgnoreCase);
     }
 }

@@ -93,7 +93,7 @@ internal sealed class LegacyDashboardRenderer
         _luaUi = new LegacyLuaUi(_settings, host);
         _weaponsUi = new LegacyWeaponsUi(_settings, host);
         _metaUi = new LegacyMetaUi(_settings, _navFiles);
-        _dungeonMapUi = new DungeonMapUi(host);
+        _dungeonMapUi = new DungeonMapUi(host, _settings);
         RefreshAllLists();
     }
 

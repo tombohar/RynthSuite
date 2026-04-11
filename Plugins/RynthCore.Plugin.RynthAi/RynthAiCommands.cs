@@ -862,4 +862,34 @@ public sealed partial class RynthAiPlugin
             ? fullCommand[prefix.Length..].Trim()
             : string.Empty;
     }
+
+    private void HandleMapDumpCommand()
+    {
+        if (_objectCache == null) { ChatLine("[RynthAi] Cache not ready."); return; }
+        if (!Host.HasGetObjectPosition) { ChatLine("[RynthAi] GetObjectPosition not available."); return; }
+        if (!Host.TryGetPlayerPose(out uint playerCell, out _, out _, out _, out _, out _, out _, out _)) { ChatLine("[RynthAi] Can't get player cell."); return; }
+
+        uint landblock = playerCell >> 16;
+        ChatLine($"[RynthAi] === Map Dump (landblock 0x{landblock:X4}) ===");
+
+        int total = 0, shown = 0;
+        foreach (var wo in _objectCache.GetLandscapeObjects())
+        {
+            total++;
+            if (!Host.TryGetObjectPosition((uint)wo.Id, out uint cellId, out _, out _, out _)) continue;
+            if ((cellId >> 16) != landblock) continue;
+
+            uint uid = (uint)wo.Id;
+            string range = uid >= 0x80000000u ? "dyn" : "sta";
+            Host.TryGetItemType(uid, out uint flags);
+            string name = wo.Name.Length > 0 ? wo.Name : "(no name)";
+            Host.Log($"[mapdump] 0x{uid:X8} [{range}] flags=0x{flags:X5} cls={wo.ObjectClass} name={name}");
+            if (shown < 30)
+            {
+                ChatLine($"  0x{uid:X8} [{range}] fl=0x{flags:X5} {wo.ObjectClass} \"{name}\"");
+                shown++;
+            }
+        }
+        ChatLine($"[RynthAi] {total} landscape objects in cache ({shown} in landblock, rest in log)");
+    }
 }

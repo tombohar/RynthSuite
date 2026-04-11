@@ -165,6 +165,8 @@ public sealed class LegacyUiSettings
     public bool DashShowMacroRules;
     public bool DashShowMonsters;
     public bool DashShowDungeonMap;
+    public bool MapShowDoors     = true;
+    public bool MapShowCreatures = true;
 
     [JsonIgnore]
     public readonly string[] AdvancedTabs =
