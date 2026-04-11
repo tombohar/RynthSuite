@@ -53,14 +53,13 @@ internal sealed class LegacyMetaUi
         ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 8.0f);
         ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 6.0f);
         ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0.04f, 0.06f, 0.08f, 0.97f));
-        ImGui.PushStyleColor(ImGuiCol.PopupBg,  new Vector4(0.08f, 0.10f, 0.13f, 1.0f));
 
         ImGui.SetNextWindowSize(new Vector2(600, 460), ImGuiCond.FirstUseEver);
         if (ImGui.Begin("Macro Rules##RynthAiMacroRules", ref DashWindows.ShowMacroRules))
             RenderContents();
         ImGui.End();
 
-        ImGui.PopStyleColor(2);
+        ImGui.PopStyleColor(1);
         ImGui.PopStyleVar(3);
     }
 

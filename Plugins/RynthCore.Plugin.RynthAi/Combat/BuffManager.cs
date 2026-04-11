@@ -694,10 +694,66 @@ public class BuffManager : IDisposable
     {
         if (CurrentCombatMode == CombatMode.Magic) return true;
 
-        // TODO: When inventory API is available, find and equip wand from ItemRules first.
-        // For now, just switch combat mode directly.
+        int wandId = FindWandInItems();
+        if (wandId == 0)
+        {
+            // No wand available — try to switch mode anyway (bare-handed magic).
+            _host.ChangeCombatMode(CombatMode.Magic);
+            _lastCastAttempt = DateTime.Now;
+            return false;
+        }
+
+        // Check whether the wand is already wielded by the player (matches
+        // CombatManager.EquipWeaponAndSetStance — PublicWeenieDesc._wielderID).
+        bool alreadyWielded = false;
+        if (_host.HasGetObjectWielderInfo)
+        {
+            uint playerId = _host.GetPlayerId();
+            if (playerId != 0 &&
+                _host.TryGetObjectWielderInfo((uint)wandId, out uint wielder, out _) &&
+                wielder == playerId)
+            {
+                alreadyWielded = true;
+            }
+        }
+
+        if (!alreadyWielded)
+        {
+            _host.UseObject((uint)wandId);
+            _lastCastAttempt = DateTime.Now;
+            return false; // Yield — let the server equip the wand
+        }
+
+        // Wand is wielded — safe to switch stance
         _host.ChangeCombatMode(CombatMode.Magic);
         _lastCastAttempt = DateTime.Now;
-        return false; // Yield tick — let stance animation finish
+        return false; // Yield — let stance animation finish
+    }
+
+    /// <summary>
+    /// Locates a wand to equip. Prefers a configured ItemRule classified as WandStaffOrb,
+    /// falling back to the first WandStaffOrb found in the inventory cache.
+    /// Mirrors CombatManager.FindWandInItems.
+    /// </summary>
+    private int FindWandInItems()
+    {
+        if (_worldObjectCache == null) return 0;
+
+        // Prefer an explicitly configured wand from item rules
+        foreach (var rule in _settings.ItemRules)
+        {
+            var wo = _worldObjectCache[rule.Id];
+            if (wo != null && wo.ObjectClass == AcObjectClass.WandStaffOrb)
+                return rule.Id;
+        }
+
+        // Fall back to inventory cache scan
+        foreach (var wo in _worldObjectCache.GetInventory())
+        {
+            if (wo.ObjectClass == AcObjectClass.WandStaffOrb)
+                return wo.Id;
+        }
+
+        return 0;
     }
 }

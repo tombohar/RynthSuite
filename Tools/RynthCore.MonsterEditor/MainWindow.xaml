@@ -1,0 +1,410 @@
+<Window x:Class="RynthCore.MonsterEditor.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:sys="clr-namespace:System;assembly=mscorlib"
+        xmlns:local="clr-namespace:RynthCore.MonsterEditor"
+        Title="RynthAi — Monster Rules Editor"
+        Height="520" Width="1060" MinWidth="800" MinHeight="300"
+        Background="#1E1E2E" Foreground="#CDD6F4">
+
+    <Window.Resources>
+        <!-- Element lists shared by Dmg/ExVuln/Pet combos -->
+        <x:Array x:Key="DmgOptions" Type="{x:Type sys:String}">
+            <sys:String>Auto</sys:String>
+            <sys:String>Slash</sys:String>
+            <sys:String>Pierce</sys:String>
+            <sys:String>Bludgeon</sys:String>
+            <sys:String>Fire</sys:String>
+            <sys:String>Cold</sys:String>
+            <sys:String>Lightning</sys:String>
+            <sys:String>Acid</sys:String>
+            <sys:String>Nether</sys:String>
+        </x:Array>
+        <x:Array x:Key="VulnOptions" Type="{x:Type sys:String}">
+            <sys:String>None</sys:String>
+            <sys:String>Slash</sys:String>
+            <sys:String>Pierce</sys:String>
+            <sys:String>Bludgeon</sys:String>
+            <sys:String>Fire</sys:String>
+            <sys:String>Cold</sys:String>
+            <sys:String>Lightning</sys:String>
+            <sys:String>Acid</sys:String>
+            <sys:String>Nether</sys:String>
+        </x:Array>
+        <x:Array x:Key="PetOptions" Type="{x:Type sys:String}">
+            <sys:String>PAuto</sys:String>
+            <sys:String>Slash</sys:String>
+            <sys:String>Pierce</sys:String>
+            <sys:String>Bludgeon</sys:String>
+            <sys:String>Fire</sys:String>
+            <sys:String>Cold</sys:String>
+            <sys:String>Lightning</sys:String>
+            <sys:String>Acid</sys:String>
+            <sys:String>Nether</sys:String>
+        </x:Array>
+
+        <!-- Toggle light: small colored square button -->
+        <Style x:Key="ToggleLight" TargetType="ToggleButton">
+            <Setter Property="Width" Value="14"/>
+            <Setter Property="Height" Value="14"/>
+            <Setter Property="Margin" Value="1,2"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="BorderBrush" Value="#555"/>
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="2"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsChecked" Value="True">
+                    <Setter Property="Background" Value="#33CC33"/>
+                    <Setter Property="BorderBrush" Value="#55EE55"/>
+                </Trigger>
+                <Trigger Property="IsChecked" Value="False">
+                    <Setter Property="Background" Value="#404040"/>
+                </Trigger>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Opacity" Value="0.75"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- DataGrid dark theme -->
+        <Style TargetType="DataGrid">
+            <Setter Property="Background" Value="#181825"/>
+            <Setter Property="Foreground" Value="#CDD6F4"/>
+            <Setter Property="BorderBrush" Value="#45475A"/>
+            <Setter Property="GridLinesVisibility" Value="All"/>
+            <Setter Property="VerticalGridLinesBrush" Value="#2A2A3A"/>
+            <Setter Property="HorizontalGridLinesBrush" Value="#2A2A3A"/>
+            <Setter Property="RowBackground" Value="#181825"/>
+            <Setter Property="AlternatingRowBackground" Value="#1E1E2E"/>
+            <Setter Property="AutoGenerateColumns" Value="False"/>
+            <Setter Property="CanUserAddRows" Value="False"/>
+            <Setter Property="CanUserDeleteRows" Value="False"/>
+            <Setter Property="SelectionMode" Value="Single"/>
+            <Setter Property="SelectionUnit" Value="FullRow"/>
+            <Setter Property="HeadersVisibility" Value="Column"/>
+            <Setter Property="ScrollViewer.CanContentScroll" Value="True"/>
+        </Style>
+        <Style TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="#313244"/>
+            <Setter Property="Foreground" Value="#89B4FA"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="Padding" Value="3,2"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="BorderBrush" Value="#45475A"/>
+            <Setter Property="BorderThickness" Value="0,0,1,1"/>
+        </Style>
+        <Style TargetType="DataGridCell">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#CDD6F4"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="2,1"/>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#2D2D44"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style TargetType="DataGridRow">
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#252538"/>
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#2D2D44"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="#313244"/>
+            <Setter Property="Foreground" Value="#CDD6F4"/>
+            <Setter Property="BorderBrush" Value="#45475A"/>
+            <Setter Property="Padding" Value="2,1"/>
+            <Setter Property="CaretBrush" Value="#CDD6F4"/>
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Background" Value="#313244"/>
+            <Setter Property="Foreground" Value="#CDD6F4"/>
+            <Setter Property="BorderBrush" Value="#45475A"/>
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="#313244"/>
+            <Setter Property="Foreground" Value="#CDD6F4"/>
+            <Setter Property="BorderBrush" Value="#45475A"/>
+            <Setter Property="Padding" Value="6,2"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+        <Style TargetType="StatusBar">
+            <Setter Property="Background" Value="#181825"/>
+            <Setter Property="Foreground" Value="#CDD6F4"/>
+        </Style>
+    </Window.Resources>
+
+    <DockPanel LastChildFill="True">
+
+        <!-- Status bar -->
+        <StatusBar DockPanel.Dock="Bottom">
+            <TextBlock x:Name="StatusText" Foreground="#A6E3A1" Padding="4,0"/>
+        </StatusBar>
+
+        <!-- Add row -->
+        <Border DockPanel.Dock="Bottom" Background="#252536" Padding="8,5" BorderBrush="#45475A" BorderThickness="0,1,0,0">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <TextBlock Text="Add Monster:" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBox x:Name="NewMonsterBox" Width="200" VerticalAlignment="Center"
+                         KeyDown="NewMonsterBox_KeyDown"/>
+                <Button Content="Add" Margin="4,0,0,0" Click="AddMonster_Click" Width="55"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Main grid -->
+        <DataGrid x:Name="MonsterGrid"
+                  ItemsSource="{Binding Rules}"
+                  CellEditEnding="MonsterGrid_CellEditEnding"
+                  PreviewMouseDown="MonsterGrid_PreviewMouseDown">
+            <DataGrid.Columns>
+
+                <!-- ── 10 Toggle lights ── -->
+                <DataGridTemplateColumn Header="F"  Width="20" CanUserResize="False" CanUserSort="False" CanUserReorder="False">
+                    <DataGridTemplateColumn.HeaderStyle>
+                        <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+                            <Setter Property="ToolTip" Value="Fester — Decrepitude's Grasp"/>
+                        </Style>
+                    </DataGridTemplateColumn.HeaderStyle>
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Style="{StaticResource ToggleLight}"
+                                      IsChecked="{Binding Fester, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      ToolTip="Fester — Decrepitude's Grasp"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="B"  Width="20" CanUserResize="False" CanUserSort="False" CanUserReorder="False">
+                    <DataGridTemplateColumn.HeaderStyle>
+                        <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+                            <Setter Property="ToolTip" Value="Broadside — Broadside of a Barn"/>
+                        </Style>
+                    </DataGridTemplateColumn.HeaderStyle>
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Style="{StaticResource ToggleLight}"
+                                      IsChecked="{Binding Broadside, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      ToolTip="Broadside — Broadside of a Barn"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="G"  Width="20" CanUserResize="False" CanUserSort="False" CanUserReorder="False">
+                    <DataGridTemplateColumn.HeaderStyle>
+                        <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+                            <Setter Property="ToolTip" Value="Gravity Well — Vulnerability Other"/>
+                        </Style>
+                    </DataGridTemplateColumn.HeaderStyle>
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Style="{StaticResource ToggleLight}"
+                                      IsChecked="{Binding GravityWell, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      ToolTip="Gravity Well — Vulnerability Other"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="I"  Width="20" CanUserResize="False" CanUserSort="False" CanUserReorder="False">
+                    <DataGridTemplateColumn.HeaderStyle>
+                        <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+                            <Setter Property="ToolTip" Value="Imperil — Gossamer Flesh"/>
+                        </Style>
+                    </DataGridTemplateColumn.HeaderStyle>
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Style="{StaticResource ToggleLight}"
+                                      IsChecked="{Binding Imperil, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      ToolTip="Imperil — Gossamer Flesh"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Y"  Width="20" CanUserResize="False" CanUserSort="False" CanUserReorder="False">
+                    <DataGridTemplateColumn.HeaderStyle>
+                        <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+                            <Setter Property="ToolTip" Value="Yield — Magic Yield Other"/>
+                        </Style>
+                    </DataGridTemplateColumn.HeaderStyle>
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Style="{StaticResource ToggleLight}"
+                                      IsChecked="{Binding Yield, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      ToolTip="Yield — Magic Yield Other"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="V"  Width="20" CanUserResize="False" CanUserSort="False" CanUserReorder="False">
+                    <DataGridTemplateColumn.HeaderStyle>
+                        <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+                            <Setter Property="ToolTip" Value="Vuln — Vulnerability (element-matched)"/>
+                        </Style>
+                    </DataGridTemplateColumn.HeaderStyle>
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Style="{StaticResource ToggleLight}"
+                                      IsChecked="{Binding Vuln, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      ToolTip="Vuln — Vulnerability (element-matched)"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="A"  Width="20" CanUserResize="False" CanUserSort="False" CanUserReorder="False">
+                    <DataGridTemplateColumn.HeaderStyle>
+                        <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+                            <Setter Property="ToolTip" Value="Arc — War/Void arc spells"/>
+                        </Style>
+                    </DataGridTemplateColumn.HeaderStyle>
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Style="{StaticResource ToggleLight}"
+                                      IsChecked="{Binding UseArc, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      ToolTip="Arc — War/Void arc spells"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Bl" Width="20" CanUserResize="False" CanUserSort="False" CanUserReorder="False">
+                    <DataGridTemplateColumn.HeaderStyle>
+                        <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+                            <Setter Property="ToolTip" Value="Bolt — War/Void bolt spells (none set = buff bot mode)"/>
+                        </Style>
+                    </DataGridTemplateColumn.HeaderStyle>
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Style="{StaticResource ToggleLight}"
+                                      IsChecked="{Binding UseBolt, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      ToolTip="Bolt — War/Void bolt spells (none set = buff bot mode)"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="R"  Width="20" CanUserResize="False" CanUserSort="False" CanUserReorder="False">
+                    <DataGridTemplateColumn.HeaderStyle>
+                        <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+                            <Setter Property="ToolTip" Value="Ring — Ring spells (uses Ring Range setting)"/>
+                        </Style>
+                    </DataGridTemplateColumn.HeaderStyle>
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Style="{StaticResource ToggleLight}"
+                                      IsChecked="{Binding UseRing, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      ToolTip="Ring — Ring spells (uses Ring Range setting)"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="S"  Width="20" CanUserResize="False" CanUserSort="False" CanUserReorder="False">
+                    <DataGridTemplateColumn.HeaderStyle>
+                        <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+                            <Setter Property="ToolTip" Value="Streak — War/Void streak spells"/>
+                        </Style>
+                    </DataGridTemplateColumn.HeaderStyle>
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Style="{StaticResource ToggleLight}"
+                                      IsChecked="{Binding UseStreak, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      ToolTip="Streak — War/Void streak spells"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- ── Name ── -->
+                <DataGridTextColumn Header="Name" Width="*" MinWidth="100"
+                                    Binding="{Binding Name, UpdateSourceTrigger=LostFocus}">
+                    <DataGridTextColumn.ElementStyle>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Foreground" Value="#CDD6F4"/>
+                            <Setter Property="Padding" Value="3,1"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsDefault}" Value="True">
+                                    <Setter Property="Foreground" Value="#F9E2AF"/>
+                                    <Setter Property="FontWeight" Value="SemiBold"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+
+                <!-- ── Priority ── -->
+                <DataGridTextColumn Header="P" Width="30" MinWidth="30"
+                                    Binding="{Binding Priority, UpdateSourceTrigger=LostFocus}">
+                    <DataGridTextColumn.ElementStyle>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Foreground" Value="#CDD6F4"/>
+                            <Setter Property="HorizontalAlignment" Value="Center"/>
+                        </Style>
+                    </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+
+                <!-- ── Damage Type ── -->
+                <DataGridTemplateColumn Header="Dmg Type" Width="80" MinWidth="70">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding DamageType}" Foreground="#CDD6F4" Padding="3,1"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <ComboBox ItemsSource="{StaticResource DmgOptions}"
+                                  SelectedItem="{Binding DamageType, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- ── Ex Vuln ── -->
+                <DataGridTemplateColumn Header="Ex Vuln" Width="80" MinWidth="70">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding ExVuln}" Foreground="#CDD6F4" Padding="3,1"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <ComboBox ItemsSource="{StaticResource VulnOptions}"
+                                  SelectedItem="{Binding ExVuln, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- ── Weapon (from ItemRules) ── -->
+                <DataGridTemplateColumn Header="Weapon" Width="130" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding WeaponId, Converter={x:Static local:IdToNameConverter.Instance}, ConverterParameter=weapon}"
+                                   Padding="3,1" Foreground="#CDD6F4"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <ComboBox ItemsSource="{Binding DataContext.WeaponOptions, RelativeSource={RelativeSource AncestorType=Window}}"
+                                  SelectedValue="{Binding WeaponId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                  SelectedValuePath="Id"
+                                  DisplayMemberPath="DisplayName"
+                                  Foreground="Black"/>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- ── Offhand (from ItemRules) ── -->
+                <DataGridTemplateColumn Header="Offhand" Width="130" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding OffhandId, Converter={x:Static local:IdToNameConverter.Instance}, ConverterParameter=weapon}"
+                                   Padding="3,1" Foreground="#CDD6F4"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <ComboBox ItemsSource="{Binding DataContext.WeaponOptions, RelativeSource={RelativeSource AncestorType=Window}}"
+                                  SelectedValue="{Binding OffhandId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                  SelectedValuePath="Id"
+                                  DisplayMemberPath="DisplayName"
+                                  Foreground="Black"/>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- ── Pet Damage ── -->
+                <DataGridTemplateColumn Header="Pet Dmg" Width="70" MinWidth="60">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding PetDamage}" Foreground="#CDD6F4" Padding="3,1"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <ComboBox ItemsSource="{StaticResource PetOptions}"
+                                  SelectedItem="{Binding PetDamage, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- ── Delete ── -->
+                <DataGridTemplateColumn Header="Del" Width="32" CanUserResize="False" CanUserSort="False" CanUserReorder="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <Button Content="X" Tag="{Binding}" Click="DeleteRow_Click"
+                                Padding="2,0" FontSize="11"
+                                Visibility="{Binding IsDefault, Converter={x:Static local:InvertBoolToVisConverter.Instance}}"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+            </DataGrid.Columns>
+        </DataGrid>
+    </DockPanel>
+</Window>

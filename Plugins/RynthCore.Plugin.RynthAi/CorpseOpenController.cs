@@ -43,20 +43,8 @@ public sealed partial class RynthAiPlugin
     private string _currentLootItemName = string.Empty;
 
     private static long CorpseNowMs => Environment.TickCount64;
-    private static readonly string CorpseLootLogPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
-        "RynthAi-loot.log");
-
     private void LootDiag(string message)
     {
-        try
-        {
-            File.AppendAllText(CorpseLootLogPath, $"{DateTime.Now:HH:mm:ss.fff} {message}{Environment.NewLine}");
-        }
-        catch
-        {
-        }
-
         Log(message);
     }
 

@@ -210,6 +210,29 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.InputInt("Min Ring Targets", ref _settings.MinRingTargets);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("If this many monsters are within ring range, ring spells are used instead of arc/bolt/streak.");
+
+                ImGui.Spacing();
+                ImGui.Separator();
+                ImGui.Text("Spell Difficulty (Min Buffed Skill)");
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Minimum buffed skill level required to cast each spell tier.\nRaise these above AC's hard minimums (1/50/100/150/200/250/300/350) to avoid fizzles.");
+
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 1", ref _settings.MinSkillLevelTier1);
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 2", ref _settings.MinSkillLevelTier2);
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 3", ref _settings.MinSkillLevelTier3);
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 4", ref _settings.MinSkillLevelTier4);
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 5", ref _settings.MinSkillLevelTier5);
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 6", ref _settings.MinSkillLevelTier6);
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 7", ref _settings.MinSkillLevelTier7);
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 8", ref _settings.MinSkillLevelTier8);
                 break;
 
             case "Ranges":
