@@ -60,7 +60,7 @@ internal sealed class LegacyDashboardRenderer
     private string _lastSavedJson = string.Empty;
     private int _saveCheckCounter;
     private const int SaveCheckIntervalFrames = 1; // check every frame for immediate save
-    private bool _firstRender = true;
+
     private Vector2 _lastWindowPos = new(-1, -1);
     private bool _windowPosRestored;
     private Vector2 _expandedSize = new(430, 452);
@@ -300,8 +300,7 @@ internal sealed class LegacyDashboardRenderer
             return;
         }
 
-        IntPtr r = ShellExecuteW(IntPtr.Zero, "open", editorExe, $"\"{_charFolder}\"", null, 1);
-        _host.WriteToChat($"[RynthAi] ShellExecute={r} exe={editorExe} arg={_charFolder}", 1);
+        ShellExecuteW(IntPtr.Zero, "open", editorExe, $"\"{_charFolder}\"", null, 1);
     }
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
@@ -620,7 +619,6 @@ internal sealed class LegacyDashboardRenderer
 
     public void Render()
     {
-        if (_firstRender) { _firstRender = false; _host.WriteToChat("[RynthAi] v2 DLL loaded.", 1); }
         RefreshPlayerVitals();
 
         // Periodic dirty-check: serialize settings every ~2s; save if changed
@@ -894,7 +892,7 @@ internal sealed class LegacyDashboardRenderer
         ImGui.TableNextColumn();
         bool prevMonsters = DashWindows.ShowMonsters;
         LegacyDashboardDrawing.GridBtn("Monsters", "target", ref DashWindows.ShowMonsters);
-        if (DashWindows.ShowMonsters && !prevMonsters) { _host.WriteToChat("[RynthAi] Monsters clicked.", 1); LaunchMonsterEditor(); DashWindows.ShowMonsters = false; }
+        if (DashWindows.ShowMonsters && !prevMonsters) { LaunchMonsterEditor(); DashWindows.ShowMonsters = false; }
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Settings", "wrench", ref _settings.ShowAdvancedWindow);
         ImGui.TableNextRow();
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Navigation", "map", ref DashWindows.ShowNavigation);
