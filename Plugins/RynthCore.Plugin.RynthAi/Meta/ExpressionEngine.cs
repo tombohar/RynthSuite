@@ -192,6 +192,7 @@ internal sealed class ExpressionEngine
             "wobjectgetintprop"      => EvalWobjectGetIntProp(A(0), A(1)),
             "wobjectgetdoubleprop"   => EvalWobjectGetDoubleProp(A(0), A(1)),
             "wobjectgetboolprop"     => EvalWobjectGetBoolProp(A(0), A(1)),
+            "wobjectgetstringprop"   => EvalWobjectGetStringProp(A(0), A(1)),
 
             // ── Plugin options ────────────────────────────────────────────────
             "raoptget" or "uboptget" => GetOption(A(0)),
@@ -624,6 +625,14 @@ internal sealed class ExpressionEngine
         if (!uint.TryParse(propArg.Trim(), out uint prop)) return "0";
         if (!_host.HasGetObjectBoolProperty) return "0";
         return _host.TryGetObjectBoolProperty(uid, prop, out bool value) ? (value ? "1" : "0") : "0";
+    }
+
+    private string EvalWobjectGetStringProp(string objArg, string propArg)
+    {
+        if (!TryParseWobjectHandle(objArg, out uint uid, out _)) return "";
+        if (!uint.TryParse(propArg.Trim(), out uint prop)) return "";
+        if (!_host.HasGetObjectStringProperty) return "";
+        return _host.TryGetObjectStringProperty(uid, prop, out string? value) ? value ?? "" : "";
     }
 
     // ── Option function implementations ───────────────────────────────────────

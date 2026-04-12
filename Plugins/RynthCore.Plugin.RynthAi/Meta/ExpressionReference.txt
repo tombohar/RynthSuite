@@ -513,6 +513,14 @@ wobjectgetboolprop[handle, property]
     Example: wobjectgetboolprop[wobjectgetselection[], 11]
                  →  "1" if the selected object is inscribable (STypeBool 11)
 
+wobjectgetstringprop[handle, property]
+    Returns a string property from a world object, or an empty string if undefined.
+    property is an AC STypeString value.
+
+    Test in chat:  /ra mexec wobjectgetstringprop[wobjectgetselection[], 1]
+    Example: wobjectgetstringprop[wobjectgetselection[], 1]
+                 →  "Blue Empyrean Ring"  (STypeString 1 = NAME)
+
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DICTIONARIES
