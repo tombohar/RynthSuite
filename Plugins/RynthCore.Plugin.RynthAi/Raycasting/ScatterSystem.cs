@@ -28,8 +28,17 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         private float[] _landHeightTable;
         private bool _initialized;
 
+        // AC's walkable surface threshold — normal.Z must be >= this value.
+        // ACE server uses 0.664 (cos 48°), but the coarse 9×9 terrain mesh over-marks gentle
+        // slopes, so we use 0.5 (cos 60°) to reduce false positives in the overlay.
+        public const float FloorZ = 0.5f;
+
         // Scene cache (portal.dat scenes)
         private Dictionary<uint, List<ScatterObjectDesc>> _sceneCache = new Dictionary<uint, List<ScatterObjectDesc>>();
+
+        // Height grid cache: landblockKey → 81-byte vertex heights
+        private readonly Dictionary<uint, byte[]> _heightGridCache = new Dictionary<uint, byte[]>();
+        private const int MAX_HEIGHT_GRID_CACHE = 30;
 
         // Reference to dat files
         private DatDatabase _portalDat;
@@ -76,6 +85,121 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 Log($"Scatter init error: {ex.Message}");
                 return false;
             }
+        }
+
+        // ===================================================================
+        // Terrain height and passability API
+        // ===================================================================
+
+        /// <summary>
+        /// Returns the 9×9 height grid (81 bytes) for a landblock, cached after first load.
+        /// Returns null if the landblock data is unavailable or the height table wasn't loaded.
+        /// </summary>
+        public byte[] LoadHeightGrid(uint landblockKey)
+        {
+            if (_landHeightTable == null || _cellDat == null) return null;
+
+            if (_heightGridCache.TryGetValue(landblockKey, out var cached))
+                return cached;
+
+            uint cellId = (landblockKey << 16) | 0xFFFF;
+            byte[] data = _cellDat.GetFileData(cellId);
+            if (data == null || data.Length < 170) return null;
+
+            var heights = new byte[81];
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var reader = new BinaryReader(ms))
+                {
+                    reader.ReadUInt32();        // id
+                    reader.ReadUInt32();        // hasObjects
+                    ms.Position += 81 * 2;     // skip terrain ushort[81]
+                    for (int i = 0; i < 81; i++)
+                        heights[i] = reader.ReadByte();
+                }
+            }
+            catch { return null; }
+
+            if (_heightGridCache.Count >= MAX_HEIGHT_GRID_CACHE)
+                _heightGridCache.Clear();
+            _heightGridCache[landblockKey] = heights;
+            return heights;
+        }
+
+        /// <summary>
+        /// World-space Z of vertex (ix, iy) in the 9×9 grid (ix and iy are 0–8).
+        /// </summary>
+        public float GetVertexHeight(byte[] heights, int ix, int iy)
+        {
+            if (heights == null || _landHeightTable == null) return 0f;
+            int idx = ix * VertexDim + iy;
+            if ((uint)idx >= 81) return 0f;
+            byte h = heights[idx];
+            return h < _landHeightTable.Length ? _landHeightTable[h] : 0f;
+        }
+
+        /// <summary>
+        /// Returns the minimum normal.Z of the two triangles making up terrain cell (cellX, cellY).
+        /// Lower values = steeper slope. Values below FloorZ are impassable.
+        /// cellX and cellY are 0–7 (8×8 grid).
+        /// </summary>
+        public float GetCellMinNormalZ(byte[] heights, int cellX, int cellY)
+        {
+            float h00 = GetVertexHeight(heights, cellX,     cellY);
+            float h10 = GetVertexHeight(heights, cellX + 1, cellY);
+            float h01 = GetVertexHeight(heights, cellX,     cellY + 1);
+            float h11 = GetVertexHeight(heights, cellX + 1, cellY + 1);
+
+            float nz = CellLength * CellLength; // 576 — constant Z component before normalization
+
+            // Triangle 1: (0,0,h00), (24,0,h10), (24,24,h11)
+            // normal = cross((24,0,h10-h00), (24,24,h11-h00)) = (-24*(h10-h00), 24*(h10-h11), 576)
+            float n1x = -CellLength * (h10 - h00);
+            float n1y =  CellLength * (h10 - h11);
+            float z1  = nz / (float)Math.Sqrt(n1x * n1x + n1y * n1y + nz * nz);
+
+            // Triangle 2: (0,0,h00), (24,24,h11), (0,24,h01)
+            // normal = cross((24,24,h11-h00), (0,24,h01-h00)) = (24*(h01-h11), -24*(h01-h00), 576)
+            float n2x =  CellLength * (h01 - h11);
+            float n2y = -CellLength * (h01 - h00);
+            float z2  = nz / (float)Math.Sqrt(n2x * n2x + n2y * n2y + nz * nz);
+
+            return Math.Min(z1, z2);
+        }
+
+        /// <summary>
+        /// Returns true if terrain cell (cellX, cellY) is walkable per AC's FloorZ threshold.
+        /// cellX and cellY are 0–7.
+        /// </summary>
+        public bool IsCellPassable(byte[] heights, int cellX, int cellY)
+            => GetCellMinNormalZ(heights, cellX, cellY) >= FloorZ;
+
+        /// <summary>
+        /// Returns whether each individual triangle in the cell is passable.
+        /// Triangle 1: vertices (cx,cy),(cx+1,cy),(cx+1,cy+1) — SE triangle.
+        /// Triangle 2: vertices (cx,cy),(cx+1,cy+1),(cx,cy+1) — NW triangle.
+        /// </summary>
+        public void GetTrianglePassability(byte[] heights, int cellX, int cellY,
+            out bool tri1Passable, out bool tri2Passable)
+        {
+            float h00 = GetVertexHeight(heights, cellX,     cellY);
+            float h10 = GetVertexHeight(heights, cellX + 1, cellY);
+            float h01 = GetVertexHeight(heights, cellX,     cellY + 1);
+            float h11 = GetVertexHeight(heights, cellX + 1, cellY + 1);
+
+            float nz = CellLength * CellLength;
+
+            float n1x = -CellLength * (h10 - h00);
+            float n1y =  CellLength * (h10 - h11);
+            float z1  = nz / (float)Math.Sqrt(n1x * n1x + n1y * n1y + nz * nz);
+
+            float n2x =  CellLength * (h01 - h11);
+            float n2y = -CellLength * (h01 - h00);
+            float z2  = nz / (float)Math.Sqrt(n2x * n2x + n2y * n2y + nz * nz);
+
+            tri1Passable = z1 >= FloorZ;
+            tri2Passable = z2 >= FloorZ;
         }
 
         /// <summary>

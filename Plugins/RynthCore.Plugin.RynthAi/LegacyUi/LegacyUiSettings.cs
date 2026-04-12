@@ -98,6 +98,7 @@ public sealed class LegacyUiSettings
     public float NavRingThickness = 6.0f;
     public float NavLineThickness = 6.0f;
     public float NavHeightOffset = 0.05f;
+    public bool  ShowTerrainPassability = true;
     public double MaxMonRange = 12.0;
     public bool SummonPets;
     public int CustomPetRange = 5;

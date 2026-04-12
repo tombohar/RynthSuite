@@ -14,6 +14,8 @@ internal sealed class MetaManager
     private readonly RynthCoreHost _host;
     private readonly PlayerVitalsCache _vitals;
     private WorldObjectCache? _objectCache;
+    private FellowshipTracker? _fellowshipTracker;
+    private QuestTracker? _questTracker;
     private uint _playerId;
 
     // ── State tracking ───────────────────────────────────────────────────────
@@ -61,6 +63,18 @@ internal sealed class MetaManager
         _expressions?.SetObjectCache(cache);
     }
 
+    public void SetFellowshipTracker(FellowshipTracker tracker)
+    {
+        _fellowshipTracker = tracker;
+        _expressions?.SetFellowshipTracker(tracker);
+    }
+
+    public void SetQuestTracker(QuestTracker tracker)
+    {
+        _questTracker = tracker;
+        _expressions?.SetQuestTracker(tracker);
+    }
+
     public void SetPlayerId(uint id)
     {
         _playerId = id;
@@ -98,6 +112,8 @@ internal sealed class MetaManager
         var engine = new ExpressionEngine(_host);
         engine.SetPlayerId(_playerId);
         engine.SetObjectCache(_objectCache);
+        engine.SetFellowshipTracker(_fellowshipTracker);
+        engine.SetQuestTracker(_questTracker);
         return engine;
     }
 

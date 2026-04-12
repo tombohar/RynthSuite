@@ -1,0 +1,180 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RynthAi Chat Commands — /ra <command>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All commands are entered in the AC chat window prefixed with /ra.
+Commands are case-insensitive.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+GENERAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/ra help
+    Show the in-game command list.
+
+/ra power [0-100|auto]
+    Get or set melee/missile attack power percentage.
+    "auto" = recklessness-aware automatic power selection.
+    Example: /ra power 90
+    Example: /ra power auto
+
+/ra buffs
+    Show active buff timers for the player.
+
+/ra cast <spellId>
+    Cast a spell by ID on the current target.
+    Example: /ra cast 2648
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBJECT INTERACTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Object search flags (suffix on use/select commands):
+    (none)  search both inventory and landscape, exact name match
+    i       inventory only, exact match
+    l       landscape only, exact match
+    p       both, partial (contains) match
+    pi      inventory only, partial match
+    lp      landscape only, partial match
+
+/ra use <name>
+    Use the object with the exact given name.
+    Searches inventory first, then landscape.
+    Example: /ra use Mana Elixir
+
+/ra usei <name>
+    Use an inventory item by exact name.
+    Example: /ra usei Stamina Elixir
+
+/ra usel <name>
+    Use a landscape object by exact name.
+    Example: /ra usel Forge
+
+/ra usep <name>
+    Use the first object whose name contains the given string (inventory + landscape).
+    Example: /ra usep elixir
+
+/ra usepi <name>
+    Use the first inventory item whose name contains the given string.
+    Example: /ra usepi mana
+
+/ra uselp <name>
+    Use the first landscape object whose name contains the given string.
+    Example: /ra uselp plant
+
+/ra use <name1> on <name2>
+    Use one object on another. Both names use the same search scope as the variant.
+    Example: /ra use Salvage Tool on Gold Ore
+    Example: /ra usepi split on gold
+
+/ra select <name>
+    Target/select the object with the exact given name.
+    Searches inventory first, then landscape.
+    Example: /ra select Mana Elixir
+
+/ra selecti <name>
+    Select an inventory item by exact name.
+    Example: /ra selecti Stamina Elixir
+
+/ra selectl <name>
+    Select a landscape object by exact name.
+    Example: /ra selectl Chest
+
+/ra selectp <name>
+    Select the first object whose name contains the given string (inventory + landscape).
+    Example: /ra selectp elixir
+
+/ra selectpi <name>
+    Select the first inventory item whose name contains the given string.
+    Example: /ra selectpi mana
+
+/ra selectlp <name>
+    Select the first landscape object whose name contains the given string.
+    Example: /ra selectlp chest
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+META / SCRIPTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/ra mexec <expression>
+    Evaluate a meta expression and print the result.
+    Type annotation ([number], [string], [List]) shown before the result.
+    Example: /ra mexec sqrt[2]
+    Example: /ra mexec listcreate[1,2,3]
+    Example: /ra mexec wobjectgetname[wobjectgetselection[]]
+    See ExpressionReference.txt for the full expression function reference.
+
+/ra listvars
+    Show all currently set meta variables with their type and value.
+    Output format:  <name> (<type>) = <value>
+    Example output:
+        myList (List) = [a,b,c]
+        myCount (number) = 5
+        myName (string) = Aluvian Warrior
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DIAGNOSTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/ra scan
+    Show all nearby monsters from the object cache with their IDs.
+
+/ra attackable
+    Check whether the current target is flagged as attackable.
+
+/ra wielded
+    Show all currently wielded/equipped items.
+
+/ra dumpprops
+    Dump all known integer, float, bool, and string properties for the player.
+
+/ra dumpinv
+    Dump all inventory items from both the cache and the direct container scan.
+
+/ra cache
+    Show a summary of the object cache (creature/inventory/landscape counts).
+
+/ra cache2
+    Show raw object IDs currently tracked in the object cache.
+
+/ra corpseinfo
+    Show corpse looting range and open diagnostics for nearby corpses.
+
+/ra corpsecheck
+    Explain whether the nearest corpse would be looted by the current loot profile.
+
+/ra corpseopen
+    Force the nearest corpse open flow (bypasses normal loot logic).
+
+/ra lootparse
+    Inspect and parse the currently selected loot profile, showing rule breakdown.
+
+/ra lootcheckinv
+    Test the active loot profile against every item in inventory and report results.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NAVIGATION / GEOMETRY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/ra navdebug
+    Show current player coordinates, heading, cell ID, and nav debug info.
+
+/ra buildinfo
+    Show geometry and building mesh info for the current landblock.
+
+/ra raycast
+    Show raycast system status (whether the DAT database is loaded, etc.).
+
+/ra lostest
+    Run a line-of-sight raycast test from the player to the current target.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FELLOWSHIP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/ra fellow [subcommand]
+/ra fellowship [subcommand]
+    Fellowship diagnostics and queries.
+
+/ra fellowinfo
+    Show fellowship tracker state (members, XP sharing status, etc.).

@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using RynthCore.Plugin.RynthAi.Meta;
 using RynthCore.Plugin.RynthAi.Raycasting;
 
@@ -30,6 +31,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra dumpprops     — dump player properties");
         ChatLine("[RynthAi] /ra mexec <expr>  — evaluate meta expression");
         ChatLine("[RynthAi] /ra listvars      — show meta variables");
+        ChatLine("[RynthAi] /ra use[i|l][p|pi|lp] <name> [on <name2>]  — use item (i=inv, l=land, p=partial)");
         ChatLine("[RynthAi] /ra raycast       — raycast system status");
         ChatLine("[RynthAi] /ra lostest       — line-of-sight test to target");
         ChatLine("[RynthAi] /ra buildinfo     — nearby geometry info");
@@ -285,7 +287,22 @@ public sealed partial class RynthAiPlugin
         var sw = System.Diagnostics.Stopwatch.StartNew();
         string result = _metaManager.Expressions.Evaluate(expr);
         sw.Stop();
-        ChatLine($"[RynthAi] Result: {result} ({sw.Elapsed.TotalMilliseconds:F3}ms)");
+        string typeTag;
+        string display = result;
+        if (result.Length > 2 && result[0] == 'D' && result[1] == ':' &&
+            _metaManager.Expressions.TryGetDict(result, out var dictContents) && dictContents != null)
+        {
+            typeTag = "[Dictionary]";
+            display = "[" + string.Join(",", dictContents.Select(kv => $"{kv.Key}=>{kv.Value}")) + "]";
+        }
+        else if (result.Length >= 2 && result[0] == '[' && result[result.Length - 1] == ']')
+            typeTag = "[List]";
+        else if (double.TryParse(result, System.Globalization.NumberStyles.Any,
+            System.Globalization.CultureInfo.InvariantCulture, out _))
+            typeTag = "[number]";
+        else
+            typeTag = "[string]";
+        ChatLine($"[RynthAi] Result: {typeTag} {display} ({sw.Elapsed.TotalMilliseconds:F3}ms)");
     }
 
     private void HandleListVarsCommand()
@@ -303,9 +320,20 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
-        ChatLine($"[RynthAi] Variables ({vars.Count}):");
+        ChatLine($"[RynthAi] Defined variables:");
         foreach (var kv in vars)
-            ChatLine($"[RynthAi]   {kv.Key} = {kv.Value}");
+        {
+            string typeLabel;
+            string val = kv.Value;
+            if (val.Length >= 2 && val[0] == '[' && val[val.Length - 1] == ']')
+                typeLabel = "List";
+            else if (double.TryParse(val, System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out _))
+                typeLabel = "number";
+            else
+                typeLabel = "string";
+            ChatLine($"[RynthAi] {kv.Key} ({typeLabel}) = {val}");
+        }
     }
 
     private void HandleDumpPropsCommand()
@@ -925,5 +953,83 @@ public sealed partial class RynthAiPlugin
             }
         }
         ChatLine($"[RynthAi] {total} landscape objects in cache ({shown} in landblock, rest in log)");
+    }
+
+    // ── use / select helpers ──────────────────────────────────────────────────
+
+    private WorldObject? FindObject(
+        string name, bool inv, bool land, bool partial)
+    {
+        if (_objectCache == null) return null;
+
+        if (inv)
+        {
+            foreach (var wo in _objectCache.GetDirectInventory())
+            {
+                if (partial
+                    ? wo.Name.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0
+                    : string.Equals(wo.Name, name, StringComparison.OrdinalIgnoreCase))
+                    return wo;
+            }
+        }
+
+        if (land)
+        {
+            foreach (var wo in _objectCache.GetLandscapeObjects())
+            {
+                if (partial
+                    ? wo.Name.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0
+                    : string.Equals(wo.Name, name, StringComparison.OrdinalIgnoreCase))
+                    return wo;
+            }
+        }
+
+        return null;
+    }
+
+    private void HandleUseCommand(string[] parts, bool inv, bool land, bool partial)
+    {
+        if (parts.Length < 3)
+        {
+            ChatLine("[RynthAi] Usage: /ra use[i|l][p] <name> [on <name2>]");
+            return;
+        }
+
+        string argStr = string.Join(" ", parts, 2, parts.Length - 2);
+
+        // Check for "X on Y" syntax
+        int onIdx = argStr.IndexOf(" on ", StringComparison.OrdinalIgnoreCase);
+        if (onIdx >= 0)
+        {
+            string srcName = argStr.Substring(0, onIdx).Trim();
+            string tgtName = argStr.Substring(onIdx + 4).Trim();
+            var src = FindObject(srcName, inv, land, partial);
+            var tgt = FindObject(tgtName, inv, land, partial);
+            if (src == null) { ChatLine($"[RynthAi] Not found: '{srcName}'"); return; }
+            if (tgt == null) { ChatLine($"[RynthAi] Not found: '{tgtName}'"); return; }
+            Host.UseObjectOn((uint)src.Id, (uint)tgt.Id);
+            ChatLine($"[RynthAi] UseObjectOn: {src.Name} (0x{src.Id:X}) → {tgt.Name} (0x{tgt.Id:X})");
+            return;
+        }
+
+        var obj = FindObject(argStr.Trim(), inv, land, partial);
+        if (obj == null) { ChatLine($"[RynthAi] Not found: '{argStr.Trim()}'"); return; }
+        Host.UseObject((uint)obj.Id);
+        ChatLine($"[RynthAi] UseObject: {obj.Name} (0x{obj.Id:X})");
+    }
+
+    private void HandleSelectCommand(string[] parts, bool inv, bool land, bool partial)
+    {
+        if (parts.Length < 3)
+        {
+            ChatLine("[RynthAi] Usage: /ra select[i|l][p] <name>");
+            return;
+        }
+
+        string name = string.Join(" ", parts, 2, parts.Length - 2).Trim();
+        var obj = FindObject(name, inv, land, partial);
+        if (obj == null) { ChatLine($"[RynthAi] Not found: '{name}'"); return; }
+        Host.SelectItem((uint)obj.Id);
+        ChatLine($"[RynthAi] Selected: {obj.Name} (0x{obj.Id:X})");
     }
 }

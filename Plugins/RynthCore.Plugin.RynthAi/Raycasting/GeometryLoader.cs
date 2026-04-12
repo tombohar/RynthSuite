@@ -731,6 +731,55 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             return GetSetupBoundingVolumes(modelId);
         }
 
+        // ===================================================================
+        // Terrain height and passability API
+        // ===================================================================
+
+        /// <summary>
+        /// Returns the 9×9 height grid (81 bytes) for the given landblock, cached after first load.
+        /// Returns null if scatter system is unavailable or data is missing.
+        /// </summary>
+        public byte[] GetTerrainHeightGrid(uint landblockKey)
+            => _scatterSystem?.LoadHeightGrid(landblockKey);
+
+        /// <summary>
+        /// World-space Z height of terrain vertex (ix, iy) in the 9×9 grid for the given landblock.
+        /// ix and iy are 0–8.
+        /// </summary>
+        public float GetTerrainVertexHeight(uint landblockKey, int ix, int iy)
+        {
+            var heights = _scatterSystem?.LoadHeightGrid(landblockKey);
+            return _scatterSystem?.GetVertexHeight(heights, ix, iy) ?? 0f;
+        }
+
+        /// <summary>
+        /// Returns true if terrain cell (cellX, cellY) within the landblock is walkable
+        /// per AC's FloorZ threshold (0.664). cellX/cellY are 0–7 (8×8 grid).
+        /// Returns true if data is unavailable (fail open).
+        /// </summary>
+        public bool IsTerrainCellPassable(uint landblockKey, int cellX, int cellY)
+        {
+            if (_scatterSystem == null) return true;
+            var heights = _scatterSystem.LoadHeightGrid(landblockKey);
+            if (heights == null) return true;
+            return _scatterSystem.IsCellPassable(heights, cellX, cellY);
+        }
+
+        /// <summary>
+        /// Returns per-triangle passability for a cell. Triangle 1 = SE half, Triangle 2 = NW half.
+        /// Both default to true (passable) if data is unavailable.
+        /// </summary>
+        public void GetTerrainTrianglePassability(uint landblockKey, int cellX, int cellY,
+            out bool tri1Passable, out bool tri2Passable)
+        {
+            tri1Passable = true;
+            tri2Passable = true;
+            if (_scatterSystem == null) return;
+            var heights = _scatterSystem.LoadHeightGrid(landblockKey);
+            if (heights == null) return;
+            _scatterSystem.GetTrianglePassability(heights, cellX, cellY, out tri1Passable, out tri2Passable);
+        }
+
         /// <summary>
         /// Loads a building's actual triangle mesh from its Setup parts for precise raycasting.
         /// Parses each GfxObj part's physics polygons, transforms by part placement frames,

@@ -271,6 +271,10 @@ internal sealed class LegacyAdvancedSettingsUi
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Vertical offset for nav markers above the ground. Negative = lower.");
 
+                ImGui.Checkbox("Show Terrain Passability", ref _settings.ShowTerrainPassability);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Highlight impassable terrain triangles in red.");
+
                 ImGui.Spacing();
                 ImGui.Text("Movement Engine");
                 ImGui.SetNextItemWidth(200);

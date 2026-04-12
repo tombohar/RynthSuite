@@ -26,6 +26,7 @@ public class WorldObjectCache
     private readonly HashSet<int> _creatures = new();   // received OnUpdateHealth or TYPE_CREATURE
     private readonly HashSet<int> _landscape = new();   // has physics position
     private readonly HashSet<int> _inventory = new();   // no physics position
+    private readonly Dictionary<int, float> _healthRatios = new(); // last known health ratio per object (0-1)
 
     // OnCreateObject IDs pending classification
     private readonly Queue<uint> _pending = new();
@@ -81,19 +82,25 @@ public class WorldObjectCache
         _byId.Remove(sid);
         _creatures.Remove(sid);
         _landscape.Remove(sid);
+        _healthRatios.Remove(sid);
         _classifyRetry.Remove(id);
         if (wasInventory)
             _inventoryDirty = true;
     }
 
-    public void OnUpdateHealth(uint id)
+    /// <summary>Returns the last known health ratio (0–1) for <paramref name="id"/>, or -1 if no update has been received.</summary>
+    public float GetHealthRatio(int id) => _healthRatios.TryGetValue(id, out float v) ? v : -1f;
+
+    public void OnUpdateHealth(uint id, float healthRatio)
     {
         if (_playerId != 0 && id == _playerId)
             return; // ignore self
 
         int sid = (int)id;
+        _healthRatios[sid] = Math.Clamp(healthRatio, 0f, 1f);
+
         if (!_creatures.Add(sid))
-            return; // already known
+            return; // creature already known — ratio updated above, nothing more to do
 
         // If classified, update class to Creature
         if (_byId.TryGetValue(sid, out var existing))

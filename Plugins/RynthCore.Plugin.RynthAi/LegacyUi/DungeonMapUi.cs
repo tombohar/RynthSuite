@@ -178,7 +178,7 @@ internal sealed class DungeonMapUi
                 out _, out _, out _, out _))
         { ImGui.TextDisabled("Player position unavailable."); ImGui.End(); return; }
 
-        if ((cellId & 0xFFFF) == 0xFFFF)
+        if ((cellId & 0xFFFF) < 0x100)
         { ImGui.TextDisabled("No dungeon map — outdoor landblock."); ImGui.End(); return; }
 
         uint landblock = cellId >> 16;

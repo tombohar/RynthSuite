@@ -20,6 +20,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private LegacyDashboardRenderer? _dashboard;
     private NavigationEngine? _navigationEngine;
     private NavMarkerRenderer? _navMarkerRenderer;
+    private TerrainPassabilityOverlay? _terrainOverlay;
     private MainLogic? _raycast;
     private WorldObjectCache? _objectCache;
     private CharacterSkills? _charSkills;
@@ -29,6 +30,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private MissileCraftingManager? _missileCraftingManager;
     private FellowshipTracker? _fellowshipTracker;
     private MetaManager? _metaManager;
+    private QuestTracker? _questTracker;
     private InventoryManager? _inventoryManager;
     private SalvageManager? _salvageManager;
     private PlayerVitalsCache _vitals = new();
@@ -53,6 +55,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             return 11;
 
         EnsureImGuiResolver();
+        ComponentDatabase.SetLog(msg => Log(msg));
         _dashboard = new LegacyDashboardRenderer(Host);
         _objectCache = new WorldObjectCache(Host); // must exist before CreateObject events fire during login
         _initialized = true;
@@ -67,6 +70,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _navigationEngine?.Stop();
         _navigationEngine = null;
         _navMarkerRenderer = null;
+        _terrainOverlay = null;
         _raycast?.Dispose();
         _raycast = null;
         _combatManager?.Dispose();
@@ -74,6 +78,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _fellowshipTracker?.Dispose();
         _fellowshipTracker = null;
         _metaManager = null;
+        _questTracker = null;
         _inventoryManager = null;
         _salvageManager = null;
         _buffManager?.Dispose();
@@ -96,6 +101,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _dashboard.OnLoginComplete();
         _navigationEngine = new NavigationEngine(Host, _dashboard.Settings);
         _navMarkerRenderer = new NavMarkerRenderer(Host, _dashboard.Settings);
+        _terrainOverlay = new TerrainPassabilityOverlay(Host);
         Log($"RynthAi: NavMarkerRenderer created, HasNav3D={Host.HasNav3D}, version={Host.Version}");
 
         // Init raycast on background thread — .dat parsing takes ~700ms and blocks the client
@@ -111,6 +117,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 {
                     _combatManager?.SetRaycastSystem(raycastRef);
                     _dashboard?.SetRaycast(raycastRef);
+                    _terrainOverlay?.SetRaycast(raycastRef);
                 }
             }
             catch (Exception ex)
@@ -179,9 +186,14 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _fellowshipTracker?.Dispose();
         _fellowshipTracker = new FellowshipTracker();
 
+        _questTracker = new QuestTracker(Host);
+        _questTracker.Refresh(); // auto-populate quest flags on login
+
         _metaManager = new MetaManager(_dashboard.Settings, Host, _vitals);
         _metaManager.SetPlayerId(_playerId);
         if (_objectCache != null) _metaManager.SetObjectCache(_objectCache);
+        _metaManager.SetFellowshipTracker(_fellowshipTracker);
+        _metaManager.SetQuestTracker(_questTracker);
 
         if (_objectCache != null)
             _inventoryManager = new InventoryManager(Host, _dashboard.Settings, _objectCache);
@@ -203,6 +215,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         try
         {
             _objectCache?.Tick();
+            _questTracker?.Tick();
 
             if (_loginComplete)
             {
@@ -372,6 +385,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _combatManager?.HandleChatForDebuffs(text);
         _missileCraftingManager?.HandleChat(text);
         _metaManager?.HandleChat(text);
+        _questTracker?.OnChatLine(text);
     }
 
     private int _createObjectCount;
@@ -391,7 +405,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
     public override void OnUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth)
     {
-        _objectCache?.OnUpdateHealth(targetId);
+        _objectCache?.OnUpdateHealth(targetId, healthRatio);
         _dashboard?.OnUpdateHealth(targetId, healthRatio, currentHealth, maxHealth);
         if (_loginComplete && targetId == _playerId && maxHealth > 0)
         {
@@ -508,6 +522,43 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "mapdump":
                 HandleMapDumpCommand();
                 break;
+            // use / select variants
+            case "use":
+                HandleUseCommand(parts, inv: true,  land: true,  partial: false);
+                break;
+            case "usei":
+                HandleUseCommand(parts, inv: true,  land: false, partial: false);
+                break;
+            case "usel":
+                HandleUseCommand(parts, inv: false, land: true,  partial: false);
+                break;
+            case "usepi": case "useip":
+                HandleUseCommand(parts, inv: true,  land: false, partial: true);
+                break;
+            case "uselp": case "usepl":
+                HandleUseCommand(parts, inv: false, land: true,  partial: true);
+                break;
+            case "usep":
+                HandleUseCommand(parts, inv: true,  land: true,  partial: true);
+                break;
+            case "select":
+                HandleSelectCommand(parts, inv: true,  land: true,  partial: false);
+                break;
+            case "selecti":
+                HandleSelectCommand(parts, inv: true,  land: false, partial: false);
+                break;
+            case "selectl":
+                HandleSelectCommand(parts, inv: false, land: true,  partial: false);
+                break;
+            case "selectpi": case "selectip":
+                HandleSelectCommand(parts, inv: true,  land: false, partial: true);
+                break;
+            case "selectlp": case "selectpl":
+                HandleSelectCommand(parts, inv: false, land: true,  partial: true);
+                break;
+            case "selectp":
+                HandleSelectCommand(parts, inv: true,  land: true,  partial: true);
+                break;
             default:
                 eat = 0; // not our command, let it through
                 break;
@@ -528,8 +579,14 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         ImGui.SetCurrentContext(Host.ImGuiContext);
         try
         {
-            // Always render nav markers when logged in (route visible even with UI hidden)
+            // Clear 3D geometry once per frame, then let all renderers populate it
+            if (_loginComplete && Host.HasNav3D)
+                Host.Nav3DClear();
+
+            // Always render nav markers and terrain overlay when logged in
             _navMarkerRenderer?.Render();
+            if (_dashboard?.Settings.ShowTerrainPassability == true)
+                _terrainOverlay?.Render();
 
             if (_windowVisible && _dashboard is not null)
             {

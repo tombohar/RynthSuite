@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Text.RegularExpressions;
 using RynthCore.PluginSdk;
 
@@ -23,19 +24,41 @@ internal sealed class ExpressionEngine
 {
     private readonly RynthCoreHost _host;
     private WorldObjectCache? _worldObjectCache;
+    private FellowshipTracker? _fellowshipTracker;
     private readonly Dictionary<string, string> _variables = new(StringComparer.OrdinalIgnoreCase);
 
-    // List store: handle → items.  Handles look like "L:0", "L:1", …
-    private readonly Dictionary<string, List<string>> _lists = new(StringComparer.Ordinal);
-    private int _nextListId;
+    // Lists are value-typed: serialized as "[item1,item2,...]" strings — no backing store.
 
     // Dict store: handle → (key → value).  Handles look like "D:0", "D:1", …
+    // Dicts are ephemeral: cleared at the start of each top-level Evaluate call.
     private readonly Dictionary<string, Dictionary<string, string>> _dicts = new(StringComparer.Ordinal);
     private int _nextDictId;
+    private int _evalDepth;
 
     // Plugin options store: name → value (case-insensitive keys).
     // Populated by the plugin via RegisterOption / SetOption.
     private readonly Dictionary<string, string> _options = new(StringComparer.OrdinalIgnoreCase);
+
+    // ItemGiver profile cache: absolute path → (profile, mtime)
+    private readonly Dictionary<string, (VTankLootProfile Profile, DateTime Mtime)> _giveProfileCache
+        = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (RynthCore.Loot.LootProfile Profile, DateTime Mtime)> _giveNativeProfileCache
+        = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly string ItemGiverDir
+        = Path.Combine(@"C:\Games\RynthSuite\RynthAi", "ItemGiver");
+
+    // Motion name → (AC motion uint, wanted state). Matches UB Motion enum values.
+    private static readonly Dictionary<string, uint> MotionValues = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Forward"]     = 0x45000005,
+        ["Backward"]    = 0x45000006,
+        ["TurnRight"]   = 0x6500000D,
+        ["TurnLeft"]    = 0x6500000E,
+        ["StrafeRight"] = 0x6500000F,
+        ["StrafeLeft"]  = 0x65000010,
+        ["Walk"]        = 0x11112222,
+    };
+    private readonly Dictionary<string, bool> _wantedMotion = new(StringComparer.OrdinalIgnoreCase);
 
     // Keeps delayexec timers rooted so the GC doesn't collect them before they fire.
     private static readonly List<System.Threading.Timer> _activeTimers = new();
@@ -66,8 +89,12 @@ internal sealed class ExpressionEngine
 
     public ExpressionEngine(RynthCoreHost host) => _host = host;
 
+    private QuestTracker? _questTracker;
+
     public void SetPlayerId(uint id) => _playerId = id;
     public void SetObjectCache(WorldObjectCache? cache) => _worldObjectCache = cache;
+    public void SetFellowshipTracker(FellowshipTracker? tracker) => _fellowshipTracker = tracker;
+    public void SetQuestTracker(QuestTracker? tracker) => _questTracker = tracker;
 
     // ── Backward-compat shim ──────────────────────────────────────────────────
 
@@ -87,7 +114,10 @@ internal sealed class ExpressionEngine
     {
         string expr = expression?.Trim() ?? "";
         if (expr.Length == 0) return "";
-        return new Parser(this, expr).Run();
+        if (_evalDepth == 0) { _dicts.Clear(); _nextDictId = 0; }
+        _evalDepth++;
+        try   { return new Parser(this, expr).Run(); }
+        finally { _evalDepth--; }
     }
 
     // ── Primary evaluator ─────────────────────────────────────────────────────
@@ -155,6 +185,11 @@ internal sealed class ExpressionEngine
             "getcharstringprop" => EvalCharString(A(0)),
 
             // ── List functions ────────────────────────────────────────────────
+            "listcreate"      => EvalListCreate(rawArgs),
+            "listadd"         => EvalListAdd(A(0), A(1)),
+            "listinsert"      => EvalListInsert(A(0), A(1), A(2)),
+            "listremove"      => EvalListRemove(A(0), A(1)),
+            "listremoveat"    => EvalListRemoveAt(A(0), A(1)),
             "listgetitem"     => EvalListGetItem(A(0), A(1)),
             "listcontains"    => EvalListContains(A(0), A(1)),
             "listindexof"     => EvalListIndexOf(A(0), A(1)),
@@ -193,6 +228,87 @@ internal sealed class ExpressionEngine
             "wobjectgetdoubleprop"   => EvalWobjectGetDoubleProp(A(0), A(1)),
             "wobjectgetboolprop"     => EvalWobjectGetBoolProp(A(0), A(1)),
             "wobjectgetstringprop"   => EvalWobjectGetStringProp(A(0), A(1)),
+            "wobjecthasdata"         => EvalWobjectHasData(A(0)),
+            "wobjectrequestdata"     => EvalWobjectRequestData(A(0)),
+            "wobjectlastidtime"      => EvalWobjectLastIdTime(A(0)),
+            "wobjectisvalid"         => EvalWobjectIsValid(A(0)),
+            "wobjectgethealth"         => EvalWobjectGetHealth(A(0)),
+            "wobjectgetspellids"       => EvalWobjectGetSpellIds(A(0)),
+            "wobjectgetactivespellids"     => EvalWobjectGetActiveSpellIds(A(0)),
+            "wobjectgetactivespelldurations" => EvalWobjectGetActiveSpellDurations(A(0)),
+            "getitemcountininventorybyname"   => EvalItemCountByName(Tmpl(0)),
+            "getitemcountininventorybynamerx" => EvalItemCountByNameRx(Tmpl(0)),
+            "getinventorycountbytemplatetype" => EvalGetInventoryCountByTemplateType(A(0)),
+            "actiontrygiveprofile"   => EvalActionTryGiveProfile(A(0), A(1)),
+            "getequippedweapontype"  => EvalGetEquippedWeaponType(),
+            "getcombatstate"         => EvalGetCombatState(),
+            "setcombatstate"         => EvalSetCombatState(A(0)),
+            "getbusystate"           => EvalGetBusyState(),
+            "setmotion"              => EvalSetMotion(A(0), A(1)),
+            "getmotion"              => EvalGetMotion(A(0)),
+            "clearmotion"            => EvalClearMotion(),
+
+            // ── Quest flag queries ────────────────────────────────────────────
+            "testquestflag"        => EvalTestQuestFlag(A(0)),
+            "getqueststatus"       => EvalGetQuestStatus(A(0)),
+            "getquestktprogress"   => EvalGetQuestKtProgress(A(0)),
+            "getquestktrequired"   => EvalGetQuestKtRequired(A(0)),
+            "isrefreshingquests"   => (_questTracker?.IsRefreshing == true) ? "1" : "0",
+            "refreshquests"        => EvalRefreshQuests(),
+
+            // ── Spell / component lookups ─────────────────────────────────────
+            "spellname"      => SpellDatabase.GetSpellName((int)ToDouble(A(0))),
+            "componentname"  => ComponentDatabase.GetComponentName((uint)ToDouble(A(0))),
+            "componentdata"  => EvalComponentData(A(0)),
+
+            "getheadingto"           => EvalGetHeadingTo(A(0)),
+            "getheading"             => EvalGetHeading(A(0)),
+
+            // ── Math ──────────────────────────────────────────────────────────
+            "hexstr" => "0x" + ((long)ToDouble(A(0))).ToString("X", CultureInfo.InvariantCulture),
+            "acos"   => Math.Acos(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
+            "asin"   => Math.Asin(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
+            "atan"   => Math.Atan(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
+            "atan2"  => Math.Atan2(ToDouble(A(0)), ToDouble(A(1))).ToString("G", CultureInfo.InvariantCulture),
+            "cos"    => Math.Cos(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
+            "cosh"   => Math.Cosh(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
+            "sin"    => Math.Sin(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
+            "sinh"   => Math.Sinh(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
+            "sqrt"   => Math.Sqrt(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
+            "tan"    => Math.Tan(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
+            "tanh"   => Math.Tanh(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
+
+            // ── Salvage (UST) ─────────────────────────────────────────────────
+            "ustopen"    => EvalUstOpen(),
+            "ustadd"     => EvalUstAdd(A(0)),
+            "ustsalvage" => EvalUstSalvage(),
+
+            // ── Game time (Dereth) ────────────────────────────────────────────
+            "getgameyear"          => GetGameYear().ToString(CultureInfo.InvariantCulture),
+            "getgamemonth"         => GetGameMonth().ToString(CultureInfo.InvariantCulture),
+            "getgamemonthname"     => GetGameMonthName(A(0)),
+            "getgameday"           => GetGameDay().ToString(CultureInfo.InvariantCulture),
+            "getgamehour"          => GetGameHour().ToString(CultureInfo.InvariantCulture),
+            "getgamehourname"      => GetGameHourName(A(0)),
+            "getminutesuntilday"   => GetMinutesUntilDay().ToString(CultureInfo.InvariantCulture),
+            "getminutesuntilnight" => GetMinutesUntilNight().ToString(CultureInfo.InvariantCulture),
+            "getgameticks"         => GetGameTicks().ToString("G", CultureInfo.InvariantCulture),
+            "getisday"             => GetIsDay() ? "1" : "0",
+            "getisnight"           => GetIsDay() ? "0" : "1",
+
+            // ── Fellowship ────────────────────────────────────────────────────
+            "getfellowshipname"        => _fellowshipTracker?.FellowshipName ?? "",
+            "getfellowshipcount"       => (_fellowshipTracker?.MemberCount ?? 0).ToString(CultureInfo.InvariantCulture),
+            "getfellowshipleaderid"    => (_fellowshipTracker?.LeaderId ?? 0).ToString(CultureInfo.InvariantCulture),
+            "getfellowshiplocked"      => (_fellowshipTracker?.IsLocked == true ? "1" : "0"),
+            "getfellowshipisleader"    => (_fellowshipTracker?.IsLeader == true ? "1" : "0"),
+            "getfellowshipisopen"      => (_fellowshipTracker?.IsOpen == true ? "1" : "0"),
+            "getfellowshipisfull"      => EvalFellowshipIsFull(),
+            "getfellowshipcanrecruit"  => EvalFellowshipCanRecruit(),
+            "getfellowid"              => EvalGetFellowId(A(0)),
+            "getfellowname"            => EvalGetFellowName(A(0)),
+            "getfellownames"           => EvalGetFellowNames(),
+            "getfellowids"             => EvalGetFellowIds(),
 
             // ── Plugin options ────────────────────────────────────────────────
             "raoptget" or "uboptget" => GetOption(A(0)),
@@ -227,7 +343,7 @@ internal sealed class ExpressionEngine
     private string EvalSetVar(string key, string value)
     {
         if (!string.IsNullOrEmpty(key)) _variables[key] = value;
-        return "";
+        return value;
     }
 
     private string EvalCharInt(string arg)
@@ -256,15 +372,24 @@ internal sealed class ExpressionEngine
 
     // ── List helpers ──────────────────────────────────────────────────────────
 
-    private string NewList(IEnumerable<string>? items = null)
+    private string EvalListCreate(List<string> rawArgs)
     {
-        string handle = "L:" + _nextListId++;
-        _lists[handle] = items != null ? new List<string>(items) : new List<string>();
-        return handle;
+        if (rawArgs.Count == 0) return "[]";
+        var items = new List<string>(rawArgs.Count);
+        foreach (var arg in rawArgs) items.Add(Evaluate(arg));
+        return NewList(items);
     }
 
-    private List<string>? GetList(string handle)
-        => _lists.TryGetValue(handle, out var l) ? l : null;
+    private static string NewList(IEnumerable<string>? items = null)
+        => items != null ? "[" + string.Join(",", items) + "]" : "[]";
+
+    private static List<string>? GetList(string handle)
+    {
+        handle = handle.Trim();
+        if (handle.Length < 2 || handle[0] != '[' || handle[handle.Length - 1] != ']') return null;
+        string inner = handle.Substring(1, handle.Length - 2);
+        return inner.Length == 0 ? new List<string>() : new List<string>(inner.Split(','));
+    }
 
     private static string StripBackticks(string s)
     {
@@ -276,7 +401,46 @@ internal sealed class ExpressionEngine
 
     // ── List function implementations ─────────────────────────────────────────
 
-    private string EvalListGetItem(string handle, string indexArg)
+    private static string EvalListAdd(string handle, string item)
+    {
+        var list = GetList(handle);
+        if (list == null) return "0";
+        list.Add(item);
+        return NewList(list);
+    }
+
+    private static string EvalListRemove(string handle, string item)
+    {
+        var list = GetList(handle);
+        if (list == null) return "0";
+        for (int i = 0; i < list.Count; i++)
+        {
+            if (AreEqual(list[i], item)) { list.RemoveAt(i); break; }
+        }
+        return NewList(list);
+    }
+
+    private static string EvalListRemoveAt(string handle, string indexArg)
+    {
+        var list = GetList(handle);
+        if (list == null) return "0";
+        int idx = (int)ToLong(indexArg);
+        if (idx < 0 || idx > list.Count - 1) return "0";
+        list.RemoveAt(idx);
+        return NewList(list);
+    }
+
+    private static string EvalListInsert(string handle, string item, string indexArg)
+    {
+        var list = GetList(handle);
+        if (list == null) return "0";
+        int idx = (int)ToLong(indexArg);
+        if (idx < 0 || idx > list.Count) return "0";
+        list.Insert(idx, item);
+        return NewList(list);
+    }
+
+    private static string EvalListGetItem(string handle, string indexArg)
     {
         var list = GetList(handle);
         if (list == null) return "";
@@ -284,7 +448,7 @@ internal sealed class ExpressionEngine
         return idx >= 0 && idx < list.Count ? list[idx] : "";
     }
 
-    private string EvalListContains(string handle, string item)
+    private static string EvalListContains(string handle, string item)
     {
         var list = GetList(handle);
         if (list == null) return "0";
@@ -293,7 +457,7 @@ internal sealed class ExpressionEngine
         return "0";
     }
 
-    private string EvalListIndexOf(string handle, string item)
+    private static string EvalListIndexOf(string handle, string item)
     {
         var list = GetList(handle);
         if (list == null) return "-1";
@@ -302,7 +466,7 @@ internal sealed class ExpressionEngine
         return "-1";
     }
 
-    private string EvalListLastIndexOf(string handle, string item)
+    private static string EvalListLastIndexOf(string handle, string item)
     {
         var list = GetList(handle);
         if (list == null) return "-1";
@@ -311,46 +475,37 @@ internal sealed class ExpressionEngine
         return "-1";
     }
 
-    private string EvalListCopy(string handle)
-    {
-        var list = GetList(handle);
-        return list != null ? NewList(list) : NewList();
-    }
+    private static string EvalListCopy(string handle)
+        => GetList(handle) != null ? handle.Trim() : "[]";
 
-    private string EvalListReverse(string handle)
+    private static string EvalListReverse(string handle)
     {
         var list = GetList(handle);
-        if (list == null) return NewList();
+        if (list == null) return "[]";
         var copy = new List<string>(list);
         copy.Reverse();
         return NewList(copy);
     }
 
-    private string EvalListPop(string handle, string indexArg)
+    private static string EvalListPop(string handle, string indexArg)
     {
         var list = GetList(handle);
         if (list == null || list.Count == 0) return "";
         int idx = (int)ToLong(indexArg);
         if (idx < 0) idx = list.Count - 1; // -1 = last item
         if (idx < 0 || idx >= list.Count) return "";
-        string item = list[idx];
-        list.RemoveAt(idx);
-        return item;
+        return list[idx];
     }
 
-    private string EvalListCount(string handle)
+    private static string EvalListCount(string handle)
     {
         var list = GetList(handle);
         return list != null ? Fmt((long)list.Count) : "0";
     }
 
-    private string EvalListClear(string handle)
-    {
-        GetList(handle)?.Clear();
-        return handle;
-    }
+    private static string EvalListClear(string _) => "[]";
 
-    private string EvalListFromRange(string startArg, string endArg)
+    private static string EvalListFromRange(string startArg, string endArg)
     {
         long start = ToLong(startArg);
         long end   = ToLong(endArg);
@@ -396,8 +551,8 @@ internal sealed class ExpressionEngine
     private string EvalListReduce(string handle, string exprTemplate)
     {
         var list = GetList(handle);
-        if (list == null || list.Count == 0 || exprTemplate.Length == 0) return "";
-        string acc = "";
+        if (list == null || list.Count == 0 || exprTemplate.Length == 0) return "0";
+        string acc = "0";
         for (int i = 0; i < list.Count; i++)
         {
             _variables["0"] = Fmt((long)i);
@@ -635,6 +790,604 @@ internal sealed class ExpressionEngine
         return _host.TryGetObjectStringProperty(uid, prop, out string? value) ? value ?? "" : "";
     }
 
+    private string EvalWobjectHasData(string objArg)
+    {
+        if (!TryParseWobjectHandle(objArg, out uint uid, out _)) return "0";
+        if (!_host.HasHasAppraisalData) return "0";
+        return _host.HasAppraisalData(uid) ? "1" : "0";
+    }
+
+    private string EvalWobjectRequestData(string objArg)
+    {
+        if (!TryParseWobjectHandle(objArg, out uint uid, out _)) return "0";
+        if (!_host.HasRequestId) return "0";
+        _host.RequestId(uid);
+        return "1";
+    }
+
+    private string EvalWobjectLastIdTime(string objArg)
+    {
+        if (!TryParseWobjectHandle(objArg, out uint uid, out _)) return "0";
+        if (!_host.HasGetLastIdTime) return "0";
+        return _host.GetLastIdTime(uid).ToString(CultureInfo.InvariantCulture);
+    }
+
+    private string EvalWobjectIsValid(string objArg)
+    {
+        if (!TryParseWobjectHandle(objArg, out uint uid, out _)) return "0";
+        if (uid == 0) return "0";
+        if (!_host.HasGetObjectName) return "0";
+        return _host.TryGetObjectName(uid, out _) ? "1" : "0";
+    }
+
+    private string EvalWobjectGetHealth(string objArg)
+    {
+        if (_worldObjectCache == null) return "-1";
+        if (!TryParseWobjectHandle(objArg, out uint uid, out _)) return "-1";
+        if (uid == 0) return "-1";
+        float ratio = _worldObjectCache.GetHealthRatio((int)uid);
+        return ratio.ToString("G", CultureInfo.InvariantCulture);
+    }
+
+    private string EvalWobjectGetSpellIds(string objArg)
+    {
+        if (!TryParseWobjectHandle(objArg, out uint uid, out _) || uid == 0) return "[]";
+        if (!_host.HasGetObjectSpellIds) return "[]";
+        var buf = new uint[512];
+        int count = _host.GetObjectSpellIds(uid, buf, buf.Length);
+        if (count <= 0) return "[]";
+        var strs = new List<string>(count);
+        int fill = Math.Min(count, buf.Length);
+        for (int i = 0; i < fill; i++)
+            strs.Add(buf[i].ToString(CultureInfo.InvariantCulture));
+        return NewList(strs);
+    }
+
+    private string EvalWobjectGetActiveSpellIds(string objArg)
+    {
+        if (!TryParseWobjectHandle(objArg, out uint uid, out _) || uid == 0) return "[]";
+
+        // Primary path: enchantment registry (works for player and creatures).
+        if (_host.HasReadObjectEnchantments)
+        {
+            var spellIds = new uint[128];
+            var expiry = new double[128];
+            int count = _host.ReadObjectEnchantments(uid, spellIds, expiry, spellIds.Length);
+            if (count > 0)
+            {
+                var strs = new List<string>(count);
+                for (int i = 0; i < count; i++)
+                    strs.Add(spellIds[i].ToString(CultureInfo.InvariantCulture));
+                return NewList(strs);
+            }
+        }
+
+        // Fallback for items: use appraisal spell book entries with the high bit set.
+        // The AC client uses bit 31 to distinguish active (player-cast) enchantments from
+        // native item spells — same logic used by ItemExamineUI to render the "Enchantments:"
+        // section. Strip the high bit to recover the actual spell ID.
+        if (_host.HasGetObjectSpellIds)
+        {
+            var buf = new uint[512];
+            int total = _host.GetObjectSpellIds(uid, buf, buf.Length);
+            if (total > 0)
+            {
+                var strs = new List<string>();
+                int fill = Math.Min(total, buf.Length);
+                for (int i = 0; i < fill; i++)
+                {
+                    if ((buf[i] & 0x80000000u) != 0)
+                        strs.Add((buf[i] & 0x7FFFFFFFu).ToString(CultureInfo.InvariantCulture));
+                }
+                if (strs.Count > 0)
+                    return NewList(strs);
+            }
+        }
+
+        return "[]";
+    }
+
+    private string EvalWobjectGetActiveSpellDurations(string objArg)
+    {
+        if (!TryParseWobjectHandle(objArg, out uint uid, out _) || uid == 0) return "[]";
+
+        // Primary path: enchantment registry (works for player and creatures).
+        if (_host.HasReadObjectEnchantments)
+        {
+            var spellIds = new uint[128];
+            var expiry = new double[128];
+            int count = _host.ReadObjectEnchantments(uid, spellIds, expiry, spellIds.Length);
+            if (count > 0)
+            {
+                double serverTime = _host.GetServerTime();
+                var strs = new List<string>(count);
+                for (int i = 0; i < count; i++)
+                {
+                    double remaining = expiry[i] > 0 && serverTime > 0 ? expiry[i] - serverTime : -1;
+                    strs.Add(remaining.ToString("G", CultureInfo.InvariantCulture));
+                }
+                return NewList(strs);
+            }
+        }
+
+        // Fallback for items: the AC server never sends expiry times for item enchantments
+        // to the client (no 0x2C2 packet is issued for item buffs — only for body buffs).
+        // Return -1 per active spell so the list length matches wobjectgetactivespellids[]
+        // and scripts can still count/detect spells by ID.
+        if (_host.HasGetObjectSpellIds)
+        {
+            var buf = new uint[512];
+            int total = _host.GetObjectSpellIds(uid, buf, buf.Length);
+            if (total > 0)
+            {
+                var strs = new List<string>();
+                int fill = Math.Min(total, buf.Length);
+                for (int i = 0; i < fill; i++)
+                {
+                    if ((buf[i] & 0x80000000u) != 0)
+                        strs.Add("-1");
+                }
+                if (strs.Count > 0)
+                    return NewList(strs);
+            }
+        }
+
+        return "[]";
+    }
+
+    private string EvalItemCountByName(string name)
+    {
+        if (_worldObjectCache == null || string.IsNullOrEmpty(name)) return "0";
+        int total = 0;
+        foreach (var wo in _worldObjectCache.GetDirectInventory())
+            if (string.Equals(wo.Name, name, StringComparison.OrdinalIgnoreCase))
+                total += Math.Max(1, wo.Values(LongValueKey.StackCount, 1));
+        return total.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private string EvalItemCountByNameRx(string pattern)
+    {
+        if (_worldObjectCache == null || string.IsNullOrEmpty(pattern)) return "0";
+        Regex? rx = null;
+        try { rx = new Regex(pattern, RegexOptions.IgnoreCase); } catch { return "0"; }
+        int total = 0;
+        foreach (var wo in _worldObjectCache.GetDirectInventory())
+            if (rx.IsMatch(wo.Name))
+                total += Math.Max(1, wo.Values(LongValueKey.StackCount, 1));
+        return total.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private string EvalGetInventoryCountByTemplateType(string arg)
+    {
+        if (_worldObjectCache == null || !_host.HasGetObjectWcid) return "0";
+        if (!uint.TryParse(arg, out uint targetWcid) || targetWcid == 0) return "0";
+        int total = 0;
+        foreach (var wo in _worldObjectCache.GetDirectInventory())
+        {
+            uint uid = (uint)wo.Id;
+            if (_host.TryGetObjectWcid(uid, out uint wcid) && wcid == targetWcid)
+                total += Math.Max(1, wo.Values(LongValueKey.StackCount, 1));
+        }
+        return total.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private string EvalActionTryGiveProfile(string profileArg, string targetNameArg)
+    {
+        // No busy check — keep retrying the give for the first matching item each pulse.
+        // The item disappearing from GetInventory() is the confirmation it was accepted.
+        if (_worldObjectCache == null || string.IsNullOrEmpty(profileArg) || string.IsNullOrEmpty(targetNameArg))
+            return "0";
+
+        // Resolve profile path — bare name → ItemGiverDir.
+        // .utl extension added automatically if no extension and not .json.
+        string profilePath = Path.IsPathRooted(profileArg)
+            ? profileArg
+            : Path.Combine(ItemGiverDir, profileArg);
+
+        bool isJson = profilePath.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+        if (!isJson && !profilePath.EndsWith(".utl", StringComparison.OrdinalIgnoreCase))
+            profilePath += ".utl";
+
+        if (!File.Exists(profilePath)) return "0";
+
+        // Find target by exact name (case-insensitive) among landscape objects
+        uint targetId = 0;
+        foreach (var wo in _worldObjectCache.GetLandscape())
+        {
+            if (string.Equals(wo.Name, targetNameArg, StringComparison.OrdinalIgnoreCase))
+            {
+                targetId = (uint)wo.Id;
+                break;
+            }
+        }
+        if (targetId == 0) return "0";
+
+        DateTime mtime = File.GetLastWriteTime(profilePath);
+
+        // Each pulse: fire MoveItemExternal for the first matching item still in inventory.
+        // We retry the same item until it vanishes from the cache (server confirmed).
+        // Once gone, the next iteration naturally picks up the next item.
+        // Returns 1 while matching items remain, 0 when inventory is clear.
+        if (isJson)
+        {
+            RynthCore.Loot.LootProfile nativeProfile;
+            if (_giveNativeProfileCache.TryGetValue(profilePath, out var nCached) && nCached.Mtime == mtime)
+                nativeProfile = nCached.Profile;
+            else
+            {
+                try
+                {
+                    nativeProfile = RynthCore.Loot.LootProfile.Load(profilePath);
+                    _giveNativeProfileCache[profilePath] = (nativeProfile, mtime);
+                }
+                catch { return "0"; }
+            }
+
+            foreach (var wo in _worldObjectCache.GetInventory())
+            {
+                var (action, _) = RynthCore.Plugin.RynthAi.Loot.LootEvaluator.Classify(nativeProfile, wo, null);
+                if (action != RynthCore.Loot.LootAction.Keep) continue;
+                int amount = Math.Max(1, wo.Values(LongValueKey.StackCount, 1));
+                _host.MoveItemExternal((uint)wo.Id, targetId, amount);
+                return "1";
+            }
+        }
+        else
+        {
+            VTankLootProfile vtProfile;
+            if (_giveProfileCache.TryGetValue(profilePath, out var vtCached) && vtCached.Mtime == mtime)
+                vtProfile = vtCached.Profile;
+            else
+            {
+                try
+                {
+                    vtProfile = VTankLootParser.Load(profilePath);
+                    _giveProfileCache[profilePath] = (vtProfile, mtime);
+                }
+                catch { return "0"; }
+            }
+
+            foreach (var wo in _worldObjectCache.GetInventory())
+            {
+                VTankLootRule? match = null;
+                foreach (var rule in vtProfile.Rules)
+                    if (rule.IsMatch(wo)) { match = rule; break; }
+
+                if (match == null || match.Action != VTankLootAction.Keep) continue;
+                int amount = Math.Max(1, wo.Values(LongValueKey.StackCount, 1));
+                _host.MoveItemExternal((uint)wo.Id, targetId, amount);
+                return "1";
+            }
+        }
+
+        return "0"; // No matching items remain
+    }
+
+    private string EvalGetCombatState()
+    {
+        if (!_host.HasGetCurrentCombatMode) return "Peace";
+        return _host.GetCurrentCombatMode() switch
+        {
+            2 => "Melee",
+            4 => "Missile",
+            8 => "Magic",
+            _ => "Peace",
+        };
+    }
+
+    private string EvalSetCombatState(string stateArg)
+    {
+        if (!_host.HasChangeCombatMode) return "0";
+        int mode = stateArg.Trim().ToLowerInvariant() switch
+        {
+            "peace"   => 1,
+            "melee"   => 2,
+            "missile" => 4,
+            "magic"   => 8,
+            _ => 0,
+        };
+        if (mode == 0) return "0";
+        return _host.ChangeCombatMode(mode) ? "1" : "0";
+    }
+
+    private string EvalGetBusyState()
+    {
+        if (!_host.HasGetBusyState) return "0";
+        return _host.GetBusyState().ToString(CultureInfo.InvariantCulture);
+    }
+
+    private string EvalSetMotion(string motionArg, string stateArg)
+    {
+        if (!_host.HasSetMotion) return "0";
+        if (!MotionValues.TryGetValue(motionArg, out uint motionVal)) return "0";
+        bool on = ToDouble(stateArg) != 0;
+        _wantedMotion[motionArg] = on;
+        return _host.SetMotion(motionVal, on) ? "1" : "0";
+    }
+
+    private string EvalGetMotion(string motionArg)
+    {
+        if (!MotionValues.ContainsKey(motionArg)) return "0";
+        bool wanted = _wantedMotion.TryGetValue(motionArg, out bool w) && w;
+        // Returns 0 (inactive+unwanted), 1 (wanted+inactive), matching UB convention.
+        // Active-but-unwanted (-1) and wanted+active (2) require client state polling not available.
+        return wanted ? "1" : "0";
+    }
+
+    private string EvalClearMotion()
+    {
+        if (_host.HasSetMotion)
+        {
+            foreach (var kvp in MotionValues)
+                _host.SetMotion(kvp.Value, false);
+        }
+        _wantedMotion.Clear();
+        return "1";
+    }
+
+    // ── Quest flag expressions ───────────────────────────────────────────────
+
+    private string EvalTestQuestFlag(string key)
+        => (_questTracker != null && _questTracker.HasFlag(key)) ? "1" : "0";
+
+    private string EvalGetQuestStatus(string key)
+    {
+        if (_questTracker == null)
+            return "1"; // no data — assume ready (matches UB behaviour)
+        if (!_questTracker.TryGetFlag(key, out QuestRecord? rec))
+            return "1"; // not in list → ready
+        return rec.IsReady() ? "1" : "0";
+    }
+
+    private string EvalGetQuestKtProgress(string key)
+    {
+        if (_questTracker == null || !_questTracker.TryGetFlag(key, out QuestRecord? rec))
+            return "0";
+        return rec.Solves.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private string EvalGetQuestKtRequired(string key)
+    {
+        if (_questTracker == null || !_questTracker.TryGetFlag(key, out QuestRecord? rec))
+            return "0";
+        return rec.MaxSolves.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private string EvalRefreshQuests()
+    {
+        _questTracker?.Refresh();
+        return "1";
+    }
+
+    private string EvalComponentData(string idArg)
+    {
+        uint id = (uint)ToDouble(idArg);
+        if (!ComponentDatabase.TryGetRecord(id, out ComponentDatabase.ComponentRecord? rec) || rec == null)
+            return NewDict();
+
+        var d = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["Id"]           = rec.Id.ToString(CultureInfo.InvariantCulture),
+            ["Name"]         = rec.Name,
+            ["IconId"]       = rec.IconId.ToString(CultureInfo.InvariantCulture),
+            ["Type"]         = rec.TypeName,
+            ["GestureId"]    = ((int)rec.GestureId).ToString(CultureInfo.InvariantCulture),
+            ["GestureSpeed"] = rec.GestureSpeed.ToString("R", CultureInfo.InvariantCulture),
+            ["BurnRate"]     = rec.BurnRate.ToString("R", CultureInfo.InvariantCulture),
+            ["Word"]         = rec.Word,
+            ["SortKey"]      = rec.Category.ToString(CultureInfo.InvariantCulture),
+        };
+        return NewDict(d);
+    }
+
+    private string EvalGetEquippedWeaponType()
+    {
+        if (_worldObjectCache == null) return "None";
+        foreach (var item in _worldObjectCache.GetDirectInventory())
+        {
+            if (item.WieldedLocation <= 0) continue;
+            switch (item.ObjectClass)
+            {
+                case AcObjectClass.MeleeWeapon:   return "Melee";
+                case AcObjectClass.MissileWeapon: return "Missile";
+                case AcObjectClass.WandStaffOrb:  return "Wand";
+            }
+        }
+        return "None";
+    }
+
+    private string EvalGetHeading(string objArg)
+    {
+        if (!TryParseWobjectHandle(objArg, out uint uid, out _)) return "0";
+        if (!_host.HasGetObjectHeading) return "0";
+        if (!_host.TryGetObjectHeading(uid, out float heading)) return "0";
+        return heading.ToString("G", CultureInfo.InvariantCulture);
+    }
+
+    private string EvalGetHeadingTo(string objArg)
+    {
+        if (!TryParseWobjectHandle(objArg, out uint uid, out _)) return "0";
+        if (!_host.HasGetPlayerPose) return "0";
+        if (!_host.TryGetPlayerPose(out _, out float px, out float py, out _, out _, out _, out _, out _)) return "0";
+        if (!_host.HasGetObjectPosition) return "0";
+        if (!_host.TryGetObjectPosition(uid, out _, out float tx, out float ty, out _)) return "0";
+
+        double deg = Math.Atan2(tx - px, ty - py) * (180.0 / Math.PI);
+        if (deg < 0) deg += 360.0;
+        return deg.ToString("G", CultureInfo.InvariantCulture);
+    }
+
+    // ── Salvage (UST) implementations ────────────────────────────────────────
+
+    private string EvalUstOpen()
+    {
+        if (_worldObjectCache == null || !_host.HasUseObject) return "0";
+        foreach (var item in _worldObjectCache.GetDirectInventory())
+        {
+            if (string.Equals(item.Name, "Ust", StringComparison.OrdinalIgnoreCase))
+            {
+                _host.UseObject((uint)item.Id);
+                return "1";
+            }
+        }
+        return "0";
+    }
+
+    private string EvalUstAdd(string objArg)
+    {
+        if (!_host.HasSalvagePanel) return "0";
+        uint uid;
+        // Accept either a wobject handle ("[WorldObject] 0x...") or a plain numeric ID
+        if (!TryParseWobjectHandle(objArg, out uid, out _))
+        {
+            if (!uint.TryParse(objArg.Trim(), out uid) || uid == 0) return "0";
+        }
+        _host.SalvagePanelAddItem(uid);
+        return "1";
+    }
+
+    private string EvalUstSalvage()
+    {
+        if (!_host.HasSalvagePanel) return "0";
+        _host.SalvagePanelExecute();
+        return "1";
+    }
+
+    // ── Game time (Dereth) implementations ───────────────────────────────────
+
+    // AC game clock: raw double at 0x008379A8 in game ticks.
+    // CurrentTime = rawTicks - 210 + (476.25 * 8) + (476.25 * 16 * 30 * 12 * 10)
+    // Matches UB DerethTime.cs exactly.
+    private const double TicksInHour  = 476.25;
+    private const int    HoursInDay   = 16;
+    private const int    DaysInMonth  = 30;
+    private const int    MonthsInYear = 12;
+    private static readonly int    TicksInDay   = (int)(TicksInHour * HoursInDay);
+    private static readonly int    TicksInMonth = (int)(TicksInHour * HoursInDay * DaysInMonth);
+    private static readonly int    TicksInYear  = (int)(TicksInHour * HoursInDay * DaysInMonth * MonthsInYear);
+
+    private static readonly string[] MonthNames =
+    {
+        "Morningthaw","Solclaim","Seedsow","Leafdawning","Verdantine","Thistledown",
+        "HarvestGain","Leafcull","Frostfell","Snowreap","Coldeve","Wintersebb"
+    };
+
+    private static readonly string[] HourNames =
+    {
+        "Darktide","Darktide-and-Half","Foredawn","Foredawn-and-Half",
+        "Dawnsong","Dawnsong-and-Half","Morntide","Morntide-and-Half",
+        "Midsong","Midsong-and-Half","Warmtide","Warmtide-and-Half",
+        "Evensong","Evensong-and-Half","Gloaming","Gloaming-and-Half"
+    };
+
+    private static unsafe double ReadGameClock()
+    {
+        // Read the raw double at 0x008379A8 — the AC game clock register.
+        long raw = System.Runtime.InteropServices.Marshal.ReadInt64(new IntPtr(unchecked((int)0x008379A8)));
+        return BitConverter.Int64BitsToDouble(raw);
+    }
+
+    private static double GetGameTicks()
+    {
+        double rawTicks = ReadGameClock();
+        return rawTicks - 210 + (TicksInHour * 8) + (TicksInHour * HoursInDay * DaysInMonth * MonthsInYear * 10);
+    }
+
+    private static int GetGameYear()   => (int)(GetGameTicks() / TicksInYear);
+    private static int GetGameMonth()  => (int)(GetGameTicks() % TicksInYear  / TicksInMonth);
+    private static int GetGameDay()    => (int)(GetGameTicks() % TicksInMonth / TicksInDay);
+    private static int GetGameHour()   => (int)(GetGameTicks() % TicksInDay   / TicksInHour);
+    private static bool GetIsDay()     { int h = GetGameHour(); return h >= 4 && h < 12; }
+
+    // Lookup by index (0-based), matches UB: getgamemonthname[0] = "Morningthaw", getgamemonthname[1] = "Solclaim"
+    private static string GetGameMonthName(string arg)
+    {
+        if (!int.TryParse(arg.Trim(), out int n)) return "";
+        return n >= 0 && n < MonthNames.Length ? MonthNames[n] : "";
+    }
+
+    private static string GetGameHourName(string arg)
+    {
+        if (!int.TryParse(arg.Trim(), out int n)) return "";
+        return n >= 0 && n < HourNames.Length ? HourNames[n] : "";
+    }
+
+    private static int GetMinutesUntilDay()
+    {
+        if (GetIsDay()) return 0;
+        // Ticks remaining until hour 4 (dawn)
+        double ticksIntoDay = GetGameTicks() % TicksInDay;
+        double dawnTick     = 4 * TicksInHour;
+        double ticksUntil   = ticksIntoDay < dawnTick
+            ? dawnTick - ticksIntoDay
+            : TicksInDay - ticksIntoDay + dawnTick;
+        return (int)(ticksUntil / 60);
+    }
+
+    private static int GetMinutesUntilNight()
+    {
+        if (!GetIsDay()) return 0;
+        // Ticks remaining until hour 12 (dusk)
+        double ticksIntoDay = GetGameTicks() % TicksInDay;
+        double duskTick     = 12 * TicksInHour;
+        double ticksUntil   = duskTick - ticksIntoDay;
+        return (int)(ticksUntil / 60);
+    }
+
+    // ── Fellowship implementations ────────────────────────────────────────────
+
+    private string EvalFellowshipIsFull()
+    {
+        if (_fellowshipTracker == null || !_fellowshipTracker.IsInFellowship) return "0";
+        return _fellowshipTracker.MemberCount >= 9 ? "1" : "0";
+    }
+
+    private string EvalFellowshipCanRecruit()
+    {
+        if (_fellowshipTracker == null || !_fellowshipTracker.IsInFellowship) return "0";
+        if (_fellowshipTracker.MemberCount >= 9) return "0";
+        return (_fellowshipTracker.IsLeader || _fellowshipTracker.IsOpen) ? "1" : "0";
+    }
+
+    private string EvalGetFellowId(string arg)
+    {
+        if (_fellowshipTracker == null) return "0";
+        if (!int.TryParse(arg.Trim(), out int idx)) return "0";
+        int id = _fellowshipTracker.GetMemberId(idx);
+        return id.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private string EvalGetFellowName(string arg)
+    {
+        if (_fellowshipTracker == null) return "";
+        if (!int.TryParse(arg.Trim(), out int idx)) return "";
+        return _fellowshipTracker.GetMemberName(idx);
+    }
+
+    private string EvalGetFellowNames()
+    {
+        if (_fellowshipTracker == null) return "[]";
+        var names = new List<string>(_fellowshipTracker.GetMemberNames());
+        names.Sort(StringComparer.OrdinalIgnoreCase);
+        return NewList(names);
+    }
+
+    private string EvalGetFellowIds()
+    {
+        if (_fellowshipTracker == null) return "[]";
+        int count = _fellowshipTracker.MemberCount;
+        var ids = new List<int>(count);
+        for (int i = 0; i < count; i++)
+        {
+            int id = _fellowshipTracker.GetMemberId(i);
+            if (id != 0) ids.Add(id);
+        }
+        ids.Sort();
+        var strs = new List<string>(ids.Count);
+        foreach (int id in ids) strs.Add(id.ToString(CultureInfo.InvariantCulture));
+        return NewList(strs);
+    }
+
     // ── Option function implementations ───────────────────────────────────────
 
     private string EvalOptSet(string name, string value)
@@ -695,6 +1448,9 @@ internal sealed class ExpressionEngine
 
     private Dictionary<string, string>? GetDict(string handle)
         => _dicts.TryGetValue(handle, out var d) ? d : null;
+
+    public bool TryGetDict(string handle, out Dictionary<string, string>? dict)
+        => _dicts.TryGetValue(handle, out dict);
 
     // ── Dict function implementations ─────────────────────────────────────────
 

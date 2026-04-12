@@ -107,8 +107,6 @@ internal sealed class NavMarkerRenderer
     private void Render3D(NavRouteParser route, int count, float px, float py, float pz,
         double playerNS, double playerEW, float ringRadius, float heightOffset, bool doLog)
     {
-        _host.Nav3DClear();
-
         // Ring thickness in world units (the band width of the annulus)
         float ringThick = _settings.NavRingThickness * 0.02f;  // Scale from UI units to world units
         float lineThick = _settings.NavLineThickness * 0.01f;
