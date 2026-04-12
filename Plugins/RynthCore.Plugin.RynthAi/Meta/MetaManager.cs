@@ -36,6 +36,11 @@ internal sealed class MetaManager
     private DateTime _watchdogExpiration;
     private Vector3 _lastWatchdogPos;
 
+    // ── Portal state tracking ────────────────────────────────────────────────
+    private bool _lastPortalState;
+    private bool _portalEnteredThisTick;
+    private bool _portalExitedThisTick;
+
     // ── Enchantment read buffers (reused per tick to avoid allocation) ────────
     private readonly uint[] _enchSpellIds = new uint[256];
     private readonly double[] _enchExpiryTimes = new double[256];
@@ -50,7 +55,11 @@ internal sealed class MetaManager
         _vitals = vitals;
     }
 
-    public void SetObjectCache(WorldObjectCache cache) => _objectCache = cache;
+    public void SetObjectCache(WorldObjectCache cache)
+    {
+        _objectCache = cache;
+        _expressions?.SetObjectCache(cache);
+    }
 
     public void SetPlayerId(uint id)
     {
@@ -88,6 +97,7 @@ internal sealed class MetaManager
     {
         var engine = new ExpressionEngine(_host);
         engine.SetPlayerId(_playerId);
+        engine.SetObjectCache(_objectCache);
         return engine;
     }
 
@@ -113,6 +123,12 @@ internal sealed class MetaManager
         }
 
         double secondsInState = (DateTime.Now - _stateStartTime).TotalSeconds;
+
+        // ── Portal state edge detection ───────────────────────────────────────
+        bool currentPortal = _host.HasIsPortaling && _host.IsPortaling();
+        _portalEnteredThisTick = currentPortal && !_lastPortalState;
+        _portalExitedThisTick  = !currentPortal && _lastPortalState;
+        _lastPortalState = currentPortal;
 
         // ── Watchdog ─────────────────────────────────────────────────────────
         if (_watchdogActive &&
@@ -211,6 +227,15 @@ internal sealed class MetaManager
 
             case MetaConditionType.CharacterDeath:
                 return _vitals.CurrentHealth == 0;
+
+            case MetaConditionType.VitaePHE:
+            {
+                if (!int.TryParse(rule.ConditionData, out int threshold)) return false;
+                if (!_host.HasGetVitae || _playerId == 0) return false;
+                float v = _host.GetVitae(_playerId);
+                int penalty = 100 - (int)Math.Round(v * 100.0f);
+                return penalty >= threshold;
+            }
 
             // ── Time ──────────────────────────────────────────────────────────
             case MetaConditionType.SecondsInState_GE:
@@ -359,6 +384,16 @@ internal sealed class MetaManager
                     return cellId == dec;
                 return false;
             }
+
+            case MetaConditionType.PortalspaceEntered:
+                return _portalEnteredThisTick;
+
+            case MetaConditionType.PortalspaceExited:
+                return _portalExitedThisTick;
+
+            case MetaConditionType.Expression:
+                return !string.IsNullOrEmpty(rule.ConditionData) &&
+                       ExpressionEngine.ToBool(Expressions.Evaluate(rule.ConditionData));
 
             default: return false;
         }

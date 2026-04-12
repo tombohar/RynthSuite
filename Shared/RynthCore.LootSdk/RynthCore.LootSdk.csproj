@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <RootNamespace>RynthCore.Loot</RootNamespace>
+    <AssemblyName>RynthCore.LootSdk</AssemblyName>
+  </PropertyGroup>
+
+</Project>

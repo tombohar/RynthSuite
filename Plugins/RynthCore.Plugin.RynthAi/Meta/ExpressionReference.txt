@@ -1,0 +1,620 @@
+RynthAi Expression Engine — Function & Operator Reference
+==========================================================
+
+All values are strings internally. Numbers are parsed from strings as needed.
+Boolean convention: "0" and "" are false. Everything else is true.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPERATORS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Operators are listed from lowest to highest precedence.
+Parentheses ( ) can be used for explicit grouping.
+
+──────────────────────────────────────────
+Logical
+──────────────────────────────────────────
+
+a || b
+    Returns "1" if either a or b is true, otherwise "0".
+    Example: getcharintprop[1] < 50 || getcharintprop[3] < 20
+
+a && b
+    Returns "1" if both a and b are true, otherwise "0".
+    Example: getcharintprop[1] > 10 && getvar[mode] == combat
+
+──────────────────────────────────────────
+Bitwise
+──────────────────────────────────────────
+
+a | b
+    Bitwise OR of two integers.
+    Example: 6 | 1   →  "7"
+
+a ^ b
+    Bitwise XOR of two integers.
+    Example: 7 ^ 3   →  "4"
+
+a & b
+    Bitwise AND of two integers.
+    Example: 7 & 3   →  "3"
+
+~a
+    Bitwise complement (NOT) of an integer. Unary, prefix.
+    Example: ~0   →  "-1"
+
+a << n
+    Shifts a left by n bits.
+    Example: 1 << 4   →  "16"
+
+a >> n
+    Shifts a right by n bits.
+    Example: 16 >> 2   →  "4"
+
+──────────────────────────────────────────
+Comparison
+──────────────────────────────────────────
+
+a == b
+    Returns "1" if a equals b.
+    If both sides parse as numbers, numeric comparison is used.
+    Otherwise, exact case-sensitive string comparison.
+    Example: getvar[state] == hunting
+    Example: getcharintprop[25] == 275
+
+a > b
+    Returns "1" if a is numerically greater than b.
+
+a < b
+    Returns "1" if a is numerically less than b.
+
+a >= b
+    Returns "1" if a is numerically greater than or equal to b.
+
+a <= b
+    Returns "1" if a is numerically less than or equal to b.
+
+a # pattern
+    Returns "1" if string a matches the regex pattern. Case-insensitive.
+    Example: getcharstringprop[1] # ^Virindi
+    Example: getvar[lastchat] # killed.*olthoi
+
+──────────────────────────────────────────
+Arithmetic
+──────────────────────────────────────────
+
+a + b
+    Adds two numbers. If either side is not a number, concatenates as strings.
+    Example: getcharintprop[1] + 100
+    Example: hello + world   →  "helloworld"
+
+a - b
+    Subtracts b from a. Numbers only.
+    Example: getcharintprop[1] - getcharintprop[3]
+
+a * b
+    Multiplies a and b. Numbers only.
+
+a / b
+    Divides a by b. Returns "0" on division by zero. Numbers only.
+
+a % b
+    Remainder of a divided by b. Returns "0" if b is zero. Numbers only.
+    Example: getcharintprop[25] % 10
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FUNCTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Function arguments are comma-separated inside brackets: funcname[arg1, arg2]
+Arguments can themselves be full expressions including other function calls.
+
+──────────────────────────────────────────
+Control Flow
+──────────────────────────────────────────
+
+iif[condition, then, else]
+    Evaluates condition. If true, evaluates and returns the then expression.
+    If false, evaluates and returns the else expression.
+    Only the chosen branch is evaluated (lazy). Side effects in the unchosen
+    branch do not occur.
+    Example: iif[getcharintprop[1] < 30, low, ok]
+    Example: iif[getvar[x] == 1, setvar[y, yes], setvar[y, no]]
+
+if[condition, then]
+    Like iif but with no else branch. Returns "" when condition is false.
+    Example: if[getcharintprop[1] < 50, setvar[warned, 1]]
+
+──────────────────────────────────────────
+Variables
+──────────────────────────────────────────
+Variables are stored as strings. They persist for the lifetime of the
+macro session and are shared across all meta rules.
+
+setvar[key, value]
+    Stores value into the named variable. Returns "".
+    The value is a full expression and will be evaluated.
+    Example: setvar[count, 0]
+    Example: setvar[count, getcharintprop[1] + 1]
+    Example: setvar[mode, hunting]
+
+getvar[key]
+    Returns the value of the named variable, or "" if it does not exist.
+    Example: getvar[count]
+    Example: getvar[mode] == hunting
+
+testvar[key]
+    Returns "1" if the variable exists, "0" if it does not.
+    Example: testvar[count]
+
+──────────────────────────────────────────
+Character Properties
+──────────────────────────────────────────
+These functions read properties from the local player character.
+The property id is the SType integer for the desired property.
+Returns "0" (or "") if the property is unavailable.
+
+getcharintprop[id]
+    Returns the integer property with the given SType id as a string.
+    Example: getcharintprop[25]    (level)
+    Example: getcharintprop[1]     (health)
+
+getchardoubleprop[id]
+    Returns a float/double property from the player character.
+    Example: getchardoubleprop[22]  (damage variance)
+
+getcharboolprop[id]
+    Returns "1" or "0" for a boolean property on the player character.
+    Example: getcharboolprop[1]    (stuck)
+
+getcharstringprop[id]
+    Returns a string property from the player character.
+    Example: getcharstringprop[1]  (name)
+    Example: getcharstringprop[2]  (title)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LISTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Lists are an ordered collection of strings. They are stored internally and
+referenced by a handle string (e.g. "L:0", "L:1"). Variables hold handles.
+
+All indices are 0-based. Out-of-range indices return "" and do not crash.
+
+──────────────────────────────────────────
+Construction
+──────────────────────────────────────────
+
+listfromrange[start, end]
+    Creates a new list containing integer values from start to end (inclusive).
+    Example: listfromrange[1, 5]   →  list ["1","2","3","4","5"]
+
+listcopy[handle]
+    Returns a new independent copy of the list.
+    Example: setvar[copy, listcopy[getvar[myList]]]
+
+──────────────────────────────────────────
+Access
+──────────────────────────────────────────
+
+listcount[handle]
+    Returns the number of items in the list as a string.
+    Example: listcount[getvar[myList]]   →  "5"
+
+listgetitem[handle, index]
+    Returns the item at the given 0-based index, or "" if out of range.
+    Example: listgetitem[getvar[myList], 0]   →  first item
+
+listcontains[handle, value]
+    Returns "1" if value exists in the list, "0" otherwise.
+    Example: listcontains[getvar[myList], 42]
+
+listindexof[handle, value]
+    Returns the 0-based index of the first occurrence of value, or "-1".
+    Example: listindexof[getvar[myList], hello]
+
+listlastindexof[handle, value]
+    Returns the 0-based index of the last occurrence of value, or "-1".
+    Example: listlastindexof[getvar[myList], hello]
+
+──────────────────────────────────────────
+Mutation
+──────────────────────────────────────────
+
+listpop[handle]
+    Removes and returns the last item. Returns "" if the list is empty.
+    Example: setvar[last, listpop[getvar[myList]]]
+
+listreverse[handle]
+    Reverses the list in place. Returns "".
+    Example: listreverse[getvar[myList]]
+
+listclear[handle]
+    Removes all items from the list. Returns "".
+    Example: listclear[getvar[myList]]
+
+──────────────────────────────────────────
+Higher-Order Functions
+──────────────────────────────────────────
+
+These functions accept an expression template as their last argument.
+The template is a raw (unevaluated) expression — wrap it in backticks
+to prevent premature evaluation: `expr`.
+
+Loop variables available inside the template:
+
+    $0   current index (0-based)
+    $1   current item value
+    $2   accumulator (listreduce only)
+
+listfilter[handle, `condition`]
+    Returns a new list containing only items where the condition is truthy.
+    $0 = index, $1 = item value.
+    Example: listfilter[getvar[myList], `$1 > 2`]   →  items whose value > 2
+    Example: listfilter[getvar[myList], `$0 > 2`]   →  items whose index > 2
+
+listmap[handle, `expression`]
+    Returns a new list where each item is replaced by the evaluated expression.
+    $0 = index, $1 = original item value.
+    Example: listmap[getvar[myList], `$1 * 2`]   →  each item doubled
+
+listreduce[handle, `expression`]
+    Folds the list into a single value using the expression.
+    $0 = index, $1 = current item, $2 = accumulator (starts as "").
+    Example: listreduce[getvar[myList], `$2 + $1`]   →  sum of all items
+    Note: the first iteration has $2 = "". If $1 is numeric, "" + number
+    concatenates as a string (e.g. "" + "4" = "4"), then subsequent
+    iterations use numeric addition once both sides are numbers.
+
+listsort[handle, `comparator`]
+    Sorts the list in place using the comparator expression.
+    $1 = left item, $2 = right item. Return negative to sort left before right.
+    Example: listsort[getvar[myList], `$1 - $2`]   →  ascending numeric sort
+    Example: listsort[getvar[myList], `$2 - $1`]   →  descending numeric sort
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PLUGIN OPTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Plugin options are named settings managed by RynthAi. Both the ra and ub
+prefixed variants are accepted and behave identically (ub variants exist for
+compatibility with expressions originally written for Utility Belt).
+
+raoptget[name]  /  uboptget[name]
+    Returns the current value of the named option. Returns "0" if the option
+    is not registered.
+    Example: raoptget[`Plugin.Debug`]   →  current value of Plugin.Debug
+    Example: uboptget[`Plugin.Debug`]   →  same result
+
+raoptset[name, value]  /  uboptset[name, value]
+    Sets the named option to the given value. Returns "1" on success, "0" if
+    the name is empty.
+    Example: raoptset[`Plugin.Debug`, 1]   →  "1"
+    Example: uboptset[`Plugin.Debug`, 0]   →  "1"
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STRING FUNCTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Backtick literals: wrap a string in backticks to pass it verbatim without
+the parser interpreting spaces or special characters as operators.
+    Example: getregexmatch[`test 123`, `\d+`]
+
+getregexmatch[text, pattern]
+    Returns the first substring of text that matches the regex pattern.
+    Returns "" if there is no match or the pattern is invalid.
+    Match is case-insensitive.
+    Example: getregexmatch[`test 123`, `\d+`]       →  "123"
+    Example: getregexmatch[`hello world`, `\w+`]    →  "hello"
+    Example: getregexmatch[`no digits here`, `\d+`] →  ""
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DYNAMIC EVALUATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+These functions treat a string as an expression and evaluate it at runtime.
+Pass the expression as a backtick literal so it is not evaluated prematurely.
+Use \` inside a backtick string to represent a literal backtick character
+(needed when nesting backtick strings inside an outer backtick string).
+
+tostring[obj]
+    Returns obj converted to a string. Since all expression values are strings
+    internally this is effectively a no-op, but matches UB API compatibility.
+    Example: tostring[2]    →  "2"
+    Example: tostring[1+1]  →  "2"
+
+exec[text]
+    Evaluates the string text as an expression and returns the result.
+    Example: exec[`1+1`]                          →  "2"
+    Example: setvar[e, `getvar[x] + 1`]
+             exec[getvar[e]]                       →  evaluates getvar[x] + 1
+
+ifthen[value, trueexpr, falseexpr]
+    If value is truthy, evaluates the string trueexpr as an expression and
+    returns the result. Otherwise evaluates falseexpr (optional; returns ""
+    if omitted). Only the chosen branch expression string is evaluated.
+    Example: ifthen[1, `chatbox[\`true\`]`, `chatbox[\`false\`]`]
+             → writes "true" to the chatbox
+    Example: ifthen[0, `chatbox[\`true\`]`, `chatbox[\`false\`]`]
+             → writes "false" to the chatbox
+    Example: ifthen[getvar[x] == 1, `setvar[y, yes]`, `setvar[y, no]`]
+
+delayexec[delay, text]
+    Schedules text to be evaluated as an expression after delay milliseconds.
+    Returns "1" immediately. The evaluation runs on a background thread —
+    avoid using delayexec with expressions that modify shared variables
+    concurrently with the meta tick loop.
+    delay: milliseconds (1 second = 1000).
+    Example: delayexec[1000, `1+1`]    → schedules evaluation of 1+1 after 1s
+    Example: delayexec[500, `setvar[delayed, 1]`]
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORLD STATE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+These functions read live game state from the client process.
+They return "0" if the underlying engine hook is unavailable.
+
+vitae[]
+    Returns the player's current vitae penalty as an integer (0–100).
+    0 = no vitae penalty. 5 = 5% penalty. 10 = 10% penalty. Etc.
+    Reads CACQualities::GetVitaeValue() directly from client memory.
+    Test in chat:  /ra mexec vitae[]
+    Example: vitae[] > 0               →  true if any vitae penalty active
+    Example: vitae[] >= 10             →  true if vitae penalty is 10% or worse
+
+isportaling[]
+    Returns "1" while the player is in portal/teleport transit, "0" otherwise.
+    Reads CPlayerSystem::teleport_in_progress directly from client memory.
+    Test in chat:  /ra mexec isportaling[]
+    Example: isportaling[] == 1
+    Example: iif[isportaling[], in portal, not in portal]
+
+    Note: for one-shot reactions to entering/exiting portal space, use the
+    meta conditions PortalspaceEntered (269) and PortalspaceExited (270)
+    instead of polling isportaling[] in an Expression condition. The meta
+    conditions fire for exactly one tick on the 0→1 and 1→0 transitions.
+
+getworldname[]
+    Returns the name of the currently connected world/server (e.g. "ACEmulator", "Darktide").
+    Captured from the server's login announcement — works with any launcher.
+    Falls back to the RynthCore launcher context file if the hook has not fired yet.
+    Returns "" (empty string) if not yet available.
+    Test in chat:  /ra mexec getworldname[]
+    Example: getworldname[] == ACEmulator     →  true if on ACEmulator
+
+getdatetimelocal[format]
+    Returns the current local date and time formatted using a .NET format string.
+    Uses standard .NET DateTime format specifiers.
+    IMPORTANT: the format string must be wrapped in backticks if it contains colons.
+    Without backticks, the parser stops at ':' and only the first token is used.
+    Test in chat:  /ra mexec getdatetimelocal[`hh:mm:ss tt`]
+    Example: getdatetimelocal[`hh:mm:ss tt`]   →  "06:09:01 PM"
+    Example: getdatetimelocal[`yyyy-MM-dd`]     →  "2026-04-11"
+    Example: getdatetimelocal[`HH:mm`]          →  "18:09"  (24-hour)
+
+getdatetimeutc[format]
+    Returns the current UTC date and time formatted using a .NET format string.
+    Uses standard .NET DateTime format specifiers.
+    IMPORTANT: the format string must be wrapped in backticks if it contains colons.
+    Test in chat:  /ra mexec getdatetimeutc[`hh:mm:ss tt`]
+    Example: getdatetimeutc[`hh:mm:ss tt`]     →  "06:09:01 PM"
+    Example: getdatetimeutc[`yyyy-MM-dd`]       →  "2026-04-11"
+    Example: getdatetimeutc[`HH:mm`]            →  "18:09"  (24-hour)
+
+getunixtime[]
+    Returns the number of whole seconds elapsed since the Unix epoch (1970-01-01 00:00:00 UTC).
+    Useful for timestamping events, computing elapsed time, and time-based conditions.
+    Test in chat:  /ra mexec getunixtime[]
+    Example: getunixtime[]                               →  e.g. "1744329600"
+    Example: setvar[t, getunixtime[]]                    →  snapshot a timestamp
+    Example: getunixtime[] - getvar[t] > 60              →  true if 60s have elapsed
+
+getaccounthash[]
+    Returns a lowercase MD5 hex string of the current account name.
+    Returns "" (empty string) if the account name is not yet available.
+    The hash is consistent for the same account across sessions.
+    Useful for per-account save keys without embedding the real account name.
+    Test in chat:  /ra mexec getaccounthash[]
+    Example: getaccounthash[]                    →  e.g. "a87ff679..."
+    Example: setvar[acct, getaccounthash[]]      →  store for later use
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORLD OBJECTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+These functions query landscape objects visible in the current cell.
+World objects are identified by their integer object ID (as a decimal string).
+"0" is returned when no matching object is found or the engine hook is unavailable.
+
+WorldObject handles
+    Most wobject* functions return or accept a WorldObject handle — a self-describing string
+    that encodes both the object's ID and name:
+        "[WorldObject] 0x80001F7B: Olthoi Slayer"
+    "0" means no object was found. Pass the handle directly to other wobject* functions.
+
+wobjectfindnearestbytemplatetype[wcid]
+    Finds the nearest landscape object whose Weenie Class ID (WCID) matches the given value.
+    Returns a WorldObject handle, or "0" if not found.
+    The WCID (also called "template type") is the world object's class identifier — the same
+    value shown in AC Toolkit and used in VTank/UB loot profiles.
+    Searches all currently visible landscape objects (creatures, portals, static objects, etc.).
+    Distance is measured in meters using landblock-relative 3D coordinates.
+    Test in chat:  /ra mexec wobjectfindnearestbytemplatetype[31008]
+    Example: wobjectfindnearestbytemplatetype[31008]
+                 →  "[WorldObject] 0x80001F7B: Olthoi Slayer"
+    Example: wobjectfindnearestbytemplatetype[31008] == 0       →  true if none nearby
+    Example: setvar[t, wobjectfindnearestbytemplatetype[31008]] →  store the handle
+
+wobjectgetname[handle]
+    Returns the name of the world object from its handle.
+    Returns "" if the handle is "0" or the object cannot be found.
+    Example: wobjectgetname[wobjectfindnearestbytemplatetype[31008]]  →  "Olthoi Slayer"
+
+wobjectgetid[handle]
+    Returns the object's ID as an unsigned decimal integer string.
+    Returns "0" if the handle is invalid.
+    Example: wobjectgetid[wobjectfindnearestbytemplatetype[31008]]    →  e.g. "2147483515"
+
+wobjectgettemplatetype[handle]
+    Returns the object's Weenie Class ID (WCID) as a decimal integer string.
+    Returns "0" if unavailable.
+    Example: wobjectgettemplatetype[wobjectfindnearestbytemplatetype[31008]]  →  "31008"
+
+wobjectgetobjclass[handle]
+    Returns the object's classification as an integer.
+    Returns "0" if unavailable.
+    Classes correspond to AcObjectClass enum values used internally by RynthAi.
+
+wobjectgetselection[]
+    Returns a WorldObject handle for the currently selected/targeted object.
+    Returns "0" if nothing is selected.
+    Example: wobjectgetselection[]
+                 →  "[WorldObject] 0x80001F7B: Olthoi Slayer"
+    Example: wobjectgetname[wobjectgetselection[]]   →  name of selected object
+
+wobjectgetintprop[handle, property]
+    Returns an integer property from a world object. Returns "0" if undefined.
+    property is an AC STypeInt value, or one of the following UB extended constants:
+        218103808  (0xD000000) — TEMPLATE_TYPE: returns the object's WCID
+    Example: wobjectgetintprop[wobjectgetselection[], 218103808]
+                 →  e.g. "12752"  (WCID of the selected object)
+    Example: wobjectgetintprop[wobjectgetselection[], 12]
+                 →  stack size (STypeInt 12)
+
+wobjectgetdoubleprop[handle, property]
+    Returns a double/float property from a world object. Returns "0" if undefined.
+    property is an AC STypeFloat value, or a UB extended constant (0xA000000 prefix,
+    low 24 bits = STypeFloat index):
+        167772169  (0xA000009) — WORKMANSHIP: returns salvage workmanship value
+    Example: wobjectgetdoubleprop[wobjectgetselection[], 167772169]
+                 →  e.g. "9"  (workmanship of the selected object)
+
+wobjectgetboolprop[handle, property]
+    Returns a boolean property from a world object as "1" or "0". Returns "0" if undefined.
+    property is an AC STypeBool value.
+
+    NOTE: Inventory/equipped items have no live bool data in client memory. The engine caches
+    bool properties from server appraisal results (i.e. when the item is identified). The item
+    must have been identified at least once in the current session before this function will
+    return a non-zero value for those objects. Landscape objects (monsters, NPCs, scenery) do
+    not require identification — their bool data is always present in client memory.
+
+    Test in chat:  /ra mexec wobjectgetboolprop[wobjectgetselection[], 99]
+    Example: wobjectgetboolprop[wobjectgetselection[], 99]
+                 →  "1" if the selected object is ivoryable (STypeBool 99)
+    Example: wobjectgetboolprop[wobjectgetselection[], 11]
+                 →  "1" if the selected object is inscribable (STypeBool 11)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DICTIONARIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Dictionaries are string-keyed, string-valued maps. Like lists, they are stored
+internally and referenced by a handle string (e.g. "D:0", "D:1").
+Variables hold handles. Keys are case-sensitive.
+
+──────────────────────────────────────────
+Construction
+──────────────────────────────────────────
+
+dictcreate[key1, val1, key2, val2, ...]
+    Creates a new dictionary, optionally pre-populated with key-value pairs.
+    The argument list must have an even number of entries (alternating keys and values).
+    Example: dictcreate[]                      →  empty dictionary
+    Example: setvar[d, dictcreate[a, 1, b, 2]] →  {a=>1, b=>2}
+
+dictcopy[handle]
+    Returns a new independent shallow copy of the dictionary.
+    Example: setvar[d2, dictcopy[getvar[d]]]
+
+──────────────────────────────────────────
+Access
+──────────────────────────────────────────
+
+dictsize[handle]
+    Returns the number of entries as a string.
+    Example: dictsize[getvar[d]]   →  "3"
+
+dictgetitem[handle, key]
+    Returns the value for the given key, or "" if the key does not exist.
+    Example: dictgetitem[getvar[d], foo]
+
+dicthaskey[handle, key]
+    Returns "1" if the key exists in the dictionary, "0" otherwise.
+    Example: dicthaskey[getvar[d], foo]
+
+dictkeys[handle]
+    Returns a new list containing all keys in the dictionary.
+    Example: setvar[keys, dictkeys[getvar[d]]]
+
+dictvalues[handle]
+    Returns a new list containing all values in the dictionary.
+    Example: setvar[vals, dictvalues[getvar[d]]]
+
+──────────────────────────────────────────
+Mutation
+──────────────────────────────────────────
+
+dictadditem[handle, key, value]
+    Sets the value for the given key. Returns "1" if an existing key was
+    overwritten, "0" if the key was new.
+    Example: dictadditem[getvar[d], foo, 42]
+
+dictremovekey[handle, key]
+    Removes the given key from the dictionary. Returns "1" if the key existed,
+    "0" if it did not.
+    Example: dictremovekey[getvar[d], foo]
+
+dictclear[handle]
+    Removes all entries. Returns the handle (dictionary is now empty).
+    Example: dictclear[getvar[d]]
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+USAGE IN META RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Expressions can be used in two places in the meta system:
+
+Condition — MetaConditionType.Expression
+    The ConditionData field holds an expression. The rule fires when the
+    expression evaluates to a truthy value (anything except "" or "0").
+    Example ConditionData:  getcharintprop[1] < 50 && getvar[mode] == hunt
+
+Action — MetaActionType.ExpressionAction
+    The ActionData field holds an expression that is evaluated for its side
+    effects. The return value is discarded.
+    Example ActionData:  setvar[count, getvar[count] + 1]
+    Example ActionData:  setvar[state, iif[getcharintprop[1] < 20, low, ok]]
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXAMPLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Increment a counter each time a rule fires:
+    setvar[kills, getvar[kills] + 1]
+
+Check if level is between 100 and 200:
+    getcharintprop[25] >= 100 && getcharintprop[25] <= 200
+
+Store current health percent in a variable:
+    setvar[hpct, getcharintprop[1] * 100 / getcharintprop[6]]
+
+Transition state based on a flag bit:
+    getcharintprop[9] & 4
+
+Check if player name matches a pattern:
+    getcharstringprop[1] # ^Sir
+
+Nested iif for a three-way branch:
+    iif[getcharintprop[1] < 20, critical, iif[getcharintprop[1] < 50, low, ok]]

@@ -28,8 +28,8 @@ public class CombatManager : IDisposable
     private DateTime lastTargetSearchTime = DateTime.MinValue;
     private const int TARGET_SEARCH_INTERVAL_MS = 150;
 
-    // ── Face-before-attack state ────��────────────────────────────���───
-    // For ranged attacks, face the target and confirm heading before firing.
+    // ── Face-before-attack state ─────────────────────────────────────────
+    // For ranged/magic attacks, face the target with smooth turn before firing.
     // ── Native attack state ──────────────────────────────────────
     // StartAttackRequest auto-repeats — only call once per target.
     private uint _nativeAttackTargetId;
@@ -39,10 +39,19 @@ public class CombatManager : IDisposable
     private const double FACE_TIMEOUT_MS = 1000.0; // give up waiting and fire anyway
     private const double FACE_TOLERANCE_DEG = 15.0; // heading error threshold to fire
 
+    // Smooth turn motions — same codes as NavigationEngine
+    private const uint MotionTurnRight = 0x6500000D;
+    private const uint MotionTurnLeft  = 0x6500000E;
+
     // Grace period: keep activeTargetId alive for this long after it disappears from scan,
     // so a single bad LOS result or scan gap doesn't hand control to navigation.
     private DateTime _targetLostScanTime = DateTime.MinValue;
     private const double TARGET_SCAN_GRACE_MS = 1500.0;
+
+    // Target lock — once committed to a mob, hold it until confirmed dead/gone.
+    // Prevents spinning caused by target thrashing when world-filter has a transient null
+    // or when a second mob briefly becomes slightly closer between scan ticks.
+    private int _lockedTargetId = 0;
 
     private DateTime _lastSpellCast = DateTime.MinValue;
     private const double SPELL_CAST_COOLDOWN_MS = 1500.0;
@@ -301,6 +310,7 @@ public class CombatManager : IDisposable
                 _host.WriteToChat($"[RynthAi] No damage feedback after {_consecutiveMisses} attacks — blacklisting 0x{(uint)targetId:X8}", 2);
                 _consecutiveMisses = 0;
                 activeTargetId = 0;
+                _lockedTargetId = 0;
             }
         }
     }
@@ -321,21 +331,43 @@ public class CombatManager : IDisposable
         // Update the pre-scanned target list (distance, attackable, LOS — no selection)
         try { ScanNearbyTargets(); } catch (Exception ex) { _host.Log($"[RynthAi] ScanNearbyTargets crashed: {ex.Message}"); }
 
-        // Validate current target
+        // Validate current target — restore from lock first so transient world-filter nulls
+        // don't cause HandleCombatTrigger to pick a different mob on the same tick.
+        if (_lockedTargetId != 0 && activeTargetId == 0)
+            activeTargetId = _lockedTargetId;
+
         if (activeTargetId != 0)
         {
             var target = _worldFilter[activeTargetId];
-            if (target == null || (int)target.ObjectClass != (int)AcObjectClass.Creature ||
-                blacklistedTargets.ContainsKey(activeTargetId) || _blacklistManager.IsBlacklisted(activeTargetId))
+            bool blacklisted = blacklistedTargets.ContainsKey(activeTargetId) || _blacklistManager.IsBlacklisted(activeTargetId);
+
+            if (blacklisted)
             {
+                // Hard drop — mob is on the blacklist.
                 activeTargetId = 0;
+                _lockedTargetId = 0;
                 _facingTarget = false;
+                ClearCombatTurnMotions();
             }
-            else if (_worldFilter.Distance(_host.GetPlayerId() == 0 ? 0 : (int)_host.GetPlayerId(), activeTargetId) > acDistanceLimit * 1.5)
+            else if (target != null && (int)target.ObjectClass != (int)AcObjectClass.Creature)
             {
+                // Confirmed no longer a creature (became a corpse, etc.) — release lock.
                 activeTargetId = 0;
+                _lockedTargetId = 0;
                 _facingTarget = false;
+                ClearCombatTurnMotions();
             }
+            else if (target != null &&
+                     _worldFilter.Distance(_host.GetPlayerId() == 0 ? 0 : (int)_host.GetPlayerId(), activeTargetId) > acDistanceLimit * 1.5)
+            {
+                // Confirmed out of range — release lock.
+                activeTargetId = 0;
+                _lockedTargetId = 0;
+                _facingTarget = false;
+                ClearCombatTurnMotions();
+            }
+            // If target == null here it's a transient world-filter miss — keep the lock,
+            // the stillScanned grace period below will handle a truly dead/vanished mob.
         }
 
         if (activeTargetId == 0)
@@ -381,7 +413,9 @@ public class CombatManager : IDisposable
             {
                 // Still not in scan after grace period — truly gone (died, moved away, permLOS)
                 activeTargetId = 0;
+                _lockedTargetId = 0;
                 _facingTarget = false;
+                ClearCombatTurnMotions();
                 _targetLostScanTime = DateTime.MinValue;
             }
             return true;
@@ -389,21 +423,27 @@ public class CombatManager : IDisposable
         _targetLostScanTime = DateTime.MinValue; // back in scan — reset grace timer
 
         var targetObj = _worldFilter[activeTargetId];
-        if (targetObj == null) { activeTargetId = 0; return true; }
+        if (targetObj == null) return true; // transient miss — skip tick, keep lock
 
         if (!EquipWeaponAndSetStance(targetObj, "Auto"))
             return true;
 
+        bool isRanged = CurrentCombatMode == CombatMode.Missile || CurrentCombatMode == CombatMode.Magic;
+        bool useNative = _settings.UseNativeAttack && _host.HasNativeAttack;
+
+        // Melee: clear turn motions every tick. AC handles melee facing during the
+        // attack animation — we must not run any turn motion alongside it or anything
+        // left over from navigation will spin the character indefinitely.
+        if (!isRanged && !useNative)
+            ClearCombatTurnMotions();
+
         if ((DateTime.Now - lastAttackCmd).TotalMilliseconds >= 1000)
         {
-            bool isRanged = CurrentCombatMode == CombatMode.Missile || CurrentCombatMode == CombatMode.Magic;
-            bool useNative = _settings.UseNativeAttack && _host.HasNativeAttack;
-
             // Native attack handles facing internally — skip manual facing
             if (!useNative)
             {
-                // For ranged attacks, confirm we're facing the target before firing.
-                // Polls actual quaternion heading each tick — no fixed timer.
+                // For ranged/magic attacks, confirm we're facing the target before firing.
+                // Melee turn motions are already cleared above every tick.
                 if (isRanged)
                 {
                     double facingError = GetFacingError(activeTargetId);
@@ -419,11 +459,7 @@ public class CombatManager : IDisposable
                             return true; // not facing yet, keep waiting
                     }
                     _facingTarget = false;
-                }
-                else
-                {
-                    // Melee: face immediately (close range, less visible)
-                    FaceTarget(activeTargetId);
+                    ClearCombatTurnMotions();
                 }
             }
 
@@ -469,6 +505,7 @@ public class CombatManager : IDisposable
                             _savedWeaponId = 0;
                             _returnToPhysicalCombat = true;
                             _host.UseObject((uint)wandId);
+                            _lastEquipTime = DateTime.Now; // gate AttackWithMagic until wand is wielded
                             _host.ChangeCombatMode(CombatMode.Magic);
                             lastAttackCmd = DateTime.Now;
                             return true;
@@ -513,6 +550,10 @@ public class CombatManager : IDisposable
 
     public void HandleCombatTrigger()
     {
+        // Never override an existing lock — only pick a new target when the previous one
+        // has been fully released (both activeTargetId and _lockedTargetId are 0).
+        if (_lockedTargetId != 0) return;
+
         // Pick the best target from the pre-scanned list (already filtered + LOS-checked)
         if (_scannedTargets.Count == 0) return;
 
@@ -520,6 +561,7 @@ public class CombatManager : IDisposable
         if (targetId != 0 && targetId != activeTargetId)
         {
             activeTargetId = targetId;
+            _lockedTargetId = targetId;
             // Don't call SelectItem here — AC auto-attacks on select in combat mode.
             // Selection happens in the attack loop after the final LOS confirmation.
         }
@@ -571,12 +613,6 @@ public class CombatManager : IDisposable
         // when the phys-obj offset probe hasn't fired yet (unlike TryGetObjectWielderInfo).
         bool alreadyWielded = weaponObj.Values(LongValueKey.CurrentWieldedLocation, 0) > 0;
 
-        // During the ~30s post-login window both probes may not have fired yet, causing
-        // Values() to return 0 even for genuinely wielded items. If we're already in a
-        // valid combat mode, trust it rather than blocking attacks indefinitely.
-        if (!alreadyWielded && CurrentCombatMode != CombatMode.NonCombat)
-            alreadyWielded = CurrentCombatMode == desiredMode;
-
         if (alreadyWielded)
         {
             // Don't enter missile mode without ammo — AC rejects it and cycles stance
@@ -592,7 +628,24 @@ public class CombatManager : IDisposable
             return CurrentCombatMode == desiredMode;
         }
 
-        // Not wielded — equip it (throttled to avoid spam)
+        // Wield-location probe hasn't confirmed this item yet. Two cases:
+        //
+        // A) Already in the correct combat mode — AC enforces "weapon wielded ↔ mode matches",
+        //    so trust it. Calling UseObject on an already-wielded wand is a no-op in AC
+        //    (it opens the wand's properties), so we must NOT call it here.
+        if (CurrentCombatMode == desiredMode)
+            return true;
+
+        // B) Mode doesn't match. Either the weapon genuinely isn't wielded, or CurrentCombatMode
+        //    is stale (e.g. hot-reload didn't re-fire OnCombatModeChange). Request both a mode
+        //    change and an equip. ChangeCombatMode succeeds if the wand is already wielded
+        //    (OnCombatModeChange fires → fixes hot-reload next tick). UseObject equips it if
+        //    it truly isn't wielded yet.
+        if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > 1000)
+        {
+            _host.ChangeCombatMode(desiredMode);
+            lastStanceAttempt = DateTime.Now;
+        }
         if ((DateTime.Now - _lastEquipTime).TotalMilliseconds > 2000)
         {
             _host.UseObject((uint)targetWeaponId);
@@ -637,18 +690,46 @@ public class CombatManager : IDisposable
     {
         try
         {
-            if (!_host.TryGetPlayerPose(out _, out float px, out float py, out _, out _, out _, out _, out _))
+            if (!_host.TryGetPlayerPose(out _, out float px, out float py, out _,
+                    out float qw, out _, out _, out float qz))
                 return;
             if (!_host.TryGetObjectPosition((uint)targetId, out _, out float tx, out float ty, out _))
                 return;
 
             double dx = tx - px;
             double dy = ty - py;
-            double heading = Math.Atan2(dx, dy) * (180.0 / Math.PI);
-            if (heading < 0) heading += 360.0;
-            _host.TurnToHeading((float)heading);
+            double desiredDeg = Math.Atan2(dx, dy) * (180.0 / Math.PI);
+            if (desiredDeg < 0) desiredDeg += 360.0;
+
+            double physYawDeg = 2.0 * Math.Atan2(qz, qw) * (180.0 / Math.PI);
+            double currentDeg = ((-physYawDeg) % 360.0 + 720.0) % 360.0;
+
+            double error = desiredDeg - currentDeg;
+            while (error >  180.0) error -= 360.0;
+            while (error < -180.0) error += 360.0;
+
+            if (Math.Abs(error) <= FACE_TOLERANCE_DEG)
+            {
+                ClearCombatTurnMotions();
+            }
+            else if (error > 0)
+            {
+                _host.SetMotion(MotionTurnRight, true);
+                _host.SetMotion(MotionTurnLeft,  false);
+            }
+            else
+            {
+                _host.SetMotion(MotionTurnLeft,  true);
+                _host.SetMotion(MotionTurnRight, false);
+            }
         }
         catch { }
+    }
+
+    private void ClearCombatTurnMotions()
+    {
+        _host.SetMotion(MotionTurnRight, false);
+        _host.SetMotion(MotionTurnLeft,  false);
     }
 
     /// <summary>
@@ -765,6 +846,10 @@ public class CombatManager : IDisposable
     private void AttackWithMagic(WorldObject target)
     {
         if (_spellManager == null || target == null) return;
+        // Don't cast while a weapon equip is in progress — the wand may not be registered
+        // as wielded yet. _lastEquipTime is set whenever UseObject is called for a wand swap.
+        if ((DateTime.Now - _lastEquipTime).TotalMilliseconds < 3000)
+            return;
         if ((DateTime.Now - _lastSpellCast).TotalMilliseconds < SPELL_CAST_COOLDOWN_MS) return;
 
         if (_waitingForDebuffResult)

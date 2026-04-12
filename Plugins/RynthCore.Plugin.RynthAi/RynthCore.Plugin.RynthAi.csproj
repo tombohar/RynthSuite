@@ -32,6 +32,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
     <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+    <ProjectReference Include="..\..\Shared\RynthCore.LootSdk\RynthCore.LootSdk.csproj" />
   </ItemGroup>
 
   <Target Name="CopyPublishedPluginToEngineOutputs" AfterTargets="Publish" Condition="'$(PublishDir)' != ''">

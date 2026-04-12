@@ -30,6 +30,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private FellowshipTracker? _fellowshipTracker;
     private MetaManager? _metaManager;
     private InventoryManager? _inventoryManager;
+    private SalvageManager? _salvageManager;
     private PlayerVitalsCache _vitals = new();
     private uint _playerId;
     private int _vitalsTickCounter;
@@ -41,6 +42,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private VTankLootProfile? _loadedLootProfile;
     private string _loadedLootProfilePath = string.Empty;
     private DateTime _loadedLootProfileTime = DateTime.MinValue;
+    private RynthCore.Loot.LootProfile? _nativeLootProfile;
+    private string _nativeLootProfilePath = string.Empty;
+    private DateTime _nativeLootProfileTime = DateTime.MinValue;
     private static bool _imguiResolverConfigured;
 
     public override int Initialize()
@@ -71,6 +75,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _fellowshipTracker = null;
         _metaManager = null;
         _inventoryManager = null;
+        _salvageManager = null;
         _buffManager?.Dispose();
         _buffManager = null;
         _spellManager = null;
@@ -154,6 +159,11 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         if (liveCount >= 0)
             Host.WriteToChat($"[RynthAi] Loaded {liveCount} active buff timer(s) from client memory.", 1);
 
+        // Sync the actual current combat mode — _currentCombatMode defaults to NonCombat and
+        // OnCombatModeChange doesn't re-fire on hot-reload, so read it directly from AC memory.
+        if (Host.HasGetCurrentCombatMode)
+            _currentCombatMode = Host.GetCurrentCombatMode();
+
         _combatManager = new CombatManager(Host, _dashboard.Settings, _objectCache!, _spellManager);
         _combatManager.SetCharacterSkills(_charSkills);
         _combatManager.SetPlayerId(_playerId);
@@ -175,6 +185,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
         if (_objectCache != null)
             _inventoryManager = new InventoryManager(Host, _dashboard.Settings, _objectCache);
+
+        _salvageManager = new SalvageManager(Host, _dashboard.Settings, _objectCache);
 
         Log("RynthAi: login complete, legacy ImGui dashboard ready.");
     }
@@ -224,6 +236,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 {
                     _inventoryManager.OnHeartbeat(_busyCount);
                 }
+
+                _salvageManager?.OnTick(_busyCount);
 
                 // Missile crafting runs before combat — blocks everything while active
                 if (_missileCraftingManager != null && settings.IsMacroRunning)
@@ -402,12 +416,12 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             return;
 
         string trimmed = text.Trim();
-        if (!trimmed.StartsWith("/na", StringComparison.OrdinalIgnoreCase))
+        if (!trimmed.StartsWith("/ra", StringComparison.OrdinalIgnoreCase))
             return;
 
         string[] parts = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
-        // Bare "/na" or "/na help" — show command list
+        // Bare "/ra" or "/ra help" — show command list
         if (parts.Length < 2 || parts[1].Equals("help", StringComparison.OrdinalIgnoreCase))
         {
             eat = 1;

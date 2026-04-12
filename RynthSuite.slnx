@@ -2,8 +2,12 @@
   <Folder Name="/Plugins/">
     <Project Path="Plugins/RynthCore.Plugin.RynthAi/RynthCore.Plugin.RynthAi.csproj" />
   </Folder>
+  <Folder Name="/Shared/">
+    <Project Path="Shared/RynthCore.LootSdk/RynthCore.LootSdk.csproj" />
+  </Folder>
   <Folder Name="/Tools/">
     <Project Path="Tools/RynthCore.MonsterEditor/RynthCore.MonsterEditor.csproj" />
+    <Project Path="Tools/RynthCore.LootEditor/RynthCore.LootEditor.csproj" />
   </Folder>
   <Project Path="../RynthCore/src/RynthCore.PluginCore/RynthCore.PluginCore.csproj" />
   <Project Path="../RynthCore/src/RynthCore.PluginSdk/RynthCore.PluginSdk.csproj" />

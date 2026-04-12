@@ -94,6 +94,7 @@ internal sealed class LegacyDashboardRenderer
         _weaponsUi = new LegacyWeaponsUi(_settings, host);
         _metaUi = new LegacyMetaUi(_settings, _navFiles);
         _dungeonMapUi = new DungeonMapUi(host, _settings);
+        _dungeonMapUi.OnSettingChanged = SaveSettings;
         RefreshAllLists();
     }
 
@@ -555,6 +556,18 @@ internal sealed class LegacyDashboardRenderer
         dst.DashShowMacroRules       = tmp.DashShowMacroRules;
         dst.DashShowMonsters         = tmp.DashShowMonsters;
         dst.DashShowDungeonMap       = tmp.DashShowDungeonMap;
+        dst.MapShowDoors             = tmp.MapShowDoors;
+        dst.MapShowCreatures         = tmp.MapShowCreatures;
+        dst.MapShowToolbar           = tmp.MapShowToolbar;
+        dst.MapBgOpacity             = tmp.MapBgOpacity;
+        dst.MinSkillLevelTier1       = tmp.MinSkillLevelTier1;
+        dst.MinSkillLevelTier2       = tmp.MinSkillLevelTier2;
+        dst.MinSkillLevelTier3       = tmp.MinSkillLevelTier3;
+        dst.MinSkillLevelTier4       = tmp.MinSkillLevelTier4;
+        dst.MinSkillLevelTier5       = tmp.MinSkillLevelTier5;
+        dst.MinSkillLevelTier6       = tmp.MinSkillLevelTier6;
+        dst.MinSkillLevelTier7       = tmp.MinSkillLevelTier7;
+        dst.MinSkillLevelTier8       = tmp.MinSkillLevelTier8;
     }
 
     private static double NormalizeCorpseRangeYards(double value, double fallbackYards)
@@ -800,7 +813,7 @@ internal sealed class LegacyDashboardRenderer
                 if (ImGui.Selectable(_lootFiles[i], _settings.LootProfileIdx == i))
                 {
                     _settings.LootProfileIdx = i;
-                    _settings.CurrentLootPath = i == 0 ? string.Empty : Path.Combine(_lootFolder, _lootFiles[i] + ".utl");
+                    _settings.CurrentLootPath = i == 0 ? string.Empty : Path.Combine(_lootFolder, _lootFiles[i]);
                 }
             ImGui.EndCombo();
         }
@@ -956,10 +969,17 @@ internal sealed class LegacyDashboardRenderer
     {
         _lootFiles.Clear(); _lootFiles.Add("None");
         if (!Directory.Exists(_lootFolder)) return;
-        foreach (string file in Directory.GetFiles(_lootFolder, "*.utl"))
+
+        var files = new System.Collections.Generic.List<string>();
+        files.AddRange(Directory.GetFiles(_lootFolder, "*.utl"));
+        files.AddRange(Directory.GetFiles(_lootFolder, "*.json"));
+        files.Sort(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string file in files)
         {
-            _lootFiles.Add(Path.GetFileNameWithoutExtension(file));
-            if (file.Equals(_settings.CurrentLootPath, StringComparison.OrdinalIgnoreCase)) _settings.LootProfileIdx = _lootFiles.Count - 1;
+            _lootFiles.Add(Path.GetFileName(file));
+            if (file.Equals(_settings.CurrentLootPath, StringComparison.OrdinalIgnoreCase))
+                _settings.LootProfileIdx = _lootFiles.Count - 1;
         }
     }
 

@@ -35,6 +35,10 @@ public class WorldObjectCache
     private readonly Dictionary<uint, int> _classifyRetry = new();
     private const int MaxClassifyRetries = 8;
 
+    // Periodic reclassification — rescues Unknown landscape objects that become recognisable later
+    private DateTime _lastReclassifyTime = DateTime.MinValue;
+    private const double ReclassifyIntervalSec = 2.0;
+
     // ItemType flag constants (AC ITEM_TYPE bitmask)
     private const uint ItemTypeMeleeWeapon   = 0x00000001;
     private const uint ItemTypeArmor         = 0x00000002;
@@ -140,6 +144,14 @@ public class WorldObjectCache
         {
             _tickDiagCount++;
             _host.Log($"[RynthAi] Cache.Tick classified {processed} from {pending0} pending, total now {_byId.Count}");
+        }
+
+        // Periodically re-check Unknown landscape objects — dynamic creatures whose weenie
+        // wasn't ready at classify time will be promoted to _creatures here.
+        if ((DateTime.Now - _lastReclassifyTime).TotalSeconds >= ReclassifyIntervalSec)
+        {
+            _lastReclassifyTime = DateTime.Now;
+            ReclassifyUnknownDynamics();
         }
 
         // Full container scan disabled — causes delayed crash when 160+ items in cache
@@ -295,6 +307,19 @@ public class WorldObjectCache
                     return;
                 }
             }
+            else if (uid >= 0x80000000u)
+            {
+                // TryGetItemType failed for a dynamic object with position — weenie may not be ready.
+                // Re-queue for retry so creatures aren't permanently misclassified as Unknown landscape.
+                int retries = _classifyRetry.TryGetValue(uid, out int r) ? r : 0;
+                if (retries < MaxClassifyRetries)
+                {
+                    _classifyRetry[uid] = retries + 1;
+                    _pending.Enqueue(uid);
+                    return;
+                }
+                _classifyRetry.Remove(uid);
+            }
 
             cls = AcObjectClass.Unknown; // landscape non-creature (static object, portal, etc.)
             _landscape.Add(id);
@@ -302,6 +327,40 @@ public class WorldObjectCache
 
         _classifyRetry.Remove(uid);
         _byId[id] = Make(id, name, cls);
+    }
+
+    /// <summary>
+    /// Scan landscape objects classified as Unknown with dynamic GUIDs and try to promote
+    /// any that are now recognised as TYPE_CREATURE. Runs every ~2 seconds from Tick().
+    /// This rescues creatures whose weenie data wasn't available when they were first classified.
+    /// </summary>
+    private void ReclassifyUnknownDynamics()
+    {
+        List<int>? toPromote = null;
+        foreach (int id in _landscape)
+        {
+            if (_creatures.Contains(id)) continue;
+            uint uid = unchecked((uint)id);
+            if (uid < 0x80000000u) continue; // static objects never become creatures
+            if (!_byId.TryGetValue(id, out var wo) || wo.ObjectClass != AcObjectClass.Unknown) continue;
+            if (!_host.TryGetItemType(uid, out uint typeFlags)) continue;
+            if ((typeFlags & ItemTypeCreature) == 0) continue;
+
+            toPromote ??= new List<int>();
+            toPromote.Add(id);
+        }
+
+        if (toPromote == null) return;
+
+        foreach (int id in toPromote)
+        {
+            uint uid = unchecked((uint)id);
+            _host.TryGetObjectName(uid, out string name);
+            _creatures.Add(id);
+            _byId[id] = Make(id, name ?? string.Empty, AcObjectClass.Creature);
+        }
+
+        _host.Log($"[RynthAi] ReclassifyUnknownDynamics: promoted {toPromote.Count} object(s) to Creature");
     }
 
     // ── WorldFilter API ───────────────────────────────────────────────────

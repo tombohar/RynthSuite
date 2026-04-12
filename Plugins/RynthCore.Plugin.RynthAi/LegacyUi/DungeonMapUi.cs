@@ -46,6 +46,15 @@ internal sealed class DungeonMapUi
     private bool _show1U1D   = true;  // show current floor ± 1 (default)
     private bool _open = true;
 
+    // Toggle-stabilisation: when toolbar is visible we track both the full window
+    // rect and the canvas rect.  On hide we snap the window to the canvas rect so
+    // it sits exactly over the map area; on show we restore the full window rect.
+    private bool    _prevHideToolbar;
+    private Vector2 _fullWindowPos;    // window pos  when toolbar is visible
+    private Vector2 _fullWindowSize;   // window size when toolbar is visible
+    private Vector2 _canvasPos;        // canvas top-left when toolbar is visible
+    private Vector2 _canvasSize;       // canvas size      when toolbar is visible
+
     // Edge colours
     private static readonly uint ColBg           = ImGui.ColorConvertFloat4ToU32(new Vector4(0.04f, 0.07f, 0.12f, 1.00f));
     private static readonly uint ColBorder       = ImGui.ColorConvertFloat4ToU32(new Vector4(0.20f, 0.30f, 0.40f, 1.00f));
@@ -74,6 +83,9 @@ internal sealed class DungeonMapUi
     private const float FlatNormalThreshold  = 0.95f; // |Nz|/|N| — must exceed to be flat (not a ramp)
     private const byte  NotFloor            = 255;    // sentinel returned by ClassifyPoly
 
+    /// <summary>Called immediately whenever a map setting is changed by the user.</summary>
+    public Action? OnSettingChanged { get; set; }
+
     public DungeonMapUi(RynthCoreHost host, LegacyUiSettings settings) { _host = host; _settings = settings; }
 
     public void SetWorldObjectCache(WorldObjectCache cache) => _objectCache = cache;
@@ -88,12 +100,70 @@ internal sealed class DungeonMapUi
 
     public void Render()
     {
-        ImGui.SetNextWindowSize(new Vector2(480, 520), ImGuiCond.FirstUseEver);
-        if (!ImGui.Begin("Dungeon Map##RynthAiDungeonMap", ref _open,
-                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse))
-        { ImGui.End(); return; }
+        // Snapshot map-specific settings so we can detect changes and save immediately.
+        bool  snapDoors     = _settings.MapShowDoors;
+        bool  snapCreatures = _settings.MapShowCreatures;
+        bool  snapToolbar   = _settings.MapShowToolbar;
+        float snapOpacity   = _settings.MapBgOpacity;
 
+        float op          = _settings.MapBgOpacity;
+        bool  hideToolbar = !_settings.MapShowToolbar;
+
+        // FirstUseEver must come BEFORE any Always override — each SetNextWindowSize call
+        // overwrites the previous one, so Always must be last to win.
+        ImGui.SetNextWindowSize(new Vector2(480, 520), ImGuiCond.FirstUseEver);
+
+        // On toggle: snap the window to the canvas rect (hide) or full window rect (show).
+        bool stateChanged = hideToolbar != _prevHideToolbar;
+        _prevHideToolbar = hideToolbar;
+        if (stateChanged)
+        {
+            if (hideToolbar && _canvasSize.X > 0)
+            {
+                // Shrink to exactly where the canvas was — no title bar / toolbar chrome.
+                ImGui.SetNextWindowPos(_canvasPos,  ImGuiCond.Always);
+                ImGui.SetNextWindowSize(_canvasSize, ImGuiCond.Always);
+            }
+            else if (!hideToolbar && _fullWindowSize.X > 0)
+            {
+                // Restore the full window including toolbar and title bar.
+                ImGui.SetNextWindowPos(_fullWindowPos,  ImGuiCond.Always);
+                ImGui.SetNextWindowSize(_fullWindowSize, ImGuiCond.Always);
+            }
+        }
+
+        // Remove border and padding when toolbar is hidden so no empty chrome is visible.
+        int styleVarCount = 0;
+        if (hideToolbar)
+        {
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
+            styleVarCount = 2;
+        }
+
+        // Apply opacity to title bar colours too — SetNextWindowBgAlpha only covers the content area.
+        var titleCol = new Vector4(0.08f, 0.12f, 0.18f, op);
+        ImGui.PushStyleColor(ImGuiCol.TitleBg,        titleCol);
+        ImGui.PushStyleColor(ImGuiCol.TitleBgActive,  new Vector4(0.10f, 0.16f, 0.24f, op));
+
+        ImGui.SetNextWindowBgAlpha(op);
+
+        ImGuiWindowFlags flags = ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse;
+        if (hideToolbar) flags |= ImGuiWindowFlags.NoTitleBar;
+
+        bool beginVisible = ImGui.Begin("Dungeon Map##RynthAiDungeonMap", ref _open, flags);
+        if (styleVarCount > 0) ImGui.PopStyleVar(styleVarCount);
+        ImGui.PopStyleColor(2);
+
+        if (!beginVisible) { ImGui.End(); return; }
         if (!_open) { DashWindows.ShowDungeonMap = false; ImGui.End(); return; }
+
+        // Track full window rect every frame when toolbar is visible.
+        if (!hideToolbar)
+        {
+            _fullWindowPos  = ImGui.GetWindowPos();
+            _fullWindowSize = ImGui.GetWindowSize();
+        }
 
         if (_raycast is null || !_raycast.IsInitialized)
         {
@@ -121,8 +191,25 @@ internal sealed class DungeonMapUi
         float gx = ((landblock >> 8) & 0xFF) * 192.0f;
         float gy =  (landblock        & 0xFF) * 192.0f;
 
-        RenderToolbar(pz);
-        RenderCanvas(px + gx, py + gy, pz);
+        if (!hideToolbar)
+        {
+            if (ImGui.SmallButton("^##tbToggle")) _settings.MapShowToolbar = false;
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Hide settings");
+            ImGui.SameLine(0, 8);
+            RenderToolbar(pz);
+        }
+
+        RenderCanvas(px + gx, py + gy, pz, hideToolbar);
+
+        // Save immediately when any map setting changes.
+        if (_settings.MapShowDoors     != snapDoors     ||
+            _settings.MapShowCreatures != snapCreatures ||
+            _settings.MapShowToolbar   != snapToolbar   ||
+            MathF.Abs(_settings.MapBgOpacity - snapOpacity) > 0.001f)
+        {
+            OnSettingChanged?.Invoke();
+        }
+
         ImGui.End();
     }
 
@@ -526,10 +613,19 @@ internal sealed class DungeonMapUi
 
     // ── Toolbar ──────────────────────────────────────────────────────────────
 
+    // Returns true if the last-drawn item's right edge + gap + nextWidth fits before the window's right edge.
+    private static bool FitsOnLine(float nextWidth, float gap = 8f)
+    {
+        float itemRight   = ImGui.GetItemRectMax().X;
+        float windowRight = ImGui.GetWindowPos().X + ImGui.GetWindowSize().X
+                            - ImGui.GetStyle().WindowPadding.X;
+        return itemRight + gap + nextWidth < windowRight;
+    }
+
     private void RenderToolbar(float playerZ)
     {
-        // ── 1U1D toggle (far left) ────────────────────────────────────────
-        bool was1U1D = _show1U1D; // capture BEFORE click changes state
+        // ── 1U1D toggle ───────────────────────────────────────────────────
+        bool was1U1D = _show1U1D;
         if (was1U1D)
         {
             ImGui.PushStyleColor(ImGuiCol.Button,        new Vector4(0.15f, 0.45f, 0.70f, 1.0f));
@@ -549,9 +645,12 @@ internal sealed class DungeonMapUi
         }
         if (was1U1D) ImGui.PopStyleColor(3);
 
+        // ── Floor buttons ─────────────────────────────────────────────────
         if (_zLayers is not null && _zLayers.Count > 1)
         {
-            ImGui.SameLine(0, 10);
+            float floorsWidth = 52f + _zLayers.Count * 26f + 60f; // "Floors:" + Fn buttons + All/Here
+            if (FitsOnLine(floorsWidth, 10f)) ImGui.SameLine(0, 10);
+
             ImGui.Text("Floors:");
             ImGui.SameLine();
             for (int i = 0; i < _zLayers.Count; i++)
@@ -565,12 +664,12 @@ internal sealed class DungeonMapUi
                     ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.15f, 0.45f, 0.70f, 1.0f));
                 if (ImGui.SmallButton($"F{i + 1}##floor{i}"))
                 {
-                    _show1U1D = false; // manual floor selection overrides 1U1D
+                    _show1U1D = false;
                     if (on) _visibleLayers.Remove(i); else _visibleLayers.Add(i);
                 }
                 if (on) ImGui.PopStyleColor();
             }
-            ImGui.SameLine(0, 10);
+            ImGui.SameLine(0, 6);
             if (ImGui.SmallButton("All##floorAll"))
             {
                 _show1U1D = false;
@@ -584,39 +683,61 @@ internal sealed class DungeonMapUi
                 _visibleLayers.Clear();
                 _visibleLayers.Add(BestLayerIdx(playerZ));
             }
-            ImGui.SameLine(0, 16);
         }
-        else ImGui.SameLine(0, 16);
 
+        // ── Zoom ──────────────────────────────────────────────────────────
+        if (FitsOnLine(130f, 12f)) ImGui.SameLine(0, 12);
         ImGui.Text("Zoom:");
         ImGui.SameLine();
-        ImGui.SetNextItemWidth(90);
+        ImGui.SetNextItemWidth(80);
         ImGui.SliderFloat("##mapzoom", ref _zoom, 1.0f, 20.0f, "%.1fx");
         if (!float.IsFinite(_zoom)) _zoom = 5.0f;
-        ImGui.SameLine(0, 16);
-        ImGui.Checkbox("Follow", ref _autoFollow);
-        ImGui.SameLine();
+
+        // ── Follow / Reset ────────────────────────────────────────────────
+        if (FitsOnLine(110f, 12f)) ImGui.SameLine(0, 12);
+        ImGui.Checkbox("Follow##mapfollow", ref _autoFollow);
+        ImGui.SameLine(0, 6);
         if (ImGui.SmallButton("Reset##mapreset"))
         { _pan = Vector2.Zero; _zoom = 5.0f; _autoFollow = true; _show1U1D = true; }
 
-        ImGui.SameLine(0, 16);
+        // ── Doors / Creatures ─────────────────────────────────────────────
+        if (FitsOnLine(148f, 12f)) ImGui.SameLine(0, 12);
         ImGui.Checkbox("Doors##mapDoors", ref _settings.MapShowDoors);
-        ImGui.SameLine();
+        ImGui.SameLine(0, 6);
         ImGui.Checkbox("Creatures##mapCreatures", ref _settings.MapShowCreatures);
+
+        // ── Opacity ───────────────────────────────────────────────────────
+        if (FitsOnLine(130f, 12f)) ImGui.SameLine(0, 12);
+        ImGui.Text("Opacity:");
+        ImGui.SameLine(0, 4);
+        ImGui.SetNextItemWidth(70);
+        ImGui.SliderFloat("##mapOpacity", ref _settings.MapBgOpacity, 0f, 1f, "%.2f");
+        _settings.MapBgOpacity = Math.Clamp(_settings.MapBgOpacity, 0f, 1f);
     }
 
     // ── Canvas ────────────────────────────────────────────────────────────────
 
-    private void RenderCanvas(float playerWX, float playerWY, float playerZ)
+    private void RenderCanvas(float playerWX, float playerWY, float playerZ, bool showExpandBtn = false)
     {
         Vector2 canvasSize = ImGui.GetContentRegionAvail();
         if (canvasSize.X < 50 || canvasSize.Y < 50) return;
 
         Vector2 origin = ImGui.GetCursorScreenPos();
+
+        // Record canvas screen rect while toolbar is visible so we can snap to it on hide.
+        if (!showExpandBtn)
+        {
+            _canvasPos  = origin;
+            _canvasSize = canvasSize;
+        }
         Vector2 centre = origin + canvasSize * 0.5f;
 
         ImDrawListPtr dl = ImGui.GetWindowDrawList();
-        dl.AddRectFilled(origin, origin + canvasSize, ColBg);
+
+        // Only the canvas background scales with opacity — fills and edges stay full colour.
+        uint colBgDyn = SetAlpha(ColBg, _settings.MapBgOpacity);
+
+        dl.AddRectFilled(origin, origin + canvasSize, colBgDyn);
         dl.AddRect(origin, origin + canvasSize, ColBorder);
         dl.PushClipRect(origin, origin + canvasSize, true);
 
@@ -852,9 +973,25 @@ internal sealed class DungeonMapUi
 
         dl.PopClipRect();
 
+        // Expand button rendered BEFORE InvisibleButton so ImGui gives it
+        // input priority over the canvas drag area.  SetCursorScreenPos is
+        // restored afterward so InvisibleButton still covers the full canvas.
+        if (showExpandBtn)
+        {
+            ImGui.SetCursorScreenPos(origin + new Vector2(4, 4));
+            if (ImGui.SmallButton("v##tbToggle")) _settings.MapShowToolbar = true;
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Show settings");
+            ImGui.SetCursorScreenPos(origin);
+        }
+
         // InvisibleButton captures mouse so the window title-bar drag handler
         // never sees the click — prevents the window from moving when panning.
         ImGui.InvisibleButton("##mapcanvas", canvasSize);
+
+        // Tell the backend to block mouse events from reaching the game when
+        // the cursor is over the canvas (fixes click-through to AC world).
+        if (ImGui.IsItemHovered())
+            ImGui.SetNextFrameWantCaptureMouse(true);
 
         if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left))
         {
@@ -866,14 +1003,28 @@ internal sealed class DungeonMapUi
             }
         }
 
-        // Scroll-wheel zoom — checked after InvisibleButton so IsWindowHovered
-        // is evaluated with the correct item state.
+        // Scroll-wheel zoom: check mouse position directly against canvas bounds.
+        // IsWindowHovered can return false if another item is active, so we bypass it.
         {
             float wheel = ImGui.GetIO().MouseWheel;
-            if (float.IsFinite(wheel) && wheel != 0f &&
-                ImGui.IsWindowHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem))
-                _zoom = Math.Clamp(_zoom + wheel * 0.5f, 1.0f, 20.0f);
+            if (float.IsFinite(wheel) && wheel != 0f)
+            {
+                var mp = ImGui.GetIO().MousePos;
+                if (mp.X >= origin.X && mp.X <= origin.X + canvasSize.X &&
+                    mp.Y >= origin.Y && mp.Y <= origin.Y + canvasSize.Y)
+                {
+                    _zoom = Math.Clamp(_zoom + wheel * 0.5f, 1.0f, 20.0f);
+                    ImGui.SetNextFrameWantCaptureMouse(true);
+                }
+            }
         }
+    }
+
+    // Sets the alpha byte of an ImGui ABGR colour to the given 0-1 value.
+    private static uint SetAlpha(uint col, float alpha)
+    {
+        uint a = (uint)(Math.Clamp(alpha, 0f, 1f) * 255f);
+        return (col & 0x00FFFFFF) | (a << 24);
     }
 
     private static bool IsDoorName(string name)

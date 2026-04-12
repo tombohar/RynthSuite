@@ -1,0 +1,139 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Styles.Resources>
+        <Color x:Key="BgMainColor"   >#0A0F14</Color>
+        <Color x:Key="BgPanelColor"  >#171F29</Color>
+        <Color x:Key="BgInputColor"  >#141C26</Color>
+        <Color x:Key="BgHoverColor"  >#1A2E40</Color>
+        <Color x:Key="BgSelectColor" >#264059</Color>
+        <Color x:Key="FgMainColor"   >#FFFFFF</Color>
+        <Color x:Key="FgMutedColor"  >#7D8FA1</Color>
+        <Color x:Key="FgAccentColor" >#1FC7AB</Color>
+        <Color x:Key="BorderColor"   >#264059</Color>
+
+        <SolidColorBrush x:Key="BgMain"   Color="{StaticResource BgMainColor}"/>
+        <SolidColorBrush x:Key="BgPanel"  Color="{StaticResource BgPanelColor}"/>
+        <SolidColorBrush x:Key="BgInput"  Color="{StaticResource BgInputColor}"/>
+        <SolidColorBrush x:Key="BgHover"  Color="{StaticResource BgHoverColor}"/>
+        <SolidColorBrush x:Key="BgSelect" Color="{StaticResource BgSelectColor}"/>
+        <SolidColorBrush x:Key="FgMain"   Color="{StaticResource FgMainColor}"/>
+        <SolidColorBrush x:Key="FgMuted"  Color="{StaticResource FgMutedColor}"/>
+        <SolidColorBrush x:Key="FgAccent" Color="{StaticResource FgAccentColor}"/>
+        <SolidColorBrush x:Key="Border"   Color="{StaticResource BorderColor}"/>
+    </Styles.Resources>
+
+    <!-- Window -->
+    <Style Selector="Window">
+        <Setter Property="Background" Value="{StaticResource BgMain}"/>
+        <Setter Property="FontFamily"  Value="Segoe UI,sans-serif"/>
+        <Setter Property="FontSize"    Value="12"/>
+        <Setter Property="Foreground"  Value="{StaticResource FgMain}"/>
+    </Style>
+
+    <!-- TextBlock -->
+    <Style Selector="TextBlock">
+        <Setter Property="Foreground" Value="{StaticResource FgMain}"/>
+    </Style>
+
+    <!-- TextBox -->
+    <Style Selector="TextBox">
+        <Setter Property="Background"       Value="{StaticResource BgInput}"/>
+        <Setter Property="Foreground"       Value="{StaticResource FgMain}"/>
+        <Setter Property="BorderBrush"      Value="{StaticResource Border}"/>
+        <Setter Property="BorderThickness"  Value="1"/>
+        <Setter Property="Padding"          Value="5,3"/>
+        <Setter Property="CaretBrush"       Value="{StaticResource FgMain}"/>
+        <Setter Property="SelectionBrush"   Value="{StaticResource BgSelect}"/>
+        <Setter Property="CornerRadius"     Value="3"/>
+    </Style>
+    <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
+        <Setter Property="BorderBrush" Value="{StaticResource FgAccent}"/>
+    </Style>
+
+    <!-- Button -->
+    <Style Selector="Button">
+        <Setter Property="Background"      Value="{StaticResource BgPanel}"/>
+        <Setter Property="Foreground"      Value="{StaticResource FgMain}"/>
+        <Setter Property="BorderBrush"     Value="{StaticResource Border}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Padding"         Value="10,3"/>
+        <Setter Property="CornerRadius"    Value="3"/>
+        <Setter Property="Cursor"          Value="Hand"/>
+    </Style>
+    <Style Selector="Button:pointerover /template/ ContentPresenter">
+        <Setter Property="Background" Value="{StaticResource BgHover}"/>
+    </Style>
+    <Style Selector="Button:pressed /template/ ContentPresenter">
+        <Setter Property="Background" Value="{StaticResource BgSelect}"/>
+    </Style>
+
+    <!-- ComboBox -->
+    <Style Selector="ComboBox">
+        <Setter Property="Background"      Value="{StaticResource BgInput}"/>
+        <Setter Property="Foreground"      Value="{StaticResource FgMain}"/>
+        <Setter Property="BorderBrush"     Value="{StaticResource Border}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Padding"         Value="5,3"/>
+        <Setter Property="CornerRadius"    Value="3"/>
+    </Style>
+    <Style Selector="ComboBoxItem">
+        <Setter Property="Background" Value="{StaticResource BgPanel}"/>
+        <Setter Property="Foreground" Value="{StaticResource FgMain}"/>
+        <Setter Property="Padding"    Value="8,4"/>
+    </Style>
+    <Style Selector="ComboBoxItem:selected /template/ ContentPresenter">
+        <Setter Property="Background" Value="{StaticResource BgSelect}"/>
+    </Style>
+    <Style Selector="ComboBoxItem:pointerover /template/ ContentPresenter">
+        <Setter Property="Background" Value="{StaticResource BgHover}"/>
+    </Style>
+
+    <!-- ListBox -->
+    <Style Selector="ListBox">
+        <Setter Property="Background"      Value="{StaticResource BgMain}"/>
+        <Setter Property="Foreground"      Value="{StaticResource FgMain}"/>
+        <Setter Property="BorderBrush"     Value="{StaticResource Border}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Padding"         Value="0"/>
+        <Setter Property="CornerRadius"    Value="3"/>
+    </Style>
+    <Style Selector="ListBoxItem">
+        <Setter Property="Padding"     Value="8,4"/>
+        <Setter Property="Background"  Value="Transparent"/>
+        <Setter Property="Foreground"  Value="{StaticResource FgMain}"/>
+    </Style>
+    <Style Selector="ListBoxItem:selected /template/ ContentPresenter">
+        <Setter Property="Background" Value="{StaticResource BgSelect}"/>
+    </Style>
+    <Style Selector="ListBoxItem:pointerover /template/ ContentPresenter">
+        <Setter Property="Background" Value="{StaticResource BgHover}"/>
+    </Style>
+
+    <!-- CheckBox -->
+    <Style Selector="CheckBox">
+        <Setter Property="Foreground" Value="{StaticResource FgMain}"/>
+    </Style>
+
+    <!-- Menu -->
+    <Style Selector="Menu">
+        <Setter Property="Background" Value="{StaticResource BgPanel}"/>
+        <Setter Property="Foreground" Value="{StaticResource FgMain}"/>
+    </Style>
+    <Style Selector="MenuItem">
+        <Setter Property="Background" Value="{StaticResource BgPanel}"/>
+        <Setter Property="Foreground" Value="{StaticResource FgMain}"/>
+    </Style>
+    <Style Selector="MenuItem:pointerover /template/ Border#PART_LayoutRoot">
+        <Setter Property="Background" Value="{StaticResource BgHover}"/>
+    </Style>
+    <Style Selector="Separator">
+        <Setter Property="Background" Value="{StaticResource Border}"/>
+    </Style>
+
+    <!-- GridSplitter -->
+    <Style Selector="GridSplitter">
+        <Setter Property="Background" Value="{StaticResource Border}"/>
+    </Style>
+
+</Styles>

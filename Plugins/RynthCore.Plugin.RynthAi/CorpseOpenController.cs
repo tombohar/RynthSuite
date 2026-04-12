@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using RynthCore.Plugin.RynthAi.LegacyUi;
+using RynthCore.Plugin.RynthAi.Loot;
 
 namespace RynthCore.Plugin.RynthAi;
 
@@ -41,6 +42,7 @@ public sealed partial class RynthAiPlugin
     private int _currentLootItemMoveAttempts;
     private string _currentLootItemActionLabel = string.Empty;
     private string _currentLootItemName = string.Empty;
+    private bool _currentLootItemIsSalvage;
 
     private static long CorpseNowMs => Environment.TickCount64;
     private void LootDiag(string message)
@@ -694,6 +696,9 @@ public sealed partial class RynthAiPlugin
         if (!string.IsNullOrWhiteSpace(_currentLootItemName))
             ChatLine($"[RynthAi] Looted [{_currentLootItemActionLabel}] {_currentLootItemName}");
 
+        if (_currentLootItemIsSalvage)
+            _salvageManager?.EnqueueItem(unchecked((uint)_currentLootItemId));
+
         ResetCurrentLootItem();
         _lastLootActionAt = now;
     }
@@ -751,34 +756,68 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
-        if (!TryLoadLootProfile(string.Empty, out VTankLootProfile profile, out _))
-        {
-            _processedCorpseItems.Add(itemId);
-            ResetCurrentLootItem();
-            _lastLootActionAt = now;
-            return;
-        }
+        // ── Classify item against active loot profile ─────────────────────────
+        string actionLabel;
+        bool isSalvage;
 
-        LootRule? matchedRule = null;
-        foreach (LootRule rule in profile.Rules)
+        if (TryLoadNativeLootProfile(out LootProfile nativeProfile, out _))
         {
-            if (rule.IsMatch(item))
+            // Native .json profile path
+            var (nativeAction, nativeRule) = LootEvaluator.Classify(nativeProfile, item, _charSkills);
+            if (nativeRule == null)
             {
-                matchedRule = rule;
-                break;
+                LootDiag($"[RynthAi] Corpse loot: no loot rule matched 0x{(uint)itemId:X8} '{item.Name}'.");
+                _processedCorpseItems.Add(itemId);
+                ResetCurrentLootItem();
+                _lastLootActionAt = now;
+                return;
             }
+            actionLabel = nativeAction.ToString();
+            isSalvage   = nativeAction == LootAction.Salvage;
+            string nativeLabel = string.IsNullOrWhiteSpace(nativeRule.Name) ? "rule" : nativeRule.Name.Trim();
+            ChatLine($"[RynthAi] Loot rule: {item.Name} -> [{actionLabel}] {nativeLabel}");
         }
-
-        if (matchedRule == null)
+        else
         {
-            LootDiag($"[RynthAi] Corpse loot: no loot rule matched 0x{(uint)itemId:X8} '{item.Name}'.");
-            _processedCorpseItems.Add(itemId);
-            ResetCurrentLootItem();
-            _lastLootActionAt = now;
-            return;
+            // VTank .utl profile fallback
+            if (!TryLoadLootProfile(string.Empty, out VTankLootProfile vtankProfile, out _))
+            {
+                _processedCorpseItems.Add(itemId);
+                ResetCurrentLootItem();
+                _lastLootActionAt = now;
+                return;
+            }
+
+            VTankLootRule? matchedRule = null;
+            int matchedRuleIndex      = -1;
+            for (int ri = 0; ri < vtankProfile.Rules.Count; ri++)
+            {
+                if (vtankProfile.Rules[ri].IsMatch(item))
+                {
+                    matchedRule      = vtankProfile.Rules[ri];
+                    matchedRuleIndex = ri;
+                    break;
+                }
+            }
+
+            if (matchedRule == null)
+            {
+                LootDiag($"[RynthAi] Corpse loot: no loot rule matched 0x{(uint)itemId:X8} '{item.Name}'.");
+                _processedCorpseItems.Add(itemId);
+                ResetCurrentLootItem();
+                _lastLootActionAt = now;
+                return;
+            }
+
+            string ruleLabel = string.IsNullOrWhiteSpace(matchedRule.Name)
+                ? $"#{matchedRuleIndex}"
+                : matchedRule.Name.Trim();
+            ChatLine($"[RynthAi] Loot rule: {item.Name} -> [{matchedRule.Action}] {ruleLabel}");
+            actionLabel = matchedRule.Action.ToString();
+            isSalvage   = matchedRule.Action == VTankLootAction.Salvage;
         }
 
-        ChatLine($"[RynthAi] Loot rule: {item.Name} -> [{matchedRule.Action}] {matchedRule.Name}");
+        // ── Dispatch ──────────────────────────────────────────────────────────
         Host.SelectItem(unchecked((uint)itemId));
         LootDiag($"[RynthAi] Corpse loot: using 0x{(uint)itemId:X8} '{item.Name}' from corpse 0x{(uint)_openedContainerId:X8}.");
         bool moved = Host.UseObject(unchecked((uint)itemId));
@@ -793,12 +832,13 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
-        _currentLootItemMovePending = true;
-        _currentLootItemMoveRequestedAt = now;
-        _currentLootItemMoveAttempts = 1;
-        _currentLootItemActionLabel = matchedRule.Action.ToString();
-        _currentLootItemName = item.Name;
-        _lastLootActionAt = now;
+        _currentLootItemMovePending      = true;
+        _currentLootItemMoveRequestedAt  = now;
+        _currentLootItemMoveAttempts     = 1;
+        _currentLootItemActionLabel      = actionLabel;
+        _currentLootItemName             = item.Name;
+        _currentLootItemIsSalvage        = isSalvage;
+        _lastLootActionAt                = now;
     }
 
     private void MarkCorpseCompleted(int corpseId)
@@ -834,6 +874,7 @@ public sealed partial class RynthAiPlugin
         _currentLootItemMoveAttempts = 0;
         _currentLootItemActionLabel = string.Empty;
         _currentLootItemName = string.Empty;
+        _currentLootItemIsSalvage = false;
     }
 
     private void ApproachCorpse(int corpseId)
@@ -1125,7 +1166,7 @@ public sealed partial class RynthAiPlugin
         string selector = parts.Length >= 3 ? parts[2].Trim().ToLowerInvariant() : string.Empty;
         if (!TryResolveCorpseForDiagnostics(selector, out WorldObject? corpse, out string source))
         {
-            ChatLine("[RynthAi] No corpse found for diagnostics. Use /na corpsecheck [target|open|nearest].");
+            ChatLine("[RynthAi] No corpse found for diagnostics. Use /ra corpsecheck [target|open|nearest].");
             return;
         }
 
@@ -1148,7 +1189,7 @@ public sealed partial class RynthAiPlugin
 
     private void HandleFellowshipInfoCommand()
     {
-        HandleFellowshipCommand(["/na", "fellow", "status"]);
+        HandleFellowshipCommand(["/ra", "fellow", "status"]);
     }
 
     private void HandleFellowshipCommand(string[] parts)
@@ -1216,16 +1257,16 @@ public sealed partial class RynthAiPlugin
                 }
                 else
                 {
-                    ChatLine("[RynthAi] Usage: /na fellow ismember <name>");
+                    ChatLine("[RynthAi] Usage: /ra fellow ismember <name>");
                 }
                 break;
 
             case "help":
-                ChatLine("[RynthAi] /na fellow [status|leader|count|names|name|open|locked|sharexp|ismember <name>]");
+                ChatLine("[RynthAi] /ra fellow [status|leader|count|names|name|open|locked|sharexp|ismember <name>]");
                 break;
 
             default:
-                ChatLine($"[RynthAi] Unknown fellow subcommand: {fellowSub}. Try /na fellow help");
+                ChatLine($"[RynthAi] Unknown fellow subcommand: {fellowSub}. Try /ra fellow help");
                 break;
         }
     }

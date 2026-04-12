@@ -165,8 +165,10 @@ public sealed class LegacyUiSettings
     public bool DashShowMacroRules;
     public bool DashShowMonsters;
     public bool DashShowDungeonMap;
-    public bool MapShowDoors     = true;
-    public bool MapShowCreatures = true;
+    public bool  MapShowDoors     = true;
+    public bool  MapShowCreatures = true;
+    public bool  MapShowToolbar   = true;
+    public float MapBgOpacity     = 1.0f;
 
     [JsonIgnore]
     public readonly string[] AdvancedTabs =
@@ -279,7 +281,8 @@ public enum MetaConditionType
     MainHealthPHE,
     MainManaLE,
     MainManaPHE,
-    MainStamLE
+    MainStamLE,
+    VitaePHE
 }
 
 public enum MetaActionType

@@ -1,0 +1,190 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="RynthCore.LootEditor.MainWindow"
+        Title="RynthCore Loot Editor"
+        Width="920" Height="620"
+        MinWidth="700" MinHeight="450"
+        WindowStartupLocation="CenterScreen">
+
+    <DockPanel>
+
+        <!-- Menu -->
+        <Menu DockPanel.Dock="Top">
+            <MenuItem Header="_File">
+                <MenuItem Header="_New"        Command="{Binding FileNew}"/>
+                <MenuItem Header="_Open..."     Command="{Binding FileOpen}"/>
+                <Separator/>
+                <MenuItem Header="_Save"        Command="{Binding FileSave}"/>
+                <MenuItem Header="Save _As..."  Command="{Binding FileSaveAs}"/>
+                <Separator/>
+                <MenuItem Header="E_xit"        Command="{Binding FileExit}"/>
+            </MenuItem>
+        </Menu>
+
+        <!-- Status bar -->
+        <Border DockPanel.Dock="Bottom"
+                Background="#080C10"
+                Padding="8,3">
+            <TextBlock x:Name="StatusText"
+                       Text="{Binding StatusMessage}"
+                       Foreground="{StaticResource FgMuted}"
+                       FontSize="11"/>
+        </Border>
+
+        <!-- Main content -->
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="260" MinWidth="160"/>
+                <ColumnDefinition Width="5"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Left: Rules panel -->
+            <DockPanel Grid.Column="0" Margin="6,6,0,6">
+
+                <!-- Search box -->
+                <TextBox DockPanel.Dock="Top"
+                         Text="{Binding SearchText}"
+                         Watermark="Search rules…"
+                         Margin="0,0,0,6"/>
+
+                <!-- Rules label + toolbar -->
+                <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4">
+                    <TextBlock Text="Rules"
+                               Foreground="{StaticResource FgMuted}"
+                               VerticalAlignment="Center"/>
+                    <StackPanel Orientation="Horizontal"
+                                HorizontalAlignment="Right"
+                                Spacing="3">
+                        <Button Content="+" Width="24" Padding="0"
+                                Command="{Binding RuleAdd}"    ToolTip.Tip="Add rule"/>
+                        <Button Content="−" Width="24" Padding="0"
+                                Command="{Binding RuleDelete}" ToolTip.Tip="Delete rule"/>
+                        <Button Content="↑" Width="24" Padding="0"
+                                Command="{Binding RuleMoveUp}" ToolTip.Tip="Move up"/>
+                        <Button Content="↓" Width="24" Padding="0"
+                                Command="{Binding RuleMoveDown}" ToolTip.Tip="Move down"/>
+                    </StackPanel>
+                </DockPanel>
+
+                <ListBox x:Name="RulesList"
+                         ItemsSource="{Binding FilteredRules}"
+                         SelectedItem="{Binding SelectedRule}">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Grid>
+                                <TextBlock Text="{Binding Name}" VerticalAlignment="Center"
+                                           TextDecorations="Strikethrough" Opacity="0.45"
+                                           IsVisible="{Binding !Enabled}"/>
+                                <TextBlock Text="{Binding Name}" VerticalAlignment="Center"
+                                           IsVisible="{Binding Enabled}"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+
+            <GridSplitter Grid.Column="1" Width="5" ResizeDirection="Columns"/>
+
+            <!-- Right: Rule editor -->
+            <DockPanel Grid.Column="2" Margin="6,6,6,6"
+                       IsEnabled="{Binding RuleEditorEnabled}">
+
+                <!-- Rule header -->
+                <TextBlock DockPanel.Dock="Top"
+                           Text="Rule"
+                           Foreground="{StaticResource FgAccent}"
+                           FontSize="13"
+                           Margin="0,0,0,6"/>
+
+                <!-- Rule properties -->
+                <Grid DockPanel.Dock="Top" Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="80"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="70"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="6"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="6"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0"
+                               Text="Name"
+                               VerticalAlignment="Center"
+                               Foreground="{StaticResource FgMuted}"/>
+                    <TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="3"
+                             Text="{Binding SelectedRuleName}"
+                             Watermark="Rule name…"/>
+
+                    <TextBlock Grid.Row="2" Grid.Column="0"
+                               Text="Action"
+                               VerticalAlignment="Center"
+                               Foreground="{StaticResource FgMuted}"/>
+                    <ComboBox Grid.Row="2" Grid.Column="1"
+                              ItemsSource="{Binding LootActions}"
+                              SelectedItem="{Binding SelectedRule.Action}"
+                              HorizontalAlignment="Stretch"/>
+                    <TextBlock Grid.Row="2" Grid.Column="2"
+                               Text="Keep count"
+                               VerticalAlignment="Center"
+                               Foreground="{StaticResource FgMuted}"
+                               Margin="8,0,4,0"
+                               IsVisible="{Binding ShowKeepCount}"/>
+                    <TextBox Grid.Row="2" Grid.Column="3"
+                             Text="{Binding KeepCountText}"
+                             IsVisible="{Binding ShowKeepCount}"/>
+
+                    <CheckBox Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="4"
+                              Content="Enabled"
+                              IsChecked="{Binding SelectedRule.Enabled}"/>
+                </Grid>
+
+                <Separator DockPanel.Dock="Top" Margin="0,0,0,8"/>
+
+                <!-- Conditions header + toolbar -->
+                <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4">
+                    <TextBlock Text="Conditions"
+                               Foreground="{StaticResource FgAccent}"
+                               FontSize="13"
+                               VerticalAlignment="Center"/>
+                    <StackPanel Orientation="Horizontal"
+                                HorizontalAlignment="Right"
+                                Spacing="3">
+                        <Button Content="+" Width="24" Padding="0"
+                                Command="{Binding CondAdd}"      ToolTip.Tip="Add condition"/>
+                        <Button Content="−" Width="24" Padding="0"
+                                Command="{Binding CondDelete}"   ToolTip.Tip="Delete condition"/>
+                        <Button Content="↑" Width="24" Padding="0"
+                                Command="{Binding CondMoveUp}"   ToolTip.Tip="Move up"/>
+                        <Button Content="↓" Width="24" Padding="0"
+                                Command="{Binding CondMoveDown}" ToolTip.Tip="Move down"/>
+                    </StackPanel>
+                </DockPanel>
+
+                <!-- Conditions list -->
+                <ListBox DockPanel.Dock="Top"
+                         Height="140"
+                         ItemsSource="{Binding Conditions}"
+                         SelectedItem="{Binding SelectedCondition}"
+                         Margin="0,0,0,8"/>
+
+                <!-- Condition editor panel -->
+                <Border Background="{StaticResource BgPanel}"
+                        BorderBrush="{StaticResource Border}"
+                        BorderThickness="1"
+                        CornerRadius="3"
+                        Padding="8"
+                        MinHeight="80">
+                    <ContentControl Content="{Binding ConditionEditor}"/>
+                </Border>
+
+            </DockPanel>
+
+        </Grid>
+    </DockPanel>
+</Window>

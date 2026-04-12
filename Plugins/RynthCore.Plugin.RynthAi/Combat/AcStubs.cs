@@ -2,37 +2,9 @@
 // TODO: Replace each stub with a proper RynthCore implementation, one at a time.
 using System;
 using System.Collections.Generic;
+using RynthCore.Loot; // AcObjectClass, AcSkillType live in the shared SDK
 
 namespace RynthCore.Plugin.RynthAi;
-
-// ── Enums ──────────────────────────────────────────────────────────────────
-
-public enum AcSkillType
-{
-    Unknown = 0,
-    MeleeDefense, MissileDefense, MagicDefense,
-    ItemEnchantment, LifeMagic, CreatureEnchantment, WarMagic, VoidMagic,
-    HeavyWeapons, LightWeapons, FinesseWeapons, TwoHandedCombat,
-    Shield, DualWield, Recklessness, SneakAttack, DirtyFighting,
-    ArcaneLore, ArmorTinkering, ItemTinkering, MagicItemTinkering, WeaponTinkering,
-    Salvaging, Run, Jump, Loyalty, Leadership, Deception,
-    Healing, Lockpick, Cooking, Fletching, Alchemy, ManaConversion,
-    AssessCreature, AssessPerson, Summoning,
-}
-
-public enum AcObjectClass
-{
-    Unknown = 0,
-    MeleeWeapon = 1,
-    Armor = 2,
-    Clothing = 3,
-    MissileWeapon = 4,
-    Creature = 5,
-    Ammo = 6,
-    Corpse = 7,
-    Container = 8,
-    WandStaffOrb = 9,
-}
 
 /// <summary>
 /// STypeInt keys used with TryGetObjectIntProperty / WorldObjectCache.GetIntProperty.

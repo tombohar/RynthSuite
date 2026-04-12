@@ -5,7 +5,7 @@ using RynthCore.Plugin.RynthAi.Raycasting;
 namespace RynthCore.Plugin.RynthAi;
 
 /// <summary>
-/// All /na chat commands — partial class split from RynthAiPlugin.
+/// All /ra chat commands — partial class split from RynthAiPlugin.
 /// </summary>
 public sealed partial class RynthAiPlugin
 {
@@ -17,30 +17,30 @@ public sealed partial class RynthAiPlugin
     private void HandleHelpCommand()
     {
         ChatLine("[RynthAi] === Commands ===");
-        ChatLine("[RynthAi] /na fellow       â€” fellowship diagnostics and queries");
-        ChatLine("[RynthAi] /na help          — show this list");
-        ChatLine("[RynthAi] /na power <0-100|auto> — set attack power (auto = recklessness-aware)");
-        ChatLine("[RynthAi] /na cast <spellId> — cast spell on current target");
-        ChatLine("[RynthAi] /na buffs         — show active buff timers");
-        ChatLine("[RynthAi] /na scan          — show nearby monsters");
-        ChatLine("[RynthAi] /na cache         — show object cache summary");
-        ChatLine("[RynthAi] /na cache2        — show raw object cache IDs");
-        ChatLine("[RynthAi] /na attackable    — check if target is attackable");
-        ChatLine("[RynthAi] /na wielded       — show wielded items");
-        ChatLine("[RynthAi] /na dumpprops     — dump player properties");
-        ChatLine("[RynthAi] /na mexec <expr>  — evaluate meta expression");
-        ChatLine("[RynthAi] /na listvars      — show meta variables");
-        ChatLine("[RynthAi] /na raycast       — raycast system status");
-        ChatLine("[RynthAi] /na lostest       — line-of-sight test to target");
-        ChatLine("[RynthAi] /na buildinfo     — nearby geometry info");
-        ChatLine("[RynthAi] /na navdebug      — show nav coordinate/debug info");
-        ChatLine("[RynthAi] /na corpseinfo    — show corpse range/open diagnostics");
-        ChatLine("[RynthAi] /na corpsecheck   — explain whether a corpse would be looted");
-        ChatLine("[RynthAi] /na corpseopen    — force the nearest corpse open flow");
-        ChatLine("[RynthAi] /na fellowinfo    — show fellowship tracker state");
-        ChatLine("[RynthAi] /na lootparse     — inspect the selected loot profile");
-        ChatLine("[RynthAi] /na lootcheckinv  — test the loot profile against inventory");
-        ChatLine("[RynthAi] /na dumpinv       — dump all inventory items (cache + direct)");
+        ChatLine("[RynthAi] /ra fellow       â€” fellowship diagnostics and queries");
+        ChatLine("[RynthAi] /ra help          — show this list");
+        ChatLine("[RynthAi] /ra power <0-100|auto> — set attack power (auto = recklessness-aware)");
+        ChatLine("[RynthAi] /ra cast <spellId> — cast spell on current target");
+        ChatLine("[RynthAi] /ra buffs         — show active buff timers");
+        ChatLine("[RynthAi] /ra scan          — show nearby monsters");
+        ChatLine("[RynthAi] /ra cache         — show object cache summary");
+        ChatLine("[RynthAi] /ra cache2        — show raw object cache IDs");
+        ChatLine("[RynthAi] /ra attackable    — check if target is attackable");
+        ChatLine("[RynthAi] /ra wielded       — show wielded items");
+        ChatLine("[RynthAi] /ra dumpprops     — dump player properties");
+        ChatLine("[RynthAi] /ra mexec <expr>  — evaluate meta expression");
+        ChatLine("[RynthAi] /ra listvars      — show meta variables");
+        ChatLine("[RynthAi] /ra raycast       — raycast system status");
+        ChatLine("[RynthAi] /ra lostest       — line-of-sight test to target");
+        ChatLine("[RynthAi] /ra buildinfo     — nearby geometry info");
+        ChatLine("[RynthAi] /ra navdebug      — show nav coordinate/debug info");
+        ChatLine("[RynthAi] /ra corpseinfo    — show corpse range/open diagnostics");
+        ChatLine("[RynthAi] /ra corpsecheck   — explain whether a corpse would be looted");
+        ChatLine("[RynthAi] /ra corpseopen    — force the nearest corpse open flow");
+        ChatLine("[RynthAi] /ra fellowinfo    — show fellowship tracker state");
+        ChatLine("[RynthAi] /ra lootparse     — inspect the selected loot profile");
+        ChatLine("[RynthAi] /ra lootcheckinv  — test the loot profile against inventory");
+        ChatLine("[RynthAi] /ra dumpinv       — dump all inventory items (cache + direct)");
     }
 
     private void HandlePowerCommand(string[] parts)
@@ -53,7 +53,7 @@ public sealed partial class RynthAiPlugin
             string current = settings.MeleeAttackPower < 0 ? "auto" : $"{settings.MeleeAttackPower}%";
             string currentMissile = settings.MissileAttackPower < 0 ? "auto" : $"{settings.MissileAttackPower}%";
             ChatLine($"[RynthAi] Melee power: {current}, Missile power: {currentMissile}");
-            ChatLine("[RynthAi] Usage: /na power <0-100|auto>");
+            ChatLine("[RynthAi] Usage: /ra power <0-100|auto>");
             return;
         }
 
@@ -72,7 +72,7 @@ public sealed partial class RynthAiPlugin
         }
         else
         {
-            ChatLine("[RynthAi] Usage: /na power <0-100|auto>");
+            ChatLine("[RynthAi] Usage: /ra power <0-100|auto>");
         }
     }
 
@@ -103,7 +103,7 @@ public sealed partial class RynthAiPlugin
     {
         if (parts.Length < 3 || !int.TryParse(parts[2], out int spellId))
         {
-            ChatLine("[RynthAi] Usage: /na cast <spellId>");
+            ChatLine("[RynthAi] Usage: /ra cast <spellId>");
             return;
         }
 
@@ -146,7 +146,7 @@ public sealed partial class RynthAiPlugin
                 ChatLine($"[RynthAi] Inv [{wo.ObjectClass}]: {wo.Name} (0x{(uint)wo.Id:X8})");
         }
         var stats = _objectCache.GetStats();
-        ChatLine($"[RynthAi] Cache: {creatures} creatures | cache inv={stats.Inventory} | direct inv={directInventory} ({wands} wands) — type /na cache2 for details");
+        ChatLine($"[RynthAi] Cache: {creatures} creatures | cache inv={stats.Inventory} | direct inv={directInventory} ({wands} wands) — type /ra cache2 for details");
     }
 
     private void HandleCache2Command()
@@ -274,24 +274,18 @@ public sealed partial class RynthAiPlugin
 
         if (parts.Length < 3)
         {
-            ChatLine("[RynthAi] Usage: /na mexec <expression>");
-            ChatLine("[RynthAi]   e.g. /na mexec setvar[Nav, NTTest5]");
-            ChatLine("[RynthAi]   e.g. /na mexec getcharintprop[25]");
+            ChatLine("[RynthAi] Usage: /ra mexec <expression>");
+            ChatLine("[RynthAi]   e.g. /ra mexec setvar[Nav, NTTest5]");
+            ChatLine("[RynthAi]   e.g. /ra mexec getcharintprop[25]");
             return;
         }
 
         string expr = string.Join(" ", parts, 2, parts.Length - 2);
-        var engine = _metaManager.Expressions;
-
-        if (engine.TryExecuteAction(expr))
-        {
-            ChatLine($"[RynthAi] Executed: {expr}");
-        }
-        else
-        {
-            string result = engine.Evaluate(expr);
-            ChatLine($"[RynthAi] {expr} == {result}");
-        }
+        ChatLine($"[RynthAi] Evaluating expression: \"{expr}\"");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        string result = _metaManager.Expressions.Evaluate(expr);
+        sw.Stop();
+        ChatLine($"[RynthAi] Result: {result} ({sw.Elapsed.TotalMilliseconds:F3}ms)");
     }
 
     private void HandleListVarsCommand()
@@ -651,7 +645,7 @@ public sealed partial class RynthAiPlugin
         int previewCount = Math.Min(profile.Rules.Count, 8);
         for (int i = 0; i < previewCount; i++)
         {
-            LootRule rule = profile.Rules[i];
+            VTankLootRule rule = profile.Rules[i];
             string name = string.IsNullOrWhiteSpace(rule.Name) ? "<unnamed>" : rule.Name;
             ChatLine($"[RynthAi]   {i + 1}. [{rule.Action}] keep={rule.KeepCount} {name}");
         }
@@ -674,13 +668,13 @@ public sealed partial class RynthAiPlugin
 
         int total = 0;
         int matched = 0;
-        var actionCounts = new System.Collections.Generic.Dictionary<LootAction, int>();
+        var actionCounts = new System.Collections.Generic.Dictionary<VTankLootAction, int>();
         int shown = 0;
 
         foreach (var item in _objectCache.GetInventory())
         {
             total++;
-            LootRule? firstMatch = null;
+            VTankLootRule? firstMatch = null;
             foreach (var rule in profile.Rules)
             {
                 if (rule.IsMatch(item))
@@ -763,6 +757,46 @@ public sealed partial class RynthAiPlugin
         catch (Exception ex)
         {
             ChatLine($"[RynthAi] Failed to load loot profile: {ex.Message}");
+            return false;
+        }
+    }
+
+    private bool TryLoadNativeLootProfile(out RynthCore.Loot.LootProfile profile, out string loadedPath)
+    {
+        string candidatePath = (_dashboard?.Settings?.CurrentLootPath ?? string.Empty).Trim().Trim('"');
+        loadedPath = candidatePath;
+        profile = _nativeLootProfile ?? new RynthCore.Loot.LootProfile();
+
+        if (string.IsNullOrWhiteSpace(candidatePath)
+            || !candidatePath.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (!System.IO.File.Exists(candidatePath))
+        {
+            ChatLine($"[RynthAi] Native loot profile not found: {candidatePath}");
+            return false;
+        }
+
+        if (_nativeLootProfile != null
+            && string.Equals(_nativeLootProfilePath, candidatePath, StringComparison.OrdinalIgnoreCase)
+            && System.IO.File.GetLastWriteTime(candidatePath) == _nativeLootProfileTime)
+        {
+            profile = _nativeLootProfile;
+            return true;
+        }
+
+        try
+        {
+            profile = RynthCore.Loot.LootProfile.Load(candidatePath);
+            _nativeLootProfile = profile;
+            _nativeLootProfilePath = candidatePath;
+            _nativeLootProfileTime = System.IO.File.GetLastWriteTime(candidatePath);
+            ChatLine($"[RynthAi] Loaded native loot profile '{System.IO.Path.GetFileName(candidatePath)}' with {profile.Rules.Count} rule(s).");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ChatLine($"[RynthAi] Failed to load native loot profile: {ex.Message}");
             return false;
         }
     }
@@ -854,7 +888,7 @@ public sealed partial class RynthAiPlugin
 
     private static string ExtractCommandArgument(string fullCommand, string commandName)
     {
-        string prefix = $"/na {commandName}";
+        string prefix = $"/ra {commandName}";
         if (!fullCommand.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
             return string.Empty;
 
