@@ -130,24 +130,100 @@ if[condition, then]
 ──────────────────────────────────────────
 Variables
 ──────────────────────────────────────────
-Variables are stored as strings. They persist for the lifetime of the
-macro session and are shared across all meta rules.
+
+SESSION VARIABLES
+Session variables persist for the lifetime of the macro session and are
+shared across all meta rules. They are cleared on relog or plugin reload.
 
 setvar[key, value]
-    Stores value into the named variable. Returns "".
-    The value is a full expression and will be evaluated.
-    Example: setvar[count, 0]
-    Example: setvar[count, getcharintprop[1] + 1]
-    Example: setvar[mode, hunting]
+    Stores value into the named variable. Returns the stored value.
+    Example: setvar[count,0]
+    Example: setvar[count,getcharintprop[1]+1]
 
 getvar[key]
-    Returns the value of the named variable, or "" if it does not exist.
+    Returns the value of the named variable, or "0" if not defined.
     Example: getvar[count]
-    Example: getvar[mode] == hunting
+    Example: $count              (shorthand for getvar[count])
 
 testvar[key]
-    Returns "1" if the variable exists, "0" if it does not.
+    Returns "1" if the variable is defined, "0" otherwise.
     Example: testvar[count]
+
+touchvar[key]
+    Sets the variable to "0" if it was not previously defined.
+    Returns "1" if it was already defined, "0" if it was just initialised.
+    Example: touchvar[count]
+
+clearvar[key]
+    Removes the variable. Returns "1" if it existed, "0" otherwise.
+    Example: clearvar[count]
+
+clearallvars[]
+    Removes all session variables. Returns "1".
+    Example: clearallvars[]
+
+
+PERSISTENT VARIABLES (pvars)
+Persistent variables survive relogging and plugin reloads. They are stored
+per-character at: C:\Games\RynthSuite\RynthAi\pvars\{CharName}.txt
+
+setpvar[key, value]
+    Stores value in the persistent variable and saves to disk.
+    Returns the stored value.
+    Example: setpvar[kills,0]
+
+getpvar[key]
+    Returns the value of the persistent variable, or "0" if not defined.
+    Example: getpvar[kills]
+
+testpvar[key]
+    Returns "1" if the persistent variable is defined, "0" otherwise.
+    Example: testpvar[kills]
+
+touchpvar[key]
+    Sets the persistent variable to "0" if not previously defined and saves.
+    Returns "1" if already defined, "0" if just initialised.
+    Example: touchpvar[kills]
+
+clearpvar[key]
+    Removes the persistent variable and saves. Returns "1" if it existed.
+    Example: clearpvar[kills]
+
+clearallpvars[]
+    Removes all persistent variables for this character and saves. Returns "1".
+    Example: clearallpvars[]
+
+
+GLOBAL VARIABLES (gvars)
+Global variables are shared across all characters. They are stored at:
+C:\Games\RynthSuite\RynthAi\gvars.txt
+
+setgvar[key, value]
+    Stores value in the global variable and saves to disk.
+    Returns the stored value.
+    Example: setgvar[serverKills,0]
+
+getgvar[key]
+    Returns the value of the global variable, or "0" if not defined.
+    Example: getgvar[serverKills]
+
+testgvar[key]
+    Returns "1" if the global variable is defined, "0" otherwise.
+    Example: testgvar[serverKills]
+
+touchgvar[key]
+    Sets the global variable to "0" if not previously defined and saves.
+    Returns "1" if already defined, "0" if just initialised.
+    Example: touchgvar[serverKills]
+
+cleargvar[key]
+    Removes the global variable and saves. Returns "1" if it existed.
+    Example: cleargvar[serverKills]
+
+clearallgvars[]
+    Removes all global variables and saves. Returns "1".
+    Example: clearallgvars[]
+
 
 ──────────────────────────────────────────
 Character Properties
@@ -165,6 +241,12 @@ getchardoubleprop[id]
     Returns a float/double property from the player character.
     Example: getchardoubleprop[22]  (damage variance)
 
+getcharquadprop[id]
+    Returns a 64-bit integer (quad) property from the player character.
+    Returns "0" if the property is undefined or unavailable.
+    Example: getcharquadprop[273]   (total XP)
+    Example: getcharquadprop[274]   (unassigned XP)
+
 getcharboolprop[id]
     Returns "1" or "0" for a boolean property on the player character.
     Example: getcharboolprop[1]    (stuck)
@@ -173,6 +255,142 @@ getcharstringprop[id]
     Returns a string property from the player character.
     Example: getcharstringprop[1]  (name)
     Example: getcharstringprop[2]  (title)
+
+getisspellknown[spellId]
+    Returns "1" if your character knows the spell with the given ID, "0" otherwise.
+    Example: getisspellknown[2931]  (Recall Aphus Lassel)
+
+getcancastspell_hunt[spellId]
+    Returns "1" if your character knows the spell and has mana available to cast it
+    while hunting (in combat context). Returns "0" otherwise.
+    Note: mana cost per spell is not available; mana > 0 is the threshold.
+    Example: getcancastspell_hunt[2931]
+
+getcancastspell_buff[spellId]
+    Returns "1" if your character knows the spell and has mana available to cast it
+    while buffing. Returns "0" otherwise.
+    Example: getcancastspell_buff[2931]
+
+getspellexpiration[spellId]
+    Returns the number of seconds until the active enchantment with spellId expires.
+    Returns "0" if the spell is not currently active.
+    Returns "2147483647" if the spell is permanent (does not expire).
+    Example: getspellexpiration[515]  (Acid Protection Self I)
+
+getspellexpirationbyname[spellName]
+    Returns the number of seconds until an active enchantment whose name contains
+    spellName (case-insensitive) expires.
+    Returns "0" if no matching spell is active.
+    Returns "2147483647" if the spell is permanent.
+    Returns "-1" if an error occurred (no server time sync, API unavailable).
+    Example: getspellexpirationbyname[acid prot]
+
+getcharvital_base[vitalId]
+    Returns your character's base (unbuffed) maximum vital.
+    Includes base training, gear bonuses, and augmentations, but NOT spell enchantments.
+    vitalId: 1 = Health, 2 = Stamina, 3 = Mana
+    Example: getcharvital_base[1]   (base max health)
+    Example: getcharvital_base[3]   (base max mana)
+
+getcharvital_current[vitalId]
+    Returns your character's current vital value.
+    vitalId: 1 = Health, 2 = Stamina, 3 = Mana
+    Example: getcharvital_current[1]   (current health)
+    Example: getcharvital_current[2]   (current stamina)
+
+getcharvital_buffedmax[vitalId]
+    Returns your character's buffed maximum vital (base + active spell enchantments).
+    vitalId: 1 = Health, 2 = Stamina, 3 = Mana
+    Example: getcharvital_buffedmax[1]   (buffed max health)
+    Example: getcharvital_buffedmax[3]   (buffed max mana)
+
+getcharskill_traininglevel[skillId]
+    Returns your character's training level for the specified skill.
+    Returns: 0 = Unusable, 1 = Untrained, 2 = Trained, 3 = Specialized
+    skillId: STypeSkill numeric value (e.g. 23 = LockPick, 43 = Void)
+    Example: getcharskill_traininglevel[23]   (LockPick training level)
+
+getcharskill_base[skillId]
+    Returns your character's base skill level (no enchantments).
+    Includes points spent and practice points, but NOT spell buffs.
+    skillId: STypeSkill numeric value
+    Example: getcharskill_base[43]   (base Void skill)
+
+getcharskill_buffed[skillId]
+    Returns your character's buffed skill level (base + active spell enchantments).
+    skillId: STypeSkill numeric value
+    Example: getcharskill_buffed[33]   (buffed Life Magic skill)
+
+getcharattribute_base[attributeId]
+    Returns your character's base attribute level (no enchantments).
+    attributeId: 1=Strength, 2=Endurance, 3=Quickness, 4=Coordination, 5=Focus, 6=Self
+    Example: getcharattribute_base[1]   (base Strength)
+
+getcharattribute_buffed[attributeId]
+    Returns your character's buffed attribute level (base + active spell enchantments).
+    attributeId: 1=Strength, 2=Endurance, 3=Quickness, 4=Coordination, 5=Focus, 6=Self
+    Example: getcharattribute_buffed[5]   (buffed Focus)
+
+getcharburden[0]
+    Returns your character's current burden as a float percentage of max capacity.
+    Capacity = buffed Strength * 150. Matches UB output format.
+    The argument is ignored — pass 0.
+    Example: getcharburden[0]   (e.g. 3.343...)
+
+getcharburden_total[0]
+    Returns your character's raw encumbrance value (burden units, not percentage).
+    The argument is ignored — pass 0.
+    Example: getcharburden_total[0]
+
+getplayerlandcell[]
+    Returns the landcell (objCellId) your character is currently standing in, as a number.
+    Example: getplayerlandcell[]
+
+getplayerlandblock[]
+    Returns the landblock (objCellId & 0xFFFF0000) your character is in, as a number.
+    Matches UB: the full 32-bit value with the lower 16 bits zeroed.
+    Example: getplayerlandblock[]
+
+getplayercoordinates[]
+    Returns a coordinates object (pipe-delimited, full precision) for the player's current
+    position: "NS|EW|Z". NS positive=N, negative=S. EW positive=E, negative=W.
+    Z is in coordinate units (raw_z/240). Use coordinatetostring[] for display,
+    coordinategetns/ew/z[] to extract components.
+    Example: getplayercoordinates[]   →  "41.52994|34.46267|0.46669"
+
+coordinategetns[coords]
+    Extracts the north/south component (map units) from a coordinates object.
+    Positive = North, negative = South. Matches UB coordinatenorthsouth[].
+    Example: coordinategetns[getplayercoordinates[]]   →  41.53
+
+coordinategetwe[coords]
+    Extracts the east/west component (map units) from a coordinates object.
+    Positive = East, negative = West. Matches UB coordinateeastwest[].
+    Example: coordinategetwe[getplayercoordinates[]]   →  34.46
+
+coordinategetz[coords]
+    Extracts the Z component from a coordinates object. Z is already in coordinate units
+    (raw_z / 240) — no further division is applied. Matches UB coordinatez[].
+    Example: coordinategetz[getplayercoordinates[]]    →  0.47
+
+coordinatetostring[coords]
+    Formats a coordinates object as a human-readable string matching UB format:
+    "{NS}N/{S}, {EW}E/{W}, {Z}Z" with 2 decimal places. Z is divided by 240.
+    Example: coordinatetostring[getplayercoordinates[]]  →  "41.53N, 34.46E, 0.47Z"
+
+coordinateparse[string]
+    Parses a human-readable coordinate string into a coordinates object.
+    Accepts UB format: "41.53N, 34.46E, 0.47Z" (Z optional).
+    NS must have N/S suffix; EW must have E/W suffix; Z suffix is z/Z.
+    The comma in coordinate strings is treated as part of the argument — no backticks needed.
+    Example: coordinateparse[41.53N, 34.46E, 0.47Z]
+    Example: coordinateparse[41.53N, 34.46E]   (no Z — defaults to 0)
+
+coordinatedistancewithz[obj1, obj2]
+    Returns the 3D distance in game units between two coordinates objects.
+    Converts NS/EW from coordinate units to raw game units (×240), same for Z.
+    Matches UB coordinatedistancewithz[].
+    Example: coordinatedistancewithz[coordinateparse[1.2N, 3.4E], coordinateparse[5.6N, 7.8E]]
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -571,6 +789,57 @@ wobjectfindnearestbytemplatetype[wcid]
     Example: wobjectfindnearestbytemplatetype[31008] == 0       →  true if none nearby
     Example: setvar[t, wobjectfindnearestbytemplatetype[31008]] →  store the handle
 
+wobjectfindininventorybynamerx[namerx]
+    Returns a WorldObject handle for the first inventory item whose name matches the regex.
+    Pattern is case-insensitive. Returns "0" on invalid/empty pattern or no match.
+    Example: wobjectfindininventorybynamerx[.* Healing Kit]
+                 →  handle of the first Healing Kit found in inventory
+    Example: actiontryapplyitem[wobjectfindininventorybynamerx[.* Healing Kit], wobjectgetplayer[]]
+                 →  use first healing kit on yourself
+
+wobjectfindallinventorybynamerx[namerx]
+    Returns a list of WorldObject handles for all inventory items whose name matches the regex.
+    Pattern is case-insensitive. Returns "[]" on invalid/empty pattern or no matches.
+    Example: wobjectfindallinventorybynamerx[Titan Mana Charge]
+                 →  list of handles for all Titan Mana Charges
+    Example: wobjectfindallinventorybynamerx[.*Scarab.*]   →  all scarab components
+    Example: listcount[wobjectfindallinventorybynamerx[.*Arrow.*]]  →  count of arrows
+
+wobjectfindallinventorybytemplatetype[wcid]
+    Returns a list of WorldObject handles for all inventory items whose Weenie Class ID matches wcid.
+    Returns "[]" if none found or WCID is invalid.
+    Searches the direct inventory snapshot (same source as crafting/ammo logic).
+    Example: wobjectfindallinventorybytemplatetype[9060]
+                 →  list of handles for all Titan Mana Charges in inventory
+    Example: listcount[wobjectfindallinventorybytemplatetype[9060]]   →  count of matching items
+    Example: listgetitem[wobjectfindallinventorybytemplatetype[9060], 0]  →  first matching handle
+
+wobjectfindalllandscapebytemplatetype[wcid]
+    Returns a list of WorldObject handles for all landscape objects whose Weenie Class ID matches wcid.
+    Returns "[]" if none found or WCID is invalid.
+    Searches all currently visible landscape objects (creatures, items, portals, static objects, etc.).
+    Example: wobjectfindalllandscapebytemplatetype[9060]
+                 →  list of handles for all Titan Mana Charges on the landscape
+    Example: listcount[wobjectfindalllandscapebytemplatetype[9060]]   →  count of matching objects
+    Example: listgetitem[wobjectfindalllandscapebytemplatetype[9060], 0]  →  first matching handle
+
+wobjectfindalllandscapebynamerx[namerx]
+    Returns a list of WorldObject handles for all landscape objects whose name matches the regex.
+    Pattern is case-insensitive. Returns "[]" on invalid/empty pattern or no matches.
+    Searches all currently visible landscape objects (creatures, items, portals, static objects, etc.).
+    Example: wobjectfindalllandscapebynamerx[Crash.*]
+                 →  list of handles for all landscape objects with names starting with "Crash"
+    Example: listcount[wobjectfindalllandscapebynamerx[.*Golem.*]]   →  count of golems nearby
+
+wobjectfindallbycontainer[container]
+    Returns a list of WorldObject handles for all items directly inside the given container.
+    The container argument can be a wobject handle or a bare object ID (hex or decimal).
+    Returns "[]" if the container is invalid or has no accessible contents.
+    Example: wobjectfindallbycontainer[wobjectgetselection[]]
+                 →  list of items in the currently selected container
+    Example: wobjectfindallbycontainer[0x1234ABCD]
+                 →  list of items in the container with that ID
+
 wobjectgetname[handle]
     Returns the name of the world object from its handle.
     Returns "" if the handle is "0" or the object cannot be found.
@@ -603,6 +872,13 @@ wobjectgetselection[]
     Returns "0" if nothing is selected.
     Example: wobjectgetselection[]
                  →  "[WorldObject] 0x80001F7B: Olthoi Slayer"
+
+wobjectgetplayer[]
+    Returns a WorldObject handle for the current player character.
+    Returns "0" if the player ID is not yet available (e.g. before login completes).
+    Example: wobjectgetplayer[]
+                 →  "[WorldObject] 0x500012AB: MyCharName"
+    Example: actiontryuseitem[wobjectgetplayer[]]   →  open the player's backpack
     Example: wobjectgetname[wobjectgetselection[]]   →  name of selected object
 
 wobjectgetintprop[handle, property]
@@ -836,6 +1112,78 @@ MATH
 All trig functions accept angles in radians. Missing or unparseable arguments default to 0.
 All results are formatted with C# "G" (shortest-round-trip).
 
+isfalse[value]
+    Returns "1" if value is 0 (false), "0" otherwise.
+    Example: isfalse[0]   →  "1"
+    Example: isfalse[1]   →  "0"
+
+istrue[value]
+    Returns "1" if value is non-zero (true), "0" otherwise.
+    Example: istrue[1]    →  "1"
+    Example: istrue[0]    →  "0"
+
+iif[value, truevalue, falsevalue]
+    Returns truevalue if value is non-zero, falsevalue otherwise.
+    Both arguments are always evaluated. Use if[] for conditional evaluation.
+    Example: iif[1,2,3]   →  "2"  (first param is true)
+    Example: iif[0,2,3]   →  "3"  (first param is false)
+
+randint[min, max]
+    Returns a random integer in the range [min, max-1].
+    Example: randint[0,2]   →  "0" or "1" (never 2)
+
+cstr[number]
+    Converts a number to its string representation.
+    Example: cstr[2]   →  "2"
+
+cstrf[number, format]
+    Converts a number to a string using a .NET numeric format string.
+    The format argument is a literal string (e.g. N3, F2, 0.00).
+    Example: cstrf[3.14159,N3]   →  "3.142"
+
+cnumber[string]
+    Converts a string to a floating point number.
+    Example: cnumber[3.14159]   →  "3.14159"
+
+strlen[tocheck]
+    Returns the length of the string tocheck.
+    Example: strlen[test]   →  "4"
+
+getobjectinternaltype[tocheck]
+    Returns the internal type of a value as a number.
+    0 = none (empty), 1 = number, 3 = string, 7 = object (WorldObject handle)
+    Example: getobjectinternaltype[test]              →  "3"
+    Example: getobjectinternaltype[42]                →  "1"
+    Example: getobjectinternaltype[wobjectgetplayer[]] →  "7"
+    Example: getobjectinternaltype[]                  →  "0"
+
+floor[number]
+    Returns the largest integer less than or equal to number.
+    Example: floor[3.14159]   →  "3"
+
+ceiling[number]
+    Returns the smallest integer greater than or equal to number.
+    Example: ceiling[3.14159]   →  "4"
+
+round[number]
+    Returns number rounded to the nearest integer (half rounds away from zero).
+    Example: round[3.14159]   →  "3"
+    Example: round[3.5]       →  "4"
+
+abs[number]
+    Returns the absolute value of number.
+    Example: abs[-3.14159]   →  "3.14159"
+
+ord[character]
+    Returns the Unicode code point of the first character of the string as a number.
+    Returns "0" if the string is empty.
+    Example: ord[c]   →  "99"
+
+chr[number]
+    Returns the character whose Unicode code point is number, as a single-character string.
+    Returns "" if number is out of the valid Unicode range.
+    Example: chr[99]   →  "c"
+
 hexstr[d]
     Converts a number to an uppercase hexadecimal string with "0x" prefix.
     Input is truncated to a 64-bit integer before conversion.
@@ -913,6 +1261,30 @@ tanh[d]
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STOPWATCHES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Stopwatch handles look like "SW:0", "SW:1", etc. Store them in variables with setvar[].
+Stopwatches persist for the lifetime of the plugin session.
+
+stopwatchcreate[]
+    Creates a new stopped stopwatch. Returns its handle.
+    Example: setvar[sw,stopwatchcreate[]]
+
+stopwatchstart[watch]
+    Starts the stopwatch (no-op if already running). Returns the handle.
+    Example: stopwatchstart[$sw]
+
+stopwatchstop[watch]
+    Stops the stopwatch (no-op if already stopped). Returns the handle.
+    Example: stopwatchstop[$sw]
+
+stopwatchelapsedseconds[watch]
+    Returns the total elapsed time in seconds (as a decimal number).
+    Example: stopwatchelapsedseconds[$sw]   →  "3.141"
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DICTIONARIES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -978,6 +1350,57 @@ dictclear[handle]
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ACTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+actiontryselect[obj]
+    Attempts to select the given world object. Always returns "0".
+    The obj parameter can be a wobject handle or a bare object ID (hex or decimal).
+    Example: actiontryselect[wobjectgetselection[]]   →  re-select the current target
+    Example: actiontryselect[wobjectfindnearestbytemplatetype[31008]]
+                 →  select nearest Lifestone
+
+actiontryuseitem[obj]
+    Attempts to use the given world object. Always returns "0".
+    The obj parameter can be a wobject handle or a bare object ID (hex or decimal).
+    Example: actiontryuseitem[wobjectgetplayer[]]   →  use the player (opens backpack)
+    Example: actiontryuseitem[wobjectfindnearestbytemplatetype[31008]]
+                 →  use nearest Lifestone (recalls)
+
+actiontryapplyitem[useObj, onObj]
+    Attempts to use useObj on onObj (e.g. apply a healing kit to a target). Returns "1" if
+    the action could be dispatched, "0" if either handle is invalid or the hook is unavailable.
+    Example: actiontryapplyitem[wobjectfindininventorybynamerx[.* Healing Kit], wobjectgetplayer[]]
+                 →  use any healing kit in inventory on yourself
+
+actiontrycastbyid[spellId]
+    Attempts to cast the spell with the given ID as a hunting spell.
+    If not in magic mode, takes one step towards it (equip wand or change stance) and returns "0".
+    Returns "1" if the cast was dispatched, "0" if a prerequisite step was taken or client is busy,
+    "2" if the attempt is impossible (invalid spell ID, hook unavailable, no player).
+    Casts on the currently selected target; falls back to the player for self-cast spells.
+    Example: actiontrycastbyid[2931]   →  cast Recall Aphus Lassel
+
+actiontrycastbyidontarget[spellId, wobjectHandle]
+    Attempts to cast a spell by ID on a specific world object. Checks spell prerequisites as a
+    hunting spell. If not in magic mode, takes one step towards it (equip wand or change stance)
+    and returns "0". Returns "1" if the cast was dispatched, "0" if a prerequisite step was taken,
+    "2" if the attempt is impossible (invalid spell ID, invalid target handle, hook unavailable).
+    Example: actiontrycastbyidontarget[1,wobjectgetselection[]]
+                 →  cast Strength Other on your currently selected target
+
+actiontryequipanywand[]
+    Takes one step towards equipping a wand. Scans inventory for any WandStaffOrb.
+    Returns "1" if a wand is already wielded, "0" otherwise (and issues the equip UseObject).
+    Example: actiontryequipanywand[]   →  equip the first wand found in inventory
+
+actiontrygiveitem[give, destination]
+    Attempts to give the item (give) to the target (destination), e.g. an NPC or player.
+    Gives the full stack. Returns "1" if the action could be dispatched, "0" otherwise.
+    Example: actiontrygiveitem[wobjectfindininventorybynamerx[.* Healing Kit], wobjectgetselection[]]
+                 →  give first matching healing kit to the currently selected object
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ITEM GIVING
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1012,6 +1435,115 @@ actiontrygiveprofile[lootprofile, target]
                  →  "1" if items were given (VTank profile)
     Example: actiontrygiveprofile[mysalvage.json,My Salvage Mule]
                  →  "1" if items were given (native JSON profile)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+chatbox[message]
+    Sends a message to the chatbox as if you had typed it and pressed Enter.
+    Returns the message string that was sent.
+    Example: chatbox[/fellowship quit]   →  leaves fellowship
+    Example: chatbox[Hello world]        →  says "Hello world" in general chat
+
+chatboxpaste[message]
+    Pastes a message to the chat input box without sending it. [NOT YET IMPLEMENTED — returns "0"]
+    Example: chatboxpaste[test]
+
+echo[message, color]
+    Echoes text to the local chatbox with a chat type color. Not sent to the server.
+    color is an AC chat type number (e.g. 1=General, 7=Magic, 13=Combat, 15=Help/red).
+    Returns "1" on success, "0" if unavailable.
+    Example: echo[test,15]   →  prints "test" in red (Help color)
+    Example: echo[Buff done,7]   →  prints "Buff done" in magic color
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RYNTHAI SETTINGS / META STATE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+rasetmetastate[state]
+    Sets the current RynthAi meta state and triggers a state reset.
+    Returns "1".
+    Example: rasetmetastate[Hunting]   →  switches meta to the "Hunting" state
+
+ragetmetastate[]
+    Returns the current RynthAi meta state as a string.
+    Example: ragetmetastate[]   →  "Hunting"
+
+rasetsetting[setting, value]
+    Sets a RynthAi setting by name. Value is always evaluated as an expression.
+    For boolean settings, any non-zero value = true.
+    Unknown names are stored as plugin options (accessible via raoptget).
+    Returns "1".
+    Example: rasetsetting[EnableCombat,1]         →  enables combat
+    Example: rasetsetting[MonsterRange,30]        →  sets monster range to 30
+    Example: rasetsetting[HealAt,50]              →  heal when HP ≤ 50%
+
+ragetsetting[setting]
+    Gets the current value of a RynthAi setting by name as a string.
+    Unknown names fall back to plugin options; returns "" if not found.
+    Example: ragetsetting[EnableCombat]           →  "1" or "0"
+    Example: ragetsetting[MonsterRange]           →  "50"
+    Example: cnumber[ragetsetting[MonsterRange]]  →  50 (as number)
+
+Supported setting names:
+    Booleans: EnableCombat, EnableBuffing, EnableNavigation, EnableLooting,
+              EnableMeta, EnableRaycasting, EnableAutostack, EnableAutocram,
+              EnableCombineSalvage, PeaceModeWhenIdle, RebuffWhenIdle,
+              SummonPets, MineOnly, UseDispelItems, CastDispelSelf,
+              AutoFellowMgmt, UseRecklessness, UseNativeAttack
+    Integers: MonsterRange, RingRange, ApproachRange, MinRingTargets,
+              HealAt, RestamAt, GetManaAt, TopOffHP, TopOffStam, TopOffMana,
+              HealOthersAt, MeleeAttackPower, MissileAttackPower,
+              CustomPetRange, PetMinMonsters
+    Floats:   MaxMonRange, NavRingThickness, NavLineThickness
+    Strings:  CurrentNavPath, CurrentLootPath, CurrentMetaPath
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STATUS HUD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+statushud[key, value]
+    Updates an entry in the Virindi HUDs Status HUD.
+    Returns "1".
+    Example: statushud[test,my value]   →  updates key "test" to "my value"
+
+statushudcolored[key, value, color]
+    Updates an entry in the Virindi HUDs Status HUD with a color.
+    color is an RGB number (e.g. 16711680 = 0xFF0000 = pure red).
+    Returns "1".
+    Example: statushudcolored[test,my value,16711680]   →  updates key "test" to "my value" in red
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+UI CONTROLS  [STUB — not yet implemented]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+uigetcontrol[windowName, controlName]
+    Gets a reference to a named control in a named meta view window.
+    Returns a UIControl handle, or "0" if not found.
+    Example: uigetcontrol[myWindow,myControl]   →  UIControl handle
+
+uisetlabel[control, label]
+    Changes the label text of a UIControl (buttons only).
+    Returns "1" on success, "0" on failure.
+    Example: uisetlabel[uigetcontrol[myWindow,myControl],new label]
+
+uisetvisible[control, visible]
+    Shows or hides a UIControl (buttons only). Pass 1 to show, 0 to hide.
+    Returns "1" on success, "0" on failure.
+    Example: uisetvisible[uigetcontrol[myWindow,myControl],0]
+
+uiviewexists[windowName]
+    Returns "1" if a meta view with the given name exists, "0" otherwise.
+    Example: uiviewexists[myWindow]   →  "1" or "0"
+
+uiviewvisible[windowName]
+    Returns "1" if a meta view with the given name is visible, "0" otherwise.
+    Example: uiviewvisible[myWindow]   →  "1" or "0"
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

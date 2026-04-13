@@ -479,6 +479,12 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "listvars":
                 HandleListVarsCommand();
                 break;
+            case "listpvars":
+                HandleListPvarsCommand();
+                break;
+            case "listgvars":
+                HandleListGvarsCommand();
+                break;
             case "dumpprops":
                 HandleDumpPropsCommand();
                 break;
