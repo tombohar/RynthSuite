@@ -114,6 +114,7 @@ internal sealed class MetaManager
         engine.SetObjectCache(_objectCache);
         engine.SetFellowshipTracker(_fellowshipTracker);
         engine.SetQuestTracker(_questTracker);
+        engine.SetSettings(_settings);
         return engine;
     }
 

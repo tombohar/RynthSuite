@@ -2,8 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using RynthCore.PluginSdk;
+using RynthCore.Plugin.RynthAi.LegacyUi;
 
 namespace RynthCore.Plugin.RynthAi.Meta;
 
@@ -47,6 +49,10 @@ internal sealed class ExpressionEngine
     private static readonly string ItemGiverDir
         = Path.Combine(@"C:\Games\RynthSuite\RynthAi", "ItemGiver");
 
+    // Stopwatch store: handle → Stopwatch. Persistent (not cleared per eval) — handles are stored in variables.
+    private readonly Dictionary<string, System.Diagnostics.Stopwatch> _stopwatches = new(StringComparer.Ordinal);
+    private int _nextSwId;
+
     // Motion name → (AC motion uint, wanted state). Matches UB Motion enum values.
     private static readonly Dictionary<string, uint> MotionValues = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -65,9 +71,19 @@ internal sealed class ExpressionEngine
     private static readonly object _timerLock = new();
 
     private uint _playerId;
+    private LegacyUiSettings? _settings;
+
+    // Persistent / global variable storage (lazy-loaded from disk)
+    private Dictionary<string, string>? _pvars;
+    private Dictionary<string, string>? _gvars;
+    private static readonly string PvarsDir  = Path.Combine(@"C:\Games\RynthSuite\RynthAi", "pvars");
+    private static readonly string GvarsPath = Path.Combine(@"C:\Games\RynthSuite\RynthAi", "gvars.txt");
+    private Dictionary<string, (Func<string> Get, Action<string> Set)>? _settingsMap;
 
     public IReadOnlyDictionary<string, string> Variables => _variables;
     public IReadOnlyDictionary<string, string> Options   => _options;
+    public IReadOnlyDictionary<string, string> Pvars     => GetPvars();
+    public IReadOnlyDictionary<string, string> Gvars     => GetGvars();
 
     /// <summary>Registers a named option with a default value if it has not been set.</summary>
     public void RegisterOption(string name, string defaultValue)
@@ -91,10 +107,11 @@ internal sealed class ExpressionEngine
 
     private QuestTracker? _questTracker;
 
-    public void SetPlayerId(uint id) => _playerId = id;
+    public void SetPlayerId(uint id) { if (id != _playerId) _pvars = null; _playerId = id; }
     public void SetObjectCache(WorldObjectCache? cache) => _worldObjectCache = cache;
     public void SetFellowshipTracker(FellowshipTracker? tracker) => _fellowshipTracker = tracker;
     public void SetQuestTracker(QuestTracker? tracker) => _questTracker = tracker;
+    public void SetSettings(LegacyUiSettings settings) { _settings = settings; _settingsMap = null; }
 
     // ── Backward-compat shim ──────────────────────────────────────────────────
 
@@ -117,6 +134,7 @@ internal sealed class ExpressionEngine
         if (_evalDepth == 0) { _dicts.Clear(); _nextDictId = 0; }
         _evalDepth++;
         try   { return new Parser(this, expr).Run(); }
+        catch (Exception ex) { return $"ERR:{ex.GetType().Name}:{ex.Message}"; }
         finally { _evalDepth--; }
     }
 
@@ -173,16 +191,60 @@ internal sealed class ExpressionEngine
 
         return funcName switch
         {
-            // ── Variables ─────────────────────────────────────────────────────
-            "setvar"  => EvalSetVar(A(0), A(1)),
-            "getvar"  => _variables.TryGetValue(A(0), out string? sv) ? sv : "",
-            "testvar" => _variables.ContainsKey(A(0)) ? "1" : "0",
+            // ── Session variables ──────────────────────────────────────────────
+            "setvar"       => EvalSetVar(A(0), A(1)),
+            "getvar"       => _variables.TryGetValue(A(0), out string? sv) ? sv : "0",
+            "testvar"      => _variables.ContainsKey(A(0)) ? "1" : "0",
+            "touchvar"     => EvalTouchVar(A(0)),
+            "clearvar"     => _variables.Remove(A(0)) ? "1" : "0",
+            "clearallvars" => EvalClearAllVars(),
+
+            // ── Persistent variables (per-character, survive relog) ────────────
+            "setpvar"       => EvalSetPvar(A(0), A(1)),
+            "getpvar"       => GetPvars().TryGetValue(A(0), out string? pv) ? pv : "0",
+            "testpvar"      => GetPvars().ContainsKey(A(0)) ? "1" : "0",
+            "touchpvar"     => EvalTouchPvar(A(0)),
+            "clearpvar"     => EvalClearPvar(A(0)),
+            "clearallpvars" => EvalClearAllPvars(),
+
+            // ── Global variables (shared across all characters) ────────────────
+            "setgvar"       => EvalSetGvar(A(0), A(1)),
+            "getgvar"       => GetGvars().TryGetValue(A(0), out string? gv) ? gv : "0",
+            "testgvar"      => GetGvars().ContainsKey(A(0)) ? "1" : "0",
+            "touchgvar"     => EvalTouchGvar(A(0)),
+            "cleargvar"     => EvalClearGvar(A(0)),
+            "clearallgvars" => EvalClearAllGvars(),
 
             // ── Character properties ──────────────────────────────────────────
             "getcharintprop"    => EvalCharInt(A(0)),
             "getchardoubleprop" => EvalCharDouble(A(0)),
-            "getcharboolprop"   => EvalCharBool(A(0)),
-            "getcharstringprop" => EvalCharString(A(0)),
+            "getcharquadprop"   => EvalCharQuad(A(0)),
+            "getcharboolprop"     => EvalCharBool(A(0)),
+            "getcharstringprop"   => EvalCharString(A(0)),
+            "getisspellknown"         => EvalIsSpellKnown(A(0)),
+            "getcancastspell_hunt"    => EvalCanCastSpell(A(0)),
+            "getcancastspell_buff"    => EvalCanCastSpell(A(0)),
+            "getspellexpiration"       => EvalSpellExpiration(A(0)),
+            "getspellexpirationbyname" => EvalSpellExpirationByName(A(0)),
+            "getcharvital_base"        => EvalCharVitalBase(A(0)),
+            "getcharvital_current"     => EvalCharVitalCurrent(A(0)),
+            "getcharvital_buffedmax"   => EvalCharVitalBuffedMax(A(0)),
+            "getcharskill_traininglevel" => EvalCharSkillTrainingLevel(A(0)),
+            "getcharskill_base"          => EvalCharSkillBase(A(0)),
+            "getcharskill_buffed"        => EvalCharSkillBuffed(A(0)),
+            "getcharattribute_base"      => EvalCharAttributeBase(A(0)),
+            "getcharattribute_buffed"    => EvalCharAttributeBuffed(A(0)),
+            "getcharburden"              => EvalCharBurdenPct(),
+            "getcharburden_total"        => EvalCharInt("5"),
+            "getplayerlandcell"          => EvalPlayerLandcell(),
+            "getplayerlandblock"         => EvalPlayerLandblock(),
+            "getplayercoordinates"       => EvalPlayerCoordinates(),
+            "coordinategetns"            => EvalCoordinateGetNS(A(0)),
+            "coordinategetwe"            => EvalCoordinateGetEW(A(0)),
+            "coordinategetz"             => EvalCoordinateGetZ(A(0)),
+            "coordinatetostring"         => EvalCoordinateToString(A(0)),
+            "coordinateparse"            => EvalCoordinateParse(string.Join(",", Enumerable.Range(0, rawArgs.Count).Select(i => A(i)))),
+            "coordinatedistancewithz"    => EvalCoordinateDistanceWithZ(A(0), A(1)),
 
             // ── List functions ────────────────────────────────────────────────
             "listcreate"      => EvalListCreate(rawArgs),
@@ -218,8 +280,15 @@ internal sealed class ExpressionEngine
             "getunixtime"       => DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture),
 
             // ── World object queries ──────────────────────────────────────────
-            "wobjectfindnearestbytemplatetype" => EvalWobjectFindNearestByTemplateType(A(0)),
+            "wobjectfindnearestbytemplatetype"        => EvalWobjectFindNearestByTemplateType(A(0)),
+            "wobjectfindallinventorybytemplatetype"   => EvalWobjectFindAllInventoryByTemplateType(A(0)),
+            "wobjectfindallinventorybynamerx"         => EvalWobjectFindAllInventoryByNameRx(Tmpl(0)),
+            "wobjectfindininventorybynamerx"          => EvalWobjectFindInInventoryByNameRx(Tmpl(0)),
+            "wobjectfindalllandscapebytemplatetype"   => EvalWobjectFindAllLandscapeByTemplateType(A(0)),
+            "wobjectfindalllandscapebynamerx"         => EvalWobjectFindAllLandscapeByNameRx(Tmpl(0)),
+            "wobjectfindallbycontainer"               => EvalWobjectFindAllByContainer(A(0)),
             "wobjectgetselection"    => EvalWobjectGetSelection(),
+            "wobjectgetplayer"       => EvalWobjectGetPlayer(),
             "wobjectgetname"         => EvalWobjectGetName(A(0)),
             "wobjectgetid"           => EvalWobjectGetId(A(0)),
             "wobjectgettemplatetype" => EvalWobjectGetTemplateType(A(0)),
@@ -239,6 +308,13 @@ internal sealed class ExpressionEngine
             "getitemcountininventorybyname"   => EvalItemCountByName(Tmpl(0)),
             "getitemcountininventorybynamerx" => EvalItemCountByNameRx(Tmpl(0)),
             "getinventorycountbytemplatetype" => EvalGetInventoryCountByTemplateType(A(0)),
+            "actiontryselect"        => EvalActionTrySelect(A(0)),
+            "actiontryuseitem"       => EvalActionTryUseItem(A(0)),
+            "actiontryapplyitem"     => EvalActionTryApplyItem(A(0), A(1)),
+            "actiontrygiveitem"      => EvalActionTryGiveItem(A(0), A(1)),
+            "actiontryequipanywand"  => EvalActionTryEquipAnyWand(),
+            "actiontrycastbyid"            => EvalActionTryCastById(A(0)),
+            "actiontrycastbyidontarget"    => EvalActionTryCastByIdOnTarget(A(0), A(1)),
             "actiontrygiveprofile"   => EvalActionTryGiveProfile(A(0), A(1)),
             "getequippedweapontype"  => EvalGetEquippedWeaponType(),
             "getcombatstate"         => EvalGetCombatState(),
@@ -265,6 +341,27 @@ internal sealed class ExpressionEngine
             "getheading"             => EvalGetHeading(A(0)),
 
             // ── Math ──────────────────────────────────────────────────────────
+            "getobjectinternaltype" => EvalGetObjectInternalType(A(0)),
+            "isfalse"  => ToDouble(A(0)) == 0 ? "1" : "0",
+            "istrue"   => ToDouble(A(0)) != 0 ? "1" : "0",
+            "iif"      => EvalIif(A(0), A(1), A(2)),
+            "randint"  => Random.Shared.Next((int)ToDouble(A(0)), (int)ToDouble(A(1))).ToString(CultureInfo.InvariantCulture),
+            "cstr"     => A(0),
+            "cstrf"    => EvalCstrf(A(0), Tmpl(1)),
+            "cnumber"  => ToDouble(A(0)).ToString("G", CultureInfo.InvariantCulture),
+            "strlen"   => A(0).Length.ToString(CultureInfo.InvariantCulture),
+            "floor"    => Math.Floor(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
+            "ceiling"  => Math.Ceiling(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
+            "round"    => Math.Round(ToDouble(A(0)), MidpointRounding.AwayFromZero).ToString("G", CultureInfo.InvariantCulture),
+            "abs"      => Math.Abs(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
+            "ord"      => EvalOrd(A(0)),
+            "chr"      => EvalChr(A(0)),
+
+            // ── Stopwatch ─────────────────────────────────────────────────────
+            "stopwatchcreate"         => EvalStopwatchCreate(),
+            "stopwatchstart"          => EvalStopwatchStart(A(0)),
+            "stopwatchstop"           => EvalStopwatchStop(A(0)),
+            "stopwatchelapsedseconds" => EvalStopwatchElapsedSeconds(A(0)),
             "hexstr" => "0x" + ((long)ToDouble(A(0))).ToString("X", CultureInfo.InvariantCulture),
             "acos"   => Math.Acos(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
             "asin"   => Math.Asin(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
@@ -277,6 +374,11 @@ internal sealed class ExpressionEngine
             "sqrt"   => Math.Sqrt(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
             "tan"    => Math.Tan(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
             "tanh"   => Math.Tanh(ToDouble(A(0))).ToString("G", CultureInfo.InvariantCulture),
+
+            // ── Chat ──────────────────────────────────────────────────────────
+            "chatbox"      => EvalChatbox(A(0)),
+            "chatboxpaste" => "0",   // no backing API — stub
+            "echo"         => EvalEcho(A(0), A(1)),
 
             // ── Salvage (UST) ─────────────────────────────────────────────────
             "ustopen"    => EvalUstOpen(),
@@ -314,6 +416,12 @@ internal sealed class ExpressionEngine
             "raoptget" or "uboptget" => GetOption(A(0)),
             "raoptset" or "uboptset" => EvalOptSet(A(0), A(1)),
 
+            // ── RynthAi settings / meta state (VTank-compatible names) ────────
+            "rasetmetastate" => EvalVtSetMetaState(Tmpl(0)),
+            "ragetmetastate" => _settings?.CurrentState ?? "",
+            "rasetsetting"   => EvalVtSetSetting(Tmpl(0), A(1)),
+            "ragetsetting"   => EvalVtGetSetting(Tmpl(0)),
+
             // ── Dynamic evaluation ────────────────────────────────────────────
             "exec"      => Evaluate(A(0)),
             "delayexec" => EvalDelayExec(A(0), A(1)),
@@ -346,6 +454,200 @@ internal sealed class ExpressionEngine
         return value;
     }
 
+    private string EvalTouchVar(string key)
+    {
+        if (_variables.ContainsKey(key)) return "1";
+        _variables[key] = "0";
+        return "0";
+    }
+
+    private string EvalClearAllVars()
+    {
+        _variables.Clear();
+        return "1";
+    }
+
+    // ── Persistent variable implementations ───────────────────────────────────
+
+    private Dictionary<string, string> GetPvars()
+    {
+        if (_pvars != null) return _pvars;
+        return _pvars = LoadVarFile(GetPvarPath());
+    }
+
+    private string GetPvarPath()
+    {
+        string charName = "unknown";
+        if (_playerId != 0 && _host.HasGetObjectName)
+            _host.TryGetObjectName(_playerId, out charName);
+        charName = SanitizeFileName(charName ?? "unknown");
+        return Path.Combine(PvarsDir, $"{charName}.txt");
+    }
+
+    private string EvalSetPvar(string key, string value)
+    {
+        if (string.IsNullOrEmpty(key)) return value;
+        GetPvars()[key] = value;
+        SaveVarFile(GetPvarPath(), _pvars!);
+        return value;
+    }
+
+    private string EvalTouchPvar(string key)
+    {
+        var pvars = GetPvars();
+        if (pvars.ContainsKey(key)) return "1";
+        pvars[key] = "0";
+        SaveVarFile(GetPvarPath(), pvars);
+        return "0";
+    }
+
+    private string EvalClearPvar(string key)
+    {
+        var pvars = GetPvars();
+        if (!pvars.Remove(key)) return "0";
+        SaveVarFile(GetPvarPath(), pvars);
+        return "1";
+    }
+
+    private string EvalClearAllPvars()
+    {
+        GetPvars().Clear();
+        SaveVarFile(GetPvarPath(), _pvars!);
+        return "1";
+    }
+
+    // ── Global variable implementations ───────────────────────────────────────
+
+    private Dictionary<string, string> GetGvars()
+        => _gvars ??= LoadVarFile(GvarsPath);
+
+    private string EvalSetGvar(string key, string value)
+    {
+        if (string.IsNullOrEmpty(key)) return value;
+        GetGvars()[key] = value;
+        SaveVarFile(GvarsPath, _gvars!);
+        return value;
+    }
+
+    private string EvalTouchGvar(string key)
+    {
+        var gvars = GetGvars();
+        if (gvars.ContainsKey(key)) return "1";
+        gvars[key] = "0";
+        SaveVarFile(GvarsPath, gvars);
+        return "0";
+    }
+
+    private string EvalClearGvar(string key)
+    {
+        var gvars = GetGvars();
+        if (!gvars.Remove(key)) return "0";
+        SaveVarFile(GvarsPath, gvars);
+        return "1";
+    }
+
+    private string EvalClearAllGvars()
+    {
+        GetGvars().Clear();
+        SaveVarFile(GvarsPath, _gvars!);
+        return "1";
+    }
+
+    // ── Var file helpers ──────────────────────────────────────────────────────
+
+    private static Dictionary<string, string> LoadVarFile(string path)
+    {
+        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (!File.Exists(path)) return dict;
+        try
+        {
+            foreach (string line in File.ReadAllLines(path))
+            {
+                int tab = line.IndexOf('\t');
+                if (tab > 0) dict[line[..tab]] = line[(tab + 1)..];
+            }
+        }
+        catch { /* return whatever was loaded */ }
+        return dict;
+    }
+
+    private static void SaveVarFile(string path, Dictionary<string, string> dict)
+    {
+        try
+        {
+            string? dir = Path.GetDirectoryName(path);
+            if (dir != null) Directory.CreateDirectory(dir);
+            File.WriteAllLines(path, dict.Select(kv => $"{kv.Key}\t{kv.Value}"));
+        }
+        catch { /* non-fatal */ }
+    }
+
+    private static string SanitizeFileName(string name)
+    {
+        char[] invalid = Path.GetInvalidFileNameChars();
+        var sb = new System.Text.StringBuilder(name.Length);
+        foreach (char c in name) sb.Append(Array.IndexOf(invalid, c) >= 0 ? '_' : c);
+        return sb.Length > 0 ? sb.ToString() : "unknown";
+    }
+
+    // ── Stopwatch implementations ─────────────────────────────────────────────
+
+    private string EvalStopwatchCreate()
+    {
+        string handle = $"SW:{_nextSwId++}";
+        _stopwatches[handle] = new System.Diagnostics.Stopwatch();
+        return handle;
+    }
+
+    private string EvalStopwatchStart(string handle)
+    {
+        if (_stopwatches.TryGetValue(handle, out var sw)) sw.Start();
+        return handle;
+    }
+
+    private string EvalStopwatchStop(string handle)
+    {
+        if (_stopwatches.TryGetValue(handle, out var sw)) sw.Stop();
+        return handle;
+    }
+
+    private string EvalStopwatchElapsedSeconds(string handle)
+    {
+        if (!_stopwatches.TryGetValue(handle, out var sw)) return "0";
+        return sw.Elapsed.TotalSeconds.ToString("G", CultureInfo.InvariantCulture);
+    }
+
+    private static string EvalOrd(string s)
+        => s.Length > 0 ? ((int)s[0]).ToString(CultureInfo.InvariantCulture) : "0";
+
+    private static string EvalChr(string arg)
+    {
+        int code = (int)ToDouble(arg);
+        return code is >= 0 and <= 0xFFFF ? ((char)code).ToString() : "";
+    }
+
+    private static string EvalCstrf(string numArg, string fmt)
+    {
+        double d = ToDouble(numArg);
+        try { return d.ToString(fmt, CultureInfo.InvariantCulture); }
+        catch { return d.ToString("G", CultureInfo.InvariantCulture); }
+    }
+
+    // Both trueVal and falseVal are pre-evaluated by the caller (C# arg eval order) — matches UB behaviour.
+    private static string EvalIif(string cond, string trueVal, string falseVal)
+        => ToDouble(cond) != 0 ? trueVal : falseVal;
+
+    // 0=none, 1=number, 3=string, 7=object — matches UB internal type constants.
+    private static string EvalGetObjectInternalType(string val)
+    {
+        if (string.IsNullOrEmpty(val)) return "0";
+        if (TryParseWobjectHandle(val, out _, out _)) return "7";
+        if (val.Length > 3 && val[0] == 'S' && val[1] == 'W' && val[2] == ':') return "7";
+        if (val.Length > 2 && val[0] == 'D' && val[1] == ':') return "7";
+        if (double.TryParse(val, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out _)) return "1";
+        return "3";
+    }
+
     private string EvalCharInt(string arg)
     {
         if (!uint.TryParse(arg.Trim(), out uint st) || _playerId == 0 || !_host.HasGetObjectIntProperty) return "0";
@@ -358,6 +660,12 @@ internal sealed class ExpressionEngine
         return _host.TryGetObjectDoubleProperty(_playerId, st, out double v) ? v.ToString("G", CultureInfo.InvariantCulture) : "0";
     }
 
+    private string EvalCharQuad(string arg)
+    {
+        if (!uint.TryParse(arg.Trim(), out uint st) || _playerId == 0 || !_host.HasGetObjectQuadProperty) return "0";
+        return _host.TryGetObjectQuadProperty(_playerId, st, out long v) ? v.ToString(CultureInfo.InvariantCulture) : "0";
+    }
+
     private string EvalCharBool(string arg)
     {
         if (!uint.TryParse(arg.Trim(), out uint st) || _playerId == 0 || !_host.HasGetObjectBoolProperty) return "0";
@@ -368,6 +676,253 @@ internal sealed class ExpressionEngine
     {
         if (!uint.TryParse(arg.Trim(), out uint st) || _playerId == 0 || !_host.HasGetObjectStringProperty) return "";
         return _host.TryGetObjectStringProperty(_playerId, st, out string? v) ? v ?? "" : "";
+    }
+
+    private string EvalIsSpellKnown(string arg)
+    {
+        if (!uint.TryParse(arg.Trim(), out uint spellId) || _playerId == 0 || !_host.HasIsSpellKnown) return "0";
+        return _host.IsSpellKnown(_playerId, spellId, out bool known) ? (known ? "1" : "0") : "0";
+    }
+
+    private string EvalCanCastSpell(string arg)
+    {
+        if (!uint.TryParse(arg.Trim(), out uint spellId) || _playerId == 0) return "0";
+        if (_host.HasIsSpellKnown && !(_host.IsSpellKnown(_playerId, spellId, out bool known) && known)) return "0";
+        if (_host.HasGetPlayerVitals &&
+            _host.TryGetPlayerVitals(out _, out _, out _, out _, out uint mana, out _) && mana == 0) return "0";
+        return "1";
+    }
+
+    private string EvalCharVitalBase(string arg)
+    {
+        // Map vitalId 1/2/3 → STypeAttribute2nd 1/3/5 (MAX_HEALTH/MAX_STAMINA/MAX_MANA)
+        // Base = _initLevel + _levelFromCp from InqAttribute2ndStruct — confirmed unbuffed in PlayerVitalsHooks.
+        if (!_host.HasGetPlayerBaseVitals) return "0";
+        if (!_host.TryGetPlayerBaseVitals(out uint baseHp, out uint baseStam, out uint baseMana)) return "0";
+        return arg.Trim() switch
+        {
+            "1" => baseHp.ToString(CultureInfo.InvariantCulture),
+            "2" => baseStam.ToString(CultureInfo.InvariantCulture),
+            "3" => baseMana.ToString(CultureInfo.InvariantCulture),
+            _   => "0",
+        };
+    }
+
+    private string EvalCharVitalCurrent(string arg)
+    {
+        if (!_host.HasGetPlayerVitals) return "0";
+        if (!_host.TryGetPlayerVitals(out uint hp, out _, out uint stam, out _, out uint mana, out _)) return "0";
+        return arg.Trim() switch
+        {
+            "1" => hp.ToString(CultureInfo.InvariantCulture),
+            "2" => stam.ToString(CultureInfo.InvariantCulture),
+            "3" => mana.ToString(CultureInfo.InvariantCulture),
+            _   => "0",
+        };
+    }
+
+    private string EvalCharVitalBuffedMax(string arg)
+    {
+        // Uses InqAttribute2nd live — always returns current buffed max, no stale snapshot issue.
+        uint stype2nd = arg.Trim() switch { "1" => 1u, "2" => 3u, "3" => 5u, _ => 0u };
+        if (stype2nd == 0 || _playerId == 0 || !_host.HasGetObjectAttribute2ndBaseLevel) return "0";
+        return _host.TryGetObjectAttribute2ndBaseLevel(_playerId, stype2nd, out uint buffedMax)
+            ? buffedMax.ToString(CultureInfo.InvariantCulture) : "0";
+    }
+
+    private string EvalCharSkillTrainingLevel(string arg)
+    {
+        if (!uint.TryParse(arg.Trim(), out uint skillId) || skillId == 0) return "0";
+        if (_playerId == 0 || !_host.HasGetObjectSkill) return "0";
+        return _host.TryGetObjectSkill(_playerId, skillId, out _, out int training)
+            ? training.ToString(CultureInfo.InvariantCulture) : "0";
+    }
+
+    private string EvalCharSkillBase(string arg)
+    {
+        if (!uint.TryParse(arg.Trim(), out uint skillId) || skillId == 0) return "0";
+        if (_playerId == 0 || !_host.HasGetObjectSkillBuffed) return "0";
+        return _host.TryGetObjectSkillLevel(_playerId, skillId, 1, out int level)
+            ? level.ToString(CultureInfo.InvariantCulture) : "0";
+    }
+
+    private string EvalCharSkillBuffed(string arg)
+    {
+        if (!uint.TryParse(arg.Trim(), out uint skillId) || skillId == 0) return "0";
+        if (_playerId == 0 || !_host.HasGetObjectSkillBuffed) return "0";
+        return _host.TryGetObjectSkillLevel(_playerId, skillId, 0, out int level)
+            ? level.ToString(CultureInfo.InvariantCulture) : "0";
+    }
+
+    private string EvalCharAttributeBase(string arg)
+    {
+        if (!uint.TryParse(arg.Trim(), out uint attrId) || attrId == 0) return "0";
+        if (_playerId == 0 || !_host.HasGetObjectAttribute) return "0";
+        return _host.TryGetObjectAttribute(_playerId, attrId, 1, out uint value)
+            ? value.ToString(CultureInfo.InvariantCulture) : "0";
+    }
+
+    private string EvalCharAttributeBuffed(string arg)
+    {
+        if (!uint.TryParse(arg.Trim(), out uint attrId) || attrId == 0) return "0";
+        if (_playerId == 0 || !_host.HasGetObjectAttribute) return "0";
+        return _host.TryGetObjectAttribute(_playerId, attrId, 0, out uint value)
+            ? value.ToString(CultureInfo.InvariantCulture) : "0";
+    }
+
+    private string EvalCharBurdenPct()
+    {
+        // Burden capacity = buffed Strength * 150 (not stored as a property, derived from attribute)
+        if (_playerId == 0 || !_host.HasGetObjectIntProperty || !_host.HasGetObjectAttribute) return "0";
+        if (!_host.TryGetObjectIntProperty(_playerId, 5u, out int current)) return "0";
+        if (!_host.TryGetObjectAttribute(_playerId, 1u, 0, out uint strength) || strength == 0) return "0";
+        double pct = current * 100.0 / ((double)strength * 150.0);
+        return pct.ToString("G", CultureInfo.InvariantCulture);
+    }
+
+    private string EvalPlayerLandcell()
+    {
+        if (!_host.HasGetPlayerPose) return "0";
+        if (!_host.TryGetPlayerPose(out uint objCellId, out _, out _, out _, out _, out _, out _, out _)) return "0";
+        return ((double)objCellId).ToString("G", CultureInfo.InvariantCulture);
+    }
+
+    private string EvalPlayerLandblock()
+    {
+        if (!_host.HasGetPlayerPose) return "0";
+        if (!_host.TryGetPlayerPose(out uint objCellId, out _, out _, out _, out _, out _, out _, out _)) return "0";
+        return ((double)(objCellId & 0xFFFF0000u)).ToString("G", CultureInfo.InvariantCulture);
+    }
+
+    // Coordinates object internal format: "NS|EW|Z" (pipe-delimited, full precision).
+    // NS positive=N, negative=S. EW positive=E, negative=W. Z is in coordinate units (raw_z/240).
+    // coordinatetostring[] formats for display ("41.53N, 34.46E, 0.47Z"); coordinateparse[] converts display → internal.
+
+    private static readonly System.Text.RegularExpressions.Regex _coordParseRegex = new(
+        @"(?<NSval>[0-9]{1,3}(?:\.[0-9]{1,3})?)(?<NSchr>[ns])(?:[,\s]+)?(?<EWval>[0-9]{1,3}(?:\.[0-9]{1,3})?)(?<EWchr>[ew])?(,?\s*(?<Zval>-?\d+\.?\d*)z)?",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static bool TryParseCoordObject(string coords, out double ns, out double ew, out double z)
+    {
+        ns = ew = z = 0;
+        if (string.IsNullOrEmpty(coords)) return false;
+        var parts = coords.Split('|');
+        if (parts.Length < 2) return false;
+        return double.TryParse(parts[0], System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out ns)
+            && double.TryParse(parts[1], System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out ew)
+            && (parts.Length < 3 || double.TryParse(parts[2], System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out z));
+    }
+
+    private static string MakeCoordObject(double ns, double ew, double z)
+        => string.Create(CultureInfo.InvariantCulture, $"{ns}|{ew}|{z}");
+
+    private string EvalPlayerCoordinates()
+    {
+        if (!_host.HasGetPlayerPose) return "";
+        if (!_host.TryGetPlayerPose(out uint objCellId, out float x, out float y, out float z, out _, out _, out _, out _)) return "";
+        if (!LegacyUi.NavCoordinateHelper.TryConvertPoseToCoords(objCellId, x, y, out double ns, out double ew)) return "";
+        return MakeCoordObject(ns, ew, z / 240.0);
+    }
+
+    private string EvalCoordinateGetNS(string coords)
+    {
+        if (!TryParseCoordObject(coords, out double ns, out _, out _)) return "0";
+        return ns.ToString("G", CultureInfo.InvariantCulture);
+    }
+
+    private string EvalCoordinateGetEW(string coords)
+    {
+        if (!TryParseCoordObject(coords, out _, out double ew, out _)) return "0";
+        return ew.ToString("G", CultureInfo.InvariantCulture);
+    }
+
+    private string EvalCoordinateGetZ(string coords)
+    {
+        if (!TryParseCoordObject(coords, out _, out _, out double z)) return "0";
+        return z.ToString("G", CultureInfo.InvariantCulture);
+    }
+
+    private string EvalCoordinateToString(string coords)
+    {
+        if (!TryParseCoordObject(coords, out double ns, out double ew, out double z)) return "";
+        string nsStr = ns >= 0
+            ? string.Create(CultureInfo.InvariantCulture, $"{ns:F2}N")
+            : string.Create(CultureInfo.InvariantCulture, $"{-ns:F2}S");
+        string ewStr = ew >= 0
+            ? string.Create(CultureInfo.InvariantCulture, $"{ew:F2}E")
+            : string.Create(CultureInfo.InvariantCulture, $"{-ew:F2}W");
+        return string.Create(CultureInfo.InvariantCulture, $"{nsStr}, {ewStr}, {z:F2}Z");
+    }
+
+    private string EvalCoordinateParse(string input)
+    {
+        var m = _coordParseRegex.Match(input.Trim());
+        if (!m.Success) return "";
+        if (!double.TryParse(m.Groups["NSval"].Value, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out double ns)) return "";
+        if (!double.TryParse(m.Groups["EWval"].Value, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out double ew)) return "";
+        ns *= m.Groups["NSchr"].Value.Equals("n", StringComparison.OrdinalIgnoreCase) ? 1 : -1;
+        ew *= m.Groups["EWchr"].Value.Equals("e", StringComparison.OrdinalIgnoreCase) ? 1 : -1;
+        double z = 0;
+        if (m.Groups["Zval"].Success && !string.IsNullOrEmpty(m.Groups["Zval"].Value))
+            double.TryParse(m.Groups["Zval"].Value, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out z);
+        return MakeCoordObject(ns, ew, z);
+    }
+
+    private string EvalCoordinateDistanceWithZ(string coords1, string coords2)
+    {
+        if (!TryParseCoordObject(coords1, out double ns1, out double ew1, out double z1)) return "0";
+        if (!TryParseCoordObject(coords2, out double ns2, out double ew2, out double z2)) return "0";
+        double dNS = (ns1 - ns2) * 240.0;
+        double dEW = (ew1 - ew2) * 240.0;
+        double dZ  = (z1  - z2)  * 240.0;
+        return Math.Sqrt(dNS * dNS + dEW * dEW + dZ * dZ).ToString("G", CultureInfo.InvariantCulture);
+    }
+
+    private string EvalSpellExpiration(string arg)
+    {
+        if (!uint.TryParse(arg.Trim(), out uint spellId)) return "0";
+        if (!_host.HasReadPlayerEnchantments || !_host.HasGetServerTime) return "0";
+        double serverNow = _host.GetServerTime();
+        if (serverNow <= 0) return "0";
+        const int Max = 512;
+        uint[] ids = new uint[Max];
+        double[] expiry = new double[Max];
+        int count = _host.ReadPlayerEnchantments(ids, expiry, Max);
+        if (count <= 0) return "0";
+        for (int i = 0; i < count; i++)
+        {
+            if (ids[i] != spellId) continue;
+            double remaining = expiry[i] - serverNow;
+            if (remaining <= 0) return "0";
+            if (remaining > 86400 * 365) return "2147483647";
+            return ((int)Math.Ceiling(remaining)).ToString(CultureInfo.InvariantCulture);
+        }
+        return "0";
+    }
+
+    private string EvalSpellExpirationByName(string nameArg)
+    {
+        if (string.IsNullOrEmpty(nameArg)) return "-1";
+        if (!_host.HasReadPlayerEnchantments || !_host.HasGetServerTime) return "-1";
+        double serverNow = _host.GetServerTime();
+        if (serverNow <= 0) return "-1";
+        const int Max = 512;
+        uint[] ids = new uint[Max];
+        double[] expiry = new double[Max];
+        int count = _host.ReadPlayerEnchantments(ids, expiry, Max);
+        if (count < 0) return "-1";
+        for (int i = 0; i < count; i++)
+        {
+            var info = SpellTableStub.GetById((int)ids[i]);
+            if (info == null) continue;
+            if (info.Name.IndexOf(nameArg, StringComparison.OrdinalIgnoreCase) < 0) continue;
+            double remaining = expiry[i] - serverNow;
+            if (remaining <= 0) return "0";
+            if (remaining > 86400 * 365) return "2147483647";
+            return ((int)Math.Ceiling(remaining)).ToString(CultureInfo.InvariantCulture);
+        }
+        return "0";
     }
 
     // ── List helpers ──────────────────────────────────────────────────────────
@@ -701,6 +1256,103 @@ internal sealed class ExpressionEngine
         return MakeWobjectHandle(bestUid, bestName ?? string.Empty);
     }
 
+    private string EvalWobjectFindInInventoryByNameRx(string pattern)
+    {
+        if (_worldObjectCache == null || string.IsNullOrEmpty(pattern)) return "0";
+        Regex re;
+        try { re = new Regex(pattern, RegexOptions.IgnoreCase); }
+        catch { return "0"; }
+
+        foreach (var wo in _worldObjectCache.GetDirectInventory(forceRefresh: true))
+        {
+            if (re.IsMatch(wo.Name))
+                return MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name);
+        }
+        return "0";
+    }
+
+    private string EvalWobjectFindAllInventoryByNameRx(string pattern)
+    {
+        if (_worldObjectCache == null || string.IsNullOrEmpty(pattern)) return "[]";
+        Regex re;
+        try { re = new Regex(pattern, RegexOptions.IgnoreCase); }
+        catch { return "[]"; }
+
+        var items = new List<string>();
+        foreach (var wo in _worldObjectCache.GetDirectInventory(forceRefresh: true))
+        {
+            if (re.IsMatch(wo.Name))
+                items.Add(MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name));
+        }
+        return NewList(items);
+    }
+
+    private string EvalWobjectFindAllInventoryByTemplateType(string arg)
+    {
+        if (_worldObjectCache == null || !_host.HasGetObjectWcid) return "[]";
+        if (!uint.TryParse(arg.Trim(), out uint targetWcid) || targetWcid == 0) return "[]";
+
+        var items = new List<string>();
+        foreach (var wo in _worldObjectCache.GetDirectInventory(forceRefresh: true))
+        {
+            uint uid = unchecked((uint)wo.Id);
+            if (_host.TryGetObjectWcid(uid, out uint wcid) && wcid == targetWcid)
+                items.Add(MakeWobjectHandle(uid, wo.Name));
+        }
+        return NewList(items);
+    }
+
+    private string EvalWobjectFindAllLandscapeByTemplateType(string arg)
+    {
+        if (_worldObjectCache == null || !_host.HasGetObjectWcid) return "[]";
+        if (!uint.TryParse(arg.Trim(), out uint targetWcid) || targetWcid == 0) return "[]";
+
+        var items = new List<string>();
+        foreach (var wo in _worldObjectCache.GetLandscapeObjects())
+        {
+            uint uid = unchecked((uint)wo.Id);
+            if (_host.TryGetObjectWcid(uid, out uint wcid) && wcid == targetWcid)
+                items.Add(MakeWobjectHandle(uid, wo.Name));
+        }
+        return NewList(items);
+    }
+
+    private string EvalWobjectFindAllLandscapeByNameRx(string pattern)
+    {
+        if (_worldObjectCache == null || string.IsNullOrEmpty(pattern)) return "[]";
+        Regex re;
+        try { re = new Regex(pattern, RegexOptions.IgnoreCase); }
+        catch { return "[]"; }
+
+        var items = new List<string>();
+        foreach (var wo in _worldObjectCache.GetLandscapeObjects())
+        {
+            if (re.IsMatch(wo.Name))
+                items.Add(MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name));
+        }
+        return NewList(items);
+    }
+
+    private string EvalWobjectFindAllByContainer(string arg)
+    {
+        if (_worldObjectCache == null || !_host.HasGetContainerContents) return "[]";
+        if (!TryParseWobjectHandle(arg, out uint containerId, out _) || containerId == 0) return "[]";
+
+        uint[] buf = new uint[512];
+        int count = _host.GetContainerContents(containerId, buf);
+
+        var items = new List<string>();
+        for (int i = 0; i < count; i++)
+        {
+            uint itemId = buf[i];
+            string name = _worldObjectCache[unchecked((int)itemId)]?.Name ?? "";
+            if (string.IsNullOrEmpty(name))
+                _host.TryGetObjectName(itemId, out name);
+            items.Add(MakeWobjectHandle(itemId, name ?? ""));
+        }
+        return NewList(items);
+    }
+
     private string EvalWobjectGetName(string arg)
     {
         if (!TryParseWobjectHandle(arg, out uint uid, out string name)) return "";
@@ -732,6 +1384,14 @@ internal sealed class ExpressionEngine
     {
         if (!_host.HasGetSelectedItemId) return "0";
         uint uid = _host.GetSelectedItemId();
+        if (uid == 0) return "0";
+        _host.TryGetObjectName(uid, out string name);
+        return MakeWobjectHandle(uid, name ?? string.Empty);
+    }
+
+    private string EvalWobjectGetPlayer()
+    {
+        uint uid = _host.GetPlayerId();
         if (uid == 0) return "0";
         _host.TryGetObjectName(uid, out string name);
         return MakeWobjectHandle(uid, name ?? string.Empty);
@@ -969,6 +1629,126 @@ internal sealed class ExpressionEngine
                 total += Math.Max(1, wo.Values(LongValueKey.StackCount, 1));
         }
         return total.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private string EvalActionTrySelect(string arg)
+    {
+        if (!TryParseWobjectHandle(arg, out uint uid, out _) || uid == 0) return "0";
+        if (!_host.HasSelectItem) return "0";
+        _host.SelectItem(uid);
+        return "0";
+    }
+
+    private string EvalActionTryUseItem(string arg)
+    {
+        if (!TryParseWobjectHandle(arg, out uint uid, out _) || uid == 0) return "0";
+        if (!_host.HasUseObject) return "0";
+        _host.UseObject(uid);
+        return "0";
+    }
+
+    private string EvalActionTryApplyItem(string useArg, string onArg)
+    {
+        if (!TryParseWobjectHandle(useArg, out uint useId, out _) || useId == 0) return "0";
+        if (!TryParseWobjectHandle(onArg, out uint onId, out _) || onId == 0) return "0";
+        if (!_host.HasUseObjectOn) return "0";
+        return _host.UseObjectOn(useId, onId) ? "1" : "0";
+    }
+
+    private string EvalActionTryCastByIdOnTarget(string spellArg, string targetArg)
+    {
+        if (!int.TryParse(spellArg.Trim(), out int spellId) || spellId == 0) return "2";
+        if (!_host.HasCastSpell) return "2";
+        if (!TryParseWobjectHandle(targetArg, out uint targetId, out _) || targetId == 0) return "2";
+
+        if (!EnsureMagicModeForCast()) return "0";
+
+        _host.CastSpell(targetId, spellId);
+        return "1";
+    }
+
+    /// <summary>
+    /// Ensures the character is in magic mode. Returns true if already in magic mode.
+    /// Otherwise takes one step (equip wand or change stance) and returns false.
+    /// </summary>
+    private bool EnsureMagicModeForCast()
+    {
+        if (_host.HasGetCurrentCombatMode && _host.GetCurrentCombatMode() == CombatMode.Magic)
+            return true;
+
+        if (_worldObjectCache != null && _host.HasUseObject)
+        {
+            WorldObject? wand = null;
+            foreach (var wo in _worldObjectCache.GetDirectInventory())
+            {
+                if (wo.ObjectClass != AcObjectClass.WandStaffOrb) continue;
+                wand = wo;
+                break;
+            }
+
+            if (wand != null)
+            {
+                bool wielded = _host.HasGetObjectWielderInfo
+                    ? (_host.GetPlayerId() is uint pid && pid != 0
+                       && _host.TryGetObjectWielderInfo(unchecked((uint)wand.Id), out uint w, out _)
+                       && w == pid)
+                    : wand.Values(LongValueKey.CurrentWieldedLocation, 0) > 0;
+
+                if (!wielded)
+                {
+                    _host.UseObject(unchecked((uint)wand.Id));
+                    return false;
+                }
+            }
+        }
+
+        if (_host.HasChangeCombatMode)
+            _host.ChangeCombatMode(CombatMode.Magic);
+        return false;
+    }
+
+    private string EvalActionTryCastById(string arg)
+    {
+        if (!int.TryParse(arg.Trim(), out int spellId) || spellId == 0) return "2";
+        if (!_host.HasCastSpell) return "2";
+
+        if (!EnsureMagicModeForCast()) return "0";
+
+        uint targetId = (_host.HasGetSelectedItemId ? _host.GetSelectedItemId() : 0);
+        if (targetId == 0) targetId = _host.GetPlayerId();
+        if (targetId == 0) return "2";
+
+        _host.CastSpell(targetId, spellId);
+        return "1";
+    }
+
+    private string EvalActionTryEquipAnyWand()
+    {
+        if (_worldObjectCache == null || !_host.HasUseObject) return "0";
+
+        WorldObject? unequipped = null;
+        foreach (var wo in _worldObjectCache.GetDirectInventory())
+        {
+            if (wo.ObjectClass != AcObjectClass.WandStaffOrb) continue;
+            if (wo.Values(LongValueKey.CurrentWieldedLocation, 0) > 0)
+                return "1"; // already wielded
+            unequipped ??= wo;
+        }
+
+        if (unequipped != null)
+            _host.UseObject(unchecked((uint)unequipped.Id));
+
+        return "0";
+    }
+
+    private string EvalActionTryGiveItem(string giveArg, string destArg)
+    {
+        if (!TryParseWobjectHandle(giveArg, out uint giveId, out _) || giveId == 0) return "0";
+        if (!TryParseWobjectHandle(destArg, out uint destId, out _) || destId == 0) return "0";
+        if (!_host.HasMoveItemExternal) return "0";
+        var wo = _worldObjectCache?[unchecked((int)giveId)];
+        int amount = wo != null ? Math.Max(1, wo.Values(LongValueKey.StackCount, 1)) : 1;
+        return _host.MoveItemExternal(giveId, destId, amount) ? "1" : "0";
     }
 
     private string EvalActionTryGiveProfile(string profileArg, string targetNameArg)
@@ -1217,6 +1997,22 @@ internal sealed class ExpressionEngine
         return deg.ToString("G", CultureInfo.InvariantCulture);
     }
 
+    // ── Chat implementations ──────────────────────────────────────────────────
+
+    private string EvalChatbox(string message)
+    {
+        if (string.IsNullOrEmpty(message) || !_host.HasInvokeChatParser) return message;
+        _host.InvokeChatParser(message);
+        return message;
+    }
+
+    private string EvalEcho(string message, string colorArg)
+    {
+        if (!_host.HasWriteToChat) return "0";
+        int chatType = (int)ToDouble(colorArg);
+        return _host.WriteToChat(message, chatType) ? "1" : "0";
+    }
+
     // ── Salvage (UST) implementations ────────────────────────────────────────
 
     private string EvalUstOpen()
@@ -1397,6 +2193,86 @@ internal sealed class ExpressionEngine
         return "1";
     }
 
+    // ── RynthAi settings / meta state implementations ─────────────────────────
+
+    private string EvalVtSetMetaState(string state)
+    {
+        if (_settings == null || string.IsNullOrEmpty(state)) return "0";
+        _settings.CurrentState = state;
+        _settings.ForceStateReset = true;
+        return "1";
+    }
+
+    private string EvalVtGetSetting(string name)
+    {
+        if (_settings == null || string.IsNullOrEmpty(name)) return "";
+        var map = BuildSettingsMap();
+        if (map.TryGetValue(name, out var entry)) return entry.Get();
+        return _options.TryGetValue(name, out string? v) ? v : "";
+    }
+
+    private string EvalVtSetSetting(string name, string value)
+    {
+        if (_settings == null || string.IsNullOrEmpty(name)) return "0";
+        var map = BuildSettingsMap();
+        if (map.TryGetValue(name, out var entry)) { entry.Set(value); return "1"; }
+        _options[name] = value;
+        return "1";
+    }
+
+    private Dictionary<string, (Func<string> Get, Action<string> Set)> BuildSettingsMap()
+    {
+        if (_settingsMap != null) return _settingsMap;
+        var s = _settings!;
+        static string B(bool v) => v ? "1" : "0";
+        static string I(int v) => v.ToString(CultureInfo.InvariantCulture);
+        static string F(float v) => v.ToString("G", CultureInfo.InvariantCulture);
+        static string D(double v) => v.ToString("G", CultureInfo.InvariantCulture);
+        _settingsMap = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["EnableCombat"]        = (() => B(s.EnableCombat),        v => s.EnableCombat        = ToDouble(v) != 0),
+            ["EnableBuffing"]       = (() => B(s.EnableBuffing),       v => s.EnableBuffing       = ToDouble(v) != 0),
+            ["EnableNavigation"]    = (() => B(s.EnableNavigation),    v => s.EnableNavigation    = ToDouble(v) != 0),
+            ["EnableLooting"]       = (() => B(s.EnableLooting),       v => s.EnableLooting       = ToDouble(v) != 0),
+            ["EnableMeta"]          = (() => B(s.EnableMeta),          v => s.EnableMeta          = ToDouble(v) != 0),
+            ["EnableRaycasting"]    = (() => B(s.EnableRaycasting),    v => s.EnableRaycasting    = ToDouble(v) != 0),
+            ["EnableAutostack"]     = (() => B(s.EnableAutostack),     v => s.EnableAutostack     = ToDouble(v) != 0),
+            ["EnableAutocram"]      = (() => B(s.EnableAutocram),      v => s.EnableAutocram      = ToDouble(v) != 0),
+            ["EnableCombineSalvage"]= (() => B(s.EnableCombineSalvage),v => s.EnableCombineSalvage= ToDouble(v) != 0),
+            ["PeaceModeWhenIdle"]   = (() => B(s.PeaceModeWhenIdle),   v => s.PeaceModeWhenIdle   = ToDouble(v) != 0),
+            ["RebuffWhenIdle"]      = (() => B(s.RebuffWhenIdle),      v => s.RebuffWhenIdle      = ToDouble(v) != 0),
+            ["SummonPets"]          = (() => B(s.SummonPets),          v => s.SummonPets          = ToDouble(v) != 0),
+            ["MineOnly"]            = (() => B(s.MineOnly),            v => s.MineOnly            = ToDouble(v) != 0),
+            ["UseDispelItems"]      = (() => B(s.UseDispelItems),      v => s.UseDispelItems      = ToDouble(v) != 0),
+            ["CastDispelSelf"]      = (() => B(s.CastDispelSelf),      v => s.CastDispelSelf      = ToDouble(v) != 0),
+            ["AutoFellowMgmt"]      = (() => B(s.AutoFellowMgmt),      v => s.AutoFellowMgmt      = ToDouble(v) != 0),
+            ["UseRecklessness"]     = (() => B(s.UseRecklessness),     v => s.UseRecklessness     = ToDouble(v) != 0),
+            ["UseNativeAttack"]     = (() => B(s.UseNativeAttack),     v => s.UseNativeAttack     = ToDouble(v) != 0),
+            ["MonsterRange"]        = (() => I(s.MonsterRange),        v => { if (int.TryParse(v, out int i)) s.MonsterRange     = i; }),
+            ["RingRange"]           = (() => I(s.RingRange),           v => { if (int.TryParse(v, out int i)) s.RingRange        = i; }),
+            ["ApproachRange"]       = (() => I(s.ApproachRange),       v => { if (int.TryParse(v, out int i)) s.ApproachRange    = i; }),
+            ["MinRingTargets"]      = (() => I(s.MinRingTargets),      v => { if (int.TryParse(v, out int i)) s.MinRingTargets   = i; }),
+            ["HealAt"]              = (() => I(s.HealAt),              v => { if (int.TryParse(v, out int i)) s.HealAt           = i; }),
+            ["RestamAt"]            = (() => I(s.RestamAt),            v => { if (int.TryParse(v, out int i)) s.RestamAt         = i; }),
+            ["GetManaAt"]           = (() => I(s.GetManaAt),           v => { if (int.TryParse(v, out int i)) s.GetManaAt        = i; }),
+            ["TopOffHP"]            = (() => I(s.TopOffHP),            v => { if (int.TryParse(v, out int i)) s.TopOffHP         = i; }),
+            ["TopOffStam"]          = (() => I(s.TopOffStam),          v => { if (int.TryParse(v, out int i)) s.TopOffStam       = i; }),
+            ["TopOffMana"]          = (() => I(s.TopOffMana),          v => { if (int.TryParse(v, out int i)) s.TopOffMana       = i; }),
+            ["HealOthersAt"]        = (() => I(s.HealOthersAt),        v => { if (int.TryParse(v, out int i)) s.HealOthersAt     = i; }),
+            ["MeleeAttackPower"]    = (() => I(s.MeleeAttackPower),    v => { if (int.TryParse(v, out int i)) s.MeleeAttackPower = i; }),
+            ["MissileAttackPower"]  = (() => I(s.MissileAttackPower),  v => { if (int.TryParse(v, out int i)) s.MissileAttackPower = i; }),
+            ["CustomPetRange"]      = (() => I(s.CustomPetRange),      v => { if (int.TryParse(v, out int i)) s.CustomPetRange   = i; }),
+            ["PetMinMonsters"]      = (() => I(s.PetMinMonsters),      v => { if (int.TryParse(v, out int i)) s.PetMinMonsters   = i; }),
+            ["MaxMonRange"]         = (() => D(s.MaxMonRange),         v => { if (double.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out double d)) s.MaxMonRange = d; }),
+            ["NavRingThickness"]    = (() => F(s.NavRingThickness),    v => { if (float.TryParse(v,  System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f))  s.NavRingThickness = f; }),
+            ["NavLineThickness"]    = (() => F(s.NavLineThickness),    v => { if (float.TryParse(v,  System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f))  s.NavLineThickness = f; }),
+            ["CurrentNavPath"]      = (() => s.CurrentNavPath,         v => s.CurrentNavPath  = v),
+            ["CurrentLootPath"]     = (() => s.CurrentLootPath,        v => s.CurrentLootPath = v),
+            ["CurrentMetaPath"]     = (() => s.CurrentMetaPath,        v => s.CurrentMetaPath = v),
+        };
+        return _settingsMap;
+    }
+
     // ── Dynamic evaluation implementations ───────────────────────────────────
 
     private string EvalDelayExec(string delayArg, string exprArg)
@@ -1556,20 +2432,25 @@ internal sealed class ExpressionEngine
 
     // ── Argument splitter ─────────────────────────────────────────────────────
 
-    /// <summary>Splits a comma-separated argument list, respecting nested bracket depth.</summary>
+    /// <summary>Splits a comma-separated argument list, respecting nested bracket depth and backtick strings.</summary>
     private static List<string> SplitArgs(string s)
     {
         var list = new List<string>();
         int depth = 0, start = 0;
+        bool inBacktick = false;
         for (int i = 0; i < s.Length; i++)
         {
             char c = s[i];
-            if (c == '[') depth++;
-            else if (c == ']') depth--;
-            else if (c == ',' && depth == 0)
+            if (c == '`') { inBacktick = !inBacktick; }
+            else if (!inBacktick)
             {
-                list.Add(s.Substring(start, i - start).Trim());
-                start = i + 1;
+                if (c == '[') depth++;
+                else if (c == ']') depth--;
+                else if (c == ',' && depth == 0)
+                {
+                    list.Add(s.Substring(start, i - start).Trim());
+                    start = i + 1;
+                }
             }
         }
         list.Add(s.Substring(start).Trim());

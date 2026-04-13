@@ -30,7 +30,9 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra wielded       — show wielded items");
         ChatLine("[RynthAi] /ra dumpprops     — dump player properties");
         ChatLine("[RynthAi] /ra mexec <expr>  — evaluate meta expression");
-        ChatLine("[RynthAi] /ra listvars      — show meta variables");
+        ChatLine("[RynthAi] /ra listvars      — show session variables");
+        ChatLine("[RynthAi] /ra listpvars     — show persistent variables");
+        ChatLine("[RynthAi] /ra listgvars     — show global variables");
         ChatLine("[RynthAi] /ra use[i|l][p|pi|lp] <name> [on <name2>]  — use item (i=inv, l=land, p=partial)");
         ChatLine("[RynthAi] /ra raycast       — raycast system status");
         ChatLine("[RynthAi] /ra lostest       — line-of-sight test to target");
@@ -295,6 +297,10 @@ public sealed partial class RynthAiPlugin
             typeTag = "[Dictionary]";
             display = "[" + string.Join(",", dictContents.Select(kv => $"{kv.Key}=>{kv.Value}")) + "]";
         }
+        else if (result.Length > 3 && result[0] == 'S' && result[1] == 'W' && result[2] == ':')
+            typeTag = "[Stopwatch]";
+        else if (result.StartsWith("ERR:", StringComparison.Ordinal))
+            typeTag = "[error]";
         else if (result.Length >= 2 && result[0] == '[' && result[result.Length - 1] == ']')
             typeTag = "[List]";
         else if (double.TryParse(result, System.Globalization.NumberStyles.Any,
@@ -334,6 +340,26 @@ public sealed partial class RynthAiPlugin
                 typeLabel = "string";
             ChatLine($"[RynthAi] {kv.Key} ({typeLabel}) = {val}");
         }
+    }
+
+    private void HandleListPvarsCommand()
+    {
+        if (_metaManager == null) { ChatLine("[RynthAi] Meta not ready."); return; }
+        var pvars = _metaManager.Expressions.Pvars;
+        if (pvars.Count == 0) { ChatLine("[RynthAi] No persistent variables set."); return; }
+        ChatLine($"[RynthAi] Persistent variables ({pvars.Count}):");
+        foreach (var kv in pvars)
+            ChatLine($"[RynthAi]   {kv.Key} = {kv.Value}");
+    }
+
+    private void HandleListGvarsCommand()
+    {
+        if (_metaManager == null) { ChatLine("[RynthAi] Meta not ready."); return; }
+        var gvars = _metaManager.Expressions.Gvars;
+        if (gvars.Count == 0) { ChatLine("[RynthAi] No global variables set."); return; }
+        ChatLine($"[RynthAi] Global variables ({gvars.Count}):");
+        foreach (var kv in gvars)
+            ChatLine($"[RynthAi]   {kv.Key} = {kv.Value}");
     }
 
     private void HandleDumpPropsCommand()
