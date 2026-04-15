@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Numerics;
 using System.Text.RegularExpressions;
+using RynthCore.Plugin.RynthAi;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.PluginSdk;
 
@@ -16,6 +17,7 @@ internal sealed class MetaManager
     private WorldObjectCache? _objectCache;
     private FellowshipTracker? _fellowshipTracker;
     private QuestTracker? _questTracker;
+    private BuffManager? _buffManager;
     private uint _playerId;
 
     // ── State tracking ───────────────────────────────────────────────────────
@@ -42,6 +44,10 @@ internal sealed class MetaManager
     private bool _lastPortalState;
     private bool _portalEnteredThisTick;
     private bool _portalExitedThisTick;
+
+    // ── Vendor state tracking ─────────────────────────────────────────────────
+    private uint _openVendorId;
+    private bool _vendorClosedThisTick;
 
     // ── Enchantment read buffers (reused per tick to avoid allocation) ────────
     private readonly uint[] _enchSpellIds = new uint[256];
@@ -74,6 +80,8 @@ internal sealed class MetaManager
         _questTracker = tracker;
         _expressions?.SetQuestTracker(tracker);
     }
+
+    public void SetBuffManager(BuffManager buffManager) => _buffManager = buffManager;
 
     public void SetPlayerId(uint id)
     {
@@ -124,6 +132,19 @@ internal sealed class MetaManager
         _lastChatTime = DateTime.Now;
     }
 
+    public void OnVendorOpen(uint vendorId)
+    {
+        if (vendorId == 0) return;
+        _openVendorId = vendorId;
+    }
+
+    public void OnVendorClose(uint vendorId)
+    {
+        if (vendorId == 0 || vendorId != _openVendorId) return;
+        _openVendorId = 0;
+        _vendorClosedThisTick = true;
+    }
+
     public void Think()
     {
         if (!_settings.IsMacroRunning || !_settings.EnableMeta || _settings.MetaRules == null)
@@ -146,6 +167,9 @@ internal sealed class MetaManager
         _portalEnteredThisTick = currentPortal && !_lastPortalState;
         _portalExitedThisTick  = !currentPortal && _lastPortalState;
         _lastPortalState = currentPortal;
+
+        // ── Vendor edge detection (reset one-shot flag each tick) ─────────────
+        _vendorClosedThisTick = false;
 
         // ── Watchdog ─────────────────────────────────────────────────────────
         if (_watchdogActive &&
@@ -350,7 +374,7 @@ internal sealed class MetaManager
                     int matchCount = 0;
                     int pid = unchecked((int)_playerId);
                     foreach (var obj in _objectCache.GetLandscape())
-                        if (obj.ObjectClass == AcObjectClass.Creature &&
+                        if (obj.ObjectClass == AcObjectClass.Monster &&
                             _objectCache.Distance(obj.Id, pid) <= maxDist &&
                             rx.IsMatch(obj.Name))
                             matchCount++;
@@ -367,7 +391,7 @@ internal sealed class MetaManager
                 if (maxD <= 0) maxD = 20.0;
                 int pid = unchecked((int)_playerId);
                 foreach (var obj in _objectCache.GetLandscape())
-                    if (obj.ObjectClass == AcObjectClass.Creature &&
+                    if (obj.ObjectClass == AcObjectClass.Monster &&
                         _objectCache.Distance(obj.Id, pid) <= maxD)
                         return false;
                 return true;
@@ -408,9 +432,75 @@ internal sealed class MetaManager
             case MetaConditionType.PortalspaceExited:
                 return _portalExitedThisTick;
 
+            case MetaConditionType.AnyVendorOpen:
+                return _openVendorId != 0;
+
+            case MetaConditionType.VendorClosed:
+                return _vendorClosedThisTick;
+
             case MetaConditionType.Expression:
                 return !string.IsNullOrEmpty(rule.ConditionData) &&
                        ExpressionEngine.ToBool(Expressions.Evaluate(rule.ConditionData));
+
+            // ── Burden percentage ─────────────────────────────────────────────
+            case MetaConditionType.BurdenPercentage_GE:
+            {
+                if (!int.TryParse(rule.ConditionData, out int threshold)) return false;
+                if (!_host.HasGetObjectIntProperty || _playerId == 0) return false;
+                if (!_host.TryGetObjectIntProperty(_playerId, 5u, out int encumbVal)) return false;
+                if (!_host.TryGetObjectIntProperty(_playerId, 96u, out int encumbCap) || encumbCap <= 0) return false;
+                return (encumbVal * 100 / encumbCap) >= threshold;
+            }
+
+            // ── Distance to nearest nav route point ───────────────────────────
+            case MetaConditionType.DistAnyRoutePT_GE:
+            {
+                if (!double.TryParse(rule.ConditionData, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out double threshold)) return false;
+                if (_settings.CurrentRoute == null || _settings.CurrentRoute.Points.Count == 0) return false;
+                if (!NavCoordinateHelper.TryGetNavCoords(_host, out double ns, out double ew)) return false;
+
+                double minDist = double.MaxValue;
+                foreach (var pt in _settings.CurrentRoute.Points)
+                {
+                    if (pt.Type != NavPointType.Point) continue;
+                    double d = Math.Sqrt((pt.NS - ns) * (pt.NS - ns) + (pt.EW - ew) * (pt.EW - ew));
+                    if (d < minDist) minDist = d;
+                }
+                return minDist != double.MaxValue && minDist >= threshold;
+            }
+
+            // ── Priority monster count within distance ────────────────────────
+            case MetaConditionType.MonsterPriorityCountWithinDistance:
+            {
+                if (_objectCache == null || _playerId == 0) return false;
+                var parts = rule.ConditionData.Split(',');
+                if (parts.Length < 2 ||
+                    !int.TryParse(parts[0], out int minCount) ||
+                    !double.TryParse(parts[1], out double maxDist)) return false;
+                int pid = unchecked((int)_playerId);
+                int matchCount = 0;
+                foreach (var obj in _objectCache.GetLandscape())
+                {
+                    if (obj.ObjectClass != AcObjectClass.Monster) continue;
+                    if (_objectCache.Distance(obj.Id, pid) > maxDist) continue;
+                    foreach (var mr in _settings.MonsterRules)
+                    {
+                        if (mr.Name.Equals("Default", StringComparison.OrdinalIgnoreCase)) continue;
+                        try
+                        {
+                            if (Regex.IsMatch(obj.Name, mr.Name, RegexOptions.IgnoreCase))
+                            { matchCount++; break; }
+                        }
+                        catch { }
+                    }
+                }
+                return matchCount >= minCount;
+            }
+
+            // ── Need to buff ──────────────────────────────────────────────────
+            case MetaConditionType.NeedToBuff:
+                return _buffManager != null && _buffManager.NeedsAnyBuff();
 
             default: return false;
         }
@@ -442,10 +532,13 @@ internal sealed class MetaManager
                 string cmd = ProcessData(rule.ActionData);
                 if (!string.IsNullOrEmpty(cmd))
                 {
-                    if (_host.HasInvokeChatParser)
-                        _host.InvokeChatParser(cmd);
-                    else
-                        _host.WriteToChat($"[RynthAi] ChatCommand (no parser): {cmd}", 1);
+                    if (!TryHandleVtCommand(cmd))
+                    {
+                        if (_host.HasInvokeChatParser)
+                            _host.InvokeChatParser(cmd);
+                        else
+                            _host.WriteToChat($"[RynthAi] ChatCommand (no parser): {cmd}", 1);
+                    }
                 }
                 break;
 
@@ -519,9 +612,53 @@ internal sealed class MetaManager
                 _watchdogActive = false;
                 break;
 
-            case MetaActionType.SetNTOption:
-                _host.WriteToChat($"[RynthAi Meta] SetNTOption: {rule.ActionData}", 1);
+            case MetaActionType.SetRAOption:
+            {
+                string optData = ProcessData(rule.ActionData);
+                if (!string.IsNullOrEmpty(optData))
+                {
+                    var parts = optData.Split(';');
+                    if (parts.Length >= 2)
+                        Expressions.SetOption(parts[0].Trim(), parts[1].Trim());
+                }
                 break;
+            }
+
+            case MetaActionType.GetRAOption:
+            {
+                string optData = ProcessData(rule.ActionData);
+                if (!string.IsNullOrEmpty(optData))
+                {
+                    var parts = optData.Split(';');
+                    if (parts.Length >= 2)
+                    {
+                        string varName = parts[0].Trim();
+                        string optName = parts[1].Trim();
+                        Expressions.SetVariable(varName, Expressions.GetOption(optName));
+                    }
+                }
+                break;
+            }
+
+            case MetaActionType.ChatExpression:
+            {
+                string exprSrc = ProcessData(rule.ActionData);
+                if (!string.IsNullOrEmpty(exprSrc))
+                {
+                    string msg = Expressions.Evaluate(exprSrc);
+                    if (!string.IsNullOrEmpty(msg))
+                    {
+                        if (!TryHandleVtCommand(msg))
+                        {
+                            if (_host.HasInvokeChatParser)
+                                _host.InvokeChatParser(msg);
+                            else
+                                _host.WriteToChat($"[RynthAi] ChatExpression (no parser): {msg}", 1);
+                        }
+                    }
+                }
+                break;
+            }
 
             case MetaActionType.ExpressionAction:
                 string exprText = ProcessData(rule.ActionData);
@@ -531,7 +668,146 @@ internal sealed class MetaManager
                         _host.WriteToChat($"[RynthAi Expr] Unknown action: {exprText}", 1);
                 }
                 break;
+
+            // ── View actions (VTank UI construct — no-op in RynthAi) ──────────
+            case MetaActionType.CreateView:
+            case MetaActionType.DestroyView:
+            case MetaActionType.DestroyAllViews:
+                break;
         }
+    }
+
+    // ── VTank command translation ───────────────────────────────────────────
+
+    /// <summary>
+    /// Intercepts /vt commands from VTank metas and translates them to
+    /// equivalent RynthAi settings changes. Returns true if handled.
+    /// </summary>
+    private bool TryHandleVtCommand(string cmd)
+    {
+        if (!cmd.StartsWith("/vt ", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        string[] parts = cmd.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2) return false;
+
+        string sub = parts[1].ToLower();
+
+        // /vt opt set <option> <value>
+        if (sub == "opt" && parts.Length >= 5 &&
+            parts[2].Equals("set", StringComparison.OrdinalIgnoreCase))
+        {
+            string optName = parts[3].ToLower();
+            string optVal = parts[4];
+            return TrySetVtOption(optName, optVal);
+        }
+
+        // /vt meta load <name> — load a meta file from MetaFiles folder
+        if (sub == "meta" && parts.Length >= 4 &&
+            parts[2].Equals("load", StringComparison.OrdinalIgnoreCase))
+        {
+            string name = string.Join(" ", parts, 3, parts.Length - 3);
+            string metaDir = @"C:\Games\RynthSuite\RynthAi\MetaFiles";
+            string afPath = Path.Combine(metaDir, name + ".af");
+            string metPath = Path.Combine(metaDir, name + ".met");
+
+            string loadPath = File.Exists(afPath) ? afPath : File.Exists(metPath) ? metPath : "";
+            if (!string.IsNullOrEmpty(loadPath))
+            {
+                try
+                {
+                    var loaded = AfFileParser.Load(loadPath, @"C:\Games\RynthSuite\RynthAi\NavProfiles");
+                    if (loaded.Count > 0)
+                    {
+                        _settings.MetaRules = loaded;
+                        _settings.CurrentState = loaded[0].State;
+                        _settings.ForceStateReset = true;
+                        _host.WriteToChat($"[RynthAi] Loaded meta: {name}", 1);
+                    }
+                }
+                catch { }
+            }
+            else
+            {
+                _host.WriteToChat($"[RynthAi] Meta not found: {name}", 1);
+            }
+            return true;
+        }
+
+        // /vt nav load <name> — load a nav route
+        if (sub == "nav" && parts.Length >= 4 &&
+            parts[2].Equals("load", StringComparison.OrdinalIgnoreCase))
+        {
+            string name = string.Join(" ", parts, 3, parts.Length - 3);
+            _settings.CurrentNavPath = name;
+            _host.WriteToChat($"[RynthAi] Nav route set: {name}", 1);
+            return true;
+        }
+
+        // /vt loot load <name> — load a loot profile
+        if ((sub == "loot" || sub == "lootprofile") && parts.Length >= 4 &&
+            parts[2].Equals("load", StringComparison.OrdinalIgnoreCase))
+        {
+            string name = string.Join(" ", parts, 3, parts.Length - 3);
+            _settings.CurrentLootPath = name;
+            _host.WriteToChat($"[RynthAi] Loot profile set: {name}", 1);
+            return true;
+        }
+
+        // /vt settings load / loadchar — ignore silently
+        if (sub == "settings") return true;
+
+        return false;
+    }
+
+    // VTank option name → RynthAi settings mapping
+    private static readonly Dictionary<string, string> VtOptionMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["enablecombat"]              = "EnableCombat",
+        ["enablelooting"]             = "EnableLooting",
+        ["enablenav"]                 = "EnableNavigation",
+        ["enablebuffing"]             = "EnableBuffing",
+        ["enablemeta"]                = "EnableMeta",
+        ["opendoors"]                 = "OpenDoors",
+        ["idlepeacemode"]             = "PeaceModeWhenIdle",
+        ["idlebufftopoff"]            = "RebuffWhenIdle",
+        ["summonpets"]                = "SummonPets",
+        ["combinesalvage"]            = "EnableCombineSalvage",
+        ["attackdistance"]            = "MonsterRange",
+        ["approachdistance"]          = "ApproachRange",
+        ["navpriorityboost"]          = "BoostNavPriority",
+        ["lootpriorityboost"]         = "BoostLootPriority",
+        ["dooropenrange"]             = "OpenDoorRange",
+        ["autofellowmanagement"]      = "AutoFellowMgmt",
+        ["switchwandstodebuff"]       = "UseDispelItems",
+        ["lootonlyrarecorpses"]       = "MineOnly",
+    };
+
+    private bool TrySetVtOption(string vtName, string vtValue)
+    {
+        // Translate VTank bool strings to numeric
+        string value = vtValue.ToLower() switch
+        {
+            "true"  => "1",
+            "false" => "0",
+            "on"    => "1",
+            "off"   => "0",
+            _       => vtValue
+        };
+
+        if (VtOptionMap.TryGetValue(vtName, out string? raName))
+        {
+            var map = Expressions.BuildSettingsMapPublic();
+            if (map.TryGetValue(raName, out var entry))
+            {
+                entry.Set(value);
+                return true;
+            }
+        }
+
+        // Not mapped — store as a generic option so expressions can still read it
+        Expressions.SetOption(vtName, value);
+        return true;
     }
 
 }

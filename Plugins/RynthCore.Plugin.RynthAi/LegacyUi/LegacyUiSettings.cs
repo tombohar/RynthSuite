@@ -111,6 +111,9 @@ public sealed class LegacyUiSettings
 
     public bool BoostNavPriority;
     public bool BoostLootPriority;
+    public bool OpenDoors;
+    public float OpenDoorRange = 5.0f;
+    public bool AutoUnlockDoors;
     public int LootOwnership;
     public bool LootOnlyRareCorpses;
     public bool PeaceModeWhenIdle = true;
@@ -143,6 +146,7 @@ public sealed class LegacyUiSettings
 
     public List<MonsterRule> MonsterRules { get; set; } = new();
     public List<ItemRule> ItemRules { get; set; } = new();
+    public List<ConsumableRule> ConsumableRules { get; set; } = new();
     public List<BuffRule> BuffRules { get; set; } = new();
     public List<MetaRule> MetaRules { get; set; } = new();
     public string LuaScript = "-- Enter your Lua script here\nprint('RynthAi Lua Loaded')";
@@ -247,6 +251,13 @@ public sealed class ItemRule
     public bool KeepBuffed { get; set; } = true;
 }
 
+public sealed class ConsumableRule
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Type { get; set; } = "General";
+}
+
 public enum MetaConditionType
 {
     Never,
@@ -299,8 +310,8 @@ public enum MetaActionType
     ChatExpression,
     SetWatchdog,
     ClearWatchdog,
-    GetNTOption,
-    SetNTOption,
+    GetRAOption,
+    SetRAOption,
     CreateView,
     DestroyView,
     DestroyAllViews

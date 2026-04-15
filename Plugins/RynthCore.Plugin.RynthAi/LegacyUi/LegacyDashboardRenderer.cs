@@ -522,6 +522,9 @@ internal sealed class LegacyDashboardRenderer
         dst.CorpseApproachRangeMin   = NormalizeCorpseRangeYards(tmp.CorpseApproachRangeMin, 2.0);
         dst.BoostNavPriority         = tmp.BoostNavPriority;
         dst.BoostLootPriority        = tmp.BoostLootPriority;
+        dst.OpenDoors                = tmp.OpenDoors;
+        dst.OpenDoorRange            = tmp.OpenDoorRange;
+        dst.AutoUnlockDoors          = tmp.AutoUnlockDoors;
         dst.LootOwnership            = tmp.LootOwnership;
         dst.LootOnlyRareCorpses      = tmp.LootOnlyRareCorpses;
         dst.PeaceModeWhenIdle        = tmp.PeaceModeWhenIdle;
@@ -539,6 +542,7 @@ internal sealed class LegacyDashboardRenderer
         dst.TargetFPSBackground      = tmp.TargetFPSBackground;
         dst.MonsterRules             = tmp.MonsterRules;
         dst.ItemRules                = tmp.ItemRules;
+        dst.ConsumableRules          = tmp.ConsumableRules;
         dst.BuffRules                = tmp.BuffRules;
         dst.MetaRules                = tmp.MetaRules;
         dst.LuaScript                = tmp.LuaScript;
@@ -909,7 +913,7 @@ internal sealed class LegacyDashboardRenderer
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Settings", "wrench", ref _settings.ShowAdvancedWindow);
         ImGui.TableNextRow();
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Navigation", "map", ref DashWindows.ShowNavigation);
-        ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Weapons", "shield", ref DashWindows.ShowWeapons);
+        ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Items", "shield", ref DashWindows.ShowWeapons);
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Lua Scripts", "code", ref DashWindows.ShowLua);
         ImGui.TableNextRow();
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Dungeon Map", "map", ref DashWindows.ShowDungeonMap);

@@ -41,12 +41,33 @@ public class WorldObjectCache
     private const double ReclassifyIntervalSec = 2.0;
 
     // ItemType flag constants (AC ITEM_TYPE bitmask)
-    private const uint ItemTypeMeleeWeapon   = 0x00000001;
-    private const uint ItemTypeArmor         = 0x00000002;
-    private const uint ItemTypeMissileWeapon = 0x00000100;
-    private const uint ItemTypeContainer      = 0x00000200;
-    private const uint ItemTypeCaster        = 0x00008000;
-    private const uint ItemTypeCreature      = 0x00000010;
+    private const uint ItemTypeMeleeWeapon              = 0x00000001;
+    private const uint ItemTypeArmor                    = 0x00000002;
+    private const uint ItemTypeClothing                 = 0x00000004;
+    private const uint ItemTypeJewelry                  = 0x00000008;
+    private const uint ItemTypeCreature                 = 0x00000010;
+    private const uint ItemTypeFood                     = 0x00000020;
+    private const uint ItemTypeMoney                    = 0x00000040;
+    private const uint ItemTypeMisc                     = 0x00000080;
+    private const uint ItemTypeMissileWeapon            = 0x00000100;
+    private const uint ItemTypeContainer                = 0x00000200;
+    private const uint ItemTypeGem                      = 0x00000800;
+    private const uint ItemTypeSpellComponents          = 0x00001000;
+    private const uint ItemTypeWritable                 = 0x00002000;
+    private const uint ItemTypeKey                      = 0x00004000;
+    private const uint ItemTypeCaster                   = 0x00008000;
+    private const uint ItemTypePortal                   = 0x00010000;
+    private const uint ItemTypePromissoryNote           = 0x00040000;
+    private const uint ItemTypeManaStone                = 0x00080000;
+    private const uint ItemTypeService                  = 0x00100000;
+    private const uint ItemTypeCraftCookingBase         = 0x00400000;
+    private const uint ItemTypeCraftAlchemyBase         = 0x00800000;
+    private const uint ItemTypeCraftFletchingBase       = 0x02000000;
+    private const uint ItemTypeCraftAlchemyIntermediate = 0x04000000;
+    private const uint ItemTypeCraftFletchingIntermediate = 0x08000000;
+    private const uint ItemTypeLifeStone                = 0x10000000;
+    private const uint ItemTypeTinkeringTool            = 0x20000000;
+    private const uint ItemTypeTinkeringMaterial        = 0x40000000;
 
     private uint _playerId; // set at login; health updates for self are ignored
     private DateTime _loginTime = DateTime.MinValue; // when SetPlayerId was called
@@ -105,13 +126,13 @@ public class WorldObjectCache
         // If classified, update class to Creature
         if (_byId.TryGetValue(sid, out var existing))
         {
-            if (existing.ObjectClass != AcObjectClass.Creature)
-                _byId[sid] = Make(sid, existing.Name, AcObjectClass.Creature);
+            if (existing.ObjectClass != AcObjectClass.Monster)
+                _byId[sid] = Make(sid, existing.Name, AcObjectClass.Monster);
         }
         else
         {
             // Not yet classified — add with empty name; Tick() will fill in name
-            _byId[sid] = Make(sid, "", AcObjectClass.Creature);
+            _byId[sid] = Make(sid, "", AcObjectClass.Monster);
         }
 
         _landscape.Add(sid);
@@ -246,7 +267,7 @@ public class WorldObjectCache
                     // Add to _creatures so future health update or retry classifies it
                     _creatures.Add(id);
                     _landscape.Add(id);
-                    _byId[id] = Make(id, name, AcObjectClass.Creature);
+                    _byId[id] = Make(id, name, AcObjectClass.Monster);
                     return;
                 }
 
@@ -298,7 +319,7 @@ public class WorldObjectCache
                 {
                     _creatures.Add(id);
                     _landscape.Add(id);
-                    _byId[id] = Make(id, name, AcObjectClass.Creature);
+                    _byId[id] = Make(id, name, AcObjectClass.Monster);
                     return;
                 }
 
@@ -364,7 +385,7 @@ public class WorldObjectCache
             uint uid = unchecked((uint)id);
             _host.TryGetObjectName(uid, out string name);
             _creatures.Add(id);
-            _byId[id] = Make(id, name ?? string.Empty, AcObjectClass.Creature);
+            _byId[id] = Make(id, name ?? string.Empty, AcObjectClass.Monster);
         }
 
         _host.Log($"[RynthAi] ReclassifyUnknownDynamics: promoted {toPromote.Count} object(s) to Creature");
@@ -403,12 +424,12 @@ public class WorldObjectCache
                 _creatures.Remove(id);
             }
             else if (_creatures.Contains(id))
-                cls = AcObjectClass.Creature;
+                cls = AcObjectClass.Monster;
             else if (_host.TryGetItemType(uid, out uint typeFlags))
             {
                 if ((typeFlags & ItemTypeCreature) != 0)
                 {
-                    cls = AcObjectClass.Creature;
+                    cls = AcObjectClass.Monster;
                     _creatures.Add(id);
                 }
                 else
@@ -812,11 +833,33 @@ public class WorldObjectCache
 
     private static AcObjectClass ClassifyByItemType(uint typeFlags)
     {
-        if ((typeFlags & ItemTypeContainer) != 0)     return AcObjectClass.Container;
-        if ((typeFlags & ItemTypeCaster) != 0)        return AcObjectClass.WandStaffOrb;
-        if ((typeFlags & ItemTypeMissileWeapon) != 0) return AcObjectClass.MissileWeapon;
-        if ((typeFlags & ItemTypeArmor) != 0)         return AcObjectClass.Armor;
-        if ((typeFlags & ItemTypeMeleeWeapon) != 0)   return AcObjectClass.MeleeWeapon;
+        // Most specific / unambiguous types first
+        if ((typeFlags & ItemTypePromissoryNote)            != 0) return AcObjectClass.TradeNote;
+        if ((typeFlags & ItemTypeManaStone)                 != 0) return AcObjectClass.ManaStone;
+        if ((typeFlags & ItemTypeSpellComponents)           != 0) return AcObjectClass.SpellComponent;
+        if ((typeFlags & ItemTypeGem)                       != 0) return AcObjectClass.Gem;
+        if ((typeFlags & ItemTypeKey)                       != 0) return AcObjectClass.Key;
+        if ((typeFlags & ItemTypeLifeStone)                 != 0) return AcObjectClass.Lifestone;
+        if ((typeFlags & ItemTypeTinkeringMaterial)         != 0) return AcObjectClass.Salvage;
+        if ((typeFlags & ItemTypeTinkeringTool)             != 0) return AcObjectClass.Ust;
+        if ((typeFlags & ItemTypeCraftCookingBase)          != 0) return AcObjectClass.BaseCooking;
+        if ((typeFlags & ItemTypeCraftAlchemyBase)          != 0) return AcObjectClass.BaseAlchemy;
+        if ((typeFlags & ItemTypeCraftFletchingBase)        != 0) return AcObjectClass.BaseFletching;
+        if ((typeFlags & ItemTypeCraftAlchemyIntermediate)  != 0) return AcObjectClass.CraftedAlchemy;
+        if ((typeFlags & ItemTypeCraftFletchingIntermediate)!= 0) return AcObjectClass.CraftedFletching;
+        if ((typeFlags & ItemTypeService)                   != 0) return AcObjectClass.Services;
+        if ((typeFlags & ItemTypePortal)                    != 0) return AcObjectClass.Portal;
+        if ((typeFlags & ItemTypeWritable)                  != 0) return AcObjectClass.Book;
+        if ((typeFlags & ItemTypeContainer)                 != 0) return AcObjectClass.Container;
+        if ((typeFlags & ItemTypeCaster)                    != 0) return AcObjectClass.WandStaffOrb;
+        if ((typeFlags & ItemTypeMissileWeapon)             != 0) return AcObjectClass.MissileWeapon;
+        if ((typeFlags & ItemTypeArmor)                     != 0) return AcObjectClass.Armor;
+        if ((typeFlags & ItemTypeMeleeWeapon)               != 0) return AcObjectClass.MeleeWeapon;
+        if ((typeFlags & ItemTypeClothing)                  != 0) return AcObjectClass.Clothing;
+        if ((typeFlags & ItemTypeJewelry)                   != 0) return AcObjectClass.Jewelry;
+        if ((typeFlags & ItemTypeFood)                      != 0) return AcObjectClass.Food;
+        if ((typeFlags & ItemTypeMoney)                     != 0) return AcObjectClass.Money;
+        if ((typeFlags & ItemTypeMisc)                      != 0) return AcObjectClass.Misc;
         return AcObjectClass.Unknown;
     }
 
@@ -829,7 +872,7 @@ public class WorldObjectCache
 
         if (IsWand(name))          return AcObjectClass.WandStaffOrb;
         if (IsMissileWeapon(name)) return AcObjectClass.MissileWeapon;
-        if (IsAmmo(name))          return AcObjectClass.Ammo;
+        if (IsAmmo(name))          return AcObjectClass.MissileWeapon;
         if (IsClothing(name))      return AcObjectClass.Clothing;
         if (IsArmor(name))         return AcObjectClass.Armor;
         if (IsMeleeWeapon(name))   return AcObjectClass.MeleeWeapon;

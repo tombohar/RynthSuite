@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Numerics;
 using ImGuiNET;
+using RynthCore.Plugin.RynthAi.Meta;
 
 namespace RynthCore.Plugin.RynthAi.LegacyUi;
 
@@ -17,6 +19,17 @@ internal sealed class LegacyMetaUi
     private string _newStateName = "";
     private bool _openCreateStatePopup;
 
+    // ── Load/Save state ──────────────────────────────────────────────────
+    private bool _openSavePopup;
+    private List<(string Path, string Display)> _macroFiles = new();
+    private int _selectedFileIdx = -1;
+    private string _saveName = "macro";
+    private string _statusMessage = "";
+    private DateTime _statusTime = DateTime.MinValue;
+
+    private static readonly string NavFolder = @"C:\Games\RynthSuite\RynthAi\NavProfiles";
+    private static readonly string MetaFolder = @"C:\Games\RynthSuite\RynthAi\MetaFiles";
+
     private readonly string[] _metaConditionNames =
     {
         "Never", "Always", "All", "Any", "Chat Message", "Pack Slots <=",
@@ -28,14 +41,15 @@ internal sealed class LegacyMetaUi
         "Seconds in State (P) >=", "Time Left On Spell >=", "Time Left On Spell <=",
         "Burden Percentage >=", "Dist Any Route PT >=", "Expression",
         "Chat Message Capture", "Navroute Empty",
-        "Main Health <=", "Main Health % >=", "Main Mana <=", "Main Mana % >=", "Main Stam <="
+        "Main Health <=", "Main Health % >=", "Main Mana <=", "Main Mana % >=", "Main Stam <=",
+        "Vitae % >="
     };
 
     private readonly string[] _metaActionNames =
     {
         "None", "Chat Command", "Set Meta State", "Embedded Nav Route", "All",
         "Call Meta State", "Return From Call", "Expression Action", "Chat Expression",
-        "Set Watchdog", "Clear Watchdog", "Get NT Option", "Set NT Option",
+        "Set Watchdog", "Clear Watchdog", "Get RA Option", "Set RA Option",
         "Create View", "Destroy View", "Destroy All Views"
     };
 
@@ -65,6 +79,10 @@ internal sealed class LegacyMetaUi
 
     private void RenderContents()
     {
+        // ── Load / Save bar ──────────────────────────────────────────────
+        RenderLoadSaveBar();
+        ImGui.Spacing();
+
         if (ImGui.BeginTable("MetaRulesTable", 6,
             ImGuiTableFlags.BordersInnerH | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
             new Vector2(0, -35)))
@@ -425,7 +443,6 @@ internal sealed class LegacyMetaUi
                     case MetaConditionType.AnyVendorOpen:
                     case MetaConditionType.VendorClosed:
                     case MetaConditionType.NeedToBuff:
-                    case MetaConditionType.NoMonstersWithinDistance:
                     case MetaConditionType.PortalspaceEntered:
                     case MetaConditionType.PortalspaceExited:
                     case MetaConditionType.NavrouteEmpty:
@@ -444,6 +461,25 @@ internal sealed class LegacyMetaUi
                     case MetaConditionType.SecondsInState_GE:
                     case MetaConditionType.SecondsInStateP_GE:
                         condHint = "Seconds (e.g. 10)";
+                        break;
+                    case MetaConditionType.NoMonstersWithinDistance:
+                        condHint = "Distance in yards (e.g. 20)";
+                        break;
+                    case MetaConditionType.MonsterNameCountWithinDistance:
+                        condHint = "name regex,distance,min count (e.g. Drudge,20,3)";
+                        break;
+                    case MetaConditionType.MonsterPriorityCountWithinDistance:
+                        condHint = "min count,distance (e.g. 1,20)";
+                        break;
+                    case MetaConditionType.DistAnyRoutePT_GE:
+                        condHint = "Distance in yards (e.g. 10)";
+                        break;
+                    case MetaConditionType.Landblock_EQ:
+                    case MetaConditionType.Landcell_EQ:
+                        condHint = "Hex value (e.g. A9B40000)";
+                        break;
+                    case MetaConditionType.VitaePHE:
+                        condHint = "Vitae penalty % (e.g. 5)";
                         break;
                 }
             }
@@ -594,19 +630,19 @@ internal sealed class LegacyMetaUi
                     rule.ActionData = $"{wdState};{wdMeters};{wdSeconds}";
                     break;
 
-                case MetaActionType.SetNTOption:
-                    string[] ntParts = (rule.ActionData ?? "EnableBuffing;False").Split(';');
-                    string ntO = ntParts[0];
-                    string ntV = ntParts.Length > 1 ? ntParts[1] : "False";
+                case MetaActionType.SetRAOption:
+                    string[] raParts = (rule.ActionData ?? "EnableBuffing;False").Split(';');
+                    string raO = raParts[0];
+                    string raV = raParts.Length > 1 ? raParts[1] : "False";
 
                     ImGui.Text("Option:");
                     ImGui.SetNextItemWidth(120);
-                    if (ImGui.InputText("##NTOpt", ref ntO, 64)) rule.ActionData = $"{ntO};{ntV}";
+                    if (ImGui.InputText("##RAOpt", ref raO, 64)) rule.ActionData = $"{raO};{raV}";
 
                     ImGui.SameLine();
                     ImGui.Text("Val:");
                     ImGui.SetNextItemWidth(-1);
-                    if (ImGui.InputText("##NTVal", ref ntV, 64)) rule.ActionData = $"{ntO};{ntV}";
+                    if (ImGui.InputText("##RAVal", ref raV, 64)) rule.ActionData = $"{raO};{raV}";
                     break;
 
                 case MetaActionType.ExpressionAction:
@@ -617,7 +653,7 @@ internal sealed class LegacyMetaUi
                         rule.ActionData = expr;
                     break;
 
-                case MetaActionType.GetNTOption:
+                case MetaActionType.GetRAOption:
                 case MetaActionType.CreateView:
                 case MetaActionType.DestroyView:
                     string vData = rule.ActionData ?? "";
@@ -650,6 +686,7 @@ internal sealed class LegacyMetaUi
             case MetaConditionType.CharacterDeath:
             case MetaConditionType.AnyVendorOpen:
             case MetaConditionType.VendorClosed:
+            case MetaConditionType.NeedToBuff:
             case MetaConditionType.PortalspaceEntered:
             case MetaConditionType.PortalspaceExited:
             case MetaConditionType.NavrouteEmpty:
@@ -678,5 +715,162 @@ internal sealed class LegacyMetaUi
             });
         }
         return result;
+    }
+
+    // ── Load / Save bar (inline at top of window) ─────────────────────────
+
+    private void RenderLoadSaveBar()
+    {
+        // Lazy-init file list
+        if (_macroFiles.Count == 0)
+            RefreshMacroFileList();
+
+        // Combo to pick a file
+        string comboLabel = _selectedFileIdx >= 0 && _selectedFileIdx < _macroFiles.Count
+            ? _macroFiles[_selectedFileIdx].Display
+            : "Select macro file...";
+
+        ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - 210);
+        if (ImGui.BeginCombo("##MacroFileCombo", comboLabel))
+        {
+            for (int i = 0; i < _macroFiles.Count; i++)
+            {
+                if (ImGui.Selectable(_macroFiles[i].Display, _selectedFileIdx == i))
+                    _selectedFileIdx = i;
+            }
+            ImGui.EndCombo();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Load", new Vector2(55, 0)))
+        {
+            if (_selectedFileIdx >= 0 && _selectedFileIdx < _macroFiles.Count)
+                LoadMacroFile(_macroFiles[_selectedFileIdx].Path);
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Refresh", new Vector2(55, 0)))
+            RefreshMacroFileList();
+
+        ImGui.SameLine();
+        if (ImGui.Button("Save", new Vector2(55, 0)))
+            _openSavePopup = true;
+
+        // Status message
+        if (!string.IsNullOrEmpty(_statusMessage) && (DateTime.Now - _statusTime).TotalSeconds < 5)
+            ImGui.TextColored(new Vector4(0, 1, 0, 1), _statusMessage);
+
+        // Save popup
+        if (_openSavePopup)
+        {
+            ImGui.OpenPopup("SaveMacroPopup");
+            _openSavePopup = false;
+        }
+
+        if (ImGui.BeginPopup("SaveMacroPopup", ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            ImGui.Text("File name:");
+            ImGui.SetNextItemWidth(250);
+            ImGui.InputText("##SaveName", ref _saveName, 64);
+            ImGui.SameLine();
+            ImGui.TextDisabled(".af");
+            ImGui.Spacing();
+            if (ImGui.Button("Save", new Vector2(120, 0)))
+            {
+                SaveMacroFile();
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel", new Vector2(120, 0)))
+                ImGui.CloseCurrentPopup();
+            ImGui.EndPopup();
+        }
+    }
+
+    private void RefreshMacroFileList()
+    {
+        _macroFiles.Clear();
+        _selectedFileIdx = -1;
+
+        Directory.CreateDirectory(MetaFolder);
+        {
+            foreach (string f in Directory.GetFiles(MetaFolder, "*.met"))
+            {
+                string name = Path.GetFileName(f);
+                if (name.StartsWith("--")) continue;
+                _macroFiles.Add((f, $"[met] {name}"));
+            }
+
+            foreach (string f in Directory.GetFiles(MetaFolder, "*.af"))
+                _macroFiles.Add((f, $"[af]  {Path.GetFileName(f)}"));
+        }
+
+        _macroFiles.Sort((a, b) => string.Compare(a.Display, b.Display, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void LoadMacroFile(string filePath)
+    {
+        try
+        {
+            string ext = Path.GetExtension(filePath).ToLowerInvariant();
+            List<MetaRule> loaded;
+
+            if (ext == ".met")
+                loaded = MetFileParser.Load(filePath, NavFolder);
+            else if (ext == ".af")
+                loaded = AfFileParser.Load(filePath, NavFolder);
+            else
+            {
+                _statusMessage = "Unsupported file type";
+                _statusTime = DateTime.Now;
+                return;
+            }
+
+            if (loaded.Count == 0)
+            {
+                _statusMessage = "No rules found (profile?)";
+                _statusTime = DateTime.Now;
+                return;
+            }
+
+            _settings.MetaRules = loaded;
+            _settings.CurrentState = loaded[0].State;
+            _settings.ForceStateReset = true;
+
+            string name = Path.GetFileNameWithoutExtension(filePath);
+            _statusMessage = $"Loaded {loaded.Count} rules from {name}";
+            _statusTime = DateTime.Now;
+        }
+        catch (Exception ex)
+        {
+            _statusMessage = $"Load error: {ex.Message}";
+            _statusTime = DateTime.Now;
+        }
+    }
+
+    private void SaveMacroFile()
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(_saveName))
+            {
+                _statusMessage = "Enter a file name";
+                _statusTime = DateTime.Now;
+                return;
+            }
+
+            Directory.CreateDirectory(MetaFolder);
+            string filePath = Path.Combine(MetaFolder, _saveName + ".af");
+            AfFileWriter.Save(filePath, _settings.MetaRules, NavFolder);
+
+            _statusMessage = $"Saved to {_saveName}.af";
+            _statusTime = DateTime.Now;
+            RefreshMacroFileList();
+        }
+        catch (Exception ex)
+        {
+            _statusMessage = $"Save error: {ex.Message}";
+            _statusTime = DateTime.Now;
+        }
     }
 }

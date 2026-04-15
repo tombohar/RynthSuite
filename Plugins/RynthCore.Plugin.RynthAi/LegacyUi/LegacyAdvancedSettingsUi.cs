@@ -276,6 +276,24 @@ internal sealed class LegacyAdvancedSettingsUi
                     ImGui.SetTooltip("Highlight impassable terrain triangles in red.");
 
                 ImGui.Spacing();
+                ImGui.Separator();
+                ImGui.Text("Doors");
+
+                ImGui.Checkbox("Open Doors While Navigating", ref _settings.OpenDoors);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Automatically open doors encountered during navigation.");
+
+                if (_settings.OpenDoors)
+                {
+                    ImGui.SetNextItemWidth(180);
+                    ImGui.SliderFloat("Door Detection Range (yd)", ref _settings.OpenDoorRange, 0.1f, 70.0f, "%.1f");
+
+                    ImGui.Checkbox("Auto-Unlock Doors", ref _settings.AutoUnlockDoors);
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip("If a door is locked, try to use a lockpick from your Consumable Items list.");
+                }
+
+                ImGui.Spacing();
                 ImGui.Text("Movement Engine");
                 ImGui.SetNextItemWidth(200);
                 ImGui.Combo("Mode", ref _settings.MovementMode, MovementModes, MovementModes.Length);

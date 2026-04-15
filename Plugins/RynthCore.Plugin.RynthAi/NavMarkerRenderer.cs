@@ -66,10 +66,6 @@ internal sealed class NavMarkerRenderer
     private void RenderCore()
     {
         _frameCount++;
-        bool doLog = (_frameCount % 300 == 1);
-
-        if (doLog)
-            _host.Log($"NavMarkers: HasNav3D={_host.HasNav3D} version={_host.Version}");
 
         var route = _settings.CurrentRoute;
         if (route?.Points == null || route.Points.Count == 0)
@@ -92,11 +88,11 @@ internal sealed class NavMarkerRenderer
 
         if (_host.HasNav3D)
         {
-            Render3D(route, count, px, py, pz, playerNS, playerEW, ringRadius, heightOffset, doLog);
+            Render3D(route, count, px, py, pz, playerNS, playerEW, ringRadius, heightOffset);
         }
         else
         {
-            RenderImGuiFallback(route, count, px, py, pz, playerNS, playerEW, ringRadius, heightOffset, doLog);
+            RenderImGuiFallback(route, count, px, py, pz, playerNS, playerEW, ringRadius, heightOffset);
         }
     }
 
@@ -105,7 +101,7 @@ internal sealed class NavMarkerRenderer
     // ═══════════════════════════════════════════════════════════════════
 
     private void Render3D(NavRouteParser route, int count, float px, float py, float pz,
-        double playerNS, double playerEW, float ringRadius, float heightOffset, bool doLog)
+        double playerNS, double playerEW, float ringRadius, float heightOffset)
     {
         // Ring thickness in world units (the band width of the annulus)
         float ringThick = _settings.NavRingThickness * 0.02f;  // Scale from UI units to world units
@@ -140,8 +136,6 @@ internal sealed class NavMarkerRenderer
 
             _host.Nav3DAddRing(wx, wy, wz, ringRadius, thick, color);
 
-            if (doLog && i == 0)
-                _host.Log($"NavMarkers3D: wp0 world=({wx:F1},{wy:F1},{wz:F1}) r={ringRadius:F2} t={thick:F3}");
         }
 
         // ── Pass 2: Submit connecting lines ──────────────────────────
@@ -156,8 +150,6 @@ internal sealed class NavMarkerRenderer
                                lineThick, ColorLine3D);
         }
 
-        if (doLog)
-            _host.Log($"NavMarkers3D: submitted {count} markers");
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -165,7 +157,7 @@ internal sealed class NavMarkerRenderer
     // ═══════════════════════════════════════════════════════════════════
 
     private void RenderImGuiFallback(NavRouteParser route, int count, float px, float py, float pz,
-        double playerNS, double playerEW, float ringRadius, float heightOffset, bool doLog)
+        double playerNS, double playerEW, float ringRadius, float heightOffset)
     {
         if (!_host.HasWorldToScreen || !_host.HasGetViewportSize)
             return;
