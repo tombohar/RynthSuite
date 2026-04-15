@@ -130,7 +130,7 @@ public class CombatManager : IDisposable
         foreach (var wo in _worldFilter.GetLandscape())
         {
             if (wo.Id == playerId) continue;
-            if ((int)wo.ObjectClass != (int)AcObjectClass.Creature) continue;
+            if ((int)wo.ObjectClass != (int)AcObjectClass.Monster) continue;
             if (blacklistedTargets.ContainsKey(wo.Id) || _blacklistManager.IsBlacklisted(wo.Id)) continue;
 
             if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable((uint)wo.Id))
@@ -349,7 +349,7 @@ public class CombatManager : IDisposable
                 _facingTarget = false;
                 ClearCombatTurnMotions();
             }
-            else if (target != null && (int)target.ObjectClass != (int)AcObjectClass.Creature)
+            else if (target != null && (int)target.ObjectClass != (int)AcObjectClass.Monster)
             {
                 // Confirmed no longer a creature (became a corpse, etc.) — release lock.
                 activeTargetId = 0;
@@ -773,7 +773,6 @@ public class CombatManager : IDisposable
         {
             if (item.WieldedLocation <= 0) continue;
             if (playerId != 0 && item.Wielder != 0 && item.Wielder != playerId) continue;
-            if (item.ObjectClass == AcObjectClass.Ammo) return true;
             string n = item.Name;
             if (string.IsNullOrEmpty(n)) continue;
             if (n.Contains("Bundle") || n.Contains("Wrapped")) continue;

@@ -255,7 +255,6 @@ internal sealed class NavigationEngine
     //  Sweep detection handles the rest.
     // ══════════════════════════════════════════════════════════════════════════
 
-    private int _diagTickCount;
 
     private void SteerToWaypoint(int idx, NavPoint pt, NavRouteParser route,
                                  double ns, double ew, double dist)
@@ -299,14 +298,6 @@ internal sealed class NavigationEngine
         double absError = Math.Abs(error);
 
         UpdateStatusLine(idx, dist, route, error);
-
-        // ── Diagnostic log — every 10th tick for ~200 ticks (~6 seconds) ───
-        _diagTickCount++;
-        if (_diagTickCount <= 200 && _diagTickCount % 10 == 1)
-        {
-            string state = _isTurning ? "TURN" : (_isMovingForward ? "RUN" : "STOP");
-            _host.Log($"Nav[{_diagTickCount}]: pos=({ns:F6},{ew:F6}) tgt=({pt.NS:F4},{pt.EW:F4}) hdg={currentDeg:F1} des={desiredDeg:F1} err={error:F1} dist={dist:F1}yd [{state}]");
-        }
 
         // ── STATE: Turning in place (big turn while stopped) ────────────────
         // Uses native turn motions for smooth animation instead of instant snap.
@@ -418,7 +409,7 @@ internal sealed class NavigationEngine
         int oldIdx = _settings.ActiveNavIndex;
         _prevDist    = double.MaxValue;
         _portalState = PortalState.None;
-        _diagTickCount = 0; // reset so we get diag for next waypoint
+
 
         switch (route.RouteType)
         {

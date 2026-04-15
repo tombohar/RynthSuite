@@ -6,5 +6,6 @@ namespace RynthCore.Plugin.RynthAi;
 
 [JsonSerializable(typeof(LegacyUiSettings))]
 [JsonSerializable(typeof(List<MonsterRule>), TypeInfoPropertyName = "MonsterRuleList")]
+[JsonSerializable(typeof(List<ConsumableRule>), TypeInfoPropertyName = "ConsumableRuleList")]
 [JsonSourceGenerationOptions(WriteIndented = true, IncludeFields = true)]
 internal partial class RynthAiJsonContext : JsonSerializerContext { }

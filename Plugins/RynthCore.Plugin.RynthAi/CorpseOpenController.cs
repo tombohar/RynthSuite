@@ -146,6 +146,20 @@ public sealed partial class RynthAiPlugin
         }
     }
 
+    public override void OnVendorOpen(uint vendorId)
+    {
+        string label = Host.TryGetObjectName(vendorId, out string name) ? name : $"0x{vendorId:X8}";
+        Host.WriteToChat($"[RynthAi] Vendor open: {label}", 1);
+        _metaManager?.OnVendorOpen(vendorId);
+    }
+
+    public override void OnVendorClose(uint vendorId)
+    {
+        string label = Host.TryGetObjectName(vendorId, out string name) ? name : $"0x{vendorId:X8}";
+        Host.WriteToChat($"[RynthAi] Vendor closed: {label}", 1);
+        _metaManager?.OnVendorClose(vendorId);
+    }
+
     private void TickCorpseOpening()
     {
         var settings = _dashboard?.Settings;

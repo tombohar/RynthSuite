@@ -64,6 +64,12 @@ public static unsafe class PluginExports
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnStopViewingObjectContents", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnStopViewingObjectContents(uint objectId) => Runtime.OnStopViewingObjectContents(objectId);
 
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnVendorOpen", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void OnVendorOpen(uint vendorId) => Runtime.OnVendorOpen(vendorId);
+
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnVendorClose", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void OnVendorClose(uint vendorId) => Runtime.OnVendorClose(vendorId);
+
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnBusyCountIncremented", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnBusyCountIncremented() => Runtime.OnBusyCountIncremented();
 

@@ -648,7 +648,7 @@ public sealed partial class RynthAiPlugin
         foreach (var wo in _objectCache.GetLandscape())
         {
             if (wo.Id == playerId) continue;
-            if ((int)wo.ObjectClass != (int)AcObjectClass.Creature) continue;
+            if ((int)wo.ObjectClass != (int)AcObjectClass.Monster) continue;
 
             double dist = _objectCache.Distance(playerId, wo.Id);
             if (dist > maxDist || dist == double.MaxValue) continue;

@@ -194,6 +194,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         if (_objectCache != null) _metaManager.SetObjectCache(_objectCache);
         _metaManager.SetFellowshipTracker(_fellowshipTracker);
         _metaManager.SetQuestTracker(_questTracker);
+        if (_buffManager != null) _metaManager.SetBuffManager(_buffManager);
 
         if (_objectCache != null)
             _inventoryManager = new InventoryManager(Host, _dashboard.Settings, _objectCache);
@@ -273,7 +274,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
                     _combatPausedNav = false;
                     _corpsePausedNav = false;
-                    _navigationEngine?.Tick();
+                    bool doorBlocking = TickDoorInteraction();
+                    if (!doorBlocking)
+                        _navigationEngine?.Tick();
                     _metaManager?.Think();
                     return;
                 }
@@ -320,6 +323,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                         if (Host.HasStopCompletely)
                             Host.StopCompletely();
                         _combatPausedNav = true;
+                        ResetDoorState();
                     }
 
                     if ((corpseBlocking || lootGraceActive) && !_corpsePausedNav)
@@ -336,7 +340,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     _combatPausedNav = false;
                     _corpsePausedNav = false;
                     _combatEndedAt = 0;
-                    _navigationEngine?.Tick();
+
+                    bool doorBlocking = TickDoorInteraction();
+                    if (!doorBlocking)
+                        _navigationEngine?.Tick();
                 }
 
                 _metaManager?.Think();

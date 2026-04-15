@@ -215,6 +215,10 @@ internal sealed class ExpressionEngine
             "cleargvar"     => EvalClearGvar(A(0)),
             "clearallgvars" => EvalClearAllGvars(),
 
+            "getfreeitemslots"       => EvalGetFreeItemSlots(rawArgs.Count > 0 ? A(0) : null),
+            "getfreecontainerslots"  => EvalGetFreeContainerSlots(rawArgs.Count > 0 ? A(0) : null),
+            "getcontaineritemcount"  => EvalGetContainerItemCount(rawArgs.Count > 0 ? A(0) : null),
+
             // ── Character properties ──────────────────────────────────────────
             "getcharintprop"    => EvalCharInt(A(0)),
             "getchardoubleprop" => EvalCharDouble(A(0)),
@@ -245,6 +249,7 @@ internal sealed class ExpressionEngine
             "coordinatetostring"         => EvalCoordinateToString(A(0)),
             "coordinateparse"            => EvalCoordinateParse(string.Join(",", Enumerable.Range(0, rawArgs.Count).Select(i => A(i)))),
             "coordinatedistancewithz"    => EvalCoordinateDistanceWithZ(A(0), A(1)),
+            "coordinatedistanceflat"     => EvalCoordinateDistanceFlat(A(0), A(1)),
 
             // ── List functions ────────────────────────────────────────────────
             "listcreate"      => EvalListCreate(rawArgs),
@@ -281,18 +286,37 @@ internal sealed class ExpressionEngine
 
             // ── World object queries ──────────────────────────────────────────
             "wobjectfindnearestbytemplatetype"        => EvalWobjectFindNearestByTemplateType(A(0)),
+            "wobjectfindininventorybytemplatetype"    => EvalWobjectFindInInventoryByTemplateType(A(0)),
+            "wobjectfindall"                          => EvalWobjectFindAll(),
+            "wobjectfindallbyobjectclass"             => EvalWobjectFindAllByObjectClass(A(0)),
+            "wobjectfindallbytemplatetype"            => EvalWobjectFindAllByTemplateType(A(0)),
+            "wobjectfindallbynamerx"                  => EvalWobjectFindAllByNameRx(Tmpl(0)),
+            "wobjectfindallinventory"                 => EvalWobjectFindAllInventory(),
+            "wobjectfindalllandscape"                 => EvalWobjectFindAllLandscape(),
             "wobjectfindallinventorybytemplatetype"   => EvalWobjectFindAllInventoryByTemplateType(A(0)),
+            "wobjectfindallinventorybyobjectclass"    => EvalWobjectFindAllInventoryByObjectClass(A(0)),
             "wobjectfindallinventorybynamerx"         => EvalWobjectFindAllInventoryByNameRx(Tmpl(0)),
+            "wobjectfindininventorybyname"             => EvalWobjectFindInInventoryByName(Tmpl(0)),
             "wobjectfindininventorybynamerx"          => EvalWobjectFindInInventoryByNameRx(Tmpl(0)),
             "wobjectfindalllandscapebytemplatetype"   => EvalWobjectFindAllLandscapeByTemplateType(A(0)),
             "wobjectfindalllandscapebynamerx"         => EvalWobjectFindAllLandscapeByNameRx(Tmpl(0)),
             "wobjectfindallbycontainer"               => EvalWobjectFindAllByContainer(A(0)),
-            "wobjectgetselection"    => EvalWobjectGetSelection(),
-            "wobjectgetplayer"       => EvalWobjectGetPlayer(),
+            "wobjectgetselection"          => EvalWobjectGetSelection(),
+            "wobjectgetplayer"             => EvalWobjectGetPlayer(),
+            "wobjectgetopencontainer"      => EvalWobjectGetOpenContainer(),
+            "wobjectgetphysicscoordinates" => EvalWobjectGetPhysicsCoordinates(A(0)),
             "wobjectgetname"         => EvalWobjectGetName(A(0)),
             "wobjectgetid"           => EvalWobjectGetId(A(0)),
             "wobjectgettemplatetype" => EvalWobjectGetTemplateType(A(0)),
-            "wobjectgetobjclass"     => EvalWobjectGetObjClass(A(0)),
+            "wobjectgetobjectclass"   => EvalWobjectGetObjClass(A(0)),
+            "wobjectgetobjclass"     => EvalWobjectGetObjClass(A(0)), // legacy alias
+            "wobjectfindnearestdoor" => EvalWobjectFindNearestDoor(),
+            "wobjectfindnearestmonster" => EvalWobjectFindNearestMonster(),
+            "wobjectfindbyid"                 => EvalWobjectFindById(A(0)),
+            "wobjectfindnearestbyobjectclass" => EvalWobjectFindNearestByObjectClass(A(0)),
+            "wobjectfindnearestbynameandobjectclass" => EvalWobjectFindNearestByNameAndObjectClass(A(0), Tmpl(1)),
+            "wobjectgetisdooropen"   => EvalWobjectGetIsDoorOpen(A(0)),
+            "wobjectgetphysicsstate" => EvalWobjectGetPhysicsState(A(0)),
             "wobjectgetintprop"      => EvalWobjectGetIntProp(A(0), A(1)),
             "wobjectgetdoubleprop"   => EvalWobjectGetDoubleProp(A(0), A(1)),
             "wobjectgetboolprop"     => EvalWobjectGetBoolProp(A(0), A(1)),
@@ -447,6 +471,11 @@ internal sealed class ExpressionEngine
     }
 
     // ── Variable / char-prop implementations ──────────────────────────────────
+
+    public void SetVariable(string key, string value)
+    {
+        if (!string.IsNullOrEmpty(key)) _variables[key] = value;
+    }
 
     private string EvalSetVar(string key, string value)
     {
@@ -879,6 +908,24 @@ internal sealed class ExpressionEngine
         return Math.Sqrt(dNS * dNS + dEW * dEW + dZ * dZ).ToString("G", CultureInfo.InvariantCulture);
     }
 
+    private string EvalWobjectGetPhysicsCoordinates(string objArg)
+    {
+        if (!TryParseWobjectHandle(objArg, out uint uid, out _)) return "";
+        if (!_host.HasGetObjectPosition) return "";
+        if (!_host.TryGetObjectPosition(uid, out uint objCellId, out float x, out float y, out float z)) return "";
+        if (!LegacyUi.NavCoordinateHelper.TryConvertPoseToCoords(objCellId, x, y, out double ns, out double ew)) return "";
+        return MakeCoordObject(ns, ew, z / 240.0);
+    }
+
+    private string EvalCoordinateDistanceFlat(string coords1, string coords2)
+    {
+        if (!TryParseCoordObject(coords1, out double ns1, out double ew1, out _)) return "0";
+        if (!TryParseCoordObject(coords2, out double ns2, out double ew2, out _)) return "0";
+        double dNS = (ns1 - ns2) * 240.0;
+        double dEW = (ew1 - ew2) * 240.0;
+        return Math.Sqrt(dNS * dNS + dEW * dEW).ToString("G", CultureInfo.InvariantCulture);
+    }
+
     private string EvalSpellExpiration(string arg)
     {
         if (!uint.TryParse(arg.Trim(), out uint spellId)) return "0";
@@ -1256,6 +1303,18 @@ internal sealed class ExpressionEngine
         return MakeWobjectHandle(bestUid, bestName ?? string.Empty);
     }
 
+    private string EvalWobjectFindInInventoryByName(string name)
+    {
+        if (_worldObjectCache == null || string.IsNullOrEmpty(name)) return "0";
+
+        foreach (var wo in _worldObjectCache.GetDirectInventory(forceRefresh: true))
+        {
+            if (string.Equals(wo.Name, name, StringComparison.OrdinalIgnoreCase))
+                return MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name);
+        }
+        return "0";
+    }
+
     private string EvalWobjectFindInInventoryByNameRx(string pattern)
     {
         if (_worldObjectCache == null || string.IsNullOrEmpty(pattern)) return "0";
@@ -1287,6 +1346,20 @@ internal sealed class ExpressionEngine
         return NewList(items);
     }
 
+    private string EvalWobjectFindInInventoryByTemplateType(string arg)
+    {
+        if (_worldObjectCache == null || !_host.HasGetObjectWcid) return "0";
+        if (!uint.TryParse(arg.Trim(), out uint targetWcid) || targetWcid == 0) return "0";
+
+        foreach (var wo in _worldObjectCache.GetDirectInventory(forceRefresh: true))
+        {
+            uint uid = unchecked((uint)wo.Id);
+            if (_host.TryGetObjectWcid(uid, out uint wcid) && wcid == targetWcid)
+                return MakeWobjectHandle(uid, wo.Name);
+        }
+        return "0";
+    }
+
     private string EvalWobjectFindAllInventoryByTemplateType(string arg)
     {
         if (_worldObjectCache == null || !_host.HasGetObjectWcid) return "[]";
@@ -1299,6 +1372,139 @@ internal sealed class ExpressionEngine
             if (_host.TryGetObjectWcid(uid, out uint wcid) && wcid == targetWcid)
                 items.Add(MakeWobjectHandle(uid, wo.Name));
         }
+        return NewList(items);
+    }
+
+    private string EvalWobjectFindAllInventoryByObjectClass(string arg)
+    {
+        if (_worldObjectCache == null) return "[]";
+        if (!int.TryParse(arg.Trim(), out int targetClass)) return "[]";
+
+        var items = new List<string>();
+        foreach (var wo in _worldObjectCache.GetDirectInventory(forceRefresh: true))
+        {
+            if (ResolveEffectiveObjectClass(wo) == targetClass)
+                items.Add(MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name));
+        }
+        return NewList(items);
+    }
+
+    private string EvalWobjectFindAllByObjectClass(string arg)
+    {
+        if (_worldObjectCache == null) return "[]";
+        if (!int.TryParse(arg.Trim(), out int targetClass)) return "[]";
+
+        var items = new List<string>();
+        var seen = new System.Collections.Generic.HashSet<int>();
+
+        void Check(WorldObject wo)
+        {
+            if (!seen.Add(wo.Id)) return;
+            if (ResolveEffectiveObjectClass(wo) != targetClass) return;
+            items.Add(MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name));
+        }
+
+        foreach (var wo in _worldObjectCache.GetLandscapeObjects()) Check(wo);
+        foreach (var wo in _worldObjectCache.GetLandscape()) Check(wo);
+
+        return NewList(items);
+    }
+
+    private string EvalWobjectFindAllByNameRx(string pattern)
+    {
+        if (_worldObjectCache == null || string.IsNullOrEmpty(pattern)) return "[]";
+        Regex re;
+        try { re = new Regex(pattern, RegexOptions.IgnoreCase); }
+        catch { return "[]"; }
+
+        var items = new List<string>();
+        var seen = new System.Collections.Generic.HashSet<int>();
+
+        void Check(WorldObject wo)
+        {
+            if (!seen.Add(wo.Id)) return;
+            if (re.IsMatch(wo.Name ?? string.Empty))
+                items.Add(MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name));
+        }
+
+        foreach (var wo in _worldObjectCache.GetLandscapeObjects()) Check(wo);
+        foreach (var wo in _worldObjectCache.GetLandscape()) Check(wo);
+        foreach (var wo in _worldObjectCache.GetInventory()) Check(wo);
+
+        return NewList(items);
+    }
+
+    private string EvalWobjectFindAllByTemplateType(string arg)
+    {
+        if (_worldObjectCache == null || !_host.HasGetObjectWcid) return "[]";
+        if (!uint.TryParse(arg.Trim(), out uint targetWcid) || targetWcid == 0) return "[]";
+
+        var items = new List<string>();
+        var seen = new System.Collections.Generic.HashSet<int>();
+
+        void Check(WorldObject wo)
+        {
+            if (!seen.Add(wo.Id)) return;
+            uint uid = unchecked((uint)wo.Id);
+            if (_host.TryGetObjectWcid(uid, out uint wcid) && wcid == targetWcid)
+                items.Add(MakeWobjectHandle(uid, wo.Name));
+        }
+
+        foreach (var wo in _worldObjectCache.GetLandscapeObjects()) Check(wo);
+        foreach (var wo in _worldObjectCache.GetLandscape()) Check(wo);
+        foreach (var wo in _worldObjectCache.GetInventory()) Check(wo);
+
+        return NewList(items);
+    }
+
+    private string EvalWobjectFindAllLandscape()
+    {
+        if (_worldObjectCache == null) return "[]";
+
+        var items = new List<string>();
+        var seen = new System.Collections.Generic.HashSet<int>();
+
+        foreach (var wo in _worldObjectCache.GetLandscapeObjects())
+            if (seen.Add(wo.Id))
+                items.Add(MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name));
+
+        foreach (var wo in _worldObjectCache.GetLandscape())
+            if (seen.Add(wo.Id))
+                items.Add(MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name));
+
+        return NewList(items);
+    }
+
+    private string EvalWobjectFindAllInventory()
+    {
+        if (_worldObjectCache == null) return "[]";
+
+        var items = new List<string>();
+        foreach (var wo in _worldObjectCache.GetInventory())
+            items.Add(MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name));
+
+        return NewList(items);
+    }
+
+    private string EvalWobjectFindAll()
+    {
+        if (_worldObjectCache == null) return "[]";
+
+        var items = new List<string>();
+        var seen = new System.Collections.Generic.HashSet<int>();
+
+        foreach (var wo in _worldObjectCache.GetLandscapeObjects())
+            if (seen.Add(wo.Id))
+                items.Add(MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name));
+
+        foreach (var wo in _worldObjectCache.GetLandscape())
+            if (seen.Add(wo.Id))
+                items.Add(MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name));
+
+        foreach (var wo in _worldObjectCache.GetInventory())
+            if (seen.Add(wo.Id))
+                items.Add(MakeWobjectHandle(unchecked((uint)wo.Id), wo.Name));
+
         return NewList(items);
     }
 
@@ -1377,7 +1583,247 @@ internal sealed class ExpressionEngine
     {
         if (_worldObjectCache == null || !TryParseWobjectHandle(arg, out uint uid, out _)) return "0";
         var wo = _worldObjectCache[unchecked((int)uid)];
-        return wo == null ? "0" : ((int)wo.ObjectClass).ToString(CultureInfo.InvariantCulture);
+        if (wo == null) return "0";
+        return ResolveEffectiveObjectClass(wo).ToString(CultureInfo.InvariantCulture);
+    }
+
+    // PublicWeenieDesc._bitfield flags for ObjectClass resolution
+    private const uint BF_PLAYER    = 0x8;
+    private const uint BF_ATTACKABLE= 0x10;
+    private const uint BF_VENDOR    = 0x200;
+    private const uint BF_DOOR      = 0x1000;
+    private const uint BF_CORPSE    = 0x2000;
+    private const uint BF_LIFESTONE = 0x4000;
+    private const uint BF_FOOD      = 0x8000;
+    private const uint BF_HEALER    = 0x10000;
+    private const uint BF_LOCKPICK  = 0x20000;
+    private const uint BF_PORTAL    = 0x40000;
+
+    /// <summary>
+    /// Resolves the VTank-compatible ObjectClass for a world object at runtime.
+    /// Uses PublicWeenieDesc._bitfield flags for accurate classification.
+    /// </summary>
+    private int ResolveEffectiveObjectClass(WorldObject wo)
+    {
+        int cls = (int)wo.ObjectClass;
+        uint uid = unchecked((uint)wo.Id);
+
+        if (_host.HasGetObjectBitfield && _host.TryGetObjectBitfield(uid, out uint bf))
+        {
+            if ((bf & BF_PLAYER) != 0)    return (int)AcObjectClass.Player;
+            if ((bf & BF_VENDOR) != 0)    return (int)AcObjectClass.Vendor;
+            if (cls == (int)AcObjectClass.Monster)
+                return (bf & BF_ATTACKABLE) != 0 ? (int)AcObjectClass.Monster : (int)AcObjectClass.Npc;
+            if ((bf & BF_DOOR) != 0)      return (int)AcObjectClass.Door;
+            if ((bf & BF_CORPSE) != 0)    return (int)AcObjectClass.Corpse;
+            if ((bf & BF_PORTAL) != 0)    return (int)AcObjectClass.Portal;
+            if ((bf & BF_LIFESTONE) != 0) return (int)AcObjectClass.Lifestone;
+            if ((bf & BF_FOOD) != 0)      return (int)AcObjectClass.Food;
+            if ((bf & BF_HEALER) != 0)    return (int)AcObjectClass.HealingKit;
+            if ((bf & BF_LOCKPICK) != 0)  return (int)AcObjectClass.Lockpick;
+        }
+        else if (cls == (int)AcObjectClass.Monster && _host.HasObjectIsAttackable)
+        {
+            return _host.ObjectIsAttackable(uid) ? (int)AcObjectClass.Monster : (int)AcObjectClass.Npc;
+        }
+
+        return cls;
+    }
+
+    private string EvalWobjectFindNearestDoor()
+    {
+        if (_worldObjectCache == null || _playerId == 0) return "0";
+
+        int bestId = 0;
+        string bestName = string.Empty;
+        double bestDist = double.MaxValue;
+        bool hasBitfield = _host.HasGetObjectBitfield;
+
+        foreach (var wo in _worldObjectCache.GetLandscapeObjects())
+        {
+            uint uid = unchecked((uint)wo.Id);
+
+            // Doors have static GUIDs (< 0x80000000). Dynamic objects are creatures,
+            // NPCs, pack items — none of them are doors.
+            if (uid >= 0x80000000u) continue;
+
+            // Primary: check PublicWeenieDesc._bitfield for BF_DOOR (0x1000).
+            // Fallback: name-based detection for older engine builds without GetObjectBitfield.
+            if (hasBitfield)
+            {
+                if (!_host.TryGetObjectBitfield(uid, out uint bf) || (bf & 0x1000u) == 0)
+                    continue;
+            }
+            else
+            {
+                string nl = (wo.Name ?? string.Empty).ToLowerInvariant();
+                if (!nl.Contains("door") && !nl.Contains("gate") && !nl.Contains("hatch") && !nl.Contains("portcullis"))
+                    continue;
+            }
+
+            double dist = _worldObjectCache.Distance(unchecked((int)_playerId), wo.Id);
+            if (dist < bestDist)
+            {
+                bestDist = dist;
+                bestId = wo.Id;
+                bestName = wo.Name ?? string.Empty;
+            }
+        }
+
+        if (bestId == 0) return "0";
+        return MakeWobjectHandle(unchecked((uint)bestId), bestName);
+    }
+
+    private string EvalWobjectFindNearestMonster()
+    {
+        if (_worldObjectCache == null || _playerId == 0) return "0";
+
+        uint bestId = 0;
+        string bestName = string.Empty;
+        double bestDist = double.MaxValue;
+        bool hasAttackCheck = _host.HasObjectIsAttackable;
+
+        foreach (var wo in _worldObjectCache.GetLandscape())
+        {
+            uint uid = unchecked((uint)wo.Id);
+            if (uid == _playerId) continue;
+
+            // Only monsters — skip NPCs, vendors, pets
+            if (hasAttackCheck && !_host.ObjectIsAttackable(uid)) continue;
+
+            double dist = _worldObjectCache.Distance(unchecked((int)_playerId), wo.Id);
+            if (dist < bestDist)
+            {
+                bestDist = dist;
+                bestId = uid;
+                bestName = wo.Name ?? string.Empty;
+            }
+        }
+
+        if (bestId == 0) return "0";
+        return MakeWobjectHandle(bestId, bestName);
+    }
+
+    private string EvalWobjectFindById(string arg)
+    {
+        if (_worldObjectCache == null) return "0";
+        arg = arg.Trim();
+        uint uid;
+        if (arg.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!uint.TryParse(arg.AsSpan(2), System.Globalization.NumberStyles.HexNumber, CultureInfo.InvariantCulture, out uid))
+                return "0";
+        }
+        else if (!uint.TryParse(arg, out uid))
+        {
+            return "0";
+        }
+        if (uid == 0) return "0";
+
+        var wo = _worldObjectCache[unchecked((int)uid)];
+        if (wo == null) return "0";
+
+        string name = wo.Name ?? string.Empty;
+        if (name.Length == 0)
+            _host.TryGetObjectName(uid, out name);
+        return MakeWobjectHandle(uid, name ?? string.Empty);
+    }
+
+    private string EvalWobjectFindNearestByObjectClass(string arg)
+    {
+        if (_worldObjectCache == null || _playerId == 0) return "0";
+        if (!int.TryParse(arg.Trim(), out int targetClass)) return "0";
+
+        uint bestId = 0;
+        string bestName = string.Empty;
+        double bestDist = double.MaxValue;
+        int pid = unchecked((int)_playerId);
+        var seen = new System.Collections.Generic.HashSet<int>();
+
+        void Check(WorldObject wo)
+        {
+            if (!seen.Add(wo.Id)) return;
+            uint uid = unchecked((uint)wo.Id);
+            if (uid == _playerId) return;
+            if (ResolveEffectiveObjectClass(wo) != targetClass) return;
+
+            double dist = _worldObjectCache.Distance(pid, wo.Id);
+            if (dist < bestDist)
+            {
+                bestDist = dist;
+                bestId = uid;
+                bestName = wo.Name ?? string.Empty;
+            }
+        }
+
+        foreach (var wo in _worldObjectCache.GetLandscapeObjects())
+            Check(wo);
+        foreach (var wo in _worldObjectCache.GetLandscape())
+            Check(wo);
+
+        if (bestId == 0) return "0";
+        return MakeWobjectHandle(bestId, bestName);
+    }
+
+    private string EvalWobjectFindNearestByNameAndObjectClass(string classArg, string pattern)
+    {
+        if (_worldObjectCache == null || _playerId == 0) return "0";
+        if (!int.TryParse(classArg.Trim(), out int targetClass)) return "0";
+        if (string.IsNullOrEmpty(pattern)) return "0";
+
+        Regex re;
+        try { re = new Regex(pattern, RegexOptions.IgnoreCase); }
+        catch { return "0"; }
+
+        uint bestId = 0;
+        string bestName = string.Empty;
+        double bestDist = double.MaxValue;
+        int pid = unchecked((int)_playerId);
+        var seen = new System.Collections.Generic.HashSet<int>();
+
+        void Check(WorldObject wo)
+        {
+            if (!seen.Add(wo.Id)) return;
+            uint uid = unchecked((uint)wo.Id);
+            if (uid == _playerId) return;
+            if (ResolveEffectiveObjectClass(wo) != targetClass) return;
+            if (!re.IsMatch(wo.Name ?? string.Empty)) return;
+
+            double dist = _worldObjectCache.Distance(pid, wo.Id);
+            if (dist < bestDist)
+            {
+                bestDist = dist;
+                bestId = uid;
+                bestName = wo.Name ?? string.Empty;
+            }
+        }
+
+        foreach (var wo in _worldObjectCache.GetLandscapeObjects())
+            Check(wo);
+        foreach (var wo in _worldObjectCache.GetLandscape())
+            Check(wo);
+
+        if (bestId == 0) return "0";
+        return MakeWobjectHandle(bestId, bestName);
+    }
+
+    private string EvalWobjectGetIsDoorOpen(string objArg)
+    {
+        if (!TryParseWobjectHandle(objArg, out uint uid, out _) || uid == 0) return "0";
+        // Read CPhysicsObj::m_state directly — no m_pQualities needed.
+        // ETHEREAL_PS (0x4) is set when a door is open (passable); clear when closed.
+        if (!_host.HasGetObjectState) return "0";
+        if (!_host.TryGetObjectState(uid, out uint physState)) return "0";
+        return (physState & 0x4u) != 0 ? "1" : "0";
+    }
+
+    /// <summary>Returns the raw CPhysicsObj::m_state bitfield as a decimal string for debugging.
+    /// Use wobjectgetphysicsstate[wobjectfindnearestdoor[]] to observe state change on open/close.</summary>
+    private string EvalWobjectGetPhysicsState(string objArg)
+    {
+        if (!TryParseWobjectHandle(objArg, out uint uid, out _) || uid == 0) return "noobj";
+        if (!_host.HasGetObjectState) return "nofn";
+        return _host.TryGetObjectState(uid, out uint s) ? s.ToString() : "nostate";
     }
 
     private string EvalWobjectGetSelection()
@@ -1395,6 +1841,94 @@ internal sealed class ExpressionEngine
         if (uid == 0) return "0";
         _host.TryGetObjectName(uid, out string name);
         return MakeWobjectHandle(uid, name ?? string.Empty);
+    }
+
+    private string EvalGetFreeContainerSlots(string? arg)
+    {
+        // Resolve the container UID: no arg → player backpack
+        uint uid;
+        if (string.IsNullOrEmpty(arg))
+        {
+            uid = _playerId;
+            if (uid == 0) return "-1";
+        }
+        else
+        {
+            if (!TryParseWobjectHandle(arg, out uid, out _) || uid == 0)
+                return "-1";
+        }
+
+        // STypeInt 7 = ContainersCapacity (max sub-containers)
+        if (!_host.HasGetObjectIntProperty) return "-1";
+        if (!_host.TryGetObjectIntProperty(uid, (uint)LongValueKey.ContainersCapacity, out int capacity) || capacity <= 0)
+            return "-1";
+
+        // Use the AC client's own GetNumContainedContainers() — authoritative count of
+        // packs + foci occupying container slots (same source as Decal's ContainersContained).
+        if (!_host.HasGetNumContainedContainers) return "-1";
+        int containerCount = _host.GetNumContainedContainers(uid);
+        if (containerCount < 0) return "-1";
+
+        int free = capacity - containerCount;
+        return free < 0 ? "0" : free.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private string EvalGetContainerItemCount(string? arg)
+    {
+        uint uid;
+        if (string.IsNullOrEmpty(arg))
+        {
+            uid = _playerId;
+            if (uid == 0) return "-1";
+        }
+        else
+        {
+            if (!TryParseWobjectHandle(arg, out uid, out _) || uid == 0)
+                return "-1";
+        }
+
+        if (!_host.HasGetNumContainedItems) return "-1";
+        int count = _host.GetNumContainedItems(uid);
+        return count < 0 ? "-1" : count.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private string EvalWobjectGetOpenContainer()
+    {
+        if (!_host.HasGetGroundContainerId) return "0";
+        uint uid = _host.GetGroundContainerId();
+        if (uid == 0) return "0";
+        _host.TryGetObjectName(uid, out string name);
+        return MakeWobjectHandle(uid, name ?? string.Empty);
+    }
+
+    private string EvalGetFreeItemSlots(string? arg)
+    {
+        // Resolve the container UID: no arg → player backpack
+        uint uid;
+        if (string.IsNullOrEmpty(arg))
+        {
+            uid = _playerId;
+            if (uid == 0) return "-1";
+        }
+        else
+        {
+            if (!TryParseWobjectHandle(arg, out uid, out _) || uid == 0)
+                return "-1";
+        }
+
+        // STypeInt 6 = ItemsCapacity (max item slots)
+        if (!_host.HasGetObjectIntProperty) return "-1";
+        if (!_host.TryGetObjectIntProperty(uid, (uint)LongValueKey.ItemsCapacity, out int capacity) || capacity <= 0)
+            return "-1";
+
+        // Current item count from GetContainerContents
+        if (!_host.HasGetContainerContents) return "-1";
+        var buf = new uint[capacity + 1];
+        int count = _host.GetContainerContents(uid, buf);
+        if (count < 0) return "-1";
+
+        int free = capacity - count;
+        return free < 0 ? "0" : free.ToString(CultureInfo.InvariantCulture);
     }
 
     private string EvalWobjectGetIntProp(string objArg, string propArg)
@@ -2220,6 +2754,9 @@ internal sealed class ExpressionEngine
         return "1";
     }
 
+    public Dictionary<string, (Func<string> Get, Action<string> Set)> BuildSettingsMapPublic()
+        => BuildSettingsMap();
+
     private Dictionary<string, (Func<string> Get, Action<string> Set)> BuildSettingsMap()
     {
         if (_settingsMap != null) return _settingsMap;
@@ -2269,6 +2806,10 @@ internal sealed class ExpressionEngine
             ["CurrentNavPath"]      = (() => s.CurrentNavPath,         v => s.CurrentNavPath  = v),
             ["CurrentLootPath"]     = (() => s.CurrentLootPath,        v => s.CurrentLootPath = v),
             ["CurrentMetaPath"]     = (() => s.CurrentMetaPath,        v => s.CurrentMetaPath = v),
+            ["OpenDoors"]           = (() => B(s.OpenDoors),           v => s.OpenDoors       = ToDouble(v) != 0),
+            ["OpenDoorRange"]       = (() => F(s.OpenDoorRange),       v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f)) s.OpenDoorRange = f; }),
+            ["BoostNavPriority"]    = (() => B(s.BoostNavPriority),    v => s.BoostNavPriority  = ToDouble(v) != 0),
+            ["BoostLootPriority"]   = (() => B(s.BoostLootPriority),   v => s.BoostLootPriority = ToDouble(v) != 0),
         };
         return _settingsMap;
     }

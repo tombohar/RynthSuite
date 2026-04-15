@@ -232,6 +232,37 @@ These functions read properties from the local player character.
 The property id is the SType integer for the desired property.
 Returns "0" (or "") if the property is unavailable.
 
+getfreeitemslots[container?]
+    Returns the number of free item slots in a container.
+    If no argument is given (or argument is omitted), defaults to the player's main backpack.
+    Returns -1 if the container is invalid or capacity cannot be determined.
+    Example: getfreeitemslots[]
+                 →  free item slots in the player backpack
+    Example: getfreeitemslots[wobjectgetselection[]]
+                 →  free item slots in the currently selected container
+    Example: getfreeitemslots[wobjectgetopencontainer[]]
+                 →  free item slots in the currently open container
+
+getfreecontainerslots[container?]
+    Returns the number of free sub-container slots in a container (i.e. how many more packs
+    can be placed inside it). If no argument is given, defaults to the player's main backpack.
+    Returns -1 if the container is invalid or capacity cannot be determined.
+    Example: getfreecontainerslots[]
+                 →  free pack slots on the player
+    Example: getfreecontainerslots[wobjectgetselection[]]
+                 →  free pack slots in the currently selected container
+
+getcontaineritemcount[container?]
+    Returns the number of items currently in a container.
+    If no argument is given, defaults to the player's main backpack.
+    Returns -1 if the container is invalid.
+    Example: getcontaineritemcount[]
+                 →  number of items in the player backpack
+    Example: getcontaineritemcount[wobjectgetselection[]]
+                 →  number of items in the currently selected container
+    Example: getcontaineritemcount[wobjectgetopencontainer[]]
+                 →  number of items in the currently open container
+
 getcharintprop[id]
     Returns the integer property with the given SType id as a string.
     Example: getcharintprop[25]    (level)
@@ -391,6 +422,12 @@ coordinatedistancewithz[obj1, obj2]
     Converts NS/EW from coordinate units to raw game units (×240), same for Z.
     Matches UB coordinatedistancewithz[].
     Example: coordinatedistancewithz[coordinateparse[1.2N, 3.4E], coordinateparse[5.6N, 7.8E]]
+
+coordinatedistanceflat[obj1, obj2]
+    Returns the 2D (horizontal) distance in game units between two coordinates objects, ignoring Z.
+    Converts NS/EW from coordinate units to raw game units (×240).
+    Matches UB coordinatedistanceflat[].
+    Example: coordinatedistanceflat[coordinateparse[1.2N, 3.4E], coordinateparse[5.6N, 7.8E]]
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -776,6 +813,16 @@ WorldObject handles
         "[WorldObject] 0x80001F7B: Olthoi Slayer"
     "0" means no object was found. Pass the handle directly to other wobject* functions.
 
+wobjectfindall[]
+    Returns a list of WorldObject handles for every object currently known to the client:
+    landscape objects, creatures, and all inventory items. Deduplicates across all sources.
+    The list may be large — prefer filtered variants (wobjectfindalllandscape*, wobjectfindallinventory*)
+    when you only need a subset.
+    Example: wobjectfindall[]
+                 →  list of all known wobject handles
+    Example: listcount[wobjectfindall[]]
+                 →  total count of all known objects
+
 wobjectfindnearestbytemplatetype[wcid]
     Finds the nearest landscape object whose Weenie Class ID (WCID) matches the given value.
     Returns a WorldObject handle, or "0" if not found.
@@ -788,6 +835,14 @@ wobjectfindnearestbytemplatetype[wcid]
                  →  "[WorldObject] 0x80001F7B: Olthoi Slayer"
     Example: wobjectfindnearestbytemplatetype[31008] == 0       →  true if none nearby
     Example: setvar[t, wobjectfindnearestbytemplatetype[31008]] →  store the handle
+
+wobjectfindininventorybyname[name]
+    Returns a WorldObject handle for the first inventory item whose name matches exactly
+    (case-insensitive). Returns "0" if no match or empty name.
+    Example: wobjectfindininventorybyname[Titan Mana Charge]
+                 →  handle of the first Titan Mana Charge in inventory
+    Example: actiontryapplyitem[wobjectfindininventorybyname[Treated Healing Kit], wobjectgetplayer[]]
+                 →  use a Treated Healing Kit on yourself
 
 wobjectfindininventorybynamerx[namerx]
     Returns a WorldObject handle for the first inventory item whose name matches the regex.
@@ -805,6 +860,29 @@ wobjectfindallinventorybynamerx[namerx]
     Example: wobjectfindallinventorybynamerx[.*Scarab.*]   →  all scarab components
     Example: listcount[wobjectfindallinventorybynamerx[.*Arrow.*]]  →  count of arrows
 
+wobjectfindininventorybytemplatetype[wcid]
+    Returns a WorldObject handle for the first inventory item whose Weenie Class ID matches wcid.
+    Returns "0" if none found.
+    Example: wobjectfindininventorybytemplatetype[9060]   →  first Titan Mana Charge in inventory
+
+wobjectfindallinventory[]
+    Returns a list of WorldObject handles for all items in the player's inventory
+    (including items inside packs and wielded items).
+    Example: wobjectfindallinventory[]
+                 →  list of all inventory wobject handles
+    Example: listcount[wobjectfindallinventory[]]
+                 →  total item count across all inventory
+
+wobjectfindallinventorybyobjectclass[objectclass]
+    Returns a list of WorldObject handles for all inventory items matching the given ObjectClass number.
+    Uses the same class resolution as wobjectfindallbyobjectclass (bitfield + ObjectIsAttackable).
+    Example: wobjectfindallinventorybyobjectclass[16]
+                 →  list of all Mana Stones in inventory
+    Example: wobjectfindallinventorybyobjectclass[29]
+                 →  list of all Healing Kits in inventory
+    Example: listcount[wobjectfindallinventorybyobjectclass[30]]
+                 →  number of Lockpicks in inventory
+
 wobjectfindallinventorybytemplatetype[wcid]
     Returns a list of WorldObject handles for all inventory items whose Weenie Class ID matches wcid.
     Returns "[]" if none found or WCID is invalid.
@@ -813,6 +891,14 @@ wobjectfindallinventorybytemplatetype[wcid]
                  →  list of handles for all Titan Mana Charges in inventory
     Example: listcount[wobjectfindallinventorybytemplatetype[9060]]   →  count of matching items
     Example: listgetitem[wobjectfindallinventorybytemplatetype[9060], 0]  →  first matching handle
+
+wobjectfindalllandscape[]
+    Returns a list of WorldObject handles for all objects currently visible on the landscape
+    (creatures, static objects, portals, NPCs, doors, etc.). Deduplicates across all sources.
+    Example: wobjectfindalllandscape[]
+                 →  list of all landscape wobject handles
+    Example: listcount[wobjectfindalllandscape[]]
+                 →  total count of landscape objects
 
 wobjectfindalllandscapebytemplatetype[wcid]
     Returns a list of WorldObject handles for all landscape objects whose Weenie Class ID matches wcid.
@@ -855,10 +941,96 @@ wobjectgettemplatetype[handle]
     Returns "0" if unavailable.
     Example: wobjectgettemplatetype[wobjectfindnearestbytemplatetype[31008]]  →  "31008"
 
-wobjectgetobjclass[handle]
-    Returns the object's classification as an integer.
-    Returns "0" if unavailable.
-    Classes correspond to AcObjectClass enum values used internally by RynthAi.
+wobjectgetobjectclass[handle]
+    Returns the object's ObjectClass as an integer. Matches UB wobjectgetobjectclass[].
+    Returns "0" if unavailable. Values match VTank ObjectClass enum:
+    0=Unknown, 1=MeleeWeapon, 2=Armor, 3=Clothing, 4=Jewelry, 5=Monster, 6=Food,
+    7=Money, 8=Misc, 9=MissileWeapon, 10=Container, 11=Gem, 12=SpellComponent,
+    13=Key, 14=Portal, 15=TradeNote, 16=ManaStone, 17=Plant, 24=Player, 25=Vendor,
+    26=Door, 27=Corpse, 28=Lifestone, 29=HealingKit, 30=Lockpick, 31=WandStaffOrb,
+    37=Npc, 38=Foci, 39=Salvage, 40=Ust, 41=Services, 42=Scroll, 43=CombatPet.
+    Example: wobjectgetobjectclass[wobjectgetplayer[]]   →  "24"
+    Alias: wobjectgetobjclass[] (legacy name, same behaviour)
+
+wobjectfindnearestmonster[]
+    Returns a handle to the nearest monster (attackable creature). Excludes NPCs, vendors,
+    pets, and the player. Uses ObjectIsAttackable to distinguish monsters from non-hostiles.
+    Returns "0" if no monster found.
+    Example: wobjectfindnearestmonster[]   →  "W:0x80001234:Tusker Guard"
+
+wobjectfindbyid[id]
+    Returns a WorldObject handle for the object with the given numeric ID.
+    Accepts decimal or hex (0x...) format. Searches all tracked objects (landscape,
+    creatures, inventory). Returns "0" if the ID is unknown or not currently tracked.
+    Example: wobjectfindbyid[123412]
+                 →  "[WorldObject] 0x1E224: Some Object"
+    Example: wobjectfindbyid[0x80001F7B]
+                 →  handle for the creature with that dynamic ID
+
+wobjectfindallbyobjectclass[objectclass]
+    Returns a list of WorldObject handles for all landscape objects matching the given ObjectClass number.
+    Uses the same class resolution as wobjectfindnearestbyobjectclass (bitfield + ObjectIsAttackable).
+    Example: wobjectfindallbyobjectclass[24]
+                 →  list of all players the client is aware of
+    Example: wobjectfindallbyobjectclass[5]
+                 →  list of all monsters on the landscape
+    Example: listcount[wobjectfindallbyobjectclass[5]]
+                 →  number of monsters visible
+
+wobjectfindallbytemplatetype[templatetype]
+    Returns a list of WorldObject handles for all objects (landscape + inventory) whose
+    Weenie Class ID (WCID / template type) matches the given value.
+    Example: wobjectfindallbytemplatetype[9060]
+                 →  list of all Titan Mana Charges known to the client
+    Example: listcount[wobjectfindallbytemplatetype[9060]]
+                 →  total count across landscape and inventory
+
+wobjectfindallbynamerx[namerx]
+    Returns a list of WorldObject handles for all objects (landscape + inventory) whose
+    name matches the given regex. Pattern is case-insensitive.
+    Returns "[]" on invalid/empty pattern or no matches.
+    Example: wobjectfindallbynamerx[Crash.*]
+                 →  list of all objects whose name starts with "Crash"
+    Example: wobjectfindallbynamerx[.*Mana Charge.*]
+                 →  list of all mana charges on landscape and in inventory
+    Example: listcount[wobjectfindallbynamerx[.*Arrow.*]]
+                 →  count of all arrows known to the client
+
+wobjectfindnearestbyobjectclass[objectclass]
+    Returns a handle to the nearest visible object matching the given ObjectClass number.
+    Searches all landscape objects and creatures. Excludes the current player.
+    Uses ObjectIsAttackable to distinguish Monster(5) from Npc(37), and BF_DOOR bitfield
+    to detect Door(26) among unclassified static objects.
+    Returns "0" if no matching object found.
+    Example: wobjectfindnearestbyobjectclass[25]   →  nearest Vendor
+    Example: wobjectfindnearestbyobjectclass[37]   →  nearest NPC
+    Example: wobjectfindnearestbyobjectclass[26]   →  nearest Door
+
+wobjectfindnearestbynameandobjectclass[objectclass, namerx]
+    Returns a handle to the nearest object matching both the given ObjectClass number and name
+    regex. Searches all landscape objects and creatures. Excludes the current player.
+    Pattern is case-insensitive. Returns "0" if no matching object found.
+    Example: wobjectfindnearestbynameandobjectclass[24,Crash.*]
+                 →  nearest Player whose name starts with "Crash"
+    Example: wobjectfindnearestbynameandobjectclass[25,.*Vendor.*]
+                 →  nearest Vendor whose name contains "Vendor"
+    Example: wobjectfindnearestbynameandobjectclass[26,.*Gate.*]
+                 →  nearest Door whose name contains "Gate"
+
+wobjectfindnearestdoor[]
+    Returns a handle to the nearest landscape door object. Primary detection uses the
+    PublicWeenieDesc._bitfield BF_DOOR flag (0x1000), which the server sets for all door objects.
+    This is the same mechanism Decal uses for ObjectClass.Door. Only considers static GUIDs
+    (< 0x80000000). Falls back to name-based detection ("door", "gate", "hatch", "portcullis",
+    case-insensitive) on older engine builds without GetObjectBitfield.
+    Returns "0" if no door found.
+    Example: wobjectfindnearestdoor[]   →  "W:0x7A9B3004:Door"
+
+wobjectgetisdooropen[handle]
+    Returns "1" if the door is currently open, "0" if closed or unavailable.
+    Reads CPhysicsObj::m_state directly at offset +0xA8. An open door has ETHEREAL_PS (0x4)
+    set in its physics state (passable). A closed door does not. Does not require m_pQualities.
+    Example: wobjectgetisdooropen[wobjectfindnearestdoor[]]   →  "1" (if door is open)
 
 wobjectisvalid[handle]
     Returns "1" if the handle refers to an object that currently exists in client memory, "0" otherwise.
@@ -880,6 +1052,23 @@ wobjectgetplayer[]
                  →  "[WorldObject] 0x500012AB: MyCharName"
     Example: actiontryuseitem[wobjectgetplayer[]]   →  open the player's backpack
     Example: wobjectgetname[wobjectgetselection[]]   →  name of selected object
+
+wobjectgetopencontainer[]
+    Returns a WorldObject handle for the currently open ground container (corpse, chest, pack, etc.).
+    Returns "0" if no container is open.
+    Example: wobjectgetopencontainer[]
+                 →  "[WorldObject] 0x7A9B3004: Arahu's Corpse"
+    Example: wobjectfindallbycontainer[wobjectgetopencontainer[]]
+                 →  list of items inside the currently open container
+
+wobjectgetphysicscoordinates[wo]
+    Returns a coordinates object for the world object's current physics position.
+    Uses the same coordinate system as getplayercoordinates[]. Returns "" if the object
+    has no physics position or is not in range.
+    Example: wobjectgetphysicscoordinates[wobjectgetplayer[]]
+                 →  same result as getplayercoordinates[]
+    Example: coordinatedistanceflat[getplayercoordinates[], wobjectgetphysicscoordinates[wobjectgetselection[]]]
+                 →  flat distance to selected object
 
 wobjectgetintprop[handle, property]
     Returns an integer property from a world object. Returns "0" if undefined.

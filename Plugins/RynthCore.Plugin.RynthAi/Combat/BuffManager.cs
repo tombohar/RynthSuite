@@ -244,6 +244,25 @@ public class BuffManager : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Returns true if any self-buff in the current buff list is missing/expired,
+    /// without actually casting. Used by NeedToBuff meta condition.
+    /// </summary>
+    public bool NeedsAnyBuff()
+    {
+        if (!_settings.EnableBuffing) return false;
+        List<string> desiredBuffs = BuildDynamicBuffList();
+        foreach (string buffBaseName in desiredBuffs)
+        {
+            AcSkillType castSkill = SkillForBuff(buffBaseName);
+            if (!IsSkillUsable(castSkill)) continue;
+            int spellId = FindBestSpellId(buffBaseName, castSkill);
+            if (spellId == 0) continue;
+            if (!IsBuffActive(spellId)) return true;
+        }
+        return false;
+    }
+
     private bool CheckAndCastSelfBuffs()
     {
         List<string> desiredBuffs = BuildDynamicBuffList();
