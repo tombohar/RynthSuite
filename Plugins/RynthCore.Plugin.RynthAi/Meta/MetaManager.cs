@@ -23,6 +23,7 @@ internal sealed class MetaManager
     // ── State tracking ───────────────────────────────────────────────────────
     private string _lastState = "";
     private DateTime _stateStartTime = DateTime.Now;
+    private bool _lastMacroRunning;
 
     // ── Chat tracking ────────────────────────────────────────────────────────
     private string _lastChatText = "";
@@ -113,6 +114,21 @@ internal sealed class MetaManager
         return best;
     }
 
+    /// <summary>
+    /// Follow and Once routes must run from the first point so opening
+    /// Recall/Portal/Chat actions fire. Circular and Linear routes jump
+    /// in at the nearest traversable Point.
+    /// </summary>
+    private int StartIndexForRoute(NavRouteParser route)
+    {
+        return route.RouteType switch
+        {
+            NavRouteType.Follow => 0,
+            NavRouteType.Once => 0,
+            _ => FindNearestWaypoint(route)
+        };
+    }
+
     public ExpressionEngine Expressions => _expressions ??= CreateExpressionEngine();
 
     private ExpressionEngine CreateExpressionEngine()
@@ -148,7 +164,17 @@ internal sealed class MetaManager
     public void Think()
     {
         if (!_settings.IsMacroRunning || !_settings.EnableMeta || _settings.MetaRules == null)
+        {
+            _lastMacroRunning = _settings.IsMacroRunning;
             return;
+        }
+
+        // Macro just started — force reset so rules re-evaluate even if state
+        // name matches where we stopped. Otherwise HasFired stays latched across
+        // a stop/start cycle and IF:Always rules like EmbedNav never re-fire.
+        if (!_lastMacroRunning)
+            _settings.ForceStateReset = true;
+        _lastMacroRunning = true;
 
         // ── State change / forced reset ──────────────────────────────────────
         if (_settings.CurrentState != _lastState || _settings.ForceStateReset)
@@ -207,6 +233,7 @@ internal sealed class MetaManager
             if (EvaluateCondition(rule, secondsInState))
             {
                 rule.HasFired = true;
+                rule.LastFiredAt = DateTime.Now;
                 ExecuteAction(rule);
 
                 // If state changed during this action, stop evaluating further rules this tick
@@ -571,24 +598,74 @@ internal sealed class MetaManager
 
             case MetaActionType.EmbeddedNavRoute:
             {
-                if (string.IsNullOrWhiteSpace(rule.ActionData)) break;
-                string routeName = rule.ActionData.Split(';')[0];
-                string navFolder = @"C:\Games\RynthSuite\RynthAi\NavProfiles";
-                string fullPath = Path.Combine(navFolder, routeName + ".nav");
-                if (File.Exists(fullPath))
+                if (string.IsNullOrWhiteSpace(rule.ActionData))
                 {
-                    try
-                    {
-                        _settings.CurrentNavPath = fullPath;
-                        _settings.CurrentRoute = NavRouteParser.Load(fullPath);
-                        _settings.ActiveNavIndex = _settings.CurrentRoute.RouteType == NavRouteType.Follow
-                            ? 0
-                            : FindNearestWaypoint(_settings.CurrentRoute);
-                        _host.WriteToChat($"[RynthAi Meta] Route \u2192 {routeName}", 1);
-                    }
-                    catch (Exception ex) { _host.WriteToChat($"[RynthAi Meta] Load Error: {ex.Message}", 1); }
+                    _host.Log("[Meta] EmbedNav: empty ActionData, ignored");
+                    break;
                 }
-                else { _host.WriteToChat($"[RynthAi Meta] Route missing: {fullPath}", 1); }
+                string routeName = rule.ActionData.Split(';')[0];
+                int priorPoints = _settings.CurrentRoute?.Points?.Count ?? 0;
+
+                try
+                {
+                    // Embedded nav routes live in memory alongside the loaded meta.
+                    // If the direct key misses, try normalizing legacy names
+                    // like "nav0__MatronHive1_nav" → "MatronHive1".
+                    if (!_settings.EmbeddedNavs.ContainsKey(routeName))
+                    {
+                        string norm = System.Text.RegularExpressions.Regex.Replace(
+                            routeName, @"^nav\d+_+", "");
+                        if (norm.EndsWith("_nav", StringComparison.OrdinalIgnoreCase))
+                            norm = norm.Substring(0, norm.Length - 4);
+                        norm = norm.Replace('_', ' ').Trim();
+                        foreach (var key in _settings.EmbeddedNavs.Keys)
+                        {
+                            if (string.Equals(key, norm, StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(key.Replace(".nav", "", StringComparison.OrdinalIgnoreCase), norm, StringComparison.OrdinalIgnoreCase))
+                            {
+                                routeName = key;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (_settings.EmbeddedNavs.TryGetValue(routeName, out var embedded))
+                    {
+                        var newRoute = NavRouteParser.LoadFromLines(embedded);
+                        _settings.CurrentNavPath   = $"<embedded:{routeName}>";
+                        _settings.CurrentRoute     = newRoute;
+                        _settings.ActiveNavIndex   = StartIndexForRoute(newRoute);
+                        _settings.EnableNavigation = true;
+                        _host.Log($"[Meta] EmbedNav: loaded '{routeName}' ({newRoute.Points.Count} pts, was {priorPoints})");
+                        _host.WriteToChat($"[RynthAi Meta] Route \u2192 {routeName} ({newRoute.Points.Count} pts)", 1);
+                        break;
+                    }
+
+                    // Fallback: a standalone .nav file in NavProfiles.
+                    string navFolder = @"C:\Games\RynthSuite\RynthAi\NavProfiles";
+                    string fullPath = Path.Combine(navFolder, routeName + ".nav");
+                    if (File.Exists(fullPath))
+                    {
+                        var newRoute = NavRouteParser.Load(fullPath);
+                        _settings.CurrentNavPath   = fullPath;
+                        _settings.CurrentRoute     = newRoute;
+                        _settings.ActiveNavIndex   = StartIndexForRoute(newRoute);
+                        _settings.EnableNavigation = true;
+                        _host.Log($"[Meta] EmbedNav: loaded file '{routeName}' ({newRoute.Points.Count} pts, was {priorPoints})");
+                        _host.WriteToChat($"[RynthAi Meta] Route \u2192 {routeName} ({newRoute.Points.Count} pts)", 1);
+                    }
+                    else
+                    {
+                        string keys = string.Join(", ", _settings.EmbeddedNavs.Keys);
+                        _host.Log($"[Meta] EmbedNav: route '{routeName}' not found. Embedded keys: [{keys}]");
+                        _host.WriteToChat($"[RynthAi Meta] Route missing: {routeName}", 1);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _host.Log($"[Meta] EmbedNav error: {ex.Message}");
+                    _host.WriteToChat($"[RynthAi Meta] Load Error: {ex.Message}", 1);
+                }
                 break;
             }
 
@@ -716,12 +793,18 @@ internal sealed class MetaManager
             {
                 try
                 {
-                    var loaded = AfFileParser.Load(loadPath, @"C:\Games\RynthSuite\RynthAi\NavProfiles");
-                    if (loaded.Count > 0)
+                    LoadedMeta loaded = loadPath.EndsWith(".met", StringComparison.OrdinalIgnoreCase)
+                        ? MetFileParser.Load(loadPath)
+                        : AfFileParser.Load(loadPath);
+                    if (loaded.Rules.Count > 0)
                     {
-                        _settings.MetaRules = loaded;
-                        _settings.CurrentState = loaded[0].State;
+                        _settings.MetaRules = loaded.Rules;
+                        _settings.EmbeddedNavs.Clear();
+                        foreach (var kvp in loaded.EmbeddedNavs)
+                            _settings.EmbeddedNavs[kvp.Key] = kvp.Value;
+                        _settings.CurrentState = loaded.Rules[0].State;
                         _settings.ForceStateReset = true;
+                        _settings.CurrentMetaPath = loadPath;
                         _host.WriteToChat($"[RynthAi] Loaded meta: {name}", 1);
                     }
                 }

@@ -219,7 +219,7 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
-        if (settings.CurrentState == "Idle" || settings.CurrentState == "Navigating")
+        if (settings.CurrentState == "Default" || settings.CurrentState == "Navigating")
             settings.CurrentState = "Looting";
 
         double distanceMeters = _objectCache.Distance(unchecked((int)_playerId), _targetCorpseId);
@@ -259,7 +259,7 @@ public sealed partial class RynthAiPlugin
         if (_combatManager?.HasTargets == true && !settings.BoostLootPriority)
             return false;
 
-        return settings.CurrentState == "Idle"
+        return settings.CurrentState == "Default"
             || settings.CurrentState == "Navigating"
             || settings.CurrentState == "Looting";
     }
@@ -1005,7 +1005,7 @@ public sealed partial class RynthAiPlugin
 
         var settings = _dashboard?.Settings;
         if (settings != null && string.Equals(settings.CurrentState, "Looting", StringComparison.OrdinalIgnoreCase))
-            settings.CurrentState = "Idle";
+            settings.CurrentState = "Default";
     }
 
     private void HandleCorpseObjectDeleted(uint objectId)

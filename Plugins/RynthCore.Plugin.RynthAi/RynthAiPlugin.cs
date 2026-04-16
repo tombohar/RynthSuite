@@ -100,6 +100,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _loginComplete = true;
         _dashboard.OnLoginComplete();
         _navigationEngine = new NavigationEngine(Host, _dashboard.Settings);
+        if (_objectCache != null) _navigationEngine.SetWorldObjectCache(_objectCache);
         _navMarkerRenderer = new NavMarkerRenderer(Host, _dashboard.Settings);
         _terrainOverlay = new TerrainPassabilityOverlay(Host);
         Log($"RynthAi: NavMarkerRenderer created, HasNav3D={Host.HasNav3D}, version={Host.Version}");
@@ -129,6 +130,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         // Cache player ID so we can filter self out of creature tracking and update vitals
         _playerId = Host.GetPlayerId();
         _objectCache?.SetPlayerId(_playerId);
+        _navigationEngine?.SetPlayerId(_playerId);
         if (_objectCache != null) _dashboard.SetWorldFilter(_objectCache);
         if (_objectCache != null) _dashboard.SetWorldObjectCache(_objectCache);
 
@@ -269,7 +271,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     if (string.Equals(settings.CurrentState, "Combat", StringComparison.OrdinalIgnoreCase)
                         || string.Equals(settings.CurrentState, "Looting", StringComparison.OrdinalIgnoreCase))
                     {
-                        settings.CurrentState = "Idle";
+                        settings.CurrentState = "Default";
                     }
 
                     _combatPausedNav = false;

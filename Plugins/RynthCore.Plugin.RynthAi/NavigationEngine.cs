@@ -28,7 +28,9 @@ internal sealed class NavigationEngine
     private const double RecoveryMs      = 1200.0;   // pause after jump recovery
     private const double ActionTimeoutMs = 10000.0;  // max wait for recall/portal
     private const double SettleDelayMs   = 600.0;    // pause before recall/portal action
-    private const double PostTeleportMs  = 4000.0;   // settle after teleport
+
+    // Tunable: settle delay after any portal/recall teleport (from settings, in seconds).
+    private double PostTeleportMs => Math.Max(0.0, _settings.PostPortalDelaySec) * 1000.0;
 
     private readonly RynthCoreHost      _host;
     private readonly LegacyUiSettings _settings;
@@ -84,11 +86,20 @@ internal sealed class NavigationEngine
 
     private static long Now => Environment.TickCount64;
 
+    private WorldObjectCache? _objectCache;
+    private uint _playerId;
+
+    // Reference-tracked so we detect route swaps (e.g., meta EmbedNav) and reset state.
+    private NavRouteParser? _lastRoute;
+
     public NavigationEngine(RynthCoreHost host, LegacyUiSettings settings)
     {
         _host     = host;
         _settings = settings;
     }
+
+    public void SetWorldObjectCache(WorldObjectCache cache) => _objectCache = cache;
+    public void SetPlayerId(uint id) => _playerId = id;
 
     // ══════════════════════════════════════════════════════════════════════════
     //  PUBLIC API
@@ -96,9 +107,14 @@ internal sealed class NavigationEngine
 
     public void Tick()
     {
+        // Nav runs independently of meta state — metas define arbitrary state names,
+        // and a running meta can fire EmbeddedNavRoute while in any state. Combat
+        // pause is handled by CombatManager taking over state; we only gate on
+        // the hard combat lock and the "Looting" interlock.
         bool shouldNav = _settings.IsMacroRunning
                       && _settings.EnableNavigation
-                      && (_settings.CurrentState == "Idle" || _settings.CurrentState == "Navigating");
+                      && _settings.CurrentState != "Combat"
+                      && _settings.CurrentState != "Looting";
 
         if (!shouldNav)
         {
@@ -126,7 +142,26 @@ internal sealed class NavigationEngine
         var route = _settings.CurrentRoute;
         if (route == null || route.Points.Count == 0) { StopMovement(); return; }
 
-        _settings.CurrentState = "Navigating";
+        // Route swap (e.g., meta EmbedNav replaced CurrentRoute): reset carry-over state
+        // so a new route doesn't inherit the old route's pause/portal/stuck progress.
+        if (!ReferenceEquals(route, _lastRoute))
+        {
+            _lastRoute      = route;
+            _inPause        = false;
+            _prevDist       = double.MaxValue;
+            _linearDir      = 1;
+            _watchdogNs     = double.NaN;
+            _watchdogEw     = double.NaN;
+            _stuckCount     = 0;
+            _inRecovery     = false;
+            _hasGoodHeading = false;
+            ResetPortalState();
+            _host.Log($"Nav: route swap detected, {route.Points.Count} pts, startIdx={_settings.ActiveNavIndex}");
+        }
+
+        // Don't stomp on meta state names — only self-promote from plain "Default".
+        if (_settings.CurrentState == "Default")
+            _settings.CurrentState = "Navigating";
 
         // Rate-limit to ~30 Hz
         if (Now - _lastNavTick < (long)NavTickMs) return;
@@ -496,9 +531,77 @@ internal sealed class NavigationEngine
         if (_portalState == PortalState.None)
         {
             _portalState = PortalState.FiringAction; // use as "fired" flag
-            _host.WriteToChat(pt.ChatCommand, 0);
+            string cmd = pt.ChatCommand ?? string.Empty;
+            if (cmd.StartsWith("/") && _host.HasInvokeChatParser)
+                _host.InvokeChatParser(cmd);
+            else
+                _host.WriteToChat(cmd, 0);
             Advance(route);
         }
+    }
+
+    /// <summary>
+    /// Cast a recall spell by ID. Recalls are self-cast — target = player.
+    /// Uses CastSpell directly because WriteToChat("/rs N") only *displays* text;
+    /// it does not route through the chat parser.
+    /// </summary>
+    private void FireRecallSpell(NavPoint pt)
+    {
+        _settings.NavStatusLine = $"Nav: recall spell {pt.SpellId}...";
+        if (!_host.HasCastSpell)
+        {
+            _host.Log($"Nav: CastSpell not available — cannot fire recall {pt.SpellId}");
+            return;
+        }
+        uint target = _playerId != 0 ? _playerId : (uint)_host.GetPlayerId();
+        if (target == 0)
+        {
+            _host.Log($"Nav: no player id — cannot fire recall {pt.SpellId}");
+            return;
+        }
+        _host.CastSpell(target, pt.SpellId);
+        _host.Log($"Nav: CastSpell(recall {pt.SpellId}) on player 0x{target:X8}");
+    }
+
+    /// <summary>
+    /// Find the landscape object whose name matches pt.TargetName (case-insensitive)
+    /// and UseObject it. The player has already navigated to the NPC's point,
+    /// so the nearest match is the correct one.
+    /// </summary>
+    private void FirePortalNpcUse(NavPoint pt)
+    {
+        _settings.NavStatusLine = $"Nav: portal '{pt.TargetName}'...";
+        if (_objectCache == null || string.IsNullOrWhiteSpace(pt.TargetName) || !_host.HasUseObject)
+        {
+            _host.Log($"Nav: PortalNPC — cache/target/UseObject unavailable for '{pt.TargetName}'");
+            return;
+        }
+
+        string target = pt.TargetName.Trim();
+        int pid = unchecked((int)(_playerId != 0 ? _playerId : (uint)_host.GetPlayerId()));
+
+        int bestId = 0;
+        double bestDist = double.MaxValue;
+
+        foreach (var wo in _objectCache.GetLandscapeObjects())
+        {
+            if (string.IsNullOrEmpty(wo.Name)) continue;
+            if (!wo.Name.Equals(target, StringComparison.OrdinalIgnoreCase) &&
+                wo.Name.IndexOf(target, StringComparison.OrdinalIgnoreCase) < 0)
+                continue;
+
+            double d = pid != 0 ? _objectCache.Distance(pid, wo.Id) : 0.0;
+            if (d < bestDist) { bestDist = d; bestId = wo.Id; }
+        }
+
+        if (bestId == 0)
+        {
+            _host.Log($"Nav: PortalNPC — no match found for '{target}'");
+            return;
+        }
+
+        _host.UseObject((uint)bestId);
+        _host.Log($"Nav: UseObject portal '{target}' (dist={bestDist:F1}yd) → 0x{bestId:X8}");
     }
 
     /// <summary>
@@ -553,14 +656,11 @@ internal sealed class NavigationEngine
                 {
                     if (pt.Type == NavPointType.Recall)
                     {
-                        _host.WriteToChat($"/rs {pt.SpellId}", 0);
-                        _settings.NavStatusLine = $"Nav: recall spell {pt.SpellId}...";
+                        FireRecallSpell(pt);
                     }
                     else if (pt.Type == NavPointType.PortalNPC)
                     {
-                        _settings.NavStatusLine = $"Nav: portal NPC '{pt.TargetName}'...";
-                        // TODO: UseObject by name search when API available
-                        _host.Log($"Nav: PortalNPC '{pt.TargetName}' — UseObject not yet available, using /use command.");
+                        FirePortalNpcUse(pt);
                     }
                 }
 

@@ -64,19 +64,22 @@ public sealed class NavRouteParser
 
     public static NavRouteParser Load(string filePath)
     {
-        var route = new NavRouteParser();
         if (!File.Exists(filePath))
-            return route;
+            return new NavRouteParser();
+        return LoadFromLines(File.ReadAllLines(filePath));
+    }
 
-        string[] lines = File.ReadAllLines(filePath);
-        if (lines.Length < 3 || !lines[0].Contains("uTank2 NAV 1.2", StringComparison.OrdinalIgnoreCase))
+    public static NavRouteParser LoadFromLines(IList<string> lines)
+    {
+        var route = new NavRouteParser();
+        if (lines.Count < 3 || !lines[0].Contains("uTank2 NAV 1.2", StringComparison.OrdinalIgnoreCase))
             return route;
 
         route.RouteType = (NavRouteType)int.Parse(lines[1], CultureInfo.InvariantCulture);
         int pointCount = int.Parse(lines[2], CultureInfo.InvariantCulture);
 
         int idx = 3;
-        for (int i = 0; i < pointCount && idx < lines.Length; i++)
+        for (int i = 0; i < pointCount && idx < lines.Count; i++)
         {
             var pt = new NavPoint
             {

@@ -19,7 +19,7 @@ public sealed class LegacyUiSettings
 {
     // ── Runtime-only state — never persisted ────────────────────────────────
     [JsonIgnore] public bool IsMacroRunning;
-    [JsonIgnore] public string CurrentState = "Idle";
+    [JsonIgnore] public string CurrentState = "Default";
     [JsonIgnore] public bool IsRecordingNav;
 
     public bool EnableBuffing = true;
@@ -34,6 +34,7 @@ public sealed class LegacyUiSettings
     public float NavResumeTurnAngle = 10f;
     public float NavDeadZone = 4f;
     public float NavSweepMult = 2.5f;
+    public float PostPortalDelaySec = 4.0f;
     public float T2Speed = 1.0f;
     public float T2DistanceTo = 0.5f;
     public float T2ReissueMs = 2000f;
@@ -149,6 +150,24 @@ public sealed class LegacyUiSettings
     public List<ConsumableRule> ConsumableRules { get; set; } = new();
     public List<BuffRule> BuffRules { get; set; } = new();
     public List<MetaRule> MetaRules { get; set; } = new();
+
+    private Dictionary<string, List<string>> _embeddedNavs =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// NAV routes embedded inside the currently-loaded .af/.met macro,
+    /// keyed by name. Persisted so meta EmbedNav actions still resolve
+    /// after a client restart without reloading the source file.
+    /// Setter re-wraps incoming dict with OrdinalIgnoreCase comparer so
+    /// JSON round-trip keeps case-insensitive lookups working.
+    /// </summary>
+    public Dictionary<string, List<string>> EmbeddedNavs
+    {
+        get => _embeddedNavs;
+        set => _embeddedNavs = value != null
+            ? new Dictionary<string, List<string>>(value, StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+    }
     public string LuaScript = "-- Enter your Lua script here\nprint('RynthAi Lua Loaded')";
     [JsonIgnore] public string LuaConsoleOutput = "--- RynthAi Lua Console ---";
 
@@ -329,4 +348,8 @@ public sealed class MetaRule
 
     [JsonIgnore]
     public bool HasFired { get; set; }
+
+    /// <summary>Last time this rule's action executed — drives the red-flash UI.</summary>
+    [JsonIgnore]
+    public DateTime LastFiredAt { get; set; } = DateTime.MinValue;
 }

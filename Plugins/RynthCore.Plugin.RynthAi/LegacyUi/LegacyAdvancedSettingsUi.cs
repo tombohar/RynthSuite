@@ -329,6 +329,12 @@ internal sealed class LegacyAdvancedSettingsUi
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Closest-approach detection radius multiplier.");
 
+                ImGui.SetNextItemWidth(80);
+                ImGui.InputFloat("Post-Portal Delay (s)", ref _settings.PostPortalDelaySec, 0.25f, 1f, "%.2f");
+                if (_settings.PostPortalDelaySec < 0f) _settings.PostPortalDelaySec = 0f;
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Seconds to settle after any portal/recall teleport before nav resumes.");
+
                 if (_settings.MovementMode == 2)
                 {
                     ImGui.Spacing();

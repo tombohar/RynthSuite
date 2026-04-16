@@ -75,7 +75,8 @@ internal static class AfFileWriter
 
     // ── Public API ──────────────────────────────────────────────────────────
 
-    public static void Save(string filePath, List<MetaRule> rules, string navFolder)
+    public static void Save(string filePath, List<MetaRule> rules,
+        IReadOnlyDictionary<string, List<string>> embeddedNavs)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(filePath) ?? ".");
 
@@ -102,12 +103,11 @@ internal static class AfFileWriter
             writer.WriteLine("~~ }");
         }
 
-        // Write NAV sections for referenced nav routes
+        // Write NAV sections for referenced nav routes (in-memory only)
         foreach (string navName in navNames)
         {
-            string navPath = Path.Combine(navFolder, navName + ".nav");
-            if (File.Exists(navPath))
-                WriteNavSection(writer, navName, navPath);
+            if (embeddedNavs.TryGetValue(navName, out var content))
+                WriteNavSection(writer, navName, content);
         }
     }
 
@@ -330,12 +330,11 @@ internal static class AfFileWriter
 
     // ── NAV section writing ─────────────────────────────────────────────────
 
-    private static void WriteNavSection(StreamWriter writer, string navName, string navPath)
+    private static void WriteNavSection(StreamWriter writer, string navName, IReadOnlyList<string> lines)
     {
         try
         {
-            string[] lines = File.ReadAllLines(navPath);
-            if (lines.Length < 3 || !lines[0].Contains("uTank2 NAV"))
+            if (lines.Count < 3 || !lines[0].Contains("uTank2 NAV"))
                 return;
 
             string routeType = int.TryParse(lines[1], out int rt) ? rt switch
@@ -352,7 +351,7 @@ internal static class AfFileWriter
             int pointCount = int.TryParse(lines[2], out int pc) ? pc : 0;
             int idx = 3;
 
-            for (int p = 0; p < pointCount && idx < lines.Length; p++)
+            for (int p = 0; p < pointCount && idx < lines.Count; p++)
             {
                 int pointType = int.Parse(lines[idx++], CultureInfo.InvariantCulture);
                 double ew = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
@@ -364,14 +363,14 @@ internal static class AfFileWriter
                 {
                     case 0: // Point
                         writer.Write("\t");
-                        writer.WriteLine($"pnt {ns.ToString(CultureInfo.InvariantCulture)} {ew.ToString(CultureInfo.InvariantCulture)} {z.ToString(CultureInfo.InvariantCulture)}");
+                        writer.WriteLine($"pnt {ew.ToString(CultureInfo.InvariantCulture)} {ns.ToString(CultureInfo.InvariantCulture)} {z.ToString(CultureInfo.InvariantCulture)}");
                         break;
                     case 2: // Recall
                     {
                         int spellId = int.Parse(lines[idx++], CultureInfo.InvariantCulture);
                         string recallName = SpellIdToRecallName(spellId);
                         writer.Write("\t");
-                        writer.WriteLine($"rcl {ns.ToString(CultureInfo.InvariantCulture)} {ew.ToString(CultureInfo.InvariantCulture)} {z.ToString(CultureInfo.InvariantCulture)} {{{recallName}}}");
+                        writer.WriteLine($"rcl {ew.ToString(CultureInfo.InvariantCulture)} {ns.ToString(CultureInfo.InvariantCulture)} {z.ToString(CultureInfo.InvariantCulture)} {{{recallName}}}");
                         break;
                     }
                     case 3: // Pause
@@ -386,7 +385,7 @@ internal static class AfFileWriter
                     {
                         string chatCmd = lines[idx++];
                         writer.Write("\t");
-                        writer.WriteLine($"cht {ns.ToString(CultureInfo.InvariantCulture)} {ew.ToString(CultureInfo.InvariantCulture)} {z.ToString(CultureInfo.InvariantCulture)} {{{chatCmd}}}");
+                        writer.WriteLine($"cht {ew.ToString(CultureInfo.InvariantCulture)} {ns.ToString(CultureInfo.InvariantCulture)} {z.ToString(CultureInfo.InvariantCulture)} {{{chatCmd}}}");
                         break;
                     }
                     case 6: // PortalNPC
@@ -404,7 +403,7 @@ internal static class AfFileWriter
                         idx++; // flag
 
                         writer.Write("\t");
-                        writer.WriteLine($"ptl {ns.ToString(CultureInfo.InvariantCulture)} {ew.ToString(CultureInfo.InvariantCulture)} {z.ToString(CultureInfo.InvariantCulture)} {exitNS.ToString(CultureInfo.InvariantCulture)} {exitEW.ToString(CultureInfo.InvariantCulture)} {exitZ.ToString(CultureInfo.InvariantCulture)} {objClass} {{{targetName}}}");
+                        writer.WriteLine($"ptl {ew.ToString(CultureInfo.InvariantCulture)} {ns.ToString(CultureInfo.InvariantCulture)} {z.ToString(CultureInfo.InvariantCulture)} {exitEW.ToString(CultureInfo.InvariantCulture)} {exitNS.ToString(CultureInfo.InvariantCulture)} {exitZ.ToString(CultureInfo.InvariantCulture)} {objClass} {{{targetName}}}");
                         break;
                     }
                 }

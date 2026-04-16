@@ -27,7 +27,6 @@ internal sealed class LegacyMetaUi
     private string _statusMessage = "";
     private DateTime _statusTime = DateTime.MinValue;
 
-    private static readonly string NavFolder = @"C:\Games\RynthSuite\RynthAi\NavProfiles";
     private static readonly string MetaFolder = @"C:\Games\RynthSuite\RynthAi\MetaFiles";
 
     private readonly string[] _metaConditionNames =
@@ -83,30 +82,47 @@ internal sealed class LegacyMetaUi
         RenderLoadSaveBar();
         ImGui.Spacing();
 
-        if (ImGui.BeginTable("MetaRulesTable", 6,
-            ImGuiTableFlags.BordersInnerH | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
-            new Vector2(0, -35)))
+        var groupedRules = _settings.MetaRules
+            .GroupBy(r => r.State)
+            .OrderBy(g => g.Key)
+            .ToList();
+
+        if (ImGui.BeginChild("##metaRulesScroll", new Vector2(0, -35), ImGuiChildFlags.None))
         {
-            ImGui.TableSetupColumn("Up",        ImGuiTableColumnFlags.WidthFixed,   20);
-            ImGui.TableSetupColumn("Dn",        ImGuiTableColumnFlags.WidthFixed,   20);
-            ImGui.TableSetupColumn("Del",       ImGuiTableColumnFlags.WidthFixed,   25);
-            ImGui.TableSetupColumn("State",     ImGuiTableColumnFlags.WidthFixed,  100);
-            ImGui.TableSetupColumn("Condition", ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableSetupColumn("Action",    ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableHeadersRow();
-
-            var groupedRules = _settings.MetaRules
-                .GroupBy(r => r.State)
-                .OrderBy(g => g.Key)
-                .ToList();
-
             foreach (var group in groupedRules)
             {
-                ImGui.TableNextRow();
-                ImGui.TableSetColumnIndex(3);
-                ImGui.TextColored(new Vector4(0, 1, 1, 1), $"--- State: {group.Key} ---");
-
                 var stateRules = group.ToList();
+                bool anyFired = false;
+                foreach (var r in stateRules)
+                {
+                    if ((DateTime.Now - r.LastFiredAt).TotalMilliseconds < 1500)
+                    {
+                        anyFired = true;
+                        break;
+                    }
+                }
+
+                string headerLabel = anyFired
+                    ? $"\u25B6 {group.Key}  ({stateRules.Count})  \u2022 firing##hdr_{group.Key}"
+                    : $"\u25B6 {group.Key}  ({stateRules.Count})##hdr_{group.Key}";
+
+                if (anyFired) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.2f, 0.2f, 1f));
+                bool open = ImGui.CollapsingHeader(headerLabel, ImGuiTreeNodeFlags.DefaultOpen);
+                if (anyFired) ImGui.PopStyleColor();
+
+                if (!open) continue;
+
+                if (!ImGui.BeginTable($"##tbl_{group.Key}", 5,
+                    ImGuiTableFlags.BordersInnerH | ImGuiTableFlags.RowBg))
+                {
+                    continue;
+                }
+                ImGui.TableSetupColumn("Up",        ImGuiTableColumnFlags.WidthFixed,   20);
+                ImGui.TableSetupColumn("Dn",        ImGuiTableColumnFlags.WidthFixed,   20);
+                ImGui.TableSetupColumn("Del",       ImGuiTableColumnFlags.WidthFixed,   25);
+                ImGui.TableSetupColumn("Condition", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("Action",    ImGuiTableColumnFlags.WidthStretch);
+
                 for (int i = 0; i < stateRules.Count; i++)
                 {
                     var rule = stateRules[i];
@@ -114,8 +130,21 @@ internal sealed class LegacyMetaUi
 
                     ImGui.TableNextRow();
 
-                    bool isFired = rule.HasFired;
-                    if (isFired) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.2f, 0.2f, 1f));
+                    double fadeMs = (DateTime.Now - rule.LastFiredAt).TotalMilliseconds;
+                    bool isFlashing = fadeMs < 1500;
+                    if (isFlashing)
+                    {
+                        float t = fadeMs < 500 ? 0f : (float)((fadeMs - 500) / 1000.0);
+                        if (t > 1f) t = 1f;
+                        var red   = new Vector4(1f, 0.25f, 0.25f, 1f);
+                        var white = new Vector4(1f, 1f, 1f, 1f);
+                        var blended = new Vector4(
+                            red.X * (1 - t) + white.X * t,
+                            red.Y * (1 - t) + white.Y * t,
+                            red.Z * (1 - t) + white.Z * t,
+                            1f);
+                        ImGui.PushStyleColor(ImGuiCol.Text, blended);
+                    }
 
                     ImGui.TableNextColumn();
                     if (i > 0 && ImGui.Button($"^##up{globalIdx}"))
@@ -142,7 +171,9 @@ internal sealed class LegacyMetaUi
                     ImGui.PopStyleColor();
 
                     ImGui.TableNextColumn();
-                    if (ImGui.Selectable($"{rule.State}##edit{globalIdx}", false, ImGuiSelectableFlags.SpanAllColumns))
+                    string condText = rule.Condition.ToString() +
+                        (string.IsNullOrEmpty(rule.ConditionData) ? "" : $": {rule.ConditionData}");
+                    if (ImGui.Selectable($"{condText}##edit{globalIdx}", false, ImGuiSelectableFlags.SpanAllColumns))
                     {
                         _editingRule = new MetaRule
                         {
@@ -159,14 +190,10 @@ internal sealed class LegacyMetaUi
                     }
 
                     ImGui.TableNextColumn();
-                    ImGui.Text(rule.Condition.ToString() +
-                        (string.IsNullOrEmpty(rule.ConditionData) ? "" : $": {rule.ConditionData}"));
-
-                    ImGui.TableNextColumn();
                     if (rule.Action == MetaActionType.All)
                     {
                         int childCount = rule.ActionChildren?.Count ?? 0;
-                        if (childCount == 0) childCount = rule.Children?.Count ?? 0; // legacy fallback
+                        if (childCount == 0) childCount = rule.Children?.Count ?? 0;
                         ImGui.TextColored(new Vector4(1, 1, 0, 1), $"All: [{childCount} actions]");
                     }
                     else if (rule.Action == MetaActionType.EmbeddedNavRoute &&
@@ -181,11 +208,12 @@ internal sealed class LegacyMetaUi
                             (string.IsNullOrEmpty(rule.ActionData) ? "" : $": {rule.ActionData}"));
                     }
 
-                    if (isFired) ImGui.PopStyleColor();
+                    if (isFlashing) ImGui.PopStyleColor();
                 }
+                ImGui.EndTable();
             }
-            ImGui.EndTable();
         }
+        ImGui.EndChild();
 
         ImGui.Separator();
 
@@ -585,9 +613,18 @@ internal sealed class LegacyMetaUi
                     if (ImGui.BeginCombo("##NavSelect",
                         string.IsNullOrEmpty(rule.ActionData) ? "Select Route..." : rule.ActionData))
                     {
+                        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var embeddedName in _settings.EmbeddedNavs.Keys)
+                        {
+                            if (!seen.Add(embeddedName)) continue;
+                            string label = $"{embeddedName} (embedded)";
+                            if (ImGui.Selectable(label, rule.ActionData == embeddedName))
+                                rule.ActionData = embeddedName;
+                        }
                         foreach (var navFile in _navFiles)
                         {
                             if (navFile == "None") continue;
+                            if (!seen.Add(navFile)) continue;
                             if (ImGui.Selectable(navFile, rule.ActionData == navFile))
                                 rule.ActionData = navFile;
                         }
@@ -813,12 +850,12 @@ internal sealed class LegacyMetaUi
         try
         {
             string ext = Path.GetExtension(filePath).ToLowerInvariant();
-            List<MetaRule> loaded;
+            LoadedMeta loaded;
 
             if (ext == ".met")
-                loaded = MetFileParser.Load(filePath, NavFolder);
+                loaded = MetFileParser.Load(filePath);
             else if (ext == ".af")
-                loaded = AfFileParser.Load(filePath, NavFolder);
+                loaded = AfFileParser.Load(filePath);
             else
             {
                 _statusMessage = "Unsupported file type";
@@ -826,19 +863,23 @@ internal sealed class LegacyMetaUi
                 return;
             }
 
-            if (loaded.Count == 0)
+            if (loaded.Rules.Count == 0)
             {
                 _statusMessage = "No rules found (profile?)";
                 _statusTime = DateTime.Now;
                 return;
             }
 
-            _settings.MetaRules = loaded;
-            _settings.CurrentState = loaded[0].State;
+            _settings.MetaRules = loaded.Rules;
+            _settings.EmbeddedNavs.Clear();
+            foreach (var kvp in loaded.EmbeddedNavs)
+                _settings.EmbeddedNavs[kvp.Key] = kvp.Value;
+            _settings.CurrentState = loaded.Rules[0].State;
             _settings.ForceStateReset = true;
+            _settings.CurrentMetaPath = filePath;
 
             string name = Path.GetFileNameWithoutExtension(filePath);
-            _statusMessage = $"Loaded {loaded.Count} rules from {name}";
+            _statusMessage = $"Loaded {loaded.Rules.Count} rules, {loaded.EmbeddedNavs.Count} embedded navs from {name}";
             _statusTime = DateTime.Now;
         }
         catch (Exception ex)
@@ -861,7 +902,7 @@ internal sealed class LegacyMetaUi
 
             Directory.CreateDirectory(MetaFolder);
             string filePath = Path.Combine(MetaFolder, _saveName + ".af");
-            AfFileWriter.Save(filePath, _settings.MetaRules, NavFolder);
+            AfFileWriter.Save(filePath, _settings.MetaRules, _settings.EmbeddedNavs);
 
             _statusMessage = $"Saved to {_saveName}.af";
             _statusTime = DateTime.Now;

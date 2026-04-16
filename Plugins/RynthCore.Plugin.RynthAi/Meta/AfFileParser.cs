@@ -8,7 +8,8 @@ namespace RynthCore.Plugin.RynthAi.Meta;
 
 /// <summary>
 /// Parses metaf .af files into RynthAi MetaRule lists.
-/// Also extracts embedded NAV routes and saves them as .nav files.
+/// Embedded NAV routes are returned in <see cref="LoadedMeta.EmbeddedNavs"/>
+/// and stay in memory — they are never written to the NavProfiles folder.
 /// </summary>
 internal static class AfFileParser
 {
@@ -68,17 +69,19 @@ internal static class AfFileParser
 
     // ── Public API ──────────────────────────────────────────────────────────
 
-    public static List<MetaRule> Load(string filePath, string navFolder)
+    public static LoadedMeta Load(string filePath)
     {
-        if (!File.Exists(filePath)) return new List<MetaRule>();
+        var result = new LoadedMeta();
+        if (!File.Exists(filePath)) return result;
 
         string[] lines = File.ReadAllLines(filePath);
-        var rules = new List<MetaRule>();
-        var navRoutes = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        string dbgLog = @"C:\Users\tboha\Desktop\AfParser.log";
+        try { File.AppendAllText(dbgLog, $"\n=== {DateTime.Now:HH:mm:ss} Load {filePath} ({lines.Length} lines) ===\n"); } catch { }
 
         try
         {
             int idx = 0;
+            int navSectionsSeen = 0;
             while (idx < lines.Length)
             {
                 string line = lines[idx];
@@ -93,11 +96,15 @@ internal static class AfFileParser
 
                 if (trimmed.StartsWith("STATE:"))
                 {
-                    ParseState(lines, ref idx, rules);
+                    ParseState(lines, ref idx, result.Rules);
                 }
                 else if (trimmed.StartsWith("NAV:"))
                 {
-                    ParseNavSection(lines, ref idx, navRoutes);
+                    navSectionsSeen++;
+                    int before = result.EmbeddedNavs.Count;
+                    ParseNavSection(lines, ref idx, result.EmbeddedNavs);
+                    int added = result.EmbeddedNavs.Count - before;
+                    try { File.AppendAllText(dbgLog, $"  NAV: section #{navSectionsSeen} added {added} (total {result.EmbeddedNavs.Count})\n"); } catch { }
                 }
                 else
                 {
@@ -105,12 +112,17 @@ internal static class AfFileParser
                 }
             }
 
-            // Save extracted nav routes as .nav files and resolve EmbedNav references
-            SaveNavRoutes(rules, navRoutes, navFolder);
+            try { File.AppendAllText(dbgLog, $"  Before prune: {result.EmbeddedNavs.Count} navs, keys=[{string.Join(",", result.EmbeddedNavs.Keys)}]\n"); } catch { }
+            // Drop empty routes (header only, 0 points) and clear dead EmbedNav refs
+            PruneEmbeddedNavs(result.Rules, result.EmbeddedNavs);
+            try { File.AppendAllText(dbgLog, $"  After prune: {result.EmbeddedNavs.Count} navs, keys=[{string.Join(",", result.EmbeddedNavs.Keys)}]\n"); } catch { }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            try { File.AppendAllText(dbgLog, $"  EXCEPTION: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}\n"); } catch { }
+        }
 
-        return rules;
+        return result;
     }
 
     // ── State parsing ───────────────────────────────────────────────────────
@@ -631,23 +643,23 @@ internal static class AfFileParser
             string nodeType = tokens[0];
             switch (nodeType)
             {
-                case "pnt": // pnt NS EW Z
+                case "pnt": // pnt EW NS Z  (VTank convention: X=EW, Y=NS)
                     if (tokens.Length >= 4)
                     {
                         navFileLines.Add("0"); // type 0 = Point
-                        navFileLines.Add(tokens[2]); // EW
-                        navFileLines.Add(tokens[1]); // NS
+                        navFileLines.Add(tokens[1]); // EW
+                        navFileLines.Add(tokens[2]); // NS
                         navFileLines.Add(tokens[3]); // Z
                         navFileLines.Add("0");
                     }
                     break;
 
-                case "rcl": // rcl NS EW Z {RecallName}
+                case "rcl": // rcl EW NS Z {RecallName}
                     if (tokens.Length >= 4)
                     {
                         navFileLines.Add("2"); // type 2 = Recall
-                        navFileLines.Add(tokens[2]); // EW
-                        navFileLines.Add(tokens[1]); // NS
+                        navFileLines.Add(tokens[1]); // EW
+                        navFileLines.Add(tokens[2]); // NS
                         navFileLines.Add(tokens[3]); // Z
                         navFileLines.Add("0");
                         // Recall spell ID — we'll use 0 as placeholder
@@ -669,24 +681,24 @@ internal static class AfFileParser
                     }
                     break;
 
-                case "cht": // cht NS EW Z {command}
+                case "cht": // cht EW NS Z {command}
                     if (tokens.Length >= 5)
                     {
                         navFileLines.Add("4"); // type 4 = Chat
-                        navFileLines.Add(tokens[2]); // EW
-                        navFileLines.Add(tokens[1]); // NS
+                        navFileLines.Add(tokens[1]); // EW
+                        navFileLines.Add(tokens[2]); // NS
                         navFileLines.Add(tokens[3]); // Z
                         navFileLines.Add("0");
                         navFileLines.Add(tokens[4]); // chat command
                     }
                     break;
 
-                case "ptl": // ptl NS EW Z destNS destEW destZ objectClass {PortalName}
+                case "ptl": // ptl EW NS Z destEW destNS destZ objectClass {PortalName}
                     if (tokens.Length >= 8)
                     {
                         navFileLines.Add("6"); // type 6 = PortalNPC
-                        navFileLines.Add(tokens[2]); // EW
-                        navFileLines.Add(tokens[1]); // NS
+                        navFileLines.Add(tokens[1]); // EW
+                        navFileLines.Add(tokens[2]); // NS
                         navFileLines.Add(tokens[3]); // Z
                         navFileLines.Add("0");
                         string portalName = tokens.Length >= 9 ? tokens[8] : tokens[7];
@@ -695,8 +707,8 @@ internal static class AfFileParser
                         navFileLines.Add(portalName);
                         navFileLines.Add(objClass.ToString());
                         navFileLines.Add("False");
-                        navFileLines.Add(tokens[5]); // dest EW
-                        navFileLines.Add(tokens[4]); // dest NS
+                        navFileLines.Add(tokens[4]); // dest EW
+                        navFileLines.Add(tokens[5]); // dest NS
                         navFileLines.Add(tokens[6]); // dest Z
                         navFileLines.Add("0");
                         navFileLines.Add("0"); // land EW
@@ -706,12 +718,12 @@ internal static class AfFileParser
                     }
                     break;
 
-                case "vnd": // vnd NS EW Z vendorId {VendorName}
+                case "vnd": // vnd EW NS Z vendorId {VendorName}
                     if (tokens.Length >= 5)
                     {
                         navFileLines.Add("6"); // treat vendor as PortalNPC type
-                        navFileLines.Add(tokens[2]); // EW
-                        navFileLines.Add(tokens[1]); // NS
+                        navFileLines.Add(tokens[1]); // EW
+                        navFileLines.Add(tokens[2]); // NS
                         navFileLines.Add(tokens[3]); // Z
                         navFileLines.Add("0");
                         string vndName = tokens.Length >= 6 ? tokens[5] : "Vendor";
@@ -723,12 +735,12 @@ internal static class AfFileParser
                     }
                     break;
 
-                case "tlk": // tlk NS EW Z objectId {NPCName}
+                case "tlk": // tlk EW NS Z objectId {NPCName}
                     if (tokens.Length >= 5)
                     {
                         navFileLines.Add("6");
-                        navFileLines.Add(tokens[2]);
                         navFileLines.Add(tokens[1]);
+                        navFileLines.Add(tokens[2]);
                         navFileLines.Add(tokens[3]);
                         navFileLines.Add("0");
                         string tlkName = tokens.Length >= 6 ? tokens[5] : "NPC";
@@ -800,58 +812,43 @@ internal static class AfFileParser
         return count;
     }
 
-    private static void SaveNavRoutes(List<MetaRule> rules, Dictionary<string, List<string>> navRoutes,
-        string navFolder)
+    /// <summary>
+    /// Drops empty nav routes (header only, 0 points) from the dict and
+    /// blanks EmbedNav action data on rules whose referenced nav was empty.
+    /// Non-empty embedded navs survive in the dict for runtime + save.
+    /// </summary>
+    private static void PruneEmbeddedNavs(List<MetaRule> rules,
+        Dictionary<string, List<string>> navRoutes)
     {
         if (navRoutes.Count == 0) return;
 
-        try { Directory.CreateDirectory(navFolder); }
-        catch { return; }
-
-        // Save each nav route as a .nav file
+        var toRemove = new List<string>();
         foreach (var kvp in navRoutes)
         {
-            string navName = kvp.Key;
-            List<string> content = kvp.Value;
-
-            // Skip empty routes (header only, 0 points)
-            if (content.Count <= 3) continue;
-            if (content.Count >= 3 && content[2] == "0") continue;
-
-            string navPath = Path.Combine(navFolder, navName + ".nav");
-            try
-            {
-                File.WriteAllLines(navPath, content);
-            }
-            catch { }
+            var content = kvp.Value;
+            if (content.Count <= 3 || content[2] == "0")
+                toRemove.Add(kvp.Key);
         }
+        foreach (string key in toRemove)
+            navRoutes.Remove(key);
 
-        // Resolve EmbedNav references in rules
-        ResolveEmbedNavRefs(rules, navRoutes, navFolder);
+        ClearMissingEmbedRefs(rules, navRoutes);
     }
 
-    private static void ResolveEmbedNavRefs(List<MetaRule> rules, Dictionary<string, List<string>> navRoutes,
-        string navFolder)
+    private static void ClearMissingEmbedRefs(List<MetaRule> rules,
+        Dictionary<string, List<string>> navRoutes)
     {
         foreach (var rule in rules)
         {
-            if (rule.Action == MetaActionType.EmbeddedNavRoute && !string.IsNullOrEmpty(rule.ActionData))
+            if (rule.Action == MetaActionType.EmbeddedNavRoute &&
+                !string.IsNullOrEmpty(rule.ActionData) &&
+                !navRoutes.ContainsKey(rule.ActionData))
             {
-                string navName = rule.ActionData;
-                if (navRoutes.ContainsKey(navName))
-                {
-                    var content = navRoutes[navName];
-                    // Check if it has actual points
-                    if (content.Count > 3 && content[2] != "0")
-                        rule.ActionData = navName;
-                    else
-                        rule.ActionData = ""; // Empty nav route
-                }
+                rule.ActionData = "";
             }
 
-            // Recurse into action children (DoAll)
             if (rule.ActionChildren != null)
-                ResolveEmbedNavRefs(rule.ActionChildren, navRoutes, navFolder);
+                ClearMissingEmbedRefs(rule.ActionChildren, navRoutes);
         }
     }
 

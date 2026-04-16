@@ -8,6 +8,7 @@ using System.Text.Json;
 using ImGuiNET;
 using RynthCore.PluginSdk;
 using RynthCore.Plugin.RynthAi;
+using RynthCore.Plugin.RynthAi.Meta;
 
 namespace RynthCore.Plugin.RynthAi.LegacyUi;
 
@@ -155,7 +156,7 @@ internal sealed class LegacyDashboardRenderer
 
         // Macro always starts stopped
         _settings.IsMacroRunning = false;
-        _settings.CurrentState   = "Idle";
+        _settings.CurrentState   = "Default";
 
         // Reload nav route from saved path
         if (!string.IsNullOrEmpty(_settings.CurrentNavPath) && File.Exists(_settings.CurrentNavPath))
@@ -163,11 +164,33 @@ internal sealed class LegacyDashboardRenderer
             try
             {
                 _settings.CurrentRoute = NavRouteParser.Load(_settings.CurrentNavPath);
-                _settings.ActiveNavIndex = _settings.CurrentRoute.RouteType == NavRouteType.Follow
-                    ? 0
-                    : FindNearestWaypoint(_settings.CurrentRoute);
+                _settings.ActiveNavIndex =
+                    (_settings.CurrentRoute.RouteType == NavRouteType.Follow ||
+                     _settings.CurrentRoute.RouteType == NavRouteType.Once)
+                        ? 0
+                        : FindNearestWaypoint(_settings.CurrentRoute);
             }
             catch { _settings.CurrentNavPath = string.Empty; }
+        }
+
+        // Auto-reload embedded navs from the last loaded meta source so
+        // EmbedNav rules resolve after a restart without a manual reload.
+        if (_settings.EmbeddedNavs.Count == 0 &&
+            !string.IsNullOrEmpty(_settings.CurrentMetaPath) &&
+            File.Exists(_settings.CurrentMetaPath))
+        {
+            try
+            {
+                string ext = Path.GetExtension(_settings.CurrentMetaPath).ToLowerInvariant();
+                LoadedMeta reload = ext == ".met"
+                    ? MetFileParser.Load(_settings.CurrentMetaPath)
+                    : ext == ".af"
+                        ? AfFileParser.Load(_settings.CurrentMetaPath)
+                        : new LoadedMeta();
+                foreach (var kvp in reload.EmbeddedNavs)
+                    _settings.EmbeddedNavs[kvp.Key] = kvp.Value;
+            }
+            catch { }
         }
 
         _windowPosRestored = false; // will apply saved position on next render
@@ -413,9 +436,11 @@ internal sealed class LegacyDashboardRenderer
             try
             {
                 _settings.CurrentRoute = NavRouteParser.Load(_settings.CurrentNavPath);
-                _settings.ActiveNavIndex = _settings.CurrentRoute.RouteType == NavRouteType.Follow
-                    ? 0
-                    : FindNearestWaypoint(_settings.CurrentRoute);
+                _settings.ActiveNavIndex =
+                    (_settings.CurrentRoute.RouteType == NavRouteType.Follow ||
+                     _settings.CurrentRoute.RouteType == NavRouteType.Once)
+                        ? 0
+                        : FindNearestWaypoint(_settings.CurrentRoute);
             }
             catch { _settings.CurrentNavPath = string.Empty; }
         }
@@ -456,6 +481,7 @@ internal sealed class LegacyDashboardRenderer
         dst.NavResumeTurnAngle       = tmp.NavResumeTurnAngle;
         dst.NavDeadZone              = tmp.NavDeadZone;
         dst.NavSweepMult             = tmp.NavSweepMult;
+        dst.PostPortalDelaySec       = tmp.PostPortalDelaySec;
         dst.T2Speed                  = tmp.T2Speed;
         dst.T2DistanceTo             = tmp.T2DistanceTo;
         dst.T2ReissueMs              = tmp.T2ReissueMs;
@@ -995,7 +1021,13 @@ internal sealed class LegacyDashboardRenderer
         string filePath = Path.Combine(_navFolder, selection + ".nav");
         _settings.CurrentNavPath = filePath;
         _settings.CurrentRoute = NavRouteParser.Load(filePath);
-        _settings.ActiveNavIndex = _settings.CurrentRoute.RouteType == NavRouteType.Follow ? 0 : FindNearestWaypoint(_settings.CurrentRoute);
+        // Follow and Once routes start from the top so opening Recall/Portal/Chat
+        // actions always fire. Circular and Linear routes jump in at the nearest point.
+        _settings.ActiveNavIndex =
+            (_settings.CurrentRoute.RouteType == NavRouteType.Follow ||
+             _settings.CurrentRoute.RouteType == NavRouteType.Once)
+                ? 0
+                : FindNearestWaypoint(_settings.CurrentRoute);
     }
 
     private int FindNearestWaypoint(NavRouteParser route)

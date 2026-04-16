@@ -159,9 +159,10 @@ internal static class MetFileParser
 
     // ── Public API ──────────────────────────────────────────────────────────
 
-    public static List<MetaRule> Load(string filePath, string navFolder)
+    public static LoadedMeta Load(string filePath)
     {
-        if (!File.Exists(filePath)) return new List<MetaRule>();
+        var result = new LoadedMeta();
+        if (!File.Exists(filePath)) return result;
 
         byte[] data = File.ReadAllBytes(filePath);
         var reader = new MetReader(data);
@@ -169,17 +170,21 @@ internal static class MetFileParser
 
         try
         {
-            return ParseMetFile(reader, navFolder, ref navCounter);
+            result.Rules = ParseMetFile(reader, result.EmbeddedNavs, ref navCounter);
         }
         catch
         {
-            return new List<MetaRule>();
+            result.Rules = new List<MetaRule>();
+            result.EmbeddedNavs.Clear();
         }
+
+        return result;
     }
 
     // ── File structure parsing ──────────────────────────────────────────────
 
-    private static List<MetaRule> ParseMetFile(MetReader r, string navFolder, ref int navCounter)
+    private static List<MetaRule> ParseMetFile(MetReader r,
+        Dictionary<string, List<string>> navDict, ref int navCounter)
     {
         r.ReadLine(); // skip "1" (version)
         r.ReadLine(); // skip "CondAct" (table name)
@@ -193,7 +198,7 @@ internal static class MetFileParser
         var rules = new List<MetaRule>();
         for (int row = 0; row < rowCount && r.HasMore; row++)
         {
-            var rule = ParseRow(r, navFolder, ref navCounter);
+            var rule = ParseRow(r, navDict, ref navCounter);
             if (rule != null)
                 rules.Add(rule);
         }
@@ -201,7 +206,8 @@ internal static class MetFileParser
         return rules;
     }
 
-    private static MetaRule? ParseRow(MetReader r, string navFolder, ref int navCounter)
+    private static MetaRule? ParseRow(MetReader r,
+        Dictionary<string, List<string>> navDict, ref int navCounter)
     {
         if (!r.HasMore) return null;
 
@@ -213,7 +219,7 @@ internal static class MetFileParser
 
         var rule = new MetaRule { Condition = condition, Action = action };
         ParseConditionData(rule, vtCType, r);
-        ParseActionData(rule, vtAType, r, navFolder, ref navCounter);
+        ParseActionData(rule, vtAType, r, navDict, ref navCounter);
 
         rule.State = ReadTypedString(r);
 
@@ -534,12 +540,12 @@ internal static class MetFileParser
     // ── Action data parsing ─────────────────────────────────────────────────
 
     private static void ParseActionData(MetaRule rule, int vtAType, MetReader r,
-        string navFolder, ref int navCounter)
+        Dictionary<string, List<string>> navDict, ref int navCounter)
     {
         switch (vtAType)
         {
             case 3: // DoAll
-                ParseDoAllTable(rule, r, navFolder, ref navCounter);
+                ParseDoAllTable(rule, r, navDict, ref navCounter);
                 break;
 
             case 1: // SetMetaState
@@ -552,7 +558,7 @@ internal static class MetFileParser
                 break;
 
             case 4: // EmbedNav
-                ParseEmbedNavData(rule, r, navFolder, ref navCounter);
+                ParseEmbedNavData(rule, r, navDict, ref navCounter);
                 break;
 
             case 7: // ExpressionAction
@@ -635,7 +641,7 @@ internal static class MetFileParser
     }
 
     private static void ParseDoAllTable(MetaRule rule, MetReader r,
-        string navFolder, ref int navCounter)
+        Dictionary<string, List<string>> navDict, ref int navCounter)
     {
         string type = r.PeekLine().Trim();
         if (type != "TABLE")
@@ -659,68 +665,66 @@ internal static class MetFileParser
                 Action = MapAType(childVtAType),
                 State = rule.State
             };
-            ParseActionData(child, childVtAType, r, navFolder, ref navCounter);
+            ParseActionData(child, childVtAType, r, navDict, ref navCounter);
             rule.ActionChildren.Add(child);
         }
     }
 
     private static void ParseEmbedNavData(MetaRule rule, MetReader r,
-        string navFolder, ref int navCounter)
+        Dictionary<string, List<string>> navDict, ref int navCounter)
     {
         string type = r.PeekLine().Trim();
-        if (type == "ba")
+        if (type != "ba")
         {
-            r.ReadLine(); // skip "ba"
-            int byteCount = ParseInt(r.ReadLine());
+            SkipTypedValue(r);
+            return;
+        }
 
-            // Read exactly byteCount bytes and split into lines
-            var navLines = r.ReadBytesAsLines(byteCount);
+        r.ReadLine(); // skip "ba"
+        int byteCount = ParseInt(r.ReadLine());
 
-            if (navLines.Count >= 3)
+        // Read exactly byteCount bytes and split into lines
+        var navLines = r.ReadBytesAsLines(byteCount);
+        if (navLines.Count < 3) return;
+
+        string navDisplayName = navLines[0]; // e.g. "[None]"
+        int navStart = -1;
+        for (int i = 1; i < navLines.Count; i++)
+        {
+            if (navLines[i].Contains("uTank2 NAV"))
             {
-                string navDisplayName = navLines[0]; // e.g. "[None]"
-                int navStart = -1;
-                for (int i = 1; i < navLines.Count; i++)
-                {
-                    if (navLines[i].Contains("uTank2 NAV"))
-                    {
-                        navStart = i;
-                        break;
-                    }
-                }
-
-                if (navStart >= 0)
-                {
-                    string routeName = $"met_nav_{navCounter++}";
-                    string cleanName = navDisplayName.Trim('[', ']', ' ');
-                    if (!string.IsNullOrEmpty(cleanName) &&
-                        !cleanName.Equals("None", StringComparison.OrdinalIgnoreCase))
-                    {
-                        routeName = SanitizeFileName(cleanName);
-                    }
-
-                    try
-                    {
-                        Directory.CreateDirectory(navFolder);
-                        string navPath = Path.Combine(navFolder, routeName + ".nav");
-                        var navContent = new List<string>();
-                        for (int i = navStart; i < navLines.Count; i++)
-                            navContent.Add(navLines[i]);
-
-                        if (navContent.Count >= 3)
-                        {
-                            File.WriteAllLines(navPath, navContent);
-                            rule.ActionData = routeName;
-                        }
-                    }
-                    catch { }
-                }
+                navStart = i;
+                break;
             }
+        }
+        if (navStart < 0) return;
+
+        string cleanName = navDisplayName.Trim('[', ']', ' ');
+        if (cleanName.EndsWith(".nav", StringComparison.OrdinalIgnoreCase))
+            cleanName = cleanName.Substring(0, cleanName.Length - 4);
+        cleanName = System.Text.RegularExpressions.Regex.Replace(cleanName, @"^nav\d+_+", "");
+
+        string routeName;
+        if (!string.IsNullOrEmpty(cleanName) &&
+            !cleanName.Equals("None", StringComparison.OrdinalIgnoreCase))
+        {
+            routeName = SanitizeFileName(cleanName);
         }
         else
         {
-            SkipTypedValue(r);
+            routeName = $"Route{navCounter++}";
         }
+
+        var navContent = new List<string>();
+        for (int i = navStart; i < navLines.Count; i++)
+            navContent.Add(navLines[i]);
+
+        // Skip empty routes (header only, 0 points)
+        if (navContent.Count < 3) return;
+        if (navContent.Count >= 3 && navContent[2] == "0") return;
+
+        navDict[routeName] = navContent;
+        rule.ActionData = routeName;
     }
 
     private static void ParseSetWatchdogTable(MetaRule rule, MetReader r)

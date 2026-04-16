@@ -65,7 +65,7 @@ internal sealed class LegacyNavigationUi
                 _settings.IsMacroRunning  = true;
                 _settings.EnableNavigation = true;
                 if (_settings.CurrentState != "Navigating")
-                    _settings.CurrentState = "Idle";
+                    _settings.CurrentState = "Default";
             }
             ImGui.PopStyleColor(3);
         }

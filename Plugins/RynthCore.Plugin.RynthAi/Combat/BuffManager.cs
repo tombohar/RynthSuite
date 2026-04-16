@@ -209,7 +209,7 @@ public class BuffManager : IDisposable
         }
 
         if (_settings.CurrentState == "Buffing")
-            _settings.CurrentState = "Idle";
+            _settings.CurrentState = "Default";
     }
 
     private bool CheckVitals()

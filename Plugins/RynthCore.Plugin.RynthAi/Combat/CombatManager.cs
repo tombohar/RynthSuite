@@ -528,9 +528,9 @@ public class CombatManager : IDisposable
     {
         if (!_settings.IsMacroRunning) return;
 
-        // Combat can run in Idle/Combat, can interrupt navigation unless nav boost is on,
+        // Combat can run in Default/Combat, can interrupt navigation unless nav boost is on,
         // and can interrupt looting unless loot boost is on.
-        bool canRun = _settings.CurrentState == "Idle"
+        bool canRun = _settings.CurrentState == "Default"
                    || _settings.CurrentState == "Combat"
                    || (_settings.CurrentState == "Navigating" && !_settings.BoostNavPriority)
                    || (_settings.CurrentState == "Looting" && !_settings.BoostLootPriority);
@@ -544,7 +544,7 @@ public class CombatManager : IDisposable
             if (activeTargetId != 0 || _scannedTargets.Count > 0)
                 _settings.CurrentState = "Combat";
             else if (_settings.CurrentState == "Combat")
-                _settings.CurrentState = "Idle"; // release so navigation can resume
+                _settings.CurrentState = "Default"; // release so navigation can resume
         }
     }
 
