@@ -26,8 +26,9 @@ internal sealed class NavigationEngine
     private const double WatchdogMs      = 5000.0;   // stuck check interval
     private const double StuckYd         = 2.0;      // min yards to not be "stuck"
     private const double RecoveryMs      = 1200.0;   // pause after jump recovery
-    private const double ActionTimeoutMs = 10000.0;  // max wait for recall/portal
+    private const double ActionTimeoutMs = 60000.0;  // max wait for recall/portal (longer so cast can finish)
     private const double SettleDelayMs   = 600.0;    // pause before recall/portal action
+    private const double RecallCastRetryMs = 4000.0; // re-issue CastSpell every N ms until teleport
 
     // Tunable: settle delay after any portal/recall teleport (from settings, in seconds).
     private double PostTeleportMs => Math.Max(0.0, _settings.PostPortalDelaySec) * 1000.0;
@@ -88,6 +89,8 @@ internal sealed class NavigationEngine
 
     private WorldObjectCache? _objectCache;
     private uint _playerId;
+    private CombatManager? _combatManager;
+    private long _lastRecallCastAt;
 
     // Reference-tracked so we detect route swaps (e.g., meta EmbedNav) and reset state.
     private NavRouteParser? _lastRoute;
@@ -100,6 +103,7 @@ internal sealed class NavigationEngine
 
     public void SetWorldObjectCache(WorldObjectCache cache) => _objectCache = cache;
     public void SetPlayerId(uint id) => _playerId = id;
+    public void SetCombatManager(CombatManager cm) => _combatManager = cm;
 
     // ══════════════════════════════════════════════════════════════════════════
     //  PUBLIC API
@@ -629,6 +633,7 @@ internal sealed class NavigationEngine
             StopMovement();
             _portalState      = PortalState.Settling;
             _portalStateStart = Now;
+            _lastRecallCastAt = 0;
 
             // Record pre-action position for teleport detection
             TryGetPos(out _prePortalNS, out _prePortalEW);
@@ -647,35 +652,15 @@ internal sealed class NavigationEngine
                 {
                     _portalState      = PortalState.FiringAction;
                     _portalStateStart = Now;
-                }
-                break;
-
-            case PortalState.FiringAction:
-                // Fire the action ONCE (first 100ms of this state)
-                if (Now - _portalStateStart < 100)
-                {
-                    if (pt.Type == NavPointType.Recall)
-                    {
-                        FireRecallSpell(pt);
-                    }
-                    else if (pt.Type == NavPointType.PortalNPC)
-                    {
-                        FirePortalNpcUse(pt);
-                    }
-                }
-
-                // After a brief wait, move to watching for teleport
-                if (Now - _portalStateStart > 500)
-                {
-                    _portalState      = PortalState.WaitingForTeleport;
-                    _portalStateStart = Now;
-                    // Re-record position (more accurate after settle)
+                    // Re-record position right before we start trying to cast,
+                    // so teleport detection is relative to the cast site.
                     TryGetPos(out _prePortalNS, out _prePortalEW);
                 }
                 break;
 
-            case PortalState.WaitingForTeleport:
-                // Detect teleport by large position change
+            case PortalState.FiringAction:
+                // Teleport detected → done. Checked first so a cast that succeeded
+                // last tick advances immediately instead of re-casting on arrival.
                 if (TryGetPos(out double ns, out double ew) && !double.IsNaN(_prePortalNS))
                 {
                     double dNS = ns - _prePortalNS, dEW = ew - _prePortalEW;
@@ -689,12 +674,30 @@ internal sealed class NavigationEngine
                     }
                 }
 
-                // Timeout for recall (short) — don't wait forever
-                if (pt.Type == NavPointType.Recall && Now - _portalStateStart > (long)ActionTimeoutMs)
+                if (pt.Type == NavPointType.Recall)
                 {
-                    _host.Log("Nav: recall timed out, advancing.");
-                    ResetPortalState();
-                    Advance(route);
+                    // Ensure magic stance + wand before every cast attempt. Retry the cast
+                    // every RecallCastRetryMs so a fizzle or interruption doesn't strand us.
+                    bool ready = _combatManager?.EnsureMagicReady() ?? false;
+                    if (!ready)
+                    {
+                        _settings.NavStatusLine = "Nav: wielding wand / entering magic mode...";
+                    }
+                    else if (_lastRecallCastAt == 0 ||
+                             Now - _lastRecallCastAt > (long)RecallCastRetryMs)
+                    {
+                        FireRecallSpell(pt);
+                        _lastRecallCastAt = Now;
+                    }
+                }
+                else if (pt.Type == NavPointType.PortalNPC)
+                {
+                    // PortalNPC is fire-once (UseObject starts a walk to the NPC).
+                    if (_lastRecallCastAt == 0)
+                    {
+                        FirePortalNpcUse(pt);
+                        _lastRecallCastAt = Now;
+                    }
                 }
                 break;
 

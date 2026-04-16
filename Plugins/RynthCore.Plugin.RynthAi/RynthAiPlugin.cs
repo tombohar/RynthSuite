@@ -178,6 +178,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _combatManager.SetPlayerId(_playerId);
         _combatManager.CurrentCombatMode = _currentCombatMode;
         _buffManager.CurrentCombatMode = _currentCombatMode;
+        _navigationEngine?.SetCombatManager(_combatManager);
 
         _missileCraftingManager = new MissileCraftingManager(Host, _dashboard.Settings);
         _missileCraftingManager.SetObjectCache(_objectCache!);

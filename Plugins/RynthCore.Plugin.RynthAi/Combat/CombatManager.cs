@@ -654,6 +654,48 @@ public class CombatManager : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// Ensure a wand is wielded and the player is in Magic combat mode.
+    /// Used by NavigationEngine to prepare for recall casts. Returns true only when
+    /// ready to cast; when false, caller should re-tick (equip/stance are throttled
+    /// internally so calling every tick is safe).
+    /// </summary>
+    public bool EnsureMagicReady()
+    {
+        int wandId = FindWandInItems();
+        if (wandId == 0) return false;
+
+        var wand = _worldFilter[wandId];
+        if (wand == null) return false;
+
+        bool alreadyWielded = wand.Values(LongValueKey.CurrentWieldedLocation, 0) > 0;
+
+        if (alreadyWielded)
+        {
+            if (CurrentCombatMode == CombatMode.Magic) return true;
+            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > 1000)
+            {
+                _host.ChangeCombatMode(CombatMode.Magic);
+                lastStanceAttempt = DateTime.Now;
+            }
+            return false;
+        }
+
+        if (CurrentCombatMode == CombatMode.Magic) return true;
+
+        if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > 1000)
+        {
+            _host.ChangeCombatMode(CombatMode.Magic);
+            lastStanceAttempt = DateTime.Now;
+        }
+        if ((DateTime.Now - _lastEquipTime).TotalMilliseconds > 2000)
+        {
+            _host.UseObject((uint)wandId);
+            _lastEquipTime = DateTime.Now;
+        }
+        return false;
+    }
+
     public string GetRaycastStatus()
     {
         if (_raycastSystem == null) return "Raycasting: NOT INITIALIZED";
