@@ -64,8 +64,8 @@ internal sealed class LegacyNavigationUi
             {
                 _settings.IsMacroRunning  = true;
                 _settings.EnableNavigation = true;
-                if (_settings.CurrentState != "Navigating")
-                    _settings.CurrentState = "Default";
+                if (_settings.BotAction != "Navigating")
+                    _settings.BotAction = "Default";
             }
             ImGui.PopStyleColor(3);
         }

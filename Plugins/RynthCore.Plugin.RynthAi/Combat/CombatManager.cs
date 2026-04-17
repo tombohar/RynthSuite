@@ -63,6 +63,10 @@ public class CombatManager : IDisposable
     /// <summary>Current combat mode — updated from OnCombatModeChange in RynthAiPlugin.</summary>
     public int CurrentCombatMode { get; set; } = CombatMode.NonCombat;
 
+    /// <summary>Client busy count — set by plugin from OnBusyCountIncremented/Decremented.
+    /// When > 0, combat must not send any game actions (SelectItem, attack, cast).</summary>
+    public int BusyCount { get; set; }
+
     private CharacterSkills? _charSkills;
 
     private readonly WorldObjectCache _worldFilter;
@@ -108,6 +112,9 @@ public class CombatManager : IDisposable
     /// <summary>True when combat has an active target or viable targets nearby. Used to block navigation.</summary>
     public bool HasTargets => activeTargetId != 0 || _scannedTargets.Count > 0;
 
+    /// <summary>True only when actively attacking a specific target. Unlike HasTargets, this is false between kills even when more monsters are scanned nearby.</summary>
+    public bool IsActivelyEngaged => activeTargetId != 0;
+
     /// <summary>
     /// Periodic scan of all creatures. Filters: distance, self, blacklist, IsAttackable, raycast LOS.
     /// Call from OnHeartbeat or Think.
@@ -134,6 +141,10 @@ public class CombatManager : IDisposable
             if (blacklistedTargets.ContainsKey(wo.Id) || _blacklistManager.IsBlacklisted(wo.Id)) continue;
 
             if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable((uint)wo.Id))
+                continue;
+
+            // Dead but not yet reclassified as corpse — skip
+            if (_worldFilter.GetHealthRatio(wo.Id) == 0f)
                 continue;
 
             double dist = _worldFilter.Distance(playerId, wo.Id);
@@ -357,10 +368,20 @@ public class CombatManager : IDisposable
                 _facingTarget = false;
                 ClearCombatTurnMotions();
             }
-            else if (target != null &&
-                     _worldFilter.Distance(_host.GetPlayerId() == 0 ? 0 : (int)_host.GetPlayerId(), activeTargetId) > acDistanceLimit * 1.5)
+            else if (_worldFilter.GetHealthRatio(activeTargetId) == 0f)
             {
-                // Confirmed out of range — release lock.
+                // Health hit zero — dead, move on immediately instead of waiting
+                // for the object class to change to corpse.
+                activeTargetId = 0;
+                _lockedTargetId = 0;
+                _facingTarget = false;
+                ClearCombatTurnMotions();
+            }
+            else if (target != null &&
+                     _worldFilter.Distance(_host.GetPlayerId() == 0 ? 0 : (int)_host.GetPlayerId(), activeTargetId) > acDistanceLimit)
+            {
+                // Out of configured range — release lock immediately.
+                // Previous 1.5× buffer caused the bot to run toward distant mobs.
                 activeTargetId = 0;
                 _lockedTargetId = 0;
                 _facingTarget = false;
@@ -380,12 +401,13 @@ public class CombatManager : IDisposable
 
             if (activeTargetId == 0)
             {
-                // Only go peace mode if no scanned targets exist at all (nothing nearby)
-                // and enough time has passed since last kill to avoid mode cycling between mobs
+                // No valid target — go to Peace immediately to stop the client
+                // from auto-running toward a distant monster.  The 500ms cooldown
+                // prevents ChangeCombatMode spam while idling between spawns.
                 if (_settings.PeaceModeWhenIdle && CurrentCombatMode != CombatMode.NonCombat
-                    && _scannedTargets.Count == 0)
+                    && _scannedTargets.Count == 0 && BusyCount == 0)
                 {
-                    if ((DateTime.Now - _lastPeaceAttempt).TotalMilliseconds > 5000)
+                    if ((DateTime.Now - _lastPeaceAttempt).TotalMilliseconds > 500)
                     {
                         _host.ChangeCombatMode(CombatMode.NonCombat);
                         _lastPeaceAttempt = DateTime.Now;
@@ -425,6 +447,14 @@ public class CombatManager : IDisposable
         var targetObj = _worldFilter[activeTargetId];
         if (targetObj == null) return true; // transient miss — skip tick, keep lock
 
+        // Distance gate: don't issue any attack commands (SelectItem, attack, cast)
+        // when the target is beyond MonsterRange. The lock stays so we re-engage if
+        // it comes back in range, but no commands means no client auto-run toward it.
+        double currentDist = _worldFilter.Distance(
+            _host.GetPlayerId() == 0 ? 0 : (int)_host.GetPlayerId(), activeTargetId);
+        if (currentDist > acDistanceLimit)
+            return true;
+
         if (!EquipWeaponAndSetStance(targetObj, "Auto"))
             return true;
 
@@ -439,6 +469,10 @@ public class CombatManager : IDisposable
 
         if ((DateTime.Now - lastAttackCmd).TotalMilliseconds >= 1000)
         {
+            // Client is busy processing a previous action — don't queue more
+            if (BusyCount > 0)
+                return true;
+
             // Native attack handles facing internally — skip manual facing
             if (!useNative)
             {
@@ -528,12 +562,28 @@ public class CombatManager : IDisposable
     {
         if (!_settings.IsMacroRunning) return;
 
+        // Always run the scan and BotAction state update, even when combat can't
+        // take actions. ScanNearbyTargets has no side-effects (no game commands)
+        // and must stay fresh so HasTargets is accurate for nav-blocking decisions.
+        // Without this, stale scan data keeps combatBlocking = true after a kill,
+        // preventing navigation from resuming while the bot is buffing, etc.
+        if (_settings.EnableCombat)
+        {
+            try { ScanNearbyTargets(); }
+            catch (Exception ex) { _host.Log($"[RynthAi] ScanNearbyTargets CRASH: {ex.Message}"); }
+
+            if (activeTargetId != 0 || _scannedTargets.Count > 0)
+                _settings.BotAction = "Combat";
+            else if (_settings.BotAction == "Combat")
+                _settings.BotAction = "Default";
+        }
+
         // Combat can run in Default/Combat, can interrupt navigation unless nav boost is on,
         // and can interrupt looting unless loot boost is on.
-        bool canRun = _settings.CurrentState == "Default"
-                   || _settings.CurrentState == "Combat"
-                   || (_settings.CurrentState == "Navigating" && !_settings.BoostNavPriority)
-                   || (_settings.CurrentState == "Looting" && !_settings.BoostLootPriority);
+        bool canRun = _settings.BotAction == "Default"
+                   || _settings.BotAction == "Combat"
+                   || (_settings.BotAction == "Navigating" && !_settings.BoostNavPriority)
+                   || (_settings.BotAction == "Looting" && !_settings.BoostLootPriority);
         if (!canRun) return;
 
         if (_settings.EnableCombat)
@@ -541,10 +591,12 @@ public class CombatManager : IDisposable
             try { Think(); }
             catch (Exception ex) { _host.Log($"[RynthAi] Think CRASH: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}"); }
 
+            // Think() already called ScanNearbyTargets internally — update BotAction
+            // again with the post-Think scan results (target selection may have changed).
             if (activeTargetId != 0 || _scannedTargets.Count > 0)
-                _settings.CurrentState = "Combat";
-            else if (_settings.CurrentState == "Combat")
-                _settings.CurrentState = "Default"; // release so navigation can resume
+                _settings.BotAction = "Combat";
+            else if (_settings.BotAction == "Combat")
+                _settings.BotAction = "Default";
         }
     }
 
@@ -562,8 +614,11 @@ public class CombatManager : IDisposable
         {
             activeTargetId = targetId;
             _lockedTargetId = targetId;
-            // Don't call SelectItem here — AC auto-attacks on select in combat mode.
-            // Selection happens in the attack loop after the final LOS confirmation.
+            // Override the client's auto-target — but only when the client isn't busy.
+            // Queuing SelectItem while a combat-mode transition is in progress can
+            // corrupt the client's action queue and permanently freeze the cursor.
+            if (BusyCount == 0)
+                _host.SelectItem((uint)targetId);
         }
     }
 

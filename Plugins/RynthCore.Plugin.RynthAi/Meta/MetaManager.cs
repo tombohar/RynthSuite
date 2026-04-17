@@ -20,6 +20,12 @@ internal sealed class MetaManager
     private BuffManager? _buffManager;
     private uint _playerId;
 
+    /// <summary>
+    /// Callback for handling /mt (Mag-Tools) commands that need plugin-level access.
+    /// Set by the plugin after construction via <see cref="SetMtCommandHandler"/>.
+    /// </summary>
+    private Func<string, bool>? _mtCommandHandler;
+
     // ── State tracking ───────────────────────────────────────────────────────
     private string _lastState = "";
     private DateTime _stateStartTime = DateTime.Now;
@@ -63,6 +69,8 @@ internal sealed class MetaManager
         _host = host;
         _vitals = vitals;
     }
+
+    public void SetMtCommandHandler(Func<string, bool> handler) => _mtCommandHandler = handler;
 
     public void SetObjectCache(WorldObjectCache cache)
     {
@@ -177,14 +185,19 @@ internal sealed class MetaManager
         _lastMacroRunning = true;
 
         // ── State change / forced reset ──────────────────────────────────────
-        if (_settings.CurrentState != _lastState || _settings.ForceStateReset)
+        // Only reset HasFired on ForceStateReset (set by meta actions: SetState,
+        // CallState, ReturnFromCall, macro start, meta load, watchdog).
+        // Operational state cycling (Combat/Looting/Default/Navigating/Buffing)
+        // does NOT set ForceStateReset and must NOT re-fire latched rules —
+        // otherwise EmbedNav reloads the nav route from index 0 on every cycle.
+        if (_settings.ForceStateReset)
         {
-            _lastState = _settings.CurrentState;
             _stateStartTime = DateTime.Now;
             _watchdogActive = false;
             _settings.ForceStateReset = false;
             foreach (var r in _settings.MetaRules) r.HasFired = false;
         }
+        _lastState = _settings.CurrentState;
 
         double secondsInState = (DateTime.Now - _stateStartTime).TotalSeconds;
 
@@ -234,6 +247,10 @@ internal sealed class MetaManager
             {
                 rule.HasFired = true;
                 rule.LastFiredAt = DateTime.Now;
+
+                if (_settings.MetaDebug)
+                    _host.WriteToChat($"[Meta] {rule.State} | {DescribeCondition(rule)} → {DescribeAction(rule)}", 1);
+
                 ExecuteAction(rule);
 
                 // If state changed during this action, stop evaluating further rules this tick
@@ -401,10 +418,15 @@ internal sealed class MetaManager
                     int matchCount = 0;
                     int pid = unchecked((int)_playerId);
                     foreach (var obj in _objectCache.GetLandscape())
-                        if (obj.ObjectClass == AcObjectClass.Monster &&
-                            _objectCache.Distance(obj.Id, pid) <= maxDist &&
-                            rx.IsMatch(obj.Name))
+                    {
+                        if (obj.Id == pid) continue;
+                        if (obj.ObjectClass != AcObjectClass.Monster) continue;
+                        float hp = _objectCache.GetHealthRatio(obj.Id);
+                        if (hp == 0f || hp < 0f) continue;
+                        if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable(unchecked((uint)obj.Id))) continue;
+                        if (_objectCache.Distance(obj.Id, pid) <= maxDist && rx.IsMatch(obj.Name))
                             matchCount++;
+                    }
                     return matchCount >= minCount;
                 }
                 catch { return false; }
@@ -418,9 +440,16 @@ internal sealed class MetaManager
                 if (maxD <= 0) maxD = 20.0;
                 int pid = unchecked((int)_playerId);
                 foreach (var obj in _objectCache.GetLandscape())
-                    if (obj.ObjectClass == AcObjectClass.Monster &&
-                        _objectCache.Distance(obj.Id, pid) <= maxD)
+                {
+                    if (obj.Id == pid) continue; // never count self
+                    if (obj.ObjectClass != AcObjectClass.Monster) continue;
+                    float hp = _objectCache.GetHealthRatio(obj.Id);
+                    if (hp == 0f) continue; // dead, pending reclassification
+                    if (hp < 0f) continue;  // never received a health update — stale/untracked
+                    if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable(unchecked((uint)obj.Id))) continue;
+                    if (_objectCache.Distance(obj.Id, pid) <= maxD)
                         return false;
+                }
                 return true;
             }
 
@@ -510,6 +539,8 @@ internal sealed class MetaManager
                 foreach (var obj in _objectCache.GetLandscape())
                 {
                     if (obj.ObjectClass != AcObjectClass.Monster) continue;
+                    if (_objectCache.GetHealthRatio(obj.Id) == 0f) continue;
+                    if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable(unchecked((uint)obj.Id))) continue;
                     if (_objectCache.Distance(obj.Id, pid) > maxDist) continue;
                     foreach (var mr in _settings.MonsterRules)
                     {
@@ -559,7 +590,7 @@ internal sealed class MetaManager
                 string cmd = ProcessData(rule.ActionData);
                 if (!string.IsNullOrEmpty(cmd))
                 {
-                    if (!TryHandleVtCommand(cmd))
+                    if (!TryHandleVtCommand(cmd) && !(_mtCommandHandler?.Invoke(cmd) == true))
                     {
                         if (_host.HasInvokeChatParser)
                             _host.InvokeChatParser(cmd);
@@ -725,7 +756,7 @@ internal sealed class MetaManager
                     string msg = Expressions.Evaluate(exprSrc);
                     if (!string.IsNullOrEmpty(msg))
                     {
-                        if (!TryHandleVtCommand(msg))
+                        if (!TryHandleVtCommand(msg) && !(_mtCommandHandler?.Invoke(msg) == true))
                         {
                             if (_host.HasInvokeChatParser)
                                 _host.InvokeChatParser(msg);
@@ -892,5 +923,31 @@ internal sealed class MetaManager
         Expressions.SetOption(vtName, value);
         return true;
     }
+
+    // ── Debug helpers ─────────────────────────────────────────────────────────
+
+    private static string DescribeCondition(MetaRule rule)
+    {
+        string cond = rule.Condition.ToString();
+        if (!string.IsNullOrEmpty(rule.ConditionData))
+            cond += $"({Truncate(rule.ConditionData, 40)})";
+        return cond;
+    }
+
+    private static string DescribeAction(MetaRule rule)
+    {
+        string act = rule.Action.ToString();
+        if (!string.IsNullOrEmpty(rule.ActionData))
+            act += $"({Truncate(rule.ActionData, 60)})";
+        else if (rule.Action == MetaActionType.All)
+        {
+            int count = (rule.ActionChildren?.Count ?? 0) + (rule.Children?.Count ?? 0);
+            act += $"({count} sub-actions)";
+        }
+        return act;
+    }
+
+    private static string Truncate(string s, int max)
+        => s.Length <= max ? s : s[..max] + "…";
 
 }

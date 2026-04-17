@@ -222,6 +222,13 @@ internal sealed class LegacyMetaUi
             _settings.EnableMeta = isMetaEnabled;
 
         ImGui.SameLine();
+        bool metaDebug = _settings.MetaDebug;
+        if (ImGui.Checkbox("Debug##MetaDbg", ref metaDebug))
+            _settings.MetaDebug = metaDebug;
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Log every rule execution to chat:\n[Meta] State | Condition → Action");
+
+        ImGui.SameLine();
         ImGui.Text("Current State:");
         ImGui.SameLine();
 
@@ -758,14 +765,16 @@ internal sealed class LegacyMetaUi
 
     private void RenderLoadSaveBar()
     {
-        // Lazy-init file list
+        // Lazy-init file list (always has at least the None entry after first refresh)
         if (_macroFiles.Count == 0)
             RefreshMacroFileList();
 
-        // Combo to pick a file
-        string comboLabel = _selectedFileIdx >= 0 && _selectedFileIdx < _macroFiles.Count
+        // Combo label: show selected file, or the currently loaded file if selection is stale
+        string comboLabel = (_selectedFileIdx >= 0 && _selectedFileIdx < _macroFiles.Count)
             ? _macroFiles[_selectedFileIdx].Display
-            : "Select macro file...";
+            : (!string.IsNullOrEmpty(_settings.CurrentMetaPath)
+                ? Path.GetFileName(_settings.CurrentMetaPath)
+                : "-- None --");
 
         ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - 210);
         if (ImGui.BeginCombo("##MacroFileCombo", comboLabel))
@@ -826,27 +835,54 @@ internal sealed class LegacyMetaUi
 
     private void RefreshMacroFileList()
     {
-        _macroFiles.Clear();
-        _selectedFileIdx = -1;
+        var fileEntries = new List<(string Path, string Display)>();
 
         Directory.CreateDirectory(MetaFolder);
+        foreach (string f in Directory.GetFiles(MetaFolder, "*.met"))
         {
-            foreach (string f in Directory.GetFiles(MetaFolder, "*.met"))
-            {
-                string name = Path.GetFileName(f);
-                if (name.StartsWith("--")) continue;
-                _macroFiles.Add((f, $"[met] {name}"));
-            }
-
-            foreach (string f in Directory.GetFiles(MetaFolder, "*.af"))
-                _macroFiles.Add((f, $"[af]  {Path.GetFileName(f)}"));
+            string name = Path.GetFileName(f);
+            if (name.StartsWith("--")) continue;
+            fileEntries.Add((f, $"[met] {name}"));
         }
+        foreach (string f in Directory.GetFiles(MetaFolder, "*.af"))
+            fileEntries.Add((f, $"[af]  {Path.GetFileName(f)}"));
 
-        _macroFiles.Sort((a, b) => string.Compare(a.Display, b.Display, StringComparison.OrdinalIgnoreCase));
+        fileEntries.Sort((a, b) => string.Compare(a.Display, b.Display, StringComparison.OrdinalIgnoreCase));
+
+        _macroFiles.Clear();
+        _macroFiles.Add(("", "-- None --")); // index 0 = clear
+        foreach (var e in fileEntries)
+            _macroFiles.Add(e);
+
+        // Pre-select the currently loaded file so the combo label is correct after a session restart.
+        _selectedFileIdx = 0;
+        if (!string.IsNullOrEmpty(_settings.CurrentMetaPath))
+        {
+            for (int i = 1; i < _macroFiles.Count; i++)
+            {
+                if (_macroFiles[i].Path.Equals(_settings.CurrentMetaPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    _selectedFileIdx = i;
+                    break;
+                }
+            }
+        }
     }
 
     private void LoadMacroFile(string filePath)
     {
+        if (string.IsNullOrEmpty(filePath))
+        {
+            _settings.MetaRules.Clear();
+            _settings.EmbeddedNavs.Clear();
+            _settings.CurrentMetaPath = string.Empty;
+            _settings.CurrentState = "Default";
+            _settings.ForceStateReset = true;
+            _statusMessage = "Macro cleared.";
+            _statusTime = DateTime.Now;
+            return;
+        }
+
         try
         {
             string ext = Path.GetExtension(filePath).ToLowerInvariant();

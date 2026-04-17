@@ -194,6 +194,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
         _metaManager = new MetaManager(_dashboard.Settings, Host, _vitals);
         _metaManager.SetPlayerId(_playerId);
+        _metaManager.SetMtCommandHandler(HandleMtCommand);
         if (_objectCache != null) _metaManager.SetObjectCache(_objectCache);
         _metaManager.SetFellowshipTracker(_fellowshipTracker);
         _metaManager.SetQuestTracker(_questTracker);
@@ -238,6 +239,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     }
                 }
 
+                CheckBusyTimeout(); // safety: force-clear stuck busy count
                 _buffManager?.OnHeartbeat();
 
                 // Combat runs first — it can claim priority over navigation
@@ -269,10 +271,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
                 if (settings.BoostNavPriority)
                 {
-                    if (string.Equals(settings.CurrentState, "Combat", StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(settings.CurrentState, "Looting", StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(settings.BotAction, "Combat", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(settings.BotAction, "Looting", StringComparison.OrdinalIgnoreCase))
                     {
-                        settings.CurrentState = "Default";
+                        settings.BotAction = "Default";
                     }
 
                     _combatPausedNav = false;
@@ -317,7 +319,11 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                                     && _combatEndedAt != 0
                                     && (now - _combatEndedAt) < LootGraceMs;
 
-                if (combatBlocking || corpseBlocking || lootGraceActive)
+                // Nav must keep ticking during portal/recall actions so teleport
+                // detection works — combat and looting must not suppress it.
+                bool navInPortal = _navigationEngine?.IsInPortalAction == true;
+
+                if ((combatBlocking || corpseBlocking || lootGraceActive) && !navInPortal)
                 {
                     // Stop nav movement immediately the first tick another controller takes over.
                     if (combatBlocking && !_combatPausedNav)
@@ -349,6 +355,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                         _navigationEngine?.Tick();
                 }
 
+                TickPendingMtLoot();
                 _metaManager?.Think();
             }
         }
@@ -440,6 +447,17 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             return;
 
         string trimmed = text.Trim();
+
+        // Mag-Tools /mt command compatibility
+        if (trimmed.StartsWith("/mt ", StringComparison.OrdinalIgnoreCase)
+            || trimmed.Equals("/mt", StringComparison.OrdinalIgnoreCase))
+        {
+            eat = 1;
+            if (!HandleMtCommand(trimmed))
+                ChatLine($"[RynthAi] Unrecognized /mt command. Try /mt opt list");
+            return;
+        }
+
         if (!trimmed.StartsWith("/ra", StringComparison.OrdinalIgnoreCase))
             return;
 

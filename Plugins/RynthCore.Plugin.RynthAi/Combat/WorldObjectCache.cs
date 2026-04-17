@@ -123,9 +123,16 @@ public class WorldObjectCache
         if (!_creatures.Add(sid))
             return; // creature already known — ratio updated above, nothing more to do
 
-        // If classified, update class to Creature
+        // If the object was already classified as a Corpse, don't promote it back to Monster.
+        // AC fires health=0 events during the creature→corpse transition; if TryClassify already
+        // reclassified it and removed it from _creatures, the Add above would re-admit it incorrectly.
         if (_byId.TryGetValue(sid, out var existing))
         {
+            if (existing.ObjectClass == AcObjectClass.Corpse)
+            {
+                _creatures.Remove(sid);
+                return;
+            }
             if (existing.ObjectClass != AcObjectClass.Monster)
                 _byId[sid] = Make(sid, existing.Name, AcObjectClass.Monster);
         }
@@ -213,6 +220,10 @@ public class WorldObjectCache
 
     private void TryClassify(uint uid)
     {
+        // Never classify the player's own object — after portal/zone changes
+        // OnCreateObject fires for the player and would re-add them to _creatures.
+        if (_playerId != 0 && uid == _playerId) return;
+
         int id = (int)uid;
 
         // Already known as creature — just fill in name if missing
@@ -641,10 +652,20 @@ public class WorldObjectCache
         {
             if (!_byId.TryGetValue(id, out var wo))
                 continue;
-
             if (GetContainerId(id) != containerId)
                 continue;
+            yield return wo;
+        }
 
+        // Quest items and items with dynamic (0x80000000+) GUIDs are classified
+        // as landscape rather than inventory. Check landscape too so they appear
+        // as corpse contents when an open corpse is scanned.
+        foreach (int id in _landscape)
+        {
+            if (_inventory.Contains(id)) continue; // already yielded above
+            if (_creatures.Contains(id)) continue; // it's a live creature, not a container item
+            if (!_byId.TryGetValue(id, out var wo)) continue;
+            if (GetContainerId(id) != containerId) continue;
             yield return wo;
         }
     }

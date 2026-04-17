@@ -19,7 +19,11 @@ public sealed class LegacyUiSettings
 {
     // ── Runtime-only state — never persisted ────────────────────────────────
     [JsonIgnore] public bool IsMacroRunning;
+    /// <summary>Meta state — set only by meta actions (SetState, CallState, ReturnFromCall, UI, meta load).</summary>
     [JsonIgnore] public string CurrentState = "Default";
+    /// <summary>Bot action state — what the bot is doing right now (Default, Combat, Looting, Navigating, Buffing).
+    /// Separate from meta state so operational cycling doesn't corrupt meta rule matching.</summary>
+    [JsonIgnore] public string BotAction = "Default";
     [JsonIgnore] public bool IsRecordingNav;
 
     public bool EnableBuffing = true;
@@ -28,6 +32,7 @@ public sealed class LegacyUiSettings
     public bool EnableLooting;
     public bool EnableMeta;
     public bool EnableRaycasting = true;
+    public bool MetaDebug;
 
     public int MovementMode;
     public float NavStopTurnAngle = 20f;
@@ -125,7 +130,7 @@ public sealed class LegacyUiSettings
 
     public int MeleeAttackPower = -1;
     public int MissileAttackPower = -1;
-    public bool UseNativeAttack;
+    public bool UseNativeAttack = true;
     public bool UseRecklessness;
     public int MeleeAttackHeight = 1;
     public int MissileAttackHeight = 1;

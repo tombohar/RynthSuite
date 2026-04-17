@@ -157,6 +157,7 @@ internal sealed class LegacyDashboardRenderer
         // Macro always starts stopped
         _settings.IsMacroRunning = false;
         _settings.CurrentState   = "Default";
+        _settings.BotAction      = "Default";
 
         // Reload nav route from saved path
         if (!string.IsNullOrEmpty(_settings.CurrentNavPath) && File.Exists(_settings.CurrentNavPath))
@@ -828,9 +829,12 @@ internal sealed class LegacyDashboardRenderer
         ImGui.TableNextRow();
         ImGui.TableNextColumn();
         ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 4);
-        ImGui.TextColored(ColTextMute, "State:");
+        ImGui.TextColored(ColTextMute, "Meta:");
         ImGui.SameLine(0, 8);
         ImGui.TextColored(ColAmber, _settings.CurrentState);
+        ImGui.TextColored(ColTextMute, "Bot:");
+        ImGui.SameLine(0, 8);
+        ImGui.TextColored(ColAmber, _settings.BotAction);
         ImGui.TableNextColumn();
         ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 6);
         ImGui.TextColored(ColTextMute, "Loot:");

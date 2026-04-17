@@ -65,8 +65,12 @@ internal sealed class NavigationEngine
     }
     private PortalState _portalState = PortalState.None;
     private long   _portalStateStart;
+
+    /// <summary>True when the nav engine is executing a portal/recall action and must keep ticking to detect the teleport.</summary>
+    public bool IsInPortalAction => _portalState != PortalState.None;
     private double _prePortalNS = double.NaN;
     private double _prePortalEW = double.NaN;
+    private bool _wasInPortalSpace;  // tracks IsPortaling() edge for teleport detection
 
     // ── Stuck watchdog ───────────────────────────────────────────────────────
     private double _watchdogNs = double.NaN;
@@ -117,8 +121,8 @@ internal sealed class NavigationEngine
         // the hard combat lock and the "Looting" interlock.
         bool shouldNav = _settings.IsMacroRunning
                       && _settings.EnableNavigation
-                      && _settings.CurrentState != "Combat"
-                      && _settings.CurrentState != "Looting";
+                      && _settings.BotAction != "Combat"
+                      && _settings.BotAction != "Looting";
 
         if (!shouldNav)
         {
@@ -164,8 +168,8 @@ internal sealed class NavigationEngine
         }
 
         // Don't stomp on meta state names — only self-promote from plain "Default".
-        if (_settings.CurrentState == "Default")
-            _settings.CurrentState = "Navigating";
+        if (_settings.BotAction == "Default")
+            _settings.BotAction = "Navigating";
 
         // Rate-limit to ~30 Hz
         if (Now - _lastNavTick < (long)NavTickMs) return;
@@ -471,6 +475,7 @@ internal sealed class NavigationEngine
                 if (_settings.ActiveNavIndex >= route.Points.Count)
                 {
                     _settings.EnableNavigation = false;
+                    route.Points.Clear();   // Clear in-memory points (file on disk unchanged)
                     StopMovement();
                 }
                 break;
@@ -659,19 +664,28 @@ internal sealed class NavigationEngine
                 break;
 
             case PortalState.FiringAction:
-                // Teleport detected → done. Checked first so a cast that succeeded
-                // last tick advances immediately instead of re-casting on arrival.
+                // Teleport detection — two methods, same as meta system:
+                // 1) IsPortaling edge: entered portal space then exited = confirmed teleport
+                // 2) Position change: moved > 50 yards from pre-portal position
+                bool inPortalSpace = _host.HasIsPortaling && _host.IsPortaling();
+                if (inPortalSpace)
+                    _wasInPortalSpace = true;
+                bool portalExited = _wasInPortalSpace && !inPortalSpace;
+
+                bool positionChanged = false;
                 if (TryGetPos(out double ns, out double ew) && !double.IsNaN(_prePortalNS))
                 {
                     double dNS = ns - _prePortalNS, dEW = ew - _prePortalEW;
                     double movedYd = Math.Sqrt(dNS * dNS + dEW * dEW) * 240.0;
-                    if (movedYd > 50.0)
-                    {
-                        _portalState      = PortalState.PostTeleportSettle;
-                        _portalStateStart = Now;
-                        _settings.NavStatusLine = "Nav: teleported, settling...";
-                        return;
-                    }
+                    positionChanged = movedYd > 50.0;
+                }
+
+                if (portalExited || positionChanged)
+                {
+                    _portalState      = PortalState.PostTeleportSettle;
+                    _portalStateStart = Now;
+                    _settings.NavStatusLine = "Nav: teleported, settling...";
+                    return;
                 }
 
                 if (pt.Type == NavPointType.Recall)
@@ -719,9 +733,10 @@ internal sealed class NavigationEngine
 
     private void ResetPortalState()
     {
-        _portalState    = PortalState.None;
-        _prePortalNS    = double.NaN;
-        _prePortalEW    = double.NaN;
+        _portalState        = PortalState.None;
+        _prePortalNS        = double.NaN;
+        _prePortalEW        = double.NaN;
+        _wasInPortalSpace   = false;
     }
 
     // ══════════════════════════════════════════════════════════════════════════

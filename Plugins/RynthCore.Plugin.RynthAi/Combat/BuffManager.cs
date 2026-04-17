@@ -50,6 +50,9 @@ public class BuffManager : IDisposable
     /// <summary>Current combat mode — updated from OnCombatModeChange.</summary>
     public int CurrentCombatMode { get; set; } = CombatMode.NonCombat;
 
+    /// <summary>Client busy count — when > 0, don't send any game actions.</summary>
+    public int BusyCount { get; set; }
+
     private readonly List<string> BaseCreatureBuffs = new()
     {
         "Strength Self", "Endurance Self", "Coordination Self",
@@ -183,13 +186,16 @@ public class BuffManager : IDisposable
 
         if ((DateTime.Now - _lastCastAttempt).TotalMilliseconds < 1500)
         {
-            _settings.CurrentState = "Buffing";
+            _settings.BotAction = "Buffing";
             return;
         }
 
+        // Client is busy — don't queue CastSpell/UseObject or we'll cause hourglass hang
+        if (BusyCount > 0) return;
+
         if (CheckVitals())
         {
-            _settings.CurrentState = "Buffing";
+            _settings.BotAction = "Buffing";
             return;
         }
 
@@ -197,7 +203,7 @@ public class BuffManager : IDisposable
         {
             if (CheckAndCastSelfBuffs())
             {
-                _settings.CurrentState = "Buffing";
+                _settings.BotAction = "Buffing";
                 return;
             }
 
@@ -208,8 +214,8 @@ public class BuffManager : IDisposable
             }
         }
 
-        if (_settings.CurrentState == "Buffing")
-            _settings.CurrentState = "Default";
+        if (_settings.BotAction == "Buffing")
+            _settings.BotAction = "Default";
     }
 
     private bool CheckVitals()
@@ -227,7 +233,11 @@ public class BuffManager : IDisposable
         if (curStamPct <= _settings.RestamAt)    _isRechargingStamina = true;
         if (curStamPct >= _settings.TopOffStam)  _isRechargingStamina = false;
 
-        if (_isHealingSelf) return AttemptVitalCast("Heal Self");
+        if (_isHealingSelf)
+        {
+            if (AttemptHealthKitUse()) return true;
+            return AttemptVitalCast("Heal Self");
+        }
         if (_isRechargingMana && curStamPct > 15) return AttemptVitalCast("Stamina to Mana Self");
         if (_isRechargingStamina) return AttemptVitalCast("Revitalize Self");
 
@@ -242,6 +252,26 @@ public class BuffManager : IDisposable
         _host.CastSpell((uint)_host.GetPlayerId(), spellId);
         _lastCastAttempt = DateTime.Now;
         return true;
+    }
+
+    private bool AttemptHealthKitUse()
+    {
+        if (_worldObjectCache == null) return false;
+
+        foreach (var rule in _settings.ConsumableRules)
+        {
+            if (!rule.Type.Equals("HealthKit", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (_worldObjectCache[rule.Id] == null)
+                continue;
+
+            _host.UseObject(unchecked((uint)rule.Id));
+            _lastCastAttempt = DateTime.Now;
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>

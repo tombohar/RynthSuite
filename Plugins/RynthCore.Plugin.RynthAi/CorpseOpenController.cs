@@ -25,6 +25,8 @@ public sealed partial class RynthAiPlugin
     private readonly Dictionary<int, int> _corpseItemAttempts = new();
     private readonly Dictionary<int, long> _corpseCooldownUntil = new();
     private int _busyCount;
+    private long _busyCountLastIncrementAt;
+    private const long BUSY_TIMEOUT_MS = 10_000; // safety: force-clear if stuck >10s
     private int _openedContainerId;
     private int _targetCorpseId;
     private int _currentLootItemId;
@@ -53,12 +55,32 @@ public sealed partial class RynthAiPlugin
     public override void OnBusyCountIncremented()
     {
         _busyCount++;
+        _busyCountLastIncrementAt = CorpseNowMs;
+        if (_combatManager != null) _combatManager.BusyCount = _busyCount;
+        if (_buffManager != null) _buffManager.BusyCount = _busyCount;
     }
 
     public override void OnBusyCountDecremented()
     {
         if (_busyCount > 0)
             _busyCount--;
+        if (_combatManager != null) _combatManager.BusyCount = _busyCount;
+        if (_buffManager != null) _buffManager.BusyCount = _busyCount;
+    }
+
+    /// <summary>Safety valve: if busy count has been positive for too long, force-reset it.
+    /// Prevents permanent lockout when the host misses a decrement callback.</summary>
+    private void CheckBusyTimeout()
+    {
+        if (_busyCount > 0 && _busyCountLastIncrementAt != 0
+            && CorpseNowMs - _busyCountLastIncrementAt > BUSY_TIMEOUT_MS)
+        {
+            Log($"[RynthAi] Busy count stuck at {_busyCount} for >{BUSY_TIMEOUT_MS}ms — force-clearing.");
+            _busyCount = 0;
+            _busyCountLastIncrementAt = 0;
+            if (_combatManager != null) _combatManager.BusyCount = 0;
+            if (_buffManager != null) _buffManager.BusyCount = 0;
+        }
     }
 
     public override void OnViewObjectContents(uint objectId)
@@ -219,8 +241,8 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
-        if (settings.CurrentState == "Default" || settings.CurrentState == "Navigating")
-            settings.CurrentState = "Looting";
+        if (settings.BotAction == "Default" || settings.BotAction == "Navigating")
+            settings.BotAction = "Looting";
 
         double distanceMeters = _objectCache.Distance(unchecked((int)_playerId), _targetCorpseId);
         if (double.IsNaN(distanceMeters) || double.IsInfinity(distanceMeters) || distanceMeters == double.MaxValue)
@@ -241,6 +263,9 @@ public sealed partial class RynthAiPlugin
 
         StopCorpseMovement();
 
+        if (_busyCount > 0)
+            return; // Client is busy — don't queue another UseObject or we'll hang
+
         if (_lastCorpseOpenAttemptAt == 0 || now - _lastCorpseOpenAttemptAt >= Math.Max(500, settings.LootOpenRetryMs))
         {
             AttemptOpenCorpse(_targetCorpseId);
@@ -256,12 +281,23 @@ public sealed partial class RynthAiPlugin
         if (settings.BoostNavPriority)
             return false;
 
-        if (_combatManager?.HasTargets == true && !settings.BoostLootPriority)
-            return false;
+        // Combat is #1 priority — block new corpse claims while combat is
+        // enabled and has ANY targets (scanned or actively engaged).
+        // If combat is disabled, targets don't matter — loot freely.
+        // Exception: if we already have an opened container, finish looting it
+        // since that involves no movement and doesn't conflict with combat.
+        if (settings.EnableCombat
+            && _combatManager?.HasTargets == true
+            && !settings.BoostLootPriority)
+        {
+            if (_openedContainerId == 0)
+                return false;
+        }
 
-        return settings.CurrentState == "Default"
-            || settings.CurrentState == "Navigating"
-            || settings.CurrentState == "Looting";
+        return settings.BotAction == "Default"
+            || settings.BotAction == "Navigating"
+            || settings.BotAction == "Looting"
+            || settings.BotAction == "Combat";
     }
 
     private bool TryFindNearestCorpse(double maxMeters, out WorldObject? corpse, out double distanceMeters)
@@ -530,6 +566,8 @@ public sealed partial class RynthAiPlugin
 
         if (_completedCorpses.Contains(corpseId))
         {
+            if (_busyCount > 0)
+                return; // Client is busy — wait before closing
             if (_lastLootActionAt == 0 || CorpseNowMs - _lastLootActionAt >= Math.Max(200, settings.LootClosingDelayMs))
             {
                 Host.SelectItem(unchecked((uint)corpseId));
@@ -583,6 +621,9 @@ public sealed partial class RynthAiPlugin
             }
             return;
         }
+
+        if (_busyCount > 0)
+            return; // Client is busy — don't queue item pickup
 
         if (_lastLootActionAt != 0 && now - _lastLootActionAt < Math.Max(50, settings.LootInterItemDelayMs))
             return;
@@ -653,6 +694,9 @@ public sealed partial class RynthAiPlugin
             _lastLootActionAt = now;
             return;
         }
+
+        if (_busyCount > 0)
+            return; // Client is busy — don't queue retry
 
         Host.SelectItem(unchecked((uint)_currentLootItemId));
         bool retried = Host.UseObject(unchecked((uint)_currentLootItemId));
@@ -738,8 +782,8 @@ public sealed partial class RynthAiPlugin
 
         int corpseId = _openedContainerId != 0 ? _openedContainerId : _targetCorpseId;
         var settings = _dashboard?.Settings;
-        if (settings != null && !string.Equals(settings.CurrentState, "Looting", StringComparison.OrdinalIgnoreCase))
-            settings.CurrentState = "Looting";
+        if (settings != null && !string.Equals(settings.BotAction, "Looting", StringComparison.OrdinalIgnoreCase))
+            settings.BotAction = "Looting";
 
         if (corpseId != 0)
             LootDiag($"[RynthAi] Corpse loot: pausing navigation for corpse 0x{(uint)corpseId:X8}.");
@@ -1004,8 +1048,8 @@ public sealed partial class RynthAiPlugin
             return;
 
         var settings = _dashboard?.Settings;
-        if (settings != null && string.Equals(settings.CurrentState, "Looting", StringComparison.OrdinalIgnoreCase))
-            settings.CurrentState = "Default";
+        if (settings != null && string.Equals(settings.BotAction, "Looting", StringComparison.OrdinalIgnoreCase))
+            settings.BotAction = "Default";
     }
 
     private void HandleCorpseObjectDeleted(uint objectId)
@@ -1116,7 +1160,7 @@ public sealed partial class RynthAiPlugin
         _completedCorpses.Add(corpseId);
         _corpseCooldownUntil.Remove(corpseId);
 
-        if (_openedContainerId == corpseId)
+        if (_openedContainerId == corpseId && _busyCount == 0)
         {
             Host.SelectItem(unchecked((uint)corpseId));
             Host.UseObject(unchecked((uint)corpseId));
