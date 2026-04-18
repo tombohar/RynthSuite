@@ -93,6 +93,9 @@ internal sealed class LegacyAdvancedSettingsUi
 
                 ImGui.Spacing();
                 ImGui.Checkbox("Peace Mode When Idle", ref _settings.PeaceModeWhenIdle);
+                ImGui.Checkbox("Start Macro On Login", ref _settings.StartMacroOnLogin);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Automatically starts the macro when RynthAi loads.");
                 ImGui.Checkbox("Enable Raycasting", ref _settings.EnableRaycasting);
 
                 ImGui.Separator();

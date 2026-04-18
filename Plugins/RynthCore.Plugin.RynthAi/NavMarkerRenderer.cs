@@ -78,8 +78,11 @@ internal sealed class NavMarkerRenderer
                 out _, out _, out _, out _))
             return;
 
-        // Don't paint during portal animation — portalspace has landblock 0x0000
+        // Don't paint during portal animation — portalspace has landblock 0x0000,
+        // but also check IsPortaling() for the brief window before cellId zeroes out.
         if ((cellId >> 16) == 0)
+            return;
+        if (_host.HasIsPortaling && _host.IsPortaling())
             return;
 
         float ringRadius = Math.Max(0.1f, _settings.FollowNavMin);

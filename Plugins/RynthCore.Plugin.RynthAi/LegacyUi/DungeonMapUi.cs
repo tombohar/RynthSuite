@@ -45,6 +45,8 @@ internal sealed class DungeonMapUi
     private bool _autoFollow = true;
     private bool _show1U1D   = true;  // show current floor ± 1 (default)
     private bool _open = true;
+    private bool _autoHidden;         // true when we auto-hid the map because player went outdoors
+    public bool IsAutoHidden => _autoHidden;
 
     // Toggle-stabilisation: when toolbar is visible we track both the full window
     // rect and the canvas rect.  On hide we snap the window to the canvas rect so
@@ -100,6 +102,32 @@ internal sealed class DungeonMapUi
 
     public void Render()
     {
+        // Check indoor/outdoor before creating the ImGui window.
+        // Auto-hide when outdoors (or in portalspace), auto-show when returning indoors.
+        bool isIndoor = false;
+        if (_host.HasGetPlayerPose && _host.TryGetPlayerPose(
+                out uint preCellId, out _, out _, out _, out _, out _, out _, out _))
+        {
+            isIndoor = (preCellId & 0xFFFF) >= 0x100 && (preCellId >> 16) != 0;
+        }
+
+        if (!isIndoor)
+        {
+            if (!_autoHidden)
+            {
+                _autoHidden = true;
+                DashWindows.ShowDungeonMap = false;
+            }
+            return;
+        }
+
+        if (_autoHidden)
+        {
+            _autoHidden = false;
+            _open = true;
+            DashWindows.ShowDungeonMap = true;
+        }
+
         // Snapshot map-specific settings so we can detect changes and save immediately.
         bool  snapDoors     = _settings.MapShowDoors;
         bool  snapCreatures = _settings.MapShowCreatures;
@@ -178,8 +206,9 @@ internal sealed class DungeonMapUi
                 out _, out _, out _, out _))
         { ImGui.TextDisabled("Player position unavailable."); ImGui.End(); return; }
 
+        // Indoor check already handled before window creation — this is a safety fallback.
         if ((cellId & 0xFFFF) < 0x100)
-        { ImGui.TextDisabled("No dungeon map — outdoor landblock."); ImGui.End(); return; }
+        { ImGui.End(); return; }
 
         uint landblock = cellId >> 16;
         if (landblock != _cachedLandblock || _outerEdges is null)

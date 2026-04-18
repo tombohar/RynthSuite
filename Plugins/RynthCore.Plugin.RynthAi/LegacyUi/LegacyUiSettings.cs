@@ -124,6 +124,7 @@ public sealed class LegacyUiSettings
     public bool LootOnlyRareCorpses;
     public bool PeaceModeWhenIdle = true;
     public bool RebuffWhenIdle;
+    public bool StartMacroOnLogin;
 
     public int BlacklistAttempts = 3;
     public int BlacklistTimeoutSec = 30;

@@ -556,6 +556,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "mapdump":
                 HandleMapDumpCommand();
                 break;
+            case "clearbusy":
+                HandleClearBusyCommand();
+                break;
             // use / select variants
             case "use":
                 HandleUseCommand(parts, inv: true,  land: true,  partial: false);

@@ -154,8 +154,7 @@ internal sealed class LegacyDashboardRenderer
         _settings.SelectedProfile = activeProfile;
         ApplyUiStateFromSettings();
 
-        // Macro always starts stopped
-        _settings.IsMacroRunning = false;
+        _settings.IsMacroRunning = _settings.StartMacroOnLogin;
         _settings.CurrentState   = "Default";
         _settings.BotAction      = "Default";
 
@@ -692,7 +691,7 @@ internal sealed class LegacyDashboardRenderer
         _luaUi.Render();
 
         if (DashWindows.ShowNavigation) _navigationUi.Render();
-        if (DashWindows.ShowDungeonMap) _dungeonMapUi.Render();
+        if (DashWindows.ShowDungeonMap || _dungeonMapUi.IsAutoHidden) _dungeonMapUi.Render();
         if (_settings.ShowAdvancedWindow) _advancedSettingsUi.Render();
 
         ImGui.PopStyleColor(8);

@@ -153,6 +153,7 @@ internal sealed class LegacyMetaUi
                         int prevGlobalIdx = _settings.MetaRules.IndexOf(prevRule);
                         _settings.MetaRules[globalIdx] = prevRule;
                         _settings.MetaRules[prevGlobalIdx] = rule;
+                        TryAutoSaveMeta();
                     }
 
                     ImGui.TableNextColumn();
@@ -162,12 +163,16 @@ internal sealed class LegacyMetaUi
                         int nextGlobalIdx = _settings.MetaRules.IndexOf(nextRule);
                         _settings.MetaRules[globalIdx] = nextRule;
                         _settings.MetaRules[nextGlobalIdx] = rule;
+                        TryAutoSaveMeta();
                     }
 
                     ImGui.TableNextColumn();
                     ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1, 0, 0, 1));
                     if (ImGui.Button($"X##delm{globalIdx}"))
+                    {
                         _settings.MetaRules.Remove(rule);
+                        TryAutoSaveMeta();
+                    }
                     ImGui.PopStyleColor();
 
                     ImGui.TableNextColumn();
@@ -351,6 +356,7 @@ internal sealed class LegacyMetaUi
             if (_editingRuleIndex == -1) _settings.MetaRules.Add(_editingRule);
             else _settings.MetaRules[_editingRuleIndex] = _editingRule;
             _showMetaEditor = false;
+            TryAutoSaveMeta();
         }
 
         ImGui.SameLine();
@@ -923,6 +929,27 @@ internal sealed class LegacyMetaUi
             _statusMessage = $"Load error: {ex.Message}";
             _statusTime = DateTime.Now;
         }
+    }
+
+    private void TryAutoSaveMeta()
+    {
+        if (string.IsNullOrEmpty(_settings.CurrentMetaPath))
+            return;
+
+        try
+        {
+            string path = _settings.CurrentMetaPath;
+
+            // .met files can't be written — save as .af alongside
+            if (Path.GetExtension(path).Equals(".met", StringComparison.OrdinalIgnoreCase))
+            {
+                path = Path.ChangeExtension(path, ".af");
+                _settings.CurrentMetaPath = path;
+            }
+
+            AfFileWriter.Save(path, _settings.MetaRules, _settings.EmbeddedNavs);
+        }
+        catch { }
     }
 
     private void SaveMacroFile()

@@ -47,6 +47,13 @@ internal sealed class NavigationEngine
     private bool  _hasStopped = true;
     private float _lastGoodHeading;
     private bool  _hasGoodHeading;
+    private bool  _postTeleport;        // true on the first steer after a teleport — forces big-turn
+    private int   _lastTurnDir;         // +1 = right, -1 = left, 0 = none — hysteresis for small corrections
+    private bool  _trackingPortalSpace; // global portal-space edge detection (independent of HandlePortalOrRecall)
+    private double _globalLastNS = double.NaN; // position tracking for teleport detection
+    private double _globalLastEW = double.NaN;
+    private bool   _globalSettling;            // true during post-teleport settle (global detection)
+    private long   _globalSettleStart;
 
     // ── Route state ──────────────────────────────────────────────────────────
     private int    _linearDir  = 1;
@@ -174,6 +181,78 @@ internal sealed class NavigationEngine
         // Rate-limit to ~30 Hz
         if (Now - _lastNavTick < (long)NavTickMs) return;
         _lastNavTick = Now;
+
+        // ── Global teleport detection ────────────────────────────────────────
+        // Catches portals used outside of HandlePortalOrRecall (cast portals,
+        // manually entered portals, etc). Detects teleport via:
+        // 1) IsPortaling edge — entered portal space then exited
+        // 2) Position jump — moved > 50 yards between ticks
+        // When detected, enter a settle period before resuming nav.
+        if (_portalState == PortalState.None)
+        {
+            // Handle active settle period
+            if (_globalSettling)
+            {
+                _host.SetAutoRun(false);
+                ClearTurnMotions();
+                if (_host.HasStopCompletely) _host.StopCompletely();
+                _isMovingForward = false;
+                _isTurning       = false;
+
+                if (Now - _globalSettleStart > (long)PostTeleportMs)
+                {
+                    _host.Log($"Nav: global post-teleport settle done ({PostTeleportMs:F0}ms)");
+                    if (_host.HasStopCompletely) _host.StopCompletely();
+                    if (_host.HasForceResetBusyCount) _host.ForceResetBusyCount();
+                    if (_combatManager != null) _combatManager.BusyCount = 0;
+                    _hasGoodHeading = false;
+                    _lastTurnDir    = 0;
+                    _postTeleport   = true;
+                    _watchdogNs     = double.NaN;
+                    _watchdogEw     = double.NaN;
+                    _watchdogNext   = Now + (long)WatchdogMs;
+                    _prevDist       = double.MaxValue;
+                    _globalSettling = false;
+                }
+                return;
+            }
+
+            bool inPS = _host.HasIsPortaling && _host.IsPortaling();
+            if (inPS)
+            {
+                if (!_trackingPortalSpace)
+                {
+                    _trackingPortalSpace = true;
+                    StopMovement();
+                }
+                return; // don't steer while in portal space
+            }
+
+            // Detect teleport: portal-space exit edge OR position jump > 50 yards
+            bool portalExited = _trackingPortalSpace && !inPS;
+            bool positionJumped = false;
+            if (TryGetPos(out double gNS, out double gEW))
+            {
+                if (!double.IsNaN(_globalLastNS))
+                {
+                    double dN = gNS - _globalLastNS, dE = gEW - _globalLastEW;
+                    double jumpYd = Math.Sqrt(dN * dN + dE * dE) * 240.0;
+                    positionJumped = jumpYd > 50.0;
+                }
+                _globalLastNS = gNS;
+                _globalLastEW = gEW;
+            }
+
+            if (portalExited || positionJumped)
+            {
+                _trackingPortalSpace = false;
+                _globalSettling      = true;
+                _globalSettleStart   = Now;
+                StopMovement();
+                _host.Log($"Nav: teleport detected (portalExit={portalExited} posJump={positionJumped}), settling {PostTeleportMs:F0}ms...");
+                return;
+            }
+        }
 
         int idx = _settings.ActiveNavIndex;
         if (!IndexValid(idx, route)) { HandleRouteEnd(route); return; }
@@ -369,10 +448,13 @@ internal sealed class NavigationEngine
             return;
         }
 
-        // ── BIG TURN (>BigTurnEnter°): stop and turn smoothly ──────────────
+        // ── BIG TURN (>BigTurnEnter° or first steer after teleport): stop and turn ─
         // Uses SetMotion turn keys so the character rotates with native animation.
-        if (absError > BigTurnEnter)
+        // After a teleport, always do a big turn to properly orient before running —
+        // jumping straight into small corrections causes left-right oscillation.
+        if (absError > BigTurnEnter || (_postTeleport && absError > DeadZone))
         {
+            _postTeleport = false;
             StopForward();
             if (error > 0)
             {
@@ -387,6 +469,7 @@ internal sealed class NavigationEngine
             _isTurning = true;
             return;
         }
+        _postTeleport = false;
 
         // ── Ensure forward motion ───────────────────────────────────────────
         StartForward();
@@ -397,10 +480,25 @@ internal sealed class NavigationEngine
 
         // ── SMALL CORRECTION: TurnRight/TurnLeft while running ──────────────
         // These combine with autorun naturally (like pressing W+A or W+D).
-        // No heading snap, no motion interrupt.
+        // Hysteresis: once a direction is chosen, hold it until error crosses
+        // zero or enters the dead zone. Prevents left-right oscillation when
+        // the error hovers near zero (common after portals).
         if (absError > DeadZone && !closeToWaypoint)
         {
-            if (error > 0)
+            int wantDir = error > 0 ? 1 : -1;
+
+            // Only change direction if the error has clearly crossed to the other side
+            if (_lastTurnDir != 0 && _lastTurnDir != wantDir && absError < DeadZone * 2.0)
+            {
+                // Error is small and we'd be reversing — hold current direction
+                // until the error either grows or clearly crosses zero.
+            }
+            else
+            {
+                _lastTurnDir = wantDir;
+            }
+
+            if (_lastTurnDir > 0)
             {
                 _host.SetMotion(MotionTurnRight, true);
                 _host.SetMotion(MotionTurnLeft,  false);
@@ -413,6 +511,7 @@ internal sealed class NavigationEngine
         }
         else
         {
+            _lastTurnDir = 0;
             ClearTurnMotions();
         }
 
@@ -664,6 +763,9 @@ internal sealed class NavigationEngine
                 break;
 
             case PortalState.FiringAction:
+                // Keep motions clear — UseObject/recall cast handles its own movement
+                ClearTurnMotions();
+
                 // Teleport detection — two methods, same as meta system:
                 // 1) IsPortaling edge: entered portal space then exited = confirmed teleport
                 // 2) Position change: moved > 50 yards from pre-portal position
@@ -682,6 +784,8 @@ internal sealed class NavigationEngine
 
                 if (portalExited || positionChanged)
                 {
+                    int busyNow = _host.HasGetBusyState ? _host.GetBusyState() : -1;
+                    _host.Log($"Nav: teleport detected (portalExit={portalExited} posChange={positionChanged}) busyState={busyNow}");
                     _portalState      = PortalState.PostTeleportSettle;
                     _portalStateStart = Now;
                     _settings.NavStatusLine = "Nav: teleported, settling...";
@@ -716,14 +820,35 @@ internal sealed class NavigationEngine
                 break;
 
             case PortalState.PostTeleportSettle:
-                // Hammer-stop to cancel any lingering UseItem walk
+                // Hammer-stop to cancel any lingering UseItem walk and clear
+                // the client's internal action queue (prevents stuck hourglass
+                // cursor when UseObject is interrupted by portal teleport).
                 _host.SetAutoRun(false);
                 ClearTurnMotions();
+                if (_host.HasStopCompletely) _host.StopCompletely();
                 _isMovingForward = false;
                 _isTurning       = false;
 
                 if (Now - _portalStateStart > (long)PostTeleportMs)
                 {
+                    int busyAfter = _host.HasGetBusyState ? _host.GetBusyState() : -1;
+                    _host.Log($"Nav: PostTeleportSettle done, busyState={busyAfter}");
+                    // Force-clear the client's internal busy count (hourglass cursor)
+                    // and our tracked busy count. Portal teleport interrupts actions
+                    // without firing the matching DecrementBusyCount callback.
+                    if (_host.HasStopCompletely) _host.StopCompletely();
+                    if (_host.HasForceResetBusyCount) _host.ForceResetBusyCount();
+                    if (_combatManager != null) _combatManager.BusyCount = 0;
+
+                    // Invalidate stale heading and watchdog data so the nav engine
+                    // starts clean after the teleport — prevents oscillating turns
+                    // caused by pre-portal heading/position data.
+                    _hasGoodHeading = false;
+                    _lastTurnDir    = 0;
+                    _postTeleport   = true;
+                    _watchdogNs     = double.NaN;
+                    _watchdogEw     = double.NaN;
+                    _watchdogNext   = Now + (long)WatchdogMs;
                     ResetPortalState();
                     Advance(route);
                 }
@@ -733,10 +858,14 @@ internal sealed class NavigationEngine
 
     private void ResetPortalState()
     {
-        _portalState        = PortalState.None;
-        _prePortalNS        = double.NaN;
-        _prePortalEW        = double.NaN;
-        _wasInPortalSpace   = false;
+        _portalState         = PortalState.None;
+        _prePortalNS         = double.NaN;
+        _prePortalEW         = double.NaN;
+        _wasInPortalSpace    = false;
+        _trackingPortalSpace = false;
+        _globalSettling      = false;
+        _globalLastNS        = double.NaN;
+        _globalLastEW        = double.NaN;
     }
 
     // ══════════════════════════════════════════════════════════════════════════

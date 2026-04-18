@@ -53,6 +53,8 @@ public class CombatManager : IDisposable
     // or when a second mob briefly becomes slightly closer between scan ticks.
     private int _lockedTargetId = 0;
 
+    private bool _wasMacroRunning;
+
     private DateTime _lastSpellCast = DateTime.MinValue;
     private const double SPELL_CAST_COOLDOWN_MS = 1500.0;
     private const double ATTACK_SPELL_COOLDOWN_MS = 100.0;
@@ -244,7 +246,7 @@ public class CombatManager : IDisposable
         { "Acid",      new[] { "Searing Disc", "Searing Disc II" } },
         { "Blade",     new[] { "Horizon's Blades", "Horizon's Blades II" } },
         { "Slash",     new[] { "Horizon's Blades", "Horizon's Blades II" } },
-        { "Pierce",    new[] { "Nuhumudira's Spines", "Nuhumudira's Spines II" } },
+        { "Pierce",    new[] { "Nuhmudira's Spines", "Nuhmudira's Spines II" } },
         { "Bludgeon",  new[] { "Tectonic Rifts", "Tectonic Rifts II" } },
     };
 
@@ -560,7 +562,19 @@ public class CombatManager : IDisposable
 
     public void OnHeartbeat()
     {
-        if (!_settings.IsMacroRunning) return;
+        if (!_settings.IsMacroRunning)
+        {
+            // Clear turn motions once on the transition from running → stopped,
+            // so the character doesn't spin indefinitely after a mid-turn stop.
+            // Do NOT clear every frame — that blocks manual keyboard turning.
+            if (_wasMacroRunning)
+            {
+                _wasMacroRunning = false;
+                ClearCombatTurnMotions();
+            }
+            return;
+        }
+        _wasMacroRunning = true;
 
         // Always run the scan and BotAction state update, even when combat can't
         // take actions. ScanNearbyTargets has no side-effects (no game commands)
@@ -1006,7 +1020,7 @@ public class CombatManager : IDisposable
 
         int warTier  = _spellManager?.GetHighestSpellTier(AcSkillType.WarMagic)  ?? 0;
         int voidTier = _spellManager?.GetHighestSpellTier(AcSkillType.VoidMagic) ?? 0;
-        int offensiveSpellId = FindBestShapedSpell(element, rule);
+        int offensiveSpellId = FindBestShapedSpell(element, rule, out bool isRing);
         if (offensiveSpellId != 0)
         {
             try
@@ -1135,12 +1149,27 @@ public class CombatManager : IDisposable
 
     private int CountMonstersInRange(double rangeYards)
     {
-        // TODO: Implement when GetLandscape() is available
-        return 0; // STUB
+        if (_playerId == 0) return 0;
+        int pid = (int)_playerId;
+        int count = 0;
+        foreach (var wo in _worldFilter.GetLandscape())
+        {
+            if (wo.ObjectClass != AcObjectClass.Monster) continue;
+            float hp = _worldFilter.GetHealthRatio(wo.Id);
+            if (hp == 0f || hp < 0f) continue;
+            if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable((uint)wo.Id)) continue;
+            if (_worldFilter.Distance(pid, wo.Id) <= rangeYards)
+                count++;
+        }
+        return count;
     }
 
-    private int FindBestShapedSpell(string element, MonsterRule? rule)
+    private int FindBestShapedSpell(string element, MonsterRule? rule) =>
+        FindBestShapedSpell(element, rule, out _);
+
+    private int FindBestShapedSpell(string element, MonsterRule? rule, out bool isRing)
     {
+        isRing = false;
         if (_spellManager == null) return 0;
 
         bool useVoid = element.Equals("Nether", StringComparison.OrdinalIgnoreCase);
@@ -1155,17 +1184,19 @@ public class CombatManager : IDisposable
         int shapeIdx = 3; // default = Bolt
         if (rule != null)
         {
-            if (rule.UseArc)    shapeIdx = 0;
-            else if (rule.UseRing)   shapeIdx = 1;
+            if (rule.UseArc)         shapeIdx = 0;
             else if (rule.UseStreak) shapeIdx = 2;
             else if (rule.UseBolt)   shapeIdx = 3;
-            else return 0;
+            else if (!rule.UseRing)  return 0; // no shape enabled at all
         }
 
-        if (rule != null && rule.UseRing && _settings.MinRingTargets > 0 && _settings.RingRange > 0)
+        // Ring override: when UseRing is enabled, check if enough monsters are within
+        // ring range. If so, upgrade to ring; otherwise keep the base shape (bolt/arc/streak).
+        if (rule != null && rule.UseRing && _settings.RingRange > 0)
         {
             int nearbyCount = CountMonstersInRange(_settings.RingRange);
-            if (nearbyCount >= _settings.MinRingTargets) shapeIdx = 1;
+            if (nearbyCount >= Math.Max(1, _settings.MinRingTargets))
+                shapeIdx = 1; // ring
         }
 
         var shapes = useVoid ? VoidSpellShapes : SpellShapes;
@@ -1180,7 +1211,7 @@ public class CombatManager : IDisposable
         if (shapeIdx == 1)
         {
             int ringId = FindBestRingSpell(element, skill);
-            if (ringId != 0) return ringId;
+            if (ringId != 0) { isRing = true; return ringId; }
         }
 
         int id = FindBestOffensiveSpellId(elementShapes[shapeIdx], skill);

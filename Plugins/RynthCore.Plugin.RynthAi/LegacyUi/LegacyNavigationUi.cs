@@ -96,6 +96,10 @@ internal sealed class LegacyNavigationUi
 
         if (ImGui.Button("Add Waypoint", new Vector2(100, 25)))
         {
+            // Stop any active turn motion so the character doesn't keep spinning
+            _host.SetMotion(0x6500000D, false); // TurnRight
+            _host.SetMotion(0x6500000E, false); // TurnLeft
+
             if (_host.HasGetPlayerPose && _host.TryGetPlayerPose(out _, out float x, out float y, out float z, out _, out _, out _, out _))
             {
                 if (NavCoordinateHelper.TryGetNavCoords(_host, out double ns, out double ew))

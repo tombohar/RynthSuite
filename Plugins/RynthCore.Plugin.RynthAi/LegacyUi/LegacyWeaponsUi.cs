@@ -192,14 +192,15 @@ internal sealed class LegacyWeaponsUi
             _host.WriteToChat($"[RynthAi] {wo.Name} is already in the list.", 1);
         else
         {
+            string element = DetectWeaponElement(wo);
             _settings.ItemRules.Add(new ItemRule
             {
                 Id      = wo.Id,
                 Name    = wo.Name,
-                Element = "Slash",
+                Element = element,
                 Action  = "Weapon",
             });
-            _host.WriteToChat($"[RynthAi] Added weapon: {wo.Name} (0x{(uint)wo.Id:X8})", 1);
+            _host.WriteToChat($"[RynthAi] Added weapon: {wo.Name} (0x{(uint)wo.Id:X8}) [{element}]", 1);
         }
     }
 
@@ -220,13 +221,14 @@ internal sealed class LegacyWeaponsUi
             _host.WriteToChat($"[RynthAi] {wo.Name} is already in the list.", 1);
         else
         {
+            string type = DetectConsumableType(wo);
             _settings.ConsumableRules.Add(new ConsumableRule
             {
                 Id   = wo.Id,
                 Name = wo.Name,
-                Type = "General",
+                Type = type,
             });
-            _host.WriteToChat($"[RynthAi] Added consumable: {wo.Name} (0x{(uint)wo.Id:X8})", 1);
+            _host.WriteToChat($"[RynthAi] Added consumable: {wo.Name} (0x{(uint)wo.Id:X8}) [{type}]", 1);
         }
     }
 
@@ -234,4 +236,53 @@ internal sealed class LegacyWeaponsUi
         wo.ObjectClass == AcObjectClass.MeleeWeapon   ||
         wo.ObjectClass == AcObjectClass.MissileWeapon ||
         wo.ObjectClass == AcObjectClass.WandStaffOrb;
+
+    /// <summary>Auto-detect weapon element from the DamageType int property.</summary>
+    private static string DetectWeaponElement(WorldObject wo)
+    {
+        // DamageType (STypeInt 45) — AC damage type flags
+        int dt = wo.Values(LongValueKey.DamageType, 0);
+        if (dt == 0) return "Slash"; // no data — default
+
+        // Check flags in order of specificity (elemental first, then physical)
+        if ((dt & 1024) != 0) return "Nether";
+        if ((dt & 16)   != 0) return "Fire";
+        if ((dt & 8)    != 0) return "Cold";
+        if ((dt & 64)   != 0) return "Lightning";
+        if ((dt & 32)   != 0) return "Acid";
+        if ((dt & 1)    != 0) return "Slash";
+        if ((dt & 2)    != 0) return "Pierce";
+        if ((dt & 4)    != 0) return "Bludgeon";
+
+        return "Slash";
+    }
+
+    /// <summary>Auto-detect consumable type from item name.</summary>
+    private static string DetectConsumableType(WorldObject wo)
+    {
+        string name = wo.Name;
+        if (string.IsNullOrEmpty(name)) return "General";
+
+        // Health items
+        if (name.Contains("Heal", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Health", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Elixir of Healing", StringComparison.OrdinalIgnoreCase))
+            return "HealthKit";
+
+        // Mana items
+        if (name.Contains("Mana", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Mana Stone", StringComparison.OrdinalIgnoreCase))
+            return "ManaStone";
+
+        // Stamina items
+        if (name.Contains("Stamina", StringComparison.OrdinalIgnoreCase))
+            return "Stamina";
+
+        // Lockpicks
+        if (name.Contains("Lockpick", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Lock Pick", StringComparison.OrdinalIgnoreCase))
+            return "Lockpick";
+
+        return "General";
+    }
 }

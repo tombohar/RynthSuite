@@ -271,7 +271,7 @@ internal sealed class MetaManager
 
             case MetaConditionType.All:
             {
-                if (rule.Children == null || rule.Children.Count == 0) return false;
+                if (rule.Children == null || rule.Children.Count == 0) return true;
                 foreach (var child in rule.Children)
                     if (!EvaluateCondition(child, secondsInState)) return false;
                 return true;
@@ -279,7 +279,7 @@ internal sealed class MetaManager
 
             case MetaConditionType.Any:
             {
-                if (rule.Children == null || rule.Children.Count == 0) return false;
+                if (rule.Children == null || rule.Children.Count == 0) return true;
                 foreach (var child in rule.Children)
                     if (EvaluateCondition(child, secondsInState)) return true;
                 return false;

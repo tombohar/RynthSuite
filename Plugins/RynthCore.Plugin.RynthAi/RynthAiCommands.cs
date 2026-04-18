@@ -45,6 +45,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra lootparse     — inspect the selected loot profile");
         ChatLine("[RynthAi] /ra lootcheckinv  — test the loot profile against inventory");
         ChatLine("[RynthAi] /ra dumpinv       — dump all inventory items (cache + direct)");
+        ChatLine("[RynthAi] /ra clearbusy     — force-clear busy state (hourglass cursor)");
     }
 
     private void HandlePowerCommand(string[] parts)
@@ -949,6 +950,19 @@ public sealed partial class RynthAiPlugin
         return fullCommand.Length > prefix.Length
             ? fullCommand[prefix.Length..].Trim()
             : string.Empty;
+    }
+
+    private void HandleClearBusyCommand()
+    {
+        int before = Host.HasGetBusyState ? Host.GetBusyState() : -1;
+        if (Host.HasForceResetBusyCount)
+            Host.ForceResetBusyCount();
+        if (Host.HasStopCompletely)
+            Host.StopCompletely();
+        if (_combatManager != null)
+            _combatManager.BusyCount = 0;
+        int after = Host.HasGetBusyState ? Host.GetBusyState() : -1;
+        ChatLine($"[RynthAi] Busy state cleared (was {before} → {after})");
     }
 
     private void HandleMapDumpCommand()
