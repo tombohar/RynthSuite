@@ -1,0 +1,123 @@
+name: Build & Release
+
+# Trigger manually (Actions tab → Run workflow) or automatically on version tags.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g. 1.0) — creates tag v<version>'
+        required: true
+        default: '1.0'
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    permissions:
+      contents: write
+
+    steps:
+    # ── Checkout both repos as siblings ───────────────────────────────────────
+    # The plugin csproj references ..\..\..\RynthCore\src\... (3 levels up),
+    # so RynthCore must be a sibling of RynthSuite under a common parent.
+    - name: Checkout RynthSuite
+      uses: actions/checkout@v4
+
+    - name: Checkout RynthCore (sibling)
+      shell: pwsh
+      run: |
+        $parent = Split-Path "$env:GITHUB_WORKSPACE" -Parent
+        $dest   = "$parent\RynthCore"
+        Write-Host "Cloning RynthCore to: $dest"
+        git clone https://github.com/tombohar/RynthCore.git $dest
+        if ($LASTEXITCODE -ne 0) { throw "git clone RynthCore failed" }
+
+    # ── Toolchain ─────────────────────────────────────────────────────────────
+    - name: Setup .NET 9
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '9.0.x'
+
+    # ── Determine version ──────────────────────────────────────────────────────
+    - name: Resolve version
+      id: ver
+      shell: pwsh
+      run: |
+        if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+          $v = "${{ github.event.inputs.version }}"
+        } else {
+          $v = "${{ github.ref_name }}".TrimStart('v')
+        }
+        echo "version=$v" >> $env:GITHUB_OUTPUT
+        echo "tag=v$v"    >> $env:GITHUB_OUTPUT
+        Write-Host "Building version: $v"
+
+    # ── Build LootEditor ───────────────────────────────────────────────────────
+    - name: Build LootEditor
+      shell: pwsh
+      run: |
+        dotnet publish "$env:GITHUB_WORKSPACE\Tools\RynthCore.LootEditor\RynthCore.LootEditor.csproj" `
+          -c Release -r win-x64 --self-contained true
+        if ($LASTEXITCODE -ne 0) { throw "LootEditor publish failed" }
+
+    - name: Zip LootEditor
+      shell: pwsh
+      run: |
+        $pub = "$env:GITHUB_WORKSPACE\Tools\RynthCore.LootEditor\bin\Release\net9.0\win-x64\publish"
+        Compress-Archive -Path "$pub\*" -DestinationPath "$env:GITHUB_WORKSPACE\RynthCore.LootEditor.zip"
+
+    # ── Build MonsterEditor ────────────────────────────────────────────────────
+    - name: Build MonsterEditor
+      shell: pwsh
+      run: |
+        dotnet publish "$env:GITHUB_WORKSPACE\Tools\RynthCore.MonsterEditor\RynthCore.MonsterEditor.csproj" `
+          -c Release -r win-x64 --self-contained true
+        if ($LASTEXITCODE -ne 0) { throw "MonsterEditor publish failed" }
+
+    - name: Zip MonsterEditor
+      shell: pwsh
+      run: |
+        $pub = "$env:GITHUB_WORKSPACE\Tools\RynthCore.MonsterEditor\bin\Release\net9.0\win-x64\publish"
+        Compress-Archive -Path "$pub\*" -DestinationPath "$env:GITHUB_WORKSPACE\RynthCore.MonsterEditor.zip"
+
+    # ── Build Plugin (NativeAOT x86) ───────────────────────────────────────────
+    - name: Build Plugin
+      shell: pwsh
+      run: |
+        dotnet publish "$env:GITHUB_WORKSPACE\Plugins\RynthCore.Plugin.RynthAi\RynthCore.Plugin.RynthAi.csproj" `
+          -c Release
+        if ($LASTEXITCODE -ne 0) { throw "Plugin publish failed" }
+
+    # ── Tag (manual dispatch only) ─────────────────────────────────────────────
+    - name: Create tag (manual dispatch)
+      if: github.event_name == 'workflow_dispatch'
+      shell: pwsh
+      run: |
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git tag "${{ steps.ver.outputs.tag }}" -m "Release ${{ steps.ver.outputs.tag }}"
+        git push origin "${{ steps.ver.outputs.tag }}"
+
+    # ── GitHub Release ─────────────────────────────────────────────────────────
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.ver.outputs.tag }}
+        name: RynthSuite ${{ steps.ver.outputs.tag }}
+        files: |
+          RynthCore.LootEditor.zip
+          RynthCore.MonsterEditor.zip
+          Plugins/RynthCore.Plugin.RynthAi/bin/Release/net9.0-windows/win-x86/publish/RynthCore.Plugin.RynthAi.dll
+        body: |
+          ## Downloads
+
+          | File | Description |
+          |------|-------------|
+          | `RynthCore.LootEditor.zip` | Loot profile editor — extract and run `RynthCore.LootEditor.exe` |
+          | `RynthCore.MonsterEditor.zip` | Monster database editor — extract and run `RynthCore.MonsterEditor.exe` |
+          | `RynthCore.Plugin.RynthAi.dll` | Plugin DLL — drop into `C:\Games\RynthCore\Runtime\Plugins\` to update without reinstalling |
+
+          > **New install?** Use the [RynthCore installer](https://github.com/tombohar/RynthCore/releases/latest) instead — it sets up everything automatically.
