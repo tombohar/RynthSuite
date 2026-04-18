@@ -60,28 +60,30 @@ jobs:
       shell: pwsh
       run: |
         dotnet publish "$env:GITHUB_WORKSPACE\Tools\RynthCore.LootEditor\RynthCore.LootEditor.csproj" `
-          -c Release -r win-x64 --self-contained true
+          -c Release -r win-x64 --self-contained true `
+          --output "$env:GITHUB_WORKSPACE\publish\LootEditor"
         if ($LASTEXITCODE -ne 0) { throw "LootEditor publish failed" }
 
     - name: Zip LootEditor
       shell: pwsh
       run: |
-        $pub = "$env:GITHUB_WORKSPACE\Tools\RynthCore.LootEditor\bin\Release\net9.0\win-x64\publish"
-        Compress-Archive -Path "$pub\*" -DestinationPath "$env:GITHUB_WORKSPACE\RynthCore.LootEditor.zip"
+        Compress-Archive -Path "$env:GITHUB_WORKSPACE\publish\LootEditor\*" `
+          -DestinationPath "$env:GITHUB_WORKSPACE\RynthCore.LootEditor.zip"
 
     # ── Build MonsterEditor ────────────────────────────────────────────────────
     - name: Build MonsterEditor
       shell: pwsh
       run: |
         dotnet publish "$env:GITHUB_WORKSPACE\Tools\RynthCore.MonsterEditor\RynthCore.MonsterEditor.csproj" `
-          -c Release -r win-x64 --self-contained true
+          -c Release -r win-x64 --self-contained true `
+          --output "$env:GITHUB_WORKSPACE\publish\MonsterEditor"
         if ($LASTEXITCODE -ne 0) { throw "MonsterEditor publish failed" }
 
     - name: Zip MonsterEditor
       shell: pwsh
       run: |
-        $pub = "$env:GITHUB_WORKSPACE\Tools\RynthCore.MonsterEditor\bin\Release\net9.0\win-x64\publish"
-        Compress-Archive -Path "$pub\*" -DestinationPath "$env:GITHUB_WORKSPACE\RynthCore.MonsterEditor.zip"
+        Compress-Archive -Path "$env:GITHUB_WORKSPACE\publish\MonsterEditor\*" `
+          -DestinationPath "$env:GITHUB_WORKSPACE\RynthCore.MonsterEditor.zip"
 
     # ── Build Plugin (NativeAOT x86) ───────────────────────────────────────────
     - name: Build Plugin
