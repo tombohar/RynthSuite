@@ -1,0 +1,162 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Styles.Resources>
+        <SolidColorBrush x:Key="BgMain"    Color="#1E1E2E"/>
+        <SolidColorBrush x:Key="BgPanel"   Color="#252536"/>
+        <SolidColorBrush x:Key="BgInput"   Color="#313244"/>
+        <SolidColorBrush x:Key="BgHover"   Color="#252538"/>
+        <SolidColorBrush x:Key="BgSelect"  Color="#2D2D44"/>
+        <SolidColorBrush x:Key="BgAltRow"  Color="#181825"/>
+        <SolidColorBrush x:Key="FgMain"    Color="#CDD6F4"/>
+        <SolidColorBrush x:Key="FgHeader"  Color="#89B4FA"/>
+        <SolidColorBrush x:Key="FgDefault" Color="#F9E2AF"/>
+        <SolidColorBrush x:Key="FgStatus"  Color="#A6E3A1"/>
+        <SolidColorBrush x:Key="FgError"   Color="#F38BA8"/>
+        <SolidColorBrush x:Key="Border"    Color="#45475A"/>
+        <SolidColorBrush x:Key="GridLine"  Color="#2A2A3A"/>
+    </Styles.Resources>
+
+    <Style Selector="Window">
+        <Setter Property="Background" Value="{StaticResource BgMain}"/>
+        <Setter Property="Foreground" Value="{StaticResource FgMain}"/>
+        <Setter Property="FontFamily" Value="Segoe UI,sans-serif"/>
+        <Setter Property="FontSize"   Value="12"/>
+    </Style>
+
+    <Style Selector="TextBlock">
+        <Setter Property="Foreground" Value="{StaticResource FgMain}"/>
+    </Style>
+
+    <Style Selector="TextBox">
+        <Setter Property="Background"      Value="{StaticResource BgInput}"/>
+        <Setter Property="Foreground"      Value="{StaticResource FgMain}"/>
+        <Setter Property="BorderBrush"     Value="{StaticResource Border}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Padding"         Value="5,3"/>
+        <Setter Property="CaretBrush"      Value="{StaticResource FgMain}"/>
+        <Setter Property="SelectionBrush"  Value="{StaticResource BgSelect}"/>
+        <Setter Property="CornerRadius"    Value="3"/>
+    </Style>
+
+    <Style Selector="Button">
+        <Setter Property="Background"      Value="{StaticResource BgInput}"/>
+        <Setter Property="Foreground"      Value="{StaticResource FgMain}"/>
+        <Setter Property="BorderBrush"     Value="{StaticResource Border}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Padding"         Value="8,3"/>
+        <Setter Property="CornerRadius"    Value="3"/>
+        <Setter Property="Cursor"          Value="Hand"/>
+    </Style>
+    <Style Selector="Button:pointerover /template/ ContentPresenter">
+        <Setter Property="Background" Value="{StaticResource BgHover}"/>
+    </Style>
+    <Style Selector="Button:pressed /template/ ContentPresenter">
+        <Setter Property="Background" Value="{StaticResource BgSelect}"/>
+    </Style>
+
+    <Style Selector="ComboBox">
+        <Setter Property="Background"      Value="{StaticResource BgInput}"/>
+        <Setter Property="Foreground"      Value="{StaticResource FgMain}"/>
+        <Setter Property="BorderBrush"     Value="{StaticResource Border}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Padding"         Value="5,1"/>
+        <Setter Property="CornerRadius"    Value="2"/>
+        <Setter Property="MinHeight"       Value="22"/>
+    </Style>
+    <Style Selector="ComboBoxItem">
+        <Setter Property="Background" Value="{StaticResource BgPanel}"/>
+        <Setter Property="Foreground" Value="{StaticResource FgMain}"/>
+        <Setter Property="Padding"    Value="8,4"/>
+    </Style>
+    <Style Selector="ComboBoxItem:selected /template/ ContentPresenter">
+        <Setter Property="Background" Value="{StaticResource BgSelect}"/>
+    </Style>
+    <Style Selector="ComboBoxItem:pointerover /template/ ContentPresenter">
+        <Setter Property="Background" Value="{StaticResource BgHover}"/>
+    </Style>
+
+    <!-- Toggle-light: small labeled square button used for each monster flag. -->
+    <Style Selector="ToggleButton.light">
+        <Setter Property="Width"           Value="18"/>
+        <Setter Property="Height"          Value="16"/>
+        <Setter Property="Margin"          Value="1,1"/>
+        <Setter Property="Padding"         Value="0"/>
+        <Setter Property="MinWidth"        Value="18"/>
+        <Setter Property="MinHeight"       Value="16"/>
+        <Setter Property="Background"      Value="#404040"/>
+        <Setter Property="Foreground"      Value="#909090"/>
+        <Setter Property="BorderBrush"     Value="#555555"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="CornerRadius"    Value="2"/>
+        <Setter Property="Focusable"       Value="False"/>
+        <Setter Property="FontSize"        Value="8"/>
+        <Setter Property="FontWeight"      Value="SemiBold"/>
+        <Setter Property="HorizontalContentAlignment" Value="Center"/>
+        <Setter Property="VerticalContentAlignment"   Value="Center"/>
+        <Setter Property="Template">
+            <ControlTemplate>
+                <Border Background="{TemplateBinding Background}"
+                        BorderBrush="{TemplateBinding BorderBrush}"
+                        BorderThickness="{TemplateBinding BorderThickness}"
+                        CornerRadius="{TemplateBinding CornerRadius}"
+                        ToolTip.Tip="{TemplateBinding ToolTip.Tip}">
+                    <ContentPresenter HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"
+                                      Content="{TemplateBinding Content}"
+                                      FontSize="{TemplateBinding FontSize}"
+                                      FontWeight="{TemplateBinding FontWeight}"
+                                      Foreground="{TemplateBinding Foreground}"/>
+                </Border>
+            </ControlTemplate>
+        </Setter>
+    </Style>
+    <Style Selector="ToggleButton.light:checked">
+        <Setter Property="Background"  Value="#22AA22"/>
+        <Setter Property="BorderBrush" Value="#44CC44"/>
+        <Setter Property="Foreground"  Value="#FFFFFF"/>
+    </Style>
+    <Style Selector="ToggleButton.light:pointerover">
+        <Setter Property="Opacity" Value="0.80"/>
+    </Style>
+
+    <!-- DataGrid styling -->
+    <Style Selector="DataGrid">
+        <Setter Property="Background"             Value="{StaticResource BgAltRow}"/>
+        <Setter Property="Foreground"             Value="{StaticResource FgMain}"/>
+        <Setter Property="BorderBrush"            Value="{StaticResource Border}"/>
+        <Setter Property="GridLinesVisibility"    Value="All"/>
+        <Setter Property="VerticalGridLinesBrush"   Value="{StaticResource GridLine}"/>
+        <Setter Property="HorizontalGridLinesBrush" Value="{StaticResource GridLine}"/>
+        <Setter Property="RowBackground"          Value="{StaticResource BgAltRow}"/>
+    </Style>
+    <Style Selector="DataGridColumnHeader">
+        <Setter Property="Background"      Value="{StaticResource BgInput}"/>
+        <Setter Property="Foreground"      Value="{StaticResource FgHeader}"/>
+        <Setter Property="BorderBrush"     Value="{StaticResource Border}"/>
+        <Setter Property="BorderThickness" Value="0,0,1,1"/>
+        <Setter Property="Padding"         Value="3,2"/>
+        <Setter Property="FontSize"        Value="11"/>
+    </Style>
+    <Style Selector="DataGridCell">
+        <Setter Property="Background"      Value="Transparent"/>
+        <Setter Property="Foreground"      Value="{StaticResource FgMain}"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Padding"         Value="2,1"/>
+    </Style>
+    <Style Selector="DataGridRow">
+        <Setter Property="Background" Value="{StaticResource BgAltRow}"/>
+    </Style>
+    <Style Selector="DataGridRow:nth-child(2n)">
+        <Setter Property="Background" Value="{StaticResource BgMain}"/>
+    </Style>
+    <Style Selector="DataGridRow:pointerover /template/ Rectangle#BackgroundRectangle">
+        <Setter Property="Fill"    Value="{StaticResource BgHover}"/>
+        <Setter Property="Opacity" Value="1"/>
+    </Style>
+    <Style Selector="DataGridRow:selected /template/ Rectangle#BackgroundRectangle">
+        <Setter Property="Fill"    Value="{StaticResource BgSelect}"/>
+        <Setter Property="Opacity" Value="1"/>
+    </Style>
+
+</Styles>

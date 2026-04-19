@@ -19,6 +19,12 @@ internal sealed class LegacyMetaUi
     private string _newStateName = "";
     private bool _openCreateStatePopup;
 
+    // ── Source view state ────────────────────────────────────────────────
+    private bool _showSourceView;
+    private string _sourceText = string.Empty;
+    private string _sourceApplyMessage = "";
+    private DateTime _sourceApplyTime = DateTime.MinValue;
+
     // ── Load/Save state ──────────────────────────────────────────────────
     private bool _openSavePopup;
     private List<(string Path, string Display)> _macroFiles = new();
@@ -67,13 +73,29 @@ internal sealed class LegacyMetaUi
         ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 6.0f);
         ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0.04f, 0.06f, 0.08f, 0.97f));
 
-        ImGui.SetNextWindowSize(new Vector2(600, 460), ImGuiCond.FirstUseEver);
-        if (ImGui.Begin("Macro Rules##RynthAiMacroRules", ref DashWindows.ShowMacroRules))
-            RenderContents();
-        ImGui.End();
-
-        ImGui.PopStyleColor(1);
-        ImGui.PopStyleVar(3);
+        try
+        {
+            ImGui.SetNextWindowSize(new Vector2(600, 460), ImGuiCond.FirstUseEver);
+            bool windowOpen = ImGui.Begin("Macro Rules##RynthAiMacroRules", ref DashWindows.ShowMacroRules);
+            try
+            {
+                if (windowOpen)
+                    RenderContents();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MetaUi] RenderContents error: {ex.Message}");
+            }
+            finally
+            {
+                ImGui.End();
+            }
+        }
+        finally
+        {
+            ImGui.PopStyleColor(1);
+            ImGui.PopStyleVar(3);
+        }
     }
 
     private void RenderContents()
@@ -82,6 +104,86 @@ internal sealed class LegacyMetaUi
         RenderLoadSaveBar();
         ImGui.Spacing();
 
+        // ── Visual / Source toggle ───────────────────────────────────────
+        // Always push/pop unconditionally — conditional push/pop is easy to misbalance
+        // if an exception fires between push and pop.
+        bool wasSource = _showSourceView;
+        var defaultBtnCol = ImGui.GetStyle().Colors[(int)ImGuiCol.Button];
+        var activeBtnCol  = new Vector4(0.15f, 0.35f, 0.6f, 1f);
+
+        ImGui.PushStyleColor(ImGuiCol.Button, wasSource ? defaultBtnCol : activeBtnCol);
+        if (ImGui.Button("Visual", new Vector2(60, 0)) && _showSourceView)
+            _showSourceView = false;
+        ImGui.PopStyleColor();
+
+        ImGui.SameLine();
+
+        ImGui.PushStyleColor(ImGuiCol.Button, wasSource ? activeBtnCol : defaultBtnCol);
+        if (ImGui.Button("Source", new Vector2(60, 0)) && !_showSourceView)
+        {
+            // Switching to source: serialise current rules
+            _sourceText = AfFileWriter.SaveToString(_settings.MetaRules, _settings.EmbeddedNavs);
+            _showSourceView = true;
+        }
+        ImGui.PopStyleColor();
+
+        ImGui.Spacing();
+
+        // ── Source view ──────────────────────────────────────────────────
+        if (_showSourceView)
+        {
+            float availH = ImGui.GetContentRegionAvail().Y - 30;
+            ImGui.InputTextMultiline("##afSource", ref _sourceText, 1024 * 1024,
+                new Vector2(-1, availH),
+                ImGuiInputTextFlags.AllowTabInput);
+
+            if (!string.IsNullOrEmpty(_sourceApplyMessage) &&
+                (DateTime.Now - _sourceApplyTime).TotalSeconds < 4)
+            {
+                ImGui.TextColored(new Vector4(0, 1, 0.4f, 1f), _sourceApplyMessage);
+                ImGui.SameLine();
+            }
+
+            if (ImGui.Button("Apply", new Vector2(80, 0)))
+            {
+                try
+                {
+                    var loaded = AfFileParser.LoadFromText(_sourceText);
+                    if (loaded.Rules.Count == 0)
+                    {
+                        _sourceApplyMessage = "No rules parsed — check syntax.";
+                    }
+                    else
+                    {
+                        _settings.MetaRules = loaded.Rules;
+                        _settings.EmbeddedNavs.Clear();
+                        foreach (var kvp in loaded.EmbeddedNavs)
+                            _settings.EmbeddedNavs[kvp.Key] = kvp.Value;
+                        _settings.ForceStateReset = true;
+                        TryAutoSaveMeta();
+                        _sourceApplyMessage = $"Applied {loaded.Rules.Count} rules.";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _sourceApplyMessage = $"Error: {ex.Message}";
+                }
+                _sourceApplyTime = DateTime.Now;
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Revert", new Vector2(80, 0)))
+            {
+                _sourceText = AfFileWriter.SaveToString(_settings.MetaRules, _settings.EmbeddedNavs);
+                _sourceApplyMessage = "Reverted to current rules.";
+                _sourceApplyTime = DateTime.Now;
+            }
+
+            RenderMetaEditorPopup();
+            return;
+        }
+
+        // ── Visual view ──────────────────────────────────────────────────
         var groupedRules = _settings.MetaRules
             .GroupBy(r => r.State)
             .OrderBy(g => g.Key)
@@ -103,8 +205,8 @@ internal sealed class LegacyMetaUi
                 }
 
                 string headerLabel = anyFired
-                    ? $"\u25B6 {group.Key}  ({stateRules.Count})  \u2022 firing##hdr_{group.Key}"
-                    : $"\u25B6 {group.Key}  ({stateRules.Count})##hdr_{group.Key}";
+                    ? $"{group.Key}  ({stateRules.Count})  - firing##hdr_{group.Key}"
+                    : $"{group.Key}  ({stateRules.Count})##hdr_{group.Key}";
 
                 if (anyFired) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.2f, 0.2f, 1f));
                 bool open = ImGui.CollapsingHeader(headerLabel, ImGuiTreeNodeFlags.DefaultOpen);
@@ -434,9 +536,10 @@ internal sealed class LegacyMetaUi
                 string itemCount = parts.Length > 1 ? parts[1] : "0";
 
                 ImGui.Text("Item Name:");
-                ImGui.SetNextItemWidth(-1);
+                ImGui.SetNextItemWidth(-28);
                 if (ImGui.InputText("##InvName", ref itemName, 64))
                     rule.ConditionData = $"{itemName},{itemCount}";
+                CopyButton("InvName", itemName);
 
                 ImGui.Text("Item Count:");
                 ImGui.SetNextItemWidth(-1);
@@ -527,12 +630,13 @@ internal sealed class LegacyMetaUi
 
             if (needsData)
             {
-                float availableSpace = ImGui.GetWindowWidth() - ImGui.GetCursorPosX() - 40f;
+                float availableSpace = ImGui.GetWindowWidth() - ImGui.GetCursorPosX() - 65f;
                 ImGui.SetNextItemWidth(Math.Max(50f, availableSpace));
 
                 string cData = rule.ConditionData ?? "";
                 if (ImGui.InputTextWithHint("##Data", condHint, ref cData, 256))
                     rule.ConditionData = cData;
+                CopyButton("CondData", cData);
             }
             else if (rule.Condition != MetaConditionType.InventoryItemCount_LE &&
                      rule.Condition != MetaConditionType.InventoryItemCount_GE &&
@@ -596,9 +700,10 @@ internal sealed class LegacyMetaUi
             {
                 case MetaActionType.ChatCommand:
                     string cmd = rule.ActionData ?? "";
-                    ImGui.SetNextItemWidth(-1);
+                    ImGui.SetNextItemWidth(-28);
                     if (ImGui.InputTextWithHint("##Cmd", "e.g. /tell {1} hello!", ref cmd, 256))
                         rule.ActionData = cmd;
+                    CopyButton("Cmd", cmd);
                     break;
 
                 case MetaActionType.SetMetaState:
@@ -688,28 +793,32 @@ internal sealed class LegacyMetaUi
                     ImGui.Text("Option:");
                     ImGui.SetNextItemWidth(120);
                     if (ImGui.InputText("##RAOpt", ref raO, 64)) rule.ActionData = $"{raO};{raV}";
+                    CopyButton("RAOpt", raO);
 
                     ImGui.SameLine();
                     ImGui.Text("Val:");
-                    ImGui.SetNextItemWidth(-1);
+                    ImGui.SetNextItemWidth(-28);
                     if (ImGui.InputText("##RAVal", ref raV, 64)) rule.ActionData = $"{raO};{raV}";
+                    CopyButton("RAVal", raV);
                     break;
 
                 case MetaActionType.ExpressionAction:
                 case MetaActionType.ChatExpression:
                     string expr = rule.ActionData ?? "";
-                    ImGui.SetNextItemWidth(-1);
+                    ImGui.SetNextItemWidth(-28);
                     if (ImGui.InputTextWithHint("##Expr", "Expression (e.g. [SlotCount] < 5)", ref expr, 256))
                         rule.ActionData = expr;
+                    CopyButton("Expr", expr);
                     break;
 
                 case MetaActionType.GetRAOption:
                 case MetaActionType.CreateView:
                 case MetaActionType.DestroyView:
                     string vData = rule.ActionData ?? "";
-                    ImGui.SetNextItemWidth(-1);
+                    ImGui.SetNextItemWidth(-28);
                     if (ImGui.InputText("##ViewData", ref vData, 128))
                         rule.ActionData = vData;
+                    CopyButton("ViewData", vData);
                     break;
 
                 case MetaActionType.ReturnFromCall:
@@ -746,6 +855,15 @@ internal sealed class LegacyMetaUi
                 rule.ConditionData = "";
                 break;
         }
+    }
+
+    private static void CopyButton(string id, string text)
+    {
+        ImGui.SameLine();
+        if (ImGui.SmallButton($"C##{id}"))
+            ImGui.SetClipboardText(text ?? "");
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Copy");
     }
 
     private static List<MetaRule> CloneChildren(List<MetaRule> source)
@@ -875,7 +993,7 @@ internal sealed class LegacyMetaUi
         }
     }
 
-    private void LoadMacroFile(string filePath)
+    internal void LoadMacroFile(string filePath)
     {
         if (string.IsNullOrEmpty(filePath))
         {

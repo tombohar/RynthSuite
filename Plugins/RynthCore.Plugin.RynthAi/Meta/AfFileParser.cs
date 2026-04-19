@@ -78,6 +78,21 @@ internal static class AfFileParser
         string dbgLog = @"C:\Users\tboha\Desktop\AfParser.log";
         try { File.AppendAllText(dbgLog, $"\n=== {DateTime.Now:HH:mm:ss} Load {filePath} ({lines.Length} lines) ===\n"); } catch { }
 
+        ParseLines(lines, result, dbgLog);
+        return result;
+    }
+
+    public static LoadedMeta LoadFromText(string text)
+    {
+        var result = new LoadedMeta();
+        // Normalize line endings then split
+        string[] lines = text.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+        ParseLines(lines, result, null);
+        return result;
+    }
+
+    private static void ParseLines(string[] lines, LoadedMeta result, string? dbgLog)
+    {
         try
         {
             int idx = 0;
@@ -104,7 +119,8 @@ internal static class AfFileParser
                     int before = result.EmbeddedNavs.Count;
                     ParseNavSection(lines, ref idx, result.EmbeddedNavs);
                     int added = result.EmbeddedNavs.Count - before;
-                    try { File.AppendAllText(dbgLog, $"  NAV: section #{navSectionsSeen} added {added} (total {result.EmbeddedNavs.Count})\n"); } catch { }
+                    if (dbgLog != null)
+                        try { File.AppendAllText(dbgLog, $"  NAV: section #{navSectionsSeen} added {added} (total {result.EmbeddedNavs.Count})\n"); } catch { }
                 }
                 else
                 {
@@ -112,17 +128,18 @@ internal static class AfFileParser
                 }
             }
 
-            try { File.AppendAllText(dbgLog, $"  Before prune: {result.EmbeddedNavs.Count} navs, keys=[{string.Join(",", result.EmbeddedNavs.Keys)}]\n"); } catch { }
+            if (dbgLog != null)
+                try { File.AppendAllText(dbgLog, $"  Before prune: {result.EmbeddedNavs.Count} navs, keys=[{string.Join(",", result.EmbeddedNavs.Keys)}]\n"); } catch { }
             // Drop empty routes (header only, 0 points) and clear dead EmbedNav refs
             PruneEmbeddedNavs(result.Rules, result.EmbeddedNavs);
-            try { File.AppendAllText(dbgLog, $"  After prune: {result.EmbeddedNavs.Count} navs, keys=[{string.Join(",", result.EmbeddedNavs.Keys)}]\n"); } catch { }
+            if (dbgLog != null)
+                try { File.AppendAllText(dbgLog, $"  After prune: {result.EmbeddedNavs.Count} navs, keys=[{string.Join(",", result.EmbeddedNavs.Keys)}]\n"); } catch { }
         }
         catch (Exception ex)
         {
-            try { File.AppendAllText(dbgLog, $"  EXCEPTION: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}\n"); } catch { }
+            if (dbgLog != null)
+                try { File.AppendAllText(dbgLog, $"  EXCEPTION: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}\n"); } catch { }
         }
-
-        return result;
     }
 
     // ── State parsing ───────────────────────────────────────────────────────

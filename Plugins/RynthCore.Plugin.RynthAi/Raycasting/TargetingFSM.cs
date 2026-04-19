@@ -108,38 +108,39 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 if (!RaycastEngine.HasNearbyGeometry(origin, targetPos, geometry, margin))
                     return false;
 
+                // In dungeons use multi-ray checks — 5 rays covering the player silhouette
+                // catch thin corner geometry that a single center ray slips through.
                 switch (attackType)
                 {
                     case AttackType.Linear:
-                        return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry);
+                        return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: isDungeon);
 
                     case AttackType.BowArc:
                         if (UseArcs)
                         {
                             if (!RaycastEngine.IsArcPathBlocked(origin, targetPos, BowArcVelocity, geometry))
                                 return false;
-                            return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry);
+                            return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: isDungeon);
                         }
-                        return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry);
+                        return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: isDungeon);
 
                     case AttackType.ThrownArc:
                         if (UseArcs)
                         {
                             if (!RaycastEngine.IsArcPathBlocked(origin, targetPos, ThrownArcVelocity, geometry))
                                 return false;
-                            return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry);
+                            return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: isDungeon);
                         }
-                        return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry);
+                        return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: isDungeon);
 
                     case AttackType.MagicArc:
-                        // Magic Arc spells have the same trajectory as missile weapons
-                        if (UseArcs && !isDungeon) // Don't arc-check in dungeons (ceiling clips)
+                        if (UseArcs && !isDungeon)
                         {
                             if (!RaycastEngine.IsArcPathBlocked(origin, targetPos, MagicArcVelocity, geometry))
                                 return false;
-                            return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry);
+                            return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: false);
                         }
-                        return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry);
+                        return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: isDungeon);
 
                     default:
                         return false;

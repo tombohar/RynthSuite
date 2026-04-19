@@ -44,6 +44,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private VTankLootProfile? _loadedLootProfile;
     private string _loadedLootProfilePath = string.Empty;
     private DateTime _loadedLootProfileTime = DateTime.MinValue;
+
+    // Give queue — drained one item per tick with a cooldown (interval comes from settings)
+    private readonly Queue<(uint itemId, uint targetId, int stackSize)> _pendingGives = new();
+    private DateTime _lastGiveAt = DateTime.MinValue;
     private RynthCore.Loot.LootProfile? _nativeLootProfile;
     private string _nativeLootProfilePath = string.Empty;
     private DateTime _nativeLootProfileTime = DateTime.MinValue;
@@ -153,14 +157,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _buffManager = new BuffManager(Host, _dashboard.Settings, _spellManager, _vitals);
         _buffManager.SetCharacterSkills(_charSkills);
         if (_objectCache != null) _buffManager.SetWorldObjectCache(_objectCache);
-        if (_playerId != 0 && Host.TryGetObjectName(_playerId, out string buffCharName) && !string.IsNullOrWhiteSpace(buffCharName))
-        {
-            string safeChar = buffCharName.Replace(" ", "_").Replace("'", "").Replace("-", "_");
-            string charFolder = System.IO.Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "RynthCore", "Characters", safeChar);
-            _buffManager.SetTimerPath(charFolder);
-        }
+        // Use the same per-character folder as the dashboard settings so all
+        // character data lives in one place and the directory is guaranteed to exist.
+        if (!string.IsNullOrEmpty(_dashboard.CharFolder))
+            _buffManager.SetTimerPath(_dashboard.CharFolder);
 
         // Override disk timers with live client memory — gets accurate remaining times
         // including login-restored enchantments the event hook missed at startup.
@@ -195,6 +195,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _metaManager = new MetaManager(_dashboard.Settings, Host, _vitals);
         _metaManager.SetPlayerId(_playerId);
         _metaManager.SetMtCommandHandler(HandleMtCommand);
+        _metaManager.SetRaCommandHandler(HandleRaCommand);
         if (_objectCache != null) _metaManager.SetObjectCache(_objectCache);
         _metaManager.SetFellowshipTracker(_fellowshipTracker);
         _metaManager.SetQuestTracker(_questTracker);
@@ -221,6 +222,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         {
             _objectCache?.Tick();
             _questTracker?.Tick();
+            DrainGiveQueue();
 
             if (_loginComplete)
             {
@@ -241,6 +243,19 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
                 CheckBusyTimeout(); // safety: force-clear stuck busy count
                 _buffManager?.OnHeartbeat();
+
+                // Buffs take absolute priority — if any buff is missing, block everything.
+                // BuffManager sets BotAction = "Buffing" when actively casting, but there
+                // can be a gap between casts where BotAction resets to "Default" and another
+                // system sneaks in. This ensures everything stays blocked until all buffs
+                // are restored. Looting is NOT exempted — buffing overrides it too.
+                if (_buffManager != null
+                    && _dashboard.Settings.EnableBuffing
+                    && _buffManager.NeedsAnyBuff()
+                    && _dashboard.Settings.BotAction != "Buffing")
+                {
+                    _dashboard.Settings.BotAction = "Buffing";
+                }
 
                 // Combat runs first — it can claim priority over navigation
                 var settings = _dashboard?.Settings;
@@ -373,6 +388,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _windowVisible = !_windowVisible;
     }
 
+    private bool _lootInspectMode = true; // always on; /ra lootcheck off to disable
+
     public override void OnSelectedTargetChange(uint currentTargetId, uint previousTargetId)
     {
         _currentTargetId = currentTargetId;
@@ -385,7 +402,22 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             if (Host.HasRequestId) Host.RequestId(currentTargetId);
             if (Host.HasQueryHealth) Host.QueryHealth(currentTargetId);
         }
+
+        if (_lootInspectMode && currentTargetId != 0)
+        {
+            int sid = unchecked((int)currentTargetId);
+            WorldObject? obj = _objectCache?[sid];
+            // Skip non-items (monsters, players, NPCs, doors, corpses, portals, etc.)
+            if (obj != null && IsLootableClass(obj.ObjectClass))
+                InspectLootRuleForItem(sid, quiet: true);
+        }
     }
+
+    private static bool IsLootableClass(AcObjectClass cls) => cls is not (
+        AcObjectClass.Unknown  or AcObjectClass.Monster   or AcObjectClass.Player  or
+        AcObjectClass.Vendor   or AcObjectClass.Door      or AcObjectClass.Corpse  or
+        AcObjectClass.Lifestone or AcObjectClass.Portal   or AcObjectClass.Housing or
+        AcObjectClass.Npc      or AcObjectClass.CombatPet or AcObjectClass.Sign);
 
     public override void OnCombatModeChange(int currentCombatMode, int previousCombatMode)
     {
@@ -429,6 +461,11 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             _vitals.CurrentHealth = currentHealth;
             _vitals.MaxHealth = maxHealth;
         }
+
+        // When a creature's health changes, something hit it — reset its miss counter
+        // so the blacklist doesn't trigger on valid in-combat targets.
+        if (targetId != _playerId)
+            _combatManager?.ReportDamageOnTarget((int)targetId);
     }
 
     public override void OnEnchantmentAdded(uint spellId, double durationSeconds)
@@ -473,132 +510,137 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
         string cmd = parts[1].ToLower();
         eat = 1;
+        DispatchRaCommand(cmd, parts, ref eat);
+    }
 
+    internal void EnqueueGive(uint itemId, uint targetId, int stackSize)
+        => _pendingGives.Enqueue((itemId, targetId, stackSize));
+
+    internal void CancelGiveQueue()
+    {
+        int count = _pendingGives.Count;
+        _pendingGives.Clear();
+        ChatLine(count > 0
+            ? $"[RynthAi] Give queue cancelled ({count} item(s) remaining)."
+            : "[RynthAi] Give queue is already empty.");
+    }
+
+    private void DrainGiveQueue()
+    {
+        if (_pendingGives.Count == 0) return;
+        int intervalMs = _dashboard?.Settings.GiveQueueIntervalMs ?? 150;
+        if ((DateTime.UtcNow - _lastGiveAt).TotalMilliseconds < intervalMs) return;
+
+        var (itemId, targetId, stackSize) = _pendingGives.Dequeue();
+        Host.MoveItemExternal(itemId, targetId, stackSize);
+        _lastGiveAt = DateTime.UtcNow;
+
+        if (_pendingGives.Count == 0)
+            ChatLine("[RynthAi] Give queue complete.");
+    }
+
+    /// <summary>
+    /// Called by MetaManager for ChatCommand actions that start with /ra,
+    /// so meta scripts can dispatch /ra commands without going through InvokeChatParser.
+    /// </summary>
+    private void HandleRaCommand(string fullCommand)
+    {
+        if (!_initialized || !_loginComplete) return;
+
+        string[] parts = fullCommand.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2) return;
+
+        string cmd = parts[1].ToLower();
+        int eat = 0; // not used for meta dispatch, but needed for shared helpers
+        DispatchRaCommand(cmd, parts, ref eat);
+    }
+
+    private void DispatchRaCommand(string cmd, string[] parts, ref int eat)
+    {
+        // Need trimmed original for commands that use it
+        string trimmed = string.Join(" ", parts);
         switch (cmd)
         {
-            case "power":
-                HandlePowerCommand(parts);
-                break;
-            case "raycast":
-                HandleRaycastCommand(parts);
-                break;
-            case "lostest":
-                HandleLosTestCommand();
-                break;
-            case "cast":
-                HandleCastCommand(parts);
-                break;
-            case "cache":
-                HandleCacheCommand();
-                break;
-            case "cache2":
-                HandleCache2Command();
-                break;
+            case "power":        HandlePowerCommand(parts); break;
+            case "raycast":      HandleRaycastCommand(parts); break;
+            case "lostest":      HandleLosTestCommand(); break;
+            case "cast":         HandleCastCommand(parts); break;
+            case "cache":        HandleCacheCommand(); break;
+            case "cache2":       HandleCache2Command(); break;
             case "buffs":
-                if (_buffManager == null) ChatLine("[RynthAi] BuffManager not ready (not logged in yet).");
-                else _buffManager.PrintBuffDebug();
+                if (_buffManager == null) { ChatLine("[RynthAi] BuffManager not ready (not logged in yet)."); break; }
+                if (parts.Length >= 3 && parts[2].Equals("item", StringComparison.OrdinalIgnoreCase))
+                    _buffManager.PrintItemBuffDebug();
+                else
+                    _buffManager.PrintBuffDebug();
                 break;
-            case "attackable":
-                HandleAttackableCommand();
-                break;
-            case "mexec":
-                HandleMexecCommand(parts);
-                break;
-            case "listvars":
-                HandleListVarsCommand();
-                break;
-            case "listpvars":
-                HandleListPvarsCommand();
-                break;
-            case "listgvars":
-                HandleListGvarsCommand();
-                break;
-            case "dumpprops":
-                HandleDumpPropsCommand();
-                break;
-            case "wielded":
-                HandleWieldedCommand();
-                break;
-            case "scan":
-                HandleScanCommand();
-                break;
-            case "buildinfo":
-                HandleBuildInfoCommand();
-                break;
-            case "navdebug":
-                HandleNavDebugCommand();
-                break;
-            case "lootparse":
-                HandleLootParseCommand(trimmed);
-                break;
-            case "lootcheckinv":
-                HandleLootCheckInventoryCommand(trimmed);
-                break;
-            case "corpseinfo":
-                HandleCorpseInfoCommand();
-                break;
-            case "corpsecheck":
-                HandleCorpseCheckCommand(parts);
-                break;
-            case "corpseopen":
-                HandleCorpseOpenCommand();
-                break;
+            case "attackable":   HandleAttackableCommand(); break;
+            case "mexec":        HandleMexecCommand(parts); break;
+            case "listvars":     HandleListVarsCommand(); break;
+            case "listpvars":    HandleListPvarsCommand(); break;
+            case "listgvars":    HandleListGvarsCommand(); break;
+            case "dumpprops":    HandleDumpPropsCommand(); break;
+            case "wielded":      HandleWieldedCommand(); break;
+            case "scan":         HandleScanCommand(); break;
+            case "buildinfo":    HandleBuildInfoCommand(); break;
+            case "navdebug":     HandleNavDebugCommand(); break;
+            case "lootparse":    HandleLootParseCommand(trimmed); break;
+            case "lootcheckinv": HandleLootCheckInventoryCommand(trimmed); break;
+            case "lootcheck":    HandleLootCheckSelectedCommand(parts); break;
+            case "corpseinfo":   HandleCorpseInfoCommand(); break;
+            case "corpsecheck":  HandleCorpseCheckCommand(parts); break;
+            case "corpseopen":   HandleCorpseOpenCommand(); break;
             case "fellow":
-            case "fellowship":
-                HandleFellowshipCommand(parts);
+            case "fellowship":   HandleFellowshipCommand(parts); break;
+            case "fellowinfo":   HandleFellowshipInfoCommand(); break;
+            case "dumpinv":      HandleDumpInventoryCommand(); break;
+            case "mapdump":      HandleMapDumpCommand(); break;
+            case "clearbusy":    HandleClearBusyCommand(); break;
+            case "busyinfo":     HandleBusyInfoCommand(); break;
+            // give variants — first-match (with optional count prefix)
+            case "give":         HandleGiveCommand(parts, GiveItemMatch.Exact,   partialPlayer: false); break;
+            case "givep":        HandleGiveCommand(parts, GiveItemMatch.Partial, partialPlayer: false); break;
+            case "givexp":       HandleGiveCommand(parts, GiveItemMatch.Exact,   partialPlayer: true);  break;
+            case "givepp":       HandleGiveCommand(parts, GiveItemMatch.Partial, partialPlayer: true);  break;
+            case "giver":        HandleGiveCommand(parts, GiveItemMatch.Regex,   partialPlayer: false); break;
+            // give-All variants — give every matching stack (sub-command "stop" cancels the queue)
+            case "givea":
+                if (parts.Length >= 3 && parts[2].Equals("stop", StringComparison.OrdinalIgnoreCase)) CancelGiveQueue();
+                else HandleGiveCommand(parts, GiveItemMatch.Exact,   partialPlayer: false, allItems: true);
                 break;
-            case "fellowinfo":
-                HandleFellowshipInfoCommand();
+            case "giveap":
+                if (parts.Length >= 3 && parts[2].Equals("stop", StringComparison.OrdinalIgnoreCase)) CancelGiveQueue();
+                else HandleGiveCommand(parts, GiveItemMatch.Partial, partialPlayer: false, allItems: true);
                 break;
-            case "dumpinv":
-                HandleDumpInventoryCommand();
+            case "giveaxp":
+                if (parts.Length >= 3 && parts[2].Equals("stop", StringComparison.OrdinalIgnoreCase)) CancelGiveQueue();
+                else HandleGiveCommand(parts, GiveItemMatch.Exact,   partialPlayer: true,  allItems: true);
                 break;
-            case "mapdump":
-                HandleMapDumpCommand();
+            case "giveapp":
+                if (parts.Length >= 3 && parts[2].Equals("stop", StringComparison.OrdinalIgnoreCase)) CancelGiveQueue();
+                else HandleGiveCommand(parts, GiveItemMatch.Partial, partialPlayer: true,  allItems: true);
                 break;
-            case "clearbusy":
-                HandleClearBusyCommand();
+            case "givear":
+                if (parts.Length >= 3 && parts[2].Equals("stop", StringComparison.OrdinalIgnoreCase)) CancelGiveQueue();
+                else HandleGiveCommand(parts, GiveItemMatch.Regex,   partialPlayer: false, allItems: true);
                 break;
-            // use / select variants
-            case "use":
-                HandleUseCommand(parts, inv: true,  land: true,  partial: false);
-                break;
-            case "usei":
-                HandleUseCommand(parts, inv: true,  land: false, partial: false);
-                break;
-            case "usel":
-                HandleUseCommand(parts, inv: false, land: true,  partial: false);
-                break;
-            case "usepi": case "useip":
-                HandleUseCommand(parts, inv: true,  land: false, partial: true);
-                break;
-            case "uselp": case "usepl":
-                HandleUseCommand(parts, inv: false, land: true,  partial: true);
-                break;
-            case "usep":
-                HandleUseCommand(parts, inv: true,  land: true,  partial: true);
-                break;
-            case "select":
-                HandleSelectCommand(parts, inv: true,  land: true,  partial: false);
-                break;
-            case "selecti":
-                HandleSelectCommand(parts, inv: true,  land: false, partial: false);
-                break;
-            case "selectl":
-                HandleSelectCommand(parts, inv: false, land: true,  partial: false);
-                break;
-            case "selectpi": case "selectip":
-                HandleSelectCommand(parts, inv: true,  land: false, partial: true);
-                break;
-            case "selectlp": case "selectpl":
-                HandleSelectCommand(parts, inv: false, land: true,  partial: true);
-                break;
-            case "selectp":
-                HandleSelectCommand(parts, inv: true,  land: true,  partial: true);
-                break;
-            default:
-                eat = 0; // not our command, let it through
-                break;
+            case "ig":           HandleGiveProfileCommand(parts, partialPlayer: false); break;
+            case "igp":          HandleGiveProfileCommand(parts, partialPlayer: true); break;
+            // use variants
+            case "use":          HandleUseCommand(parts, inv: true,  land: true,  partial: false); break;
+            case "usei":         HandleUseCommand(parts, inv: true,  land: false, partial: false); break;
+            case "usel":         HandleUseCommand(parts, inv: false, land: true,  partial: false); break;
+            case "usepi": case "useip": HandleUseCommand(parts, inv: true,  land: false, partial: true); break;
+            case "uselp": case "usepl": HandleUseCommand(parts, inv: false, land: true,  partial: true); break;
+            case "usep":         HandleUseCommand(parts, inv: true,  land: true,  partial: true); break;
+            // select variants
+            case "select":       HandleSelectCommand(parts, inv: true,  land: true,  partial: false); break;
+            case "selecti":      HandleSelectCommand(parts, inv: true,  land: false, partial: false); break;
+            case "selectl":      HandleSelectCommand(parts, inv: false, land: true,  partial: false); break;
+            case "selectpi": case "selectip": HandleSelectCommand(parts, inv: true,  land: false, partial: true); break;
+            case "selectlp": case "selectpl": HandleSelectCommand(parts, inv: false, land: true,  partial: true); break;
+            case "selectp":      HandleSelectCommand(parts, inv: true,  land: true,  partial: true); break;
+            default:             eat = 0; break;
         }
     }
 

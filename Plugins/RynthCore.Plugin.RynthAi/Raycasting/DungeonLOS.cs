@@ -236,10 +236,14 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     var envCell = ParseEnvCellHeader(cellData);
                     if (envCell == null) continue;
 
-                    var cellGeo = GetCellGeometry(envCell.EnvironmentId, envCell.CellStructureIndex);
+                    // Use rendering polygons (not physics) — physics polygons are a
+                    // smaller subset that can miss wall surfaces at corners. Rendering
+                    // polygons match what the dungeon map draws, with portal openings
+                    // tagged so we can skip them below.
+                    var cellGeo = GetCellRenderGeometry(envCell.EnvironmentId, envCell.CellStructureIndex);
                     if (cellGeo == null || cellGeo.Polygons.Count == 0) continue;
 
-                    // Collect all physics triangles for this cell
+                    // Collect all wall triangles for this cell
                     var cellTriangles = new List<Vector3>();
                     var min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
                     var max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
@@ -254,7 +258,39 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                         foreach (var localVert in poly.Vertices)
                             worldVerts.Add(TransformVertex(localVert, envCell, globalOffsetX, globalOffsetY));
 
-                        // Triangulate polygon (fan from vertex 0) for exact ray-triangle intersection
+                        // Classify polygon: wall (horizontal normal) vs floor/ceiling (vertical normal)
+                        Vector3 edge1 = worldVerts[1] - worldVerts[0];
+                        Vector3 edge2 = worldVerts[2] - worldVerts[0];
+                        Vector3 faceNormal = Vector3.Cross(edge1, edge2);
+                        float normalLen = faceNormal.Length();
+                        bool isWall = false;
+                        if (normalLen > 0.0001f)
+                        {
+                            faceNormal = faceNormal / normalLen;
+                            isWall = Math.Abs(faceNormal.Z) < 0.5f;
+                        }
+
+                        // Expand wall polygon vertices outward from centroid to close
+                        // gaps at cell junctions. At dungeon corners where two cells'
+                        // wall polygons meet edge-to-edge, this creates ~0.3m overlap
+                        // so rays can't slip through the seam.
+                        if (isWall)
+                        {
+                            Vector3 centroid = new Vector3(0, 0, 0);
+                            for (int i = 0; i < worldVerts.Count; i++)
+                                centroid = centroid + worldVerts[i];
+                            centroid = centroid * (1.0f / worldVerts.Count);
+
+                            for (int i = 0; i < worldVerts.Count; i++)
+                            {
+                                Vector3 dir = worldVerts[i] - centroid;
+                                float dirLen = dir.Length();
+                                if (dirLen > 0.01f)
+                                    worldVerts[i] = worldVerts[i] + (dir / dirLen) * 0.15f;
+                            }
+                        }
+
+                        // Fan-triangulate the (possibly expanded) polygon
                         for (int i = 1; i < worldVerts.Count - 1; i++)
                         {
                             cellTriangles.Add(worldVerts[0]);
@@ -262,11 +298,35 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                             cellTriangles.Add(worldVerts[i + 1]);
                         }
 
-                        // Update cell AABB for pre-filter
+                        // For walls, add a second triangle layer offset along the face
+                        // normal to give walls physical thickness. Catches rays that
+                        // approach at shallow angles to the wall surface.
+                        if (isWall && normalLen > 0.0001f)
+                        {
+                            Vector3 offset = faceNormal * 0.15f;
+                            for (int i = 1; i < worldVerts.Count - 1; i++)
+                            {
+                                cellTriangles.Add(worldVerts[0] + offset);
+                                cellTriangles.Add(worldVerts[i] + offset);
+                                cellTriangles.Add(worldVerts[i + 1] + offset);
+                            }
+                        }
+
+                        // Update cell AABB for pre-filter (includes expanded vertices)
                         foreach (var wv in worldVerts)
                         {
                             min = Vector3.Min(min, wv);
                             max = Vector3.Max(max, wv);
+                        }
+                        if (isWall && normalLen > 0.0001f)
+                        {
+                            Vector3 offset = faceNormal * 0.15f;
+                            foreach (var wv in worldVerts)
+                            {
+                                Vector3 owv = wv + offset;
+                                min = Vector3.Min(min, owv);
+                                max = Vector3.Max(max, owv);
+                            }
                         }
                     }
 

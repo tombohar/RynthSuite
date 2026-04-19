@@ -42,9 +42,10 @@ internal sealed class LegacyDashboardRenderer
     private readonly List<string> _profiles = new();
     private readonly List<string> _navFiles = new();
     private readonly List<string> _lootFiles = new();
+    private readonly List<string> _metaFiles = new();
     private readonly string _navFolder = @"C:\Games\RynthSuite\RynthAi\NavProfiles";
     private readonly string _lootFolder = @"C:\Games\RynthSuite\RynthAi\LootProfiles";
-    private readonly string _metaFolder = @"C:\Games\RynthSuite\RynthAi\MetaProfiles";
+    private readonly string _metaFolder = @"C:\Games\RynthSuite\RynthAi\MetaFiles";
     private readonly string _settingsRoot = @"C:\Games\RynthSuite\RynthAi\SettingsProfiles\ACEmulator";
 
     private int _selectedNavIdx;
@@ -85,6 +86,7 @@ internal sealed class LegacyDashboardRenderer
     // ── Monster editor (external process) ────────────────────────────────────
     private FileSystemWatcher? _monsterWatcher;
     private volatile bool _monsterFileChanged;
+    private System.Diagnostics.Process? _monsterEditorProcess;
 
     public LegacyDashboardRenderer(RynthCoreHost host)
     {
@@ -100,6 +102,12 @@ internal sealed class LegacyDashboardRenderer
     }
 
     public void OnLoginComplete() => RefreshAllLists();
+
+    /// <summary>
+    /// Returns the current per-character folder (set during LoadSettings).
+    /// Empty string until a character has logged in.
+    /// </summary>
+    public string CharFolder => _charFolder;
 
     public void SetWorldFilter(WorldObjectCache cache) => _weaponsUi.SetWorldFilter(cache);
 
@@ -314,6 +322,14 @@ internal sealed class LegacyDashboardRenderer
             return;
         }
 
+        // Toggle: if the editor is already running, close it.
+        if (_monsterEditorProcess != null && !_monsterEditorProcess.HasExited)
+        {
+            _monsterEditorProcess.CloseMainWindow();
+            _monsterEditorProcess = null;
+            return;
+        }
+
         // Editor lives at: <RynthAi root>\MonsterEditor\RynthCore.MonsterEditor.exe
         string rynthAiRoot = Path.GetDirectoryName(Path.GetDirectoryName(_settingsRoot)!)!;
         string editorExe   = Path.Combine(rynthAiRoot, "MonsterEditor", "RynthCore.MonsterEditor.exe");
@@ -324,11 +340,14 @@ internal sealed class LegacyDashboardRenderer
             return;
         }
 
-        ShellExecuteW(IntPtr.Zero, "open", editorExe, $"\"{_charFolder}\"", null, 1);
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName        = editorExe,
+            Arguments       = $"\"{_charFolder}\"",
+            UseShellExecute = true,
+        };
+        _monsterEditorProcess = System.Diagnostics.Process.Start(psi);
     }
-
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
-    private static extern IntPtr ShellExecuteW(IntPtr hwnd, string lpOperation, string lpFile, string lpParameters, string? lpDirectory, int nShowCmd);
 
     private void CaptureTransientUiState()
     {
@@ -598,6 +617,12 @@ internal sealed class LegacyDashboardRenderer
         dst.MinSkillLevelTier6       = tmp.MinSkillLevelTier6;
         dst.MinSkillLevelTier7       = tmp.MinSkillLevelTier7;
         dst.MinSkillLevelTier8       = tmp.MinSkillLevelTier8;
+        dst.MetaDebug                = tmp.MetaDebug;
+        dst.StartMacroOnLogin        = tmp.StartMacroOnLogin;
+        dst.ShowTerrainPassability   = tmp.ShowTerrainPassability;
+        dst.GiveQueueIntervalMs      = tmp.GiveQueueIntervalMs;
+        dst.SpellCastIntervalMs      = tmp.SpellCastIntervalMs;
+        dst.EmbeddedNavs             = tmp.EmbeddedNavs;
     }
 
     private static double NormalizeCorpseRangeYards(double value, double fallbackYards)
@@ -681,20 +706,25 @@ internal sealed class LegacyDashboardRenderer
         ImGui.PushStyleColor(ImGuiCol.HeaderHovered,  new Vector4(0.22f, 0.62f, 1.00f, 1.00f));
         ImGui.PushStyleColor(ImGuiCol.HeaderActive,   new Vector4(0.10f, 0.45f, 0.82f, 1.00f));
 
-        RenderDashboard();
+        try
+        {
+            RenderDashboard();
 
-        _metaUi.Render();
-        TickMonsterReload();
-        _weaponsUi.Render();
+            _metaUi.Render();
+            TickMonsterReload();
+            _weaponsUi.Render();
 
-        // Hooked up the new Lua UI here
-        _luaUi.Render();
+            // Hooked up the new Lua UI here
+            _luaUi.Render();
 
-        if (DashWindows.ShowNavigation) _navigationUi.Render();
-        if (DashWindows.ShowDungeonMap || _dungeonMapUi.IsAutoHidden) _dungeonMapUi.Render();
-        if (_settings.ShowAdvancedWindow) _advancedSettingsUi.Render();
-
-        ImGui.PopStyleColor(8);
+            if (DashWindows.ShowNavigation) _navigationUi.Render();
+            if (DashWindows.ShowDungeonMap || _dungeonMapUi.IsAutoHidden) _dungeonMapUi.Render();
+            if (_settings.ShowAdvancedWindow) _advancedSettingsUi.Render();
+        }
+        finally
+        {
+            ImGui.PopStyleColor(8);
+        }
     }
 
     private void RenderDashboard()
@@ -730,7 +760,7 @@ internal sealed class LegacyDashboardRenderer
             ImGui.PushStyleColor(ImGuiCol.ChildBg, ColPanelBg);
             ImGui.PushStyleColor(ImGuiCol.Border, ColBtnBord);
             ImGui.PushStyleVar(ImGuiStyleVar.ChildBorderSize, 1.0f);
-            if (ImGui.BeginChild("CombatPanel", new Vector2(-1, 200), ImGuiChildFlags.Borders, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)) { RenderCombatPanel(); ImGui.Dummy(new Vector2(0, 2)); }
+            if (ImGui.BeginChild("CombatPanel", new Vector2(-1, 180), ImGuiChildFlags.Borders, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)) { RenderCombatPanel(); ImGui.Dummy(new Vector2(0, 2)); }
             ImGui.EndChild();
             ImGui.PopStyleVar();
             ImGui.PopStyleColor(2);
@@ -775,17 +805,61 @@ internal sealed class LegacyDashboardRenderer
         ImGui.SameLine();
         if (ImGui.SmallButton("X")) CloseRequested = true;
         ImGui.Dummy(new Vector2(0, 2));
-        if (_isMinimized || !ImGui.BeginTable("HeaderGrid", 2)) return;
+        if (_isMinimized) return;
+        if (!ImGui.BeginTable("HeaderGrid", 2)) return;
 
         ImGui.TableSetupColumn("Left", ImGuiTableColumnFlags.WidthFixed, width * 0.40f);
         ImGui.TableSetupColumn("Right", ImGuiTableColumnFlags.WidthStretch);
         ImGui.TableNextRow();
+
+        // ── Left column: macro button + status ──────────────────────────
         ImGui.TableNextColumn();
-        ImGui.SetWindowFontScale(1.3f);
-        ImGui.TextColored(ColTextMute, "Macro Status:");
+
+        var btnColor = _settings.IsMacroRunning
+            ? new Vector4(0.10f, 0.35f, 0.15f, 1.00f)
+            : new Vector4(0.25f, 0.12f, 0.12f, 1.00f);
+        var btnHover = _settings.IsMacroRunning
+            ? new Vector4(0.15f, 0.50f, 0.22f, 1.00f)
+            : new Vector4(0.40f, 0.18f, 0.18f, 1.00f);
+        var btnActive = _settings.IsMacroRunning
+            ? new Vector4(0.08f, 0.28f, 0.12f, 1.00f)
+            : new Vector4(0.20f, 0.10f, 0.10f, 1.00f);
+
+        ImGui.PushStyleColor(ImGuiCol.Button, btnColor);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, btnHover);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, btnActive);
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4.0f);
+        ImGui.SetWindowFontScale(1.2f);
+
+        Vector2 pos = ImGui.GetCursorScreenPos();
+        string macroLabel = _settings.IsMacroRunning ? "RUNNING##ToggleMacro" : "STOPPED##ToggleMacro";
+        if (ImGui.Button(macroLabel, new Vector2(120, 28)))
+            _settings.IsMacroRunning = !_settings.IsMacroRunning;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Click to Start / Stop Macro");
+
         ImGui.SetWindowFontScale(1.0f);
+        ImGui.PopStyleVar();
+        ImGui.PopStyleColor(3);
+
+        // Status circle beside the button
+        ImDrawListPtr dl = ImGui.GetWindowDrawList();
+        uint circleColor = _settings.IsMacroRunning ? ImGui.ColorConvertFloat4ToU32(ColGreen) : ImGui.ColorConvertFloat4ToU32(ColTextMute);
+        Vector2 circlePos = pos + new Vector2(128, 14);
+        dl.AddCircleFilled(circlePos, 5, circleColor);
+        if (_settings.IsMacroRunning) dl.AddCircle(circlePos, 8, circleColor, 12, 1.5f);
+
+        ImGui.Spacing();
+        ImGui.TextColored(ColTextMute, "Meta State:");
+        ImGui.SameLine(0, 8);
+        ImGui.TextColored(ColAmber, _settings.CurrentState);
+        ImGui.TextColored(ColTextMute, "Bot Activity:");
+        ImGui.SameLine(0, 8);
+        string botDisplay = string.IsNullOrEmpty(_settings.BotAction) || _settings.BotAction == "Default" ? "Idle" : _settings.BotAction;
+        ImGui.TextColored(ColAmber, botDisplay);
+
+        // ── Right column: file dropdowns (independent vertical layout) ──
         ImGui.TableNextColumn();
-        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 2);
+
         ImGui.TextColored(ColTextMute, "Profile:");
         ImGui.SameLine(60);
         ImGui.SetNextItemWidth(-1);
@@ -797,23 +871,6 @@ internal sealed class LegacyDashboardRenderer
             ImGui.EndCombo();
         }
 
-        ImGui.TableNextRow();
-        ImGui.TableNextColumn();
-        Vector2 pos = ImGui.GetCursorScreenPos();
-        ImDrawListPtr dl = ImGui.GetWindowDrawList();
-        uint color = _settings.IsMacroRunning ? ImGui.ColorConvertFloat4ToU32(ColGreen) : ImGui.ColorConvertFloat4ToU32(ColTextMute);
-        dl.AddCircleFilled(pos + new Vector2(8, 12), 6, color);
-        if (_settings.IsMacroRunning) dl.AddCircle(pos + new Vector2(8, 12), 9, color, 12, 1.5f);
-        ImGui.SetCursorScreenPos(pos + new Vector2(24, 0));
-        if (ImGui.InvisibleButton("ToggleMacro", new Vector2(100, 24))) _settings.IsMacroRunning = !_settings.IsMacroRunning;
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Click to Start / Stop Macro");
-        ImGui.SetCursorScreenPos(pos + new Vector2(26, 2));
-        ImGui.SetWindowFontScale(1.3f);
-        ImGui.TextColored(_settings.IsMacroRunning ? ColGreen : ColTextMute, _settings.IsMacroRunning ? "RUNNING" : "STOPPED");
-        ImGui.SetWindowFontScale(1.0f);
-
-        ImGui.TableNextColumn();
-        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 4);
         ImGui.TextColored(ColTextMute, "Nav:");
         ImGui.SameLine(60);
         ImGui.SetNextItemWidth(-1);
@@ -825,17 +882,6 @@ internal sealed class LegacyDashboardRenderer
             ImGui.EndCombo();
         }
 
-        ImGui.TableNextRow();
-        ImGui.TableNextColumn();
-        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 4);
-        ImGui.TextColored(ColTextMute, "Meta:");
-        ImGui.SameLine(0, 8);
-        ImGui.TextColored(ColAmber, _settings.CurrentState);
-        ImGui.TextColored(ColTextMute, "Bot:");
-        ImGui.SameLine(0, 8);
-        ImGui.TextColored(ColAmber, _settings.BotAction);
-        ImGui.TableNextColumn();
-        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 6);
         ImGui.TextColored(ColTextMute, "Loot:");
         ImGui.SameLine(60);
         ImGui.SetNextItemWidth(-1);
@@ -851,8 +897,50 @@ internal sealed class LegacyDashboardRenderer
             ImGui.EndCombo();
         }
 
+        ImGui.TextColored(ColTextMute, "Meta:");
+        ImGui.SameLine(60);
+        ImGui.SetNextItemWidth(-1);
+        string metaName = string.IsNullOrEmpty(_settings.CurrentMetaPath) ? "None" : Path.GetFileNameWithoutExtension(_settings.CurrentMetaPath);
+        if (ImGui.BeginCombo("##MetaCombo", TruncateName(metaName, 16)))
+        {
+            for (int i = 0; i < _metaFiles.Count; i++)
+                if (ImGui.Selectable(_metaFiles[i], _settings.MetaProfileIdx == i))
+                {
+                    _settings.MetaProfileIdx = i;
+                    string path = i == 0 ? string.Empty : Path.Combine(_metaFolder, _metaFiles[i]);
+                    _metaUi.LoadMacroFile(path);
+                }
+            ImGui.EndCombo();
+        }
+
         ImGui.EndTable();
         ImGui.Spacing();
+    }
+
+    private void RenderMinimizedMacroButton()
+    {
+        var btnColor = _settings.IsMacroRunning
+            ? new Vector4(0.10f, 0.35f, 0.15f, 1.00f)
+            : new Vector4(0.25f, 0.12f, 0.12f, 1.00f);
+        var btnHover = _settings.IsMacroRunning
+            ? new Vector4(0.15f, 0.50f, 0.22f, 1.00f)
+            : new Vector4(0.40f, 0.18f, 0.18f, 1.00f);
+        var btnActive = _settings.IsMacroRunning
+            ? new Vector4(0.08f, 0.28f, 0.12f, 1.00f)
+            : new Vector4(0.20f, 0.10f, 0.10f, 1.00f);
+
+        ImGui.PushStyleColor(ImGuiCol.Button, btnColor);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, btnHover);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, btnActive);
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 3.0f);
+
+        string label = _settings.IsMacroRunning ? "Running##MinMacro" : "Stopped##MinMacro";
+        if (ImGui.SmallButton(label))
+            _settings.IsMacroRunning = !_settings.IsMacroRunning;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Click to Start / Stop Macro");
+
+        ImGui.PopStyleVar();
+        ImGui.PopStyleColor(3);
     }
 
     private void RenderCombatPanel()
@@ -862,7 +950,29 @@ internal sealed class LegacyDashboardRenderer
         ImGui.TableSetupColumn("Vitals", ImGuiTableColumnFlags.WidthStretch);
         ImGui.TableNextRow();
         ImGui.TableNextColumn();
-        Vector2 togglePos = ImGui.GetCursorScreenPos() + new Vector2(2, 28);
+        if (_isMinimized)
+        {
+            var btnColor = _settings.IsMacroRunning
+                ? new Vector4(0.10f, 0.35f, 0.15f, 1.00f)
+                : new Vector4(0.25f, 0.12f, 0.12f, 1.00f);
+            var btnHover = _settings.IsMacroRunning
+                ? new Vector4(0.15f, 0.50f, 0.22f, 1.00f)
+                : new Vector4(0.40f, 0.18f, 0.18f, 1.00f);
+            var btnActive = _settings.IsMacroRunning
+                ? new Vector4(0.08f, 0.28f, 0.12f, 1.00f)
+                : new Vector4(0.20f, 0.10f, 0.10f, 1.00f);
+            ImGui.PushStyleColor(ImGuiCol.Button, btnColor);
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, btnHover);
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, btnActive);
+            ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 3.0f);
+            string mLabel = _settings.IsMacroRunning ? "ON##MinMacro" : "OFF##MinMacro";
+            if (ImGui.Button(mLabel, new Vector2(64, 20)))
+                _settings.IsMacroRunning = !_settings.IsMacroRunning;
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(_settings.IsMacroRunning ? "Macro Running - Click to Stop" : "Macro Stopped - Click to Start");
+            ImGui.PopStyleVar();
+            ImGui.PopStyleColor(3);
+        }
+        Vector2 togglePos = ImGui.GetCursorScreenPos() + new Vector2(2, _isMinimized ? 6 : 28);
         LegacyDashboardDrawing.DrawSquareToggle("sword", ref _settings.EnableCombat, togglePos, "CombatTgl");
         LegacyDashboardDrawing.DrawSquareToggle("buff", ref _settings.EnableBuffing, togglePos + new Vector2(34, 0), "BuffTgl");
         LegacyDashboardDrawing.DrawSquareToggle("shoe", ref _settings.EnableNavigation, togglePos + new Vector2(0, 34), "NavTgl");
@@ -962,6 +1072,7 @@ internal sealed class LegacyDashboardRenderer
         RefreshProfilesList();
         RefreshNavFiles();
         RefreshLootFiles();
+        RefreshMetaFiles();
     }
 
     private void RefreshProfilesList()
@@ -1013,6 +1124,30 @@ internal sealed class LegacyDashboardRenderer
             _lootFiles.Add(Path.GetFileName(file));
             if (file.Equals(_settings.CurrentLootPath, StringComparison.OrdinalIgnoreCase))
                 _settings.LootProfileIdx = _lootFiles.Count - 1;
+        }
+    }
+
+    private void RefreshMetaFiles()
+    {
+        _metaFiles.Clear();
+        _metaFiles.Add("None");
+        _settings.MetaProfileIdx = 0;
+        if (!Directory.Exists(_metaFolder)) return;
+
+        var files = new List<string>();
+        foreach (string f in Directory.GetFiles(_metaFolder, "*.met"))
+        {
+            if (Path.GetFileName(f).StartsWith("--")) continue;
+            files.Add(f);
+        }
+        files.AddRange(Directory.GetFiles(_metaFolder, "*.af"));
+        files.Sort(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string file in files)
+        {
+            _metaFiles.Add(Path.GetFileName(file));
+            if (file.Equals(_settings.CurrentMetaPath, StringComparison.OrdinalIgnoreCase))
+                _settings.MetaProfileIdx = _metaFiles.Count - 1;
         }
     }
 

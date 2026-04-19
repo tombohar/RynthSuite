@@ -1,0 +1,227 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:RynthCore.MonsterEditor"
+        x:Class="RynthCore.MonsterEditor.MainWindow"
+        Title="RynthAi — Monster Rules Editor"
+        Width="1060" Height="520" MinWidth="800" MinHeight="300">
+
+    <DockPanel LastChildFill="True">
+
+        <!-- Status bar -->
+        <Border DockPanel.Dock="Bottom" Background="#181825" BorderBrush="#45475A"
+                BorderThickness="0,1,0,0" Padding="4,2">
+            <TextBlock Name="StatusText" Foreground="#A6E3A1"/>
+        </Border>
+
+        <!-- Add row -->
+        <Border DockPanel.Dock="Bottom" Background="#252536" BorderBrush="#45475A"
+                BorderThickness="0,1,0,0" Padding="8,5">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <TextBlock Text="Add Monster:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBox Name="NewMonsterBox" Width="200" VerticalAlignment="Center"
+                         KeyDown="NewMonsterBox_KeyDown"/>
+                <Button Content="Add" Margin="4,0,0,0" Click="AddMonster_Click" Width="55"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Main grid -->
+        <DataGrid Name="MonsterGrid"
+                  ItemsSource="{Binding Rules}"
+                  AutoGenerateColumns="False"
+                  CanUserReorderColumns="False"
+                  CanUserSortColumns="False"
+                  SelectionMode="Single"
+                  HeadersVisibility="Column"
+                  CellEditEnding="MonsterGrid_CellEditEnding">
+            <DataGrid.Columns>
+
+                <!-- Toggle lights — letter shown inside each button; tooltip on hover -->
+                <DataGridTemplateColumn Header="F" Width="24" CanUserResize="False" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Classes="light" Content="F"
+                                      IsChecked="{Binding Fester, Mode=TwoWay}"
+                                      ToolTip.Tip="Fester — Decrepitude's Grasp"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="B" Width="24" CanUserResize="False" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Classes="light" Content="B"
+                                      IsChecked="{Binding Broadside, Mode=TwoWay}"
+                                      ToolTip.Tip="Broadside — Broadside of a Barn"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="G" Width="24" CanUserResize="False" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Classes="light" Content="G"
+                                      IsChecked="{Binding GravityWell, Mode=TwoWay}"
+                                      ToolTip.Tip="Gravity Well — Vulnerability Other"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="I" Width="24" CanUserResize="False" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Classes="light" Content="I"
+                                      IsChecked="{Binding Imperil, Mode=TwoWay}"
+                                      ToolTip.Tip="Imperil — Gossamer Flesh"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Y" Width="24" CanUserResize="False" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Classes="light" Content="Y"
+                                      IsChecked="{Binding Yield, Mode=TwoWay}"
+                                      ToolTip.Tip="Yield — Magic Yield Other"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="V" Width="24" CanUserResize="False" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Classes="light" Content="V"
+                                      IsChecked="{Binding Vuln, Mode=TwoWay}"
+                                      ToolTip.Tip="Vuln — Vulnerability (element-matched)"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="A" Width="24" CanUserResize="False" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Classes="light" Content="A"
+                                      IsChecked="{Binding UseArc, Mode=TwoWay}"
+                                      ToolTip.Tip="Arc — War/Void arc spells"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Bl" Width="26" CanUserResize="False" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Classes="light" Content="Bl"
+                                      IsChecked="{Binding UseBolt, Mode=TwoWay}"
+                                      ToolTip.Tip="Bolt — War/Void bolt spells (none set = buff bot mode)"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="R" Width="24" CanUserResize="False" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Classes="light" Content="R"
+                                      IsChecked="{Binding UseRing, Mode=TwoWay}"
+                                      ToolTip.Tip="Ring — Ring spells (uses Ring Range setting)"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="S" Width="24" CanUserResize="False" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Classes="light" Content="S"
+                                      IsChecked="{Binding UseStreak, Mode=TwoWay}"
+                                      ToolTip.Tip="Streak — War/Void streak spells"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- Name -->
+                <DataGridTemplateColumn Header="Name" Width="*" MinWidth="100">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding Name}"
+                                   Padding="3,1"
+                                   VerticalAlignment="Center"
+                                   Foreground="{Binding IsDefault, Converter={x:Static local:DefaultFgConverter.Instance}}"
+                                   FontWeight="{Binding IsDefault, Converter={x:Static local:DefaultWeightConverter.Instance}}"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <TextBox Text="{Binding Name, Mode=TwoWay}" Padding="3,1"/>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- Priority -->
+                <DataGridTemplateColumn Header="P" Width="32" MinWidth="30">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding Priority}"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <TextBox Text="{Binding Priority, Mode=TwoWay}" Padding="3,1"/>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- Damage Type -->
+                <DataGridTemplateColumn Header="Dmg Type" Width="84" MinWidth="70">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding DamageType}" Padding="3,1" VerticalAlignment="Center"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <ComboBox ItemsSource="{Binding $parent[Window].((local:MainWindow)DataContext).DmgOptions}"
+                                  SelectedItem="{Binding DamageType, Mode=TwoWay}"/>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- Ex Vuln -->
+                <DataGridTemplateColumn Header="Ex Vuln" Width="84" MinWidth="70">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding ExVuln}" Padding="3,1" VerticalAlignment="Center"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <ComboBox ItemsSource="{Binding $parent[Window].((local:MainWindow)DataContext).VulnOptions}"
+                                  SelectedItem="{Binding ExVuln, Mode=TwoWay}"/>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- Weapon -->
+                <DataGridTemplateColumn Header="Weapon" Width="140">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding WeaponId, Converter={x:Static local:IdToNameConverter.Instance}}"
+                                   Padding="3,1" VerticalAlignment="Center"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <ComboBox ItemsSource="{Binding $parent[Window].((local:MainWindow)DataContext).WeaponOptions}"
+                                  SelectedItem="{Binding WeaponId, Converter={x:Static local:OptionFromIdConverter.Instance}, Mode=TwoWay}"
+                                  ItemTemplate="{x:Null}">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate DataType="local:WeaponOption">
+                                    <TextBlock Text="{Binding DisplayName}"/>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- Offhand -->
+                <DataGridTemplateColumn Header="Offhand" Width="140">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding OffhandId, Converter={x:Static local:IdToNameConverter.Instance}}"
+                                   Padding="3,1" VerticalAlignment="Center"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <ComboBox ItemsSource="{Binding $parent[Window].((local:MainWindow)DataContext).WeaponOptions}"
+                                  SelectedItem="{Binding OffhandId, Converter={x:Static local:OptionFromIdConverter.Instance}, Mode=TwoWay}">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate DataType="local:WeaponOption">
+                                    <TextBlock Text="{Binding DisplayName}"/>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- Pet Damage -->
+                <DataGridTemplateColumn Header="Pet Dmg" Width="74" MinWidth="60">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding PetDamage}" Padding="3,1" VerticalAlignment="Center"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <ComboBox ItemsSource="{Binding $parent[Window].((local:MainWindow)DataContext).PetOptions}"
+                                  SelectedItem="{Binding PetDamage, Mode=TwoWay}"/>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- Delete -->
+                <DataGridTemplateColumn Header="Del" Width="34" CanUserResize="False" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <Button Content="X" Tag="{Binding}" Click="DeleteRow_Click"
+                                Padding="2,0" FontSize="11"
+                                IsVisible="{Binding IsDefault, Converter={x:Static local:InvertBoolConverter.Instance}}"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+            </DataGrid.Columns>
+        </DataGrid>
+    </DockPanel>
+</Window>

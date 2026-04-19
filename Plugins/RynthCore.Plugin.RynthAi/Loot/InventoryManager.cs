@@ -194,9 +194,6 @@ public sealed class InventoryManager
             .Where(g => g.Count() > 1)
             .ToList();
 
-        int eligibleGroups = 0;
-        int blacklistedPairs = 0;
-
         foreach (var g in groupList)
         {
             int max = GetMaxStackSize(g.First());
@@ -208,15 +205,6 @@ public sealed class InventoryManager
                 .Select(x => (Item: x, Raw: x.Values(LongValueKey.StackCount, -999)))
                 .ToList();
 
-            // Verbose group dump — every member with its raw count, so we can see what's
-            // actually in inventory and verify the user's test partials are detected.
-            if (withCounts.Count > 0)
-            {
-                var dump = string.Join(", ",
-                    withCounts.Select(t => $"0x{t.Item.Id:X8}({t.Raw})"));
-                _host.Log($"[RynthAi] AutoStack group '{g.Key}' max={max}: {dump}");
-            }
-
             // For merging, treat InqInt failure as a stack of 1 (legitimate single stack).
             // Partials = anything below the cap. Sorted descending so we walk from
             // largest target down to find one that fits with the smallest source.
@@ -227,7 +215,6 @@ public sealed class InventoryManager
                 .ToList();
 
             if (parts.Count < 2) continue;
-            eligibleGroups++;
 
             // Pick largest target (most almost-full → topping it off removes it
             // from the partials list fastest) and smallest source (most likely
@@ -240,10 +227,7 @@ public sealed class InventoryManager
 
             string pairKey = target.Item.Id + "_" + source.Item.Id;
             if (_failedStackPairs.Contains(pairKey))
-            {
-                blacklistedPairs++;
                 continue;
-            }
 
             _host.Log($"[RynthAi] AutoStack: merge {source.Item.Name} src=0x{source.Item.Id:X8}({source.Count}) -> tgt=0x{target.Item.Id:X8}({target.Count}) max={max}");
             bool ok = _host.MergeStackInternal(
@@ -256,11 +240,6 @@ public sealed class InventoryManager
             _failedStackPairs.Add(pairKey);
             return true; // one action per tick
         }
-
-        if (groupList.Count > 0 && eligibleGroups == 0)
-            _host.Log($"[RynthAi] AutoStack: {groupList.Count} name groups but none have 2+ partial stacks");
-        else if (eligibleGroups > 0 && blacklistedPairs == eligibleGroups)
-            _host.Log($"[RynthAi] AutoStack: {eligibleGroups} eligible groups but all pairs blacklisted (will retry after clear)");
 
         return false;
     }

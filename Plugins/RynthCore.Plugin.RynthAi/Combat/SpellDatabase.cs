@@ -103,4 +103,16 @@ public static class SpellDatabase
             map.TryAdd(kvp.Value, kvp.Key);
         return map;
     }
+
+    /// <summary>Looks up a spell ID by exact name (case-insensitive).</summary>
+    public static int GetIdByName(string name)
+    {
+        foreach (var kvp in _spellNames)
+            if (kvp.Value.Equals(name, StringComparison.OrdinalIgnoreCase))
+                return kvp.Key;
+        foreach (var kvp in _builtinSpells)
+            if (kvp.Value.Equals(name, StringComparison.OrdinalIgnoreCase))
+                return kvp.Key;
+        return 0;
+    }
 }
