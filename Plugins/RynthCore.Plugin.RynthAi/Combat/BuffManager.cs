@@ -38,9 +38,23 @@ public class BuffManager : IDisposable
         public string SpellName = "";
     }
 
+    /// <summary>
+    /// Timer for an item spell (armor bane / Impenetrability) cast by this plugin.
+    /// Recorded immediately on cast — independent of chat parsing and enchantment hooks.
+    /// </summary>
+    private class ItemSpellRecord
+    {
+        public DateTime CastAt;
+        public DateTime ExpiresAt;
+        public string SpellName = "";
+        public int SpellLevel;
+    }
+
     private readonly Dictionary<int, RamTimerInfo> _ramBuffTimers = new();
     /// <summary>Keyed by (objectId, spellFamily) packed as long.</summary>
     private readonly Dictionary<long, ItemBuffTimerInfo> _itemBuffTimers = new();
+    /// <summary>Keyed by spell family. Tracks item-enchantment casts (armor banes, Impenetrability) directly.</summary>
+    private readonly Dictionary<int, ItemSpellRecord> _itemSpellTimers = new();
     private string _buffTimerPath = "";
 
     private bool _isRechargingMana = false;
@@ -123,11 +137,17 @@ public class BuffManager : IDisposable
         if (string.IsNullOrEmpty(_buffTimerPath)) return;
         try
         {
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(_buffTimerPath)!);
             var lines = new List<string>();
             foreach (var kvp in _ramBuffTimers)
             {
                 var info = kvp.Value;
-                lines.Add($"{kvp.Key}|{info.Expiration.Ticks}|{info.SpellLevel}|{info.SpellName}");
+                lines.Add($"ram|{kvp.Key}|{info.Expiration.Ticks}|{info.SpellLevel}|{info.SpellName}");
+            }
+            foreach (var kvp in _itemSpellTimers)
+            {
+                var info = kvp.Value;
+                lines.Add($"item|{kvp.Key}|{info.CastAt.Ticks}|{info.ExpiresAt.Ticks}|{info.SpellLevel}|{info.SpellName}");
             }
             System.IO.File.WriteAllLines(_buffTimerPath, lines);
         }
@@ -141,21 +161,44 @@ public class BuffManager : IDisposable
         try
         {
             _ramBuffTimers.Clear();
+            _itemSpellTimers.Clear();
             foreach (string line in System.IO.File.ReadAllLines(_buffTimerPath))
             {
-                string[] parts = line.Split('|');
-                if (parts.Length < 4) continue;
-                DateTime expiration = new DateTime(long.Parse(parts[1]));
-                int level = int.Parse(parts[2]);
-                string name = parts[3];
-                // Recompute family from stored spell name — handles files saved with the old
-                // non-deterministic String.GetHashCode (randomised per-session in .NET 5+).
-                int family = new SpellInfo(0, name).Family;
-                if (expiration > DateTime.Now)
-                    _ramBuffTimers[family] = new RamTimerInfo { Expiration = expiration, SpellLevel = level, SpellName = name };
+                string[] p = line.Split('|');
+
+                if (p[0] == "item" && p.Length >= 6)
+                {
+                    DateTime castAt    = new DateTime(long.Parse(p[2]));
+                    DateTime expiresAt = new DateTime(long.Parse(p[3]));
+                    int level = int.Parse(p[4]);
+                    string name = p[5];
+                    if (expiresAt > DateTime.Now)
+                    {
+                        int family = new SpellInfo(0, name).Family;
+                        _itemSpellTimers[family] = new ItemSpellRecord
+                        {
+                            CastAt = castAt, ExpiresAt = expiresAt,
+                            SpellLevel = level, SpellName = name,
+                        };
+                    }
+                    continue;
+                }
+
+                // Legacy single-prefix "family|ticks|level|name" or new "ram|family|ticks|level|name"
+                int offset = (p[0] == "ram") ? 1 : 0;
+                if (p.Length < offset + 4) continue;
+                {
+                    DateTime expiration = new DateTime(long.Parse(p[offset + 1]));
+                    int level = int.Parse(p[offset + 2]);
+                    string name = p[offset + 3];
+                    int family = new SpellInfo(0, name).Family;
+                    if (expiration > DateTime.Now)
+                        _ramBuffTimers[family] = new RamTimerInfo { Expiration = expiration, SpellLevel = level, SpellName = name };
+                }
             }
-            if (_ramBuffTimers.Count > 0)
-                _host.WriteToChat($"[RynthAi] Restored {_ramBuffTimers.Count} buff timer(s) from last session.", 1);
+            int total = _ramBuffTimers.Count + _itemSpellTimers.Count;
+            if (total > 0)
+                _host.WriteToChat($"[RynthAi] Restored {_ramBuffTimers.Count} player + {_itemSpellTimers.Count} item spell timer(s).", 1);
         }
         catch { }
     }
@@ -166,6 +209,7 @@ public class BuffManager : IDisposable
     {
         _isForceRebuffing = true;
         _ramBuffTimers.Clear();
+        _itemSpellTimers.Clear();
         SaveBuffTimers();
         _host.WriteToChat("[RynthAi] Starting Force Rebuff...", 5);
     }
@@ -184,7 +228,7 @@ public class BuffManager : IDisposable
     {
         if (!_settings.IsMacroRunning) return;
 
-        if ((DateTime.Now - _lastCastAttempt).TotalMilliseconds < 1500)
+        if ((DateTime.Now - _lastCastAttempt).TotalMilliseconds < _settings.SpellCastIntervalMs)
         {
             _settings.BotAction = "Buffing";
             return;
@@ -266,7 +310,9 @@ public class BuffManager : IDisposable
             if (_worldObjectCache[rule.Id] == null)
                 continue;
 
-            _host.UseObject(unchecked((uint)rule.Id));
+            uint playerId = _host.GetPlayerId();
+            if (playerId == 0) return false;
+            _host.UseObjectOn(unchecked((uint)rule.Id), playerId);
             _lastCastAttempt = DateTime.Now;
             return true;
         }
@@ -313,7 +359,14 @@ public class BuffManager : IDisposable
 
                 var spellInfo = SpellTableStub.GetById(spellId);
                 if (spellInfo != null)
+                {
                     _host.WriteToChat($"[RynthAi] Casting: {spellInfo.Name}", 5);
+
+                    // Record item spell timers immediately on cast — don't rely on chat parsing
+                    // or enchantment hooks (item enchantments fire on the item, not the player).
+                    if (IsArmorEnchantment(spellInfo.Name))
+                        RecordItemSpellCast(spellInfo);
+                }
 
                 _host.CastSpell((uint)_host.GetPlayerId(), spellId);
                 _lastCastAttempt = DateTime.Now;
@@ -339,27 +392,53 @@ public class BuffManager : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// Called immediately when CheckAndCastSelfBuffs decides to cast an item spell.
+    /// Records the timer optimistically — removed on fizzle.
+    /// </summary>
+    private void RecordItemSpellCast(SpellInfo spellInfo)
+    {
+        double duration = GetCustomSpellDuration(GetSpellLevel(spellInfo));
+        var now = DateTime.Now;
+        _itemSpellTimers[spellInfo.Family] = new ItemSpellRecord
+        {
+            CastAt    = now,
+            ExpiresAt = now.AddSeconds(duration),
+            SpellName = spellInfo.Name,
+            SpellLevel = GetSpellLevel(spellInfo),
+        };
+        SaveBuffTimers();
+    }
+
     private bool IsBuffActive(int spellId)
     {
         var targetSpell = SpellTableStub.GetById(spellId);
         if (targetSpell == null) return false;
 
         int targetLevel = GetSpellLevel(targetSpell);
+        int rebufferMin = 5; // recast when < 5 min remaining
 
+        // Item spells (armor banes, Impenetrability) tracked in their own dictionary
+        if (IsArmorEnchantment(targetSpell.Name))
+        {
+            if (_isForceRebuffing) return false;
+            if (_itemSpellTimers.TryGetValue(targetSpell.Family, out ItemSpellRecord? itemTimer))
+                if (itemTimer.SpellLevel >= targetLevel &&
+                    DateTime.Now < itemTimer.ExpiresAt.AddMinutes(-rebufferMin))
+                    return true;
+            return false;
+        }
+
+        // Player buffs — use RAM timers
         if (_ramBuffTimers.TryGetValue(targetSpell.Family, out RamTimerInfo? timer))
         {
-            if (DateTime.Now < timer.Expiration.AddMinutes(-5))
+            if (DateTime.Now < timer.Expiration.AddMinutes(-rebufferMin))
             {
                 if (timer.SpellLevel >= targetLevel) return true;
             }
         }
 
         if (_isForceRebuffing) return false;
-
-        if (IsArmorEnchantment(targetSpell.Name)) return false;
-
-        // TODO: Check real enchantments from AC memory when available.
-        // For now, rely entirely on RAM timers above.
 
         return false;
     }
@@ -430,6 +509,16 @@ public class BuffManager : IDisposable
         if (count < 0)
             return -1;
 
+        // Preserve item enchantment timers (armor banes, Impenetrability, etc.)
+        // that live on the item, not the player — ReadPlayerEnchantments won't
+        // return them, so clearing would lose them every login.
+        var preservedItemTimers = new Dictionary<int, RamTimerInfo>();
+        foreach (var kvp in _ramBuffTimers)
+        {
+            if (kvp.Value.Expiration > DateTime.Now && IsArmorEnchantment(kvp.Value.SpellName))
+                preservedItemTimers[kvp.Key] = kvp.Value;
+        }
+
         _ramBuffTimers.Clear();
         for (int i = 0; i < count; i++)
         {
@@ -451,6 +540,10 @@ public class BuffManager : IDisposable
                 SpellName  = spellInfo.Name,
             };
         }
+
+        // Restore item enchantment timers that weren't covered by player enchantments
+        foreach (var kvp in preservedItemTimers)
+            _ramBuffTimers.TryAdd(kvp.Key, kvp.Value);
 
         SaveBuffTimers();
         return _ramBuffTimers.Count;
@@ -562,22 +655,59 @@ public class BuffManager : IDisposable
             _host.WriteToChat($"[RynthAi] ServerTime={Math.Round(serverNow)} (no live read: serverTime=0 or API missing)", 1);
         }
 
-        if (_ramBuffTimers.Count == 0)
+        if (_ramBuffTimers.Count == 0 && _itemSpellTimers.Count == 0)
         {
             _host.WriteToChat("[RynthAi] No buff timers active.", 1);
             return;
         }
 
-        _host.WriteToChat($"[RynthAi] -- Player buffs ({_ramBuffTimers.Count}) --", 1);
-        foreach (var kvp in _ramBuffTimers)
+        if (_itemSpellTimers.Count > 0)
+        {
+            _host.WriteToChat($"[RynthAi] -- Item spells ({_itemSpellTimers.Count}) --", 1);
+            PrintItemSpellTimers();
+        }
+
+        if (_ramBuffTimers.Count > 0)
+        {
+            _host.WriteToChat($"[RynthAi] -- Player buffs ({_ramBuffTimers.Count}) --", 1);
+            foreach (var kvp in _ramBuffTimers)
+            {
+                var info = kvp.Value;
+                double total = GetCustomSpellDuration(info.SpellLevel);
+                TimeSpan left = info.Expiration - DateTime.Now;
+                double passed = total - left.TotalSeconds;
+                _host.WriteToChat(
+                    $"[RynthAi]   {info.SpellName} (Lvl {info.SpellLevel}): {Math.Round(passed / 60, 1)}m passed, " +
+                    $"{Math.Round(left.TotalMinutes, 1)}m left. Total: {total / 60}m", 1);
+            }
+        }
+    }
+
+    public void PrintItemBuffDebug()
+    {
+        if (_itemSpellTimers.Count == 0)
+        {
+            _host.WriteToChat("[RynthAi] No item spell timers recorded yet.", 1);
+            return;
+        }
+        _host.WriteToChat($"[RynthAi] -- Item spells ({_itemSpellTimers.Count}) --", 1);
+        PrintItemSpellTimers();
+    }
+
+    private void PrintItemSpellTimers()
+    {
+        foreach (var kvp in _itemSpellTimers)
         {
             var info = kvp.Value;
-            double total = GetCustomSpellDuration(info.SpellLevel);
-            TimeSpan left = info.Expiration - DateTime.Now;
-            double passed = total - left.TotalSeconds;
-            _host.WriteToChat(
-                $"[RynthAi] {info.SpellName} (Lvl {info.SpellLevel}): {Math.Round(passed / 60, 1)}m passed, " +
-                $"{Math.Round(left.TotalMinutes, 1)}m left. Total: {total / 60}m", 1);
+            TimeSpan left  = info.ExpiresAt - DateTime.Now;
+            TimeSpan spent = DateTime.Now - info.CastAt;
+            double totalMin = (info.ExpiresAt - info.CastAt).TotalMinutes;
+            if (left.TotalSeconds <= 0)
+                _host.WriteToChat($"[RynthAi]   {info.SpellName} (Lvl {info.SpellLevel}): EXPIRED", 1);
+            else
+                _host.WriteToChat(
+                    $"[RynthAi]   {info.SpellName} (Lvl {info.SpellLevel}): " +
+                    $"{Math.Round(spent.TotalMinutes, 1)}m elapsed, {Math.Round(left.TotalMinutes, 1)}m left / {Math.Round(totalMin, 0)}m total", 1);
         }
     }
 
@@ -644,11 +774,20 @@ public class BuffManager : IDisposable
     /// </summary>
     public void OnEnchantmentAdded(uint spellId, double durationSeconds)
     {
-        _pendingSpellId = 0;
-
         var spellInfo = SpellTableStub.GetById((int)spellId);
         if (spellInfo == null)
             return;
+
+        // Only clear pending if this enchantment matches what we were casting.
+        // Armor/item enchantments fire on the item, not the player — clearing
+        // _pendingSpellId unconditionally would lose track of pending item casts
+        // and prevent the chat handler from recording their timers.
+        if (_pendingSpellId != 0)
+        {
+            var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
+            if (pendingSpell != null && pendingSpell.Family == spellInfo.Family)
+                _pendingSpellId = 0;
+        }
 
         // Prefer live memory read — gives accurate remaining time for all enchantments.
         // But only trust it if the just-added buff actually shows up there yet.
@@ -682,21 +821,51 @@ public class BuffManager : IDisposable
     public void OnChatWindowText(string text, int chatType)
     {
         string lower = text.ToLowerInvariant();
-        if (_pendingSpellId != 0 && (lower.Contains("you cast ") || lower.Contains("you say, ")))
-        {
-            var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
-            if (pendingSpell != null)
-                RecordSpellTimer(pendingSpell);
-
-            _pendingSpellId = 0;
-        }
 
         if (lower.Contains("fizzle") || lower.Contains("fail") ||
             lower.Contains("component") || lower.Contains("lack the mana"))
         {
+            // If we optimistically recorded an item spell timer, roll it back on failure
+            if (_pendingSpellId != 0)
+            {
+                var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
+                if (pendingSpell != null && IsArmorEnchantment(pendingSpell.Name))
+                {
+                    _itemSpellTimers.Remove(pendingSpell.Family);
+                    SaveBuffTimers();
+                }
+            }
             _lastCastAttempt = DateTime.MinValue;
             _pendingSpellId = 0;
+            return;
         }
+
+        // "You cast Incantation of Flame Bane on Gelidite Robe, refreshing ..."
+        // "You cast Strength Self VIII"
+        if (!lower.StartsWith("you cast "))
+            return;
+
+        // Extract spell name: everything after "You cast " up to " on " or ","
+        string afterCast = text.Substring(9); // skip "You cast "
+        int onIdx = afterCast.IndexOf(" on ", StringComparison.OrdinalIgnoreCase);
+        int commaIdx = afterCast.IndexOf(',');
+        int endIdx = afterCast.Length;
+        if (onIdx > 0) endIdx = onIdx;
+        if (commaIdx > 0 && commaIdx < endIdx) endIdx = commaIdx;
+        string spellName = afterCast.Substring(0, endIdx).Trim();
+
+        // Try to find the spell by name first (authoritative — this is what was actually cast)
+        int spellId = SpellDatabase.GetIdByName(spellName);
+        SpellInfo? spellInfo = spellId > 0 ? SpellTableStub.GetById(spellId) : null;
+
+        // Fall back to pending spell if name lookup fails
+        if (spellInfo == null && _pendingSpellId != 0)
+            spellInfo = SpellTableStub.GetById(_pendingSpellId);
+
+        if (spellInfo != null)
+            RecordSpellTimer(spellInfo);
+
+        _pendingSpellId = 0;
     }
 
     private void RecordSpellTimer(SpellInfo spellInfo, double durationSeconds = -1)

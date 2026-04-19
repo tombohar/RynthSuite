@@ -24,10 +24,16 @@ public sealed partial class RynthAiPlugin
     private readonly HashSet<int> _processedCorpseItems = new();
     private readonly Dictionary<int, int> _corpseItemAttempts = new();
     private readonly Dictionary<int, long> _corpseCooldownUntil = new();
+    private readonly HashSet<int> _ownershipSkipLogged = new();
+    private readonly HashSet<int> _corpseIdRequested = new(); // corpses whose LongDesc ID was already requested
     private int _busyCount;
     private long _busyCountLastIncrementAt;
+    private long _busyCountBecamePositiveAt; // when count first went 0→positive
     private const long BUSY_TIMEOUT_MS = 10_000; // safety: force-clear if stuck >10s
     private int _openedContainerId;
+    private int _pendingLootCheckContainerId; // non-corpse container opened natively: run lootcheck on inventory arrival
+    private int _corpseItemsEvaluated;  // items checked against loot profile this corpse session
+    private int _corpseItemsMatched;    // items that matched a loot rule this corpse session
     private int _targetCorpseId;
     private int _currentLootItemId;
     private long _corpseTargetSince;
@@ -45,6 +51,8 @@ public sealed partial class RynthAiPlugin
     private string _currentLootItemActionLabel = string.Empty;
     private string _currentLootItemName = string.Empty;
     private bool _currentLootItemIsSalvage;
+    private bool _corpseIdsRequested;
+    private long _corpseIdsRequestedAt;
 
     private static long CorpseNowMs => Environment.TickCount64;
     private void LootDiag(string message)
@@ -54,6 +62,8 @@ public sealed partial class RynthAiPlugin
 
     public override void OnBusyCountIncremented()
     {
+        if (_busyCount == 0)
+            _busyCountBecamePositiveAt = CorpseNowMs; // record first transition 0→positive
         _busyCount++;
         _busyCountLastIncrementAt = CorpseNowMs;
         if (_combatManager != null) _combatManager.BusyCount = _busyCount;
@@ -64,30 +74,77 @@ public sealed partial class RynthAiPlugin
     {
         if (_busyCount > 0)
             _busyCount--;
+        if (_busyCount == 0)
+            _busyCountBecamePositiveAt = 0; // back to idle — reset the elevation timer
         if (_combatManager != null) _combatManager.BusyCount = _busyCount;
         if (_buffManager != null) _buffManager.BusyCount = _busyCount;
     }
 
-    /// <summary>Safety valve: if busy count has been positive for too long, force-reset it.
-    /// Prevents permanent lockout when the host misses a decrement callback.</summary>
+    /// <summary>Safety valve: if busy count has been continuously positive for too long,
+    /// force-reset it. Uses the "first went positive" timestamp so that a stream of
+    /// new increments cannot keep refreshing the window indefinitely.</summary>
     private void CheckBusyTimeout()
     {
-        if (_busyCount > 0 && _busyCountLastIncrementAt != 0
-            && CorpseNowMs - _busyCountLastIncrementAt > BUSY_TIMEOUT_MS)
+        if (_busyCount > 0 && _busyCountBecamePositiveAt != 0
+            && CorpseNowMs - _busyCountBecamePositiveAt > BUSY_TIMEOUT_MS)
         {
             Log($"[RynthAi] Busy count stuck at {_busyCount} for >{BUSY_TIMEOUT_MS}ms — force-clearing.");
             _busyCount = 0;
             _busyCountLastIncrementAt = 0;
+            _busyCountBecamePositiveAt = 0;
             if (_combatManager != null) _combatManager.BusyCount = 0;
             if (_buffManager != null) _buffManager.BusyCount = 0;
+            // Also reset the engine's native count so accumulated increments don't
+            // prevent the next action from being processed.
+            if (Host.HasForceResetBusyCount) Host.ForceResetBusyCount();
         }
+
+        PruneCorpseCollections();
+    }
+
+    private long _lastCorpsePruneAt;
+    private const long CorpsePruneIntervalMs = 60_000; // prune once per minute
+    private const int  CorpseSetCap          = 500;    // trim when either set exceeds this
+
+    private void PruneCorpseCollections()
+    {
+        long now = CorpseNowMs;
+        if (now - _lastCorpsePruneAt < CorpsePruneIntervalMs) return;
+        _lastCorpsePruneAt = now;
+
+        // _completedCorpses — keep last CorpseSetCap entries (oldest irrelevant; corpses despawn)
+        if (_completedCorpses.Count > CorpseSetCap)
+        {
+            _completedCorpses.Clear();
+            Log($"[RynthAi] Pruned _completedCorpses (was >{CorpseSetCap})");
+        }
+
+        // _ownershipSkipLogged / _corpseIdRequested — pure spam-prevention, safe to wipe periodically
+        if (_ownershipSkipLogged.Count > 200)
+        {
+            _ownershipSkipLogged.Clear();
+            Log($"[RynthAi] Pruned _ownershipSkipLogged");
+        }
+        if (_corpseIdRequested.Count > 200)
+            _corpseIdRequested.Clear();
+
+        // _corpseCooldownUntil — remove expired entries
+        var expiredCooldowns = new List<int>();
+        foreach (var kvp in _corpseCooldownUntil)
+            if (kvp.Value <= now) expiredCooldowns.Add(kvp.Key);
+        foreach (var id in expiredCooldowns)
+            _corpseCooldownUntil.Remove(id);
     }
 
     public override void OnViewObjectContents(uint objectId)
     {
         int sid = unchecked((int)objectId);
         if (!IsCorpseLikeObject(sid))
+        {
+            // Non-corpse container (chest, bag, etc.) — queue a loot-check once inventory arrives.
+            _pendingLootCheckContainerId = sid;
             return;
+        }
 
         bool wasCompleted = _completedCorpses.Remove(sid);
         _corpseCooldownUntil.Remove(sid);
@@ -98,6 +155,9 @@ public sealed partial class RynthAiPlugin
         _openedContainerAt = CorpseNowMs;
         _openedContainerInventoryObservedAt = 0;
         _lastLootActionAt = 0;
+        _corpseItemsEvaluated = 0;
+        _corpseItemsMatched = 0;
+        _corpseIdsRequested = false;
         ResetCurrentLootItem();
         if (!sameCorpse || wasCompleted)
         {
@@ -124,6 +184,18 @@ public sealed partial class RynthAiPlugin
         if (sid == 0)
             return;
 
+        // Non-corpse container opened natively — run lootcheck on all its items.
+        if (_pendingLootCheckContainerId != 0 && sid == _pendingLootCheckContainerId)
+        {
+            _pendingLootCheckContainerId = 0;
+            if (_objectCache != null)
+            {
+                foreach (WorldObject item in _objectCache.GetContainedItems(sid))
+                    InspectLootRuleForItem(item.Id, quiet: true);
+            }
+            return;
+        }
+
         if (_openedContainerId != 0)
         {
             if (sid != _openedContainerId)
@@ -143,6 +215,8 @@ public sealed partial class RynthAiPlugin
     public override void OnStopViewingObjectContents(uint objectId)
     {
         int sid = unchecked((int)objectId);
+        if (_pendingLootCheckContainerId == sid)
+            _pendingLootCheckContainerId = 0;
         bool wasOpenCorpse = _openedContainerId == sid;
         if (_openedContainerId == sid)
         {
@@ -190,12 +264,30 @@ public sealed partial class RynthAiPlugin
 
         SyncCorpseContainerState();
 
-        if (!ShouldDriveCorpseOpening(settings))
+        // ── Hard disable: macro off, looting off, nav-boost, or buffing ──
+        // Buffing has absolute priority — halt all loot work until buffs are restored.
+        // The current corpse target is retained so looting resumes immediately after.
+        if (string.Equals(settings.BotAction, "Buffing", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        if (!settings.IsMacroRunning || !settings.EnableLooting || settings.BoostNavPriority)
         {
             ResetCorpseTarget(releaseState: true);
             return;
         }
 
+        // ── Combat takes priority over claiming NEW corpses ───────────────
+        // But if we already have an opened container, finish looting it
+        // (no movement, no conflict with combat).
+        if (settings.EnableCombat
+            && _combatManager?.HasTargets == true
+            && !settings.BoostLootPriority
+            && _openedContainerId == 0)
+        {
+            return; // Keep our target, just wait — don't ResetCorpseTarget
+        }
+
+        // ── Active corpse work — pause navigation ────────────────────────
         if (_openedContainerId != 0 || _targetCorpseId != 0)
             PauseNavigationForCorpse();
 
@@ -215,7 +307,17 @@ public sealed partial class RynthAiPlugin
         if (_targetCorpseId == 0)
         {
             if (!TryFindNearestCorpse(maxMeters, out WorldObject? corpse, out _))
+            {
+                // No corpses in range. If we were holding "Looting" from a just-completed
+                // corpse (MarkCorpseComplete intentionally skips ResetCorpseTarget so the
+                // next tick can claim instantly), release it now so navigation can resume.
+                if (settings.BotAction == "Looting")
+                {
+                    settings.BotAction = "Default";
+                    _corpsePausedNav = false;
+                }
                 return;
+            }
 
             if (corpse == null)
                 return;
@@ -241,7 +343,9 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
-        if (settings.BotAction == "Default" || settings.BotAction == "Navigating")
+        // Set BotAction to Looting — but don't override Buffing, which is
+        // handled by the buff system and just means "casting between loot actions"
+        if (settings.BotAction == "Default" || settings.BotAction == "Navigating" || settings.BotAction == "Combat")
             settings.BotAction = "Looting";
 
         double distanceMeters = _objectCache.Distance(unchecked((int)_playerId), _targetCorpseId);
@@ -262,9 +366,6 @@ public sealed partial class RynthAiPlugin
         }
 
         StopCorpseMovement();
-
-        if (_busyCount > 0)
-            return; // Client is busy — don't queue another UseObject or we'll hang
 
         if (_lastCorpseOpenAttemptAt == 0 || now - _lastCorpseOpenAttemptAt >= Math.Max(500, settings.LootOpenRetryMs))
         {
@@ -325,8 +426,15 @@ public sealed partial class RynthAiPlugin
                 _corpseCooldownUntil.Remove(candidate.Id);
             }
 
-            if (!ShouldLootCorpse(candidate))
+            CorpseLootDecision decision = EvaluateCorpseLootDecision(candidate);
+            if (!decision.ShouldLoot)
+            {
+                if (_ownershipSkipLogged.Add(candidate.Id))
+                {
+                    LootDiag($"[RynthAi] Corpse loot: ownership skip 0x{(uint)candidate.Id:X8} name='{candidate.Name}' mode='{decision.ModeName}' killer='{decision.KillerName}' me='{decision.PlayerName}' reason='{decision.Reason}'");
+                }
                 continue;
+            }
 
             double dist = _objectCache.Distance(playerId, candidate.Id);
             if (dist > maxMeters || dist >= distanceMeters)
@@ -363,7 +471,7 @@ public sealed partial class RynthAiPlugin
 
         // Corpse LongDesc is only available after the object is identified.
         // Request ID so the killer name is populated for the next check.
-        if (string.IsNullOrWhiteSpace(longDesc) && Host.HasRequestId)
+        if (string.IsNullOrWhiteSpace(longDesc) && Host.HasRequestId && _corpseIdRequested.Add(corpse.Id))
             Host.RequestId(unchecked((uint)corpse.Id));
 
         string killerName = ExtractCorpseKillerName(longDesc) ?? string.Empty;
@@ -422,7 +530,7 @@ public sealed partial class RynthAiPlugin
             }
 
             bool matchesPlayer = !string.IsNullOrWhiteSpace(myName)
-                && killerName.Equals(myName, StringComparison.OrdinalIgnoreCase);
+                && NormalizeCharName(killerName).Equals(NormalizeCharName(myName), StringComparison.OrdinalIgnoreCase);
             return new CorpseLootDecision
             {
                 ShouldLoot = matchesPlayer,
@@ -440,7 +548,7 @@ public sealed partial class RynthAiPlugin
 
         if (!string.IsNullOrWhiteSpace(killerName)
             && !string.IsNullOrWhiteSpace(myName)
-            && killerName.Equals(myName, StringComparison.OrdinalIgnoreCase))
+            && NormalizeCharName(killerName).Equals(NormalizeCharName(myName), StringComparison.OrdinalIgnoreCase))
         {
             return new CorpseLootDecision
             {
@@ -490,7 +598,7 @@ public sealed partial class RynthAiPlugin
         bool killerKnown = !string.IsNullOrWhiteSpace(killerName);
         bool fallbackMatchesPlayer = killerKnown
             && !string.IsNullOrWhiteSpace(myName)
-            && killerName.Equals(myName, StringComparison.OrdinalIgnoreCase);
+            && NormalizeCharName(killerName).Equals(NormalizeCharName(myName), StringComparison.OrdinalIgnoreCase);
         bool tentative = !killerKnown; // LongDesc not loaded yet
         return new CorpseLootDecision
         {
@@ -517,6 +625,21 @@ public sealed partial class RynthAiPlugin
         return Host.TryGetObjectName(_playerId, out string playerName) && !string.IsNullOrWhiteSpace(playerName)
             ? playerName
             : string.Empty;
+    }
+
+    /// <summary>Strip GM/admin sigils (leading '+', surrounding whitespace) so admin characters
+    /// whose player-object name is "+Buffi" match the "Killed by Buffi." string in corpse LongDesc.</summary>
+    private static string NormalizeCharName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return string.Empty;
+
+        string trimmed = name.Trim();
+        // Admin/GM sigils appear at the start of the display name (+, @, etc.) but
+        // are stripped out of the "Killed by X" string the server writes to LongDesc.
+        while (trimmed.Length > 0 && (trimmed[0] == '+' || trimmed[0] == '@' || trimmed[0] == '#'))
+            trimmed = trimmed.Substring(1);
+        return trimmed.Trim();
     }
 
     private static string? ExtractCorpseKillerName(string longDesc)
@@ -556,25 +679,12 @@ public sealed partial class RynthAiPlugin
             _corpseTargetSince = CorpseNowMs;
         }
 
-        WorldObject? openedCorpse = _objectCache?[corpseId];
-        if (openedCorpse != null && !ShouldLootCorpse(openedCorpse))
-        {
-            LootDiag($"[RynthAi] Corpse loot: skipping corpse 0x{(uint)corpseId:X8} due to loot ownership settings.");
-            MarkCorpseCompleted(corpseId);
-            return;
-        }
-
         if (_completedCorpses.Contains(corpseId))
         {
-            if (_busyCount > 0)
-                return; // Client is busy — wait before closing
-            if (_lastLootActionAt == 0 || CorpseNowMs - _lastLootActionAt >= Math.Max(200, settings.LootClosingDelayMs))
-            {
-                Host.SelectItem(unchecked((uint)corpseId));
-                Host.UseObject(unchecked((uint)corpseId));
-                LootDiag($"[RynthAi] Corpse loot: closing completed corpse 0x{(uint)corpseId:X8}.");
-                _lastLootActionAt = CorpseNowMs;
-            }
+            _openedContainerId = 0;
+            _openedContainerAt = 0;
+            _openedContainerInventoryObservedAt = 0;
+            ResetCorpseTarget(releaseState: true);
             return;
         }
 
@@ -589,73 +699,183 @@ public sealed partial class RynthAiPlugin
         }
 
         long openAge = now - _openedContainerAt;
-        if (openAge < Math.Max(350, settings.LootContentSettleMs))
+
+        // Brief settle after open for client to populate container
+        if (openAge < Math.Max(50, settings.LootContentSettleMs))
             return;
 
+        // Wait for inventory update event from server
         if (_openedContainerInventoryObservedAt == 0)
         {
-            if (openAge < Math.Max(1000, settings.LootEmptyCorpseMs + 300))
+            if (openAge < Math.Max(300, settings.LootEmptyCorpseMs))
                 return;
-
             _openedContainerInventoryObservedAt = _openedContainerAt;
-            LootDiag($"[RynthAi] Corpse loot: no inventory update seen for 0x{(uint)corpseId:X8}; probing after {openAge}ms.");
-        }
-        else if (now - _openedContainerInventoryObservedAt < 250)
-        {
-            return;
+            LootDiag($"[RynthAi] Corpse loot: no inventory update for 0x{(uint)corpseId:X8}; probing after {openAge}ms.");
         }
 
+        // Handle pending pickup confirmation (don't block evaluation — just check)
         if (_currentLootItemMovePending)
         {
             TickPendingCorpsePickup(settings);
-            return;
+            if (_currentLootItemMovePending)
+                return; // Still waiting for this pickup to clear
         }
 
-        int nextItemId = FindNextCorpseItem(corpseId, out int visibleItemCount);
-        if (visibleItemCount <= 0)
+        // Pre-classify items and batch-request IDs only for items that need them.
+        //
+        // Each Host.RequestId() call increments ClientUISystem::m_cBusy (busy count).
+        // After MarkCorpseCompleted, the _busyCount > 0 guard in TickCorpseOpening
+        // blocks AttemptOpenCorpse until every ID response clears the count — which
+        // takes 2-4 seconds for a full corpse batch.  Fix: classify items whose class
+        // has no stat-based rules immediately (no ID needed); only request ID for items
+        // where the profile has numeric/spell conditions that require appraisal data.
+        if (!_corpseIdsRequested)
         {
-            if (now - _openedContainerAt >= Math.Max(200, settings.LootEmptyCorpseMs))
+            _corpseIdsRequested = true;
+            _corpseIdsRequestedAt = now;
+            int requested = 0;
+            int preClassified = 0;
+
+            foreach (WorldObject item in _objectCache.GetContainedItems(corpseId))
             {
-                LootDiag($"[RynthAi] Corpse loot: no cached child items found for 0x{(uint)corpseId:X8} after {openAge}ms; marking complete.");
+                if (_processedCorpseItems.Contains(item.Id)) continue;
+
+                bool hasData = Host.HasHasAppraisalData && Host.HasAppraisalData(unchecked((uint)item.Id));
+                if (hasData) continue; // Already has full appraisal — will evaluate below
+
+                bool hasName = !string.IsNullOrWhiteSpace(item.Name);
+
+                // Items with a name whose class has no stat-based loot rules can be
+                // classified immediately from name/class data — no ID request needed.
+                if (hasName && !ItemNeedsAppraisalForLoot(item))
+                {
+                    // Pre-classify: if no match, mark processed so we never re-evaluate.
+                    // Items that DO match (e.g. name-only rules) stay unprocessed and will
+                    // be picked up in the eval loop below on this same tick.
+                    if (!ClassifyItemAgainstProfile(item, out _, out _, out _))
+                        _processedCorpseItems.Add(item.Id);
+                    preClassified++;
+                    continue; // No busy-count-inflating ID request
+                }
+
+                // Item needs appraisal for accurate classification — request ID.
+                Host.RequestId(unchecked((uint)item.Id));
+                requested++;
+            }
+
+            if (requested > 0)
+            {
+                LootDiag($"[RynthAi] Corpse loot: requested {requested} item ID(s) (pre-classified {preClassified}) for 0x{(uint)corpseId:X8}.");
+                return; // One tick for server responses to start arriving
+            }
+            if (preClassified > 0)
+                LootDiag($"[RynthAi] Corpse loot: pre-classified {preClassified} item(s) without ID for 0x{(uint)corpseId:X8}.");
+            // Fall through: all items handled without ID requests — evaluate immediately
+        }
+
+        // Evaluate ALL items with data in one pass — do NOT gate evaluation on
+        // busy count.  Only the actual UseObject pickup needs busy == 0.
+        // This lets us classify every item on the corpse as soon as ID data
+        // arrives, instead of waiting for each RequestId to fully clear.
+        int visibleItemCount = 0;
+        int pendingDataCount = 0;
+        bool assessTimedOut = now - _corpseIdsRequestedAt >= Math.Max(100, settings.LootAssessWindowMs);
+
+        int    firstMatchId     = 0;
+        string matchItemName    = string.Empty;
+        string matchActionLabel = string.Empty;
+        string matchRuleLabel   = string.Empty;
+        bool   matchIsSalvage   = false;
+
+        foreach (WorldObject item in _objectCache.GetContainedItems(corpseId))
+        {
+            visibleItemCount++;
+            if (_processedCorpseItems.Contains(item.Id))
+                continue;
+
+            bool hasAppraisalData = Host.HasHasAppraisalData && Host.HasAppraisalData(unchecked((uint)item.Id));
+            bool hasName = !string.IsNullOrWhiteSpace(item.Name);
+
+            if (!hasAppraisalData && !hasName)
+            {
+                if (!assessTimedOut)
+                {
+                    pendingDataCount++;
+                    continue;
+                }
+                // Timed out waiting for data — skip this item
+                _processedCorpseItems.Add(item.Id);
+                continue;
+            }
+
+            // Evaluate against loot profile — pure classification, no UseObject.
+            if (ClassifyItemAgainstProfile(item, out string actionLabel, out bool isSalvage, out string ruleLabel))
+            {
+                // First match wins — save it for pickup below
+                if (firstMatchId == 0)
+                {
+                    firstMatchId     = item.Id;
+                    matchItemName    = item.Name ?? string.Empty;
+                    matchActionLabel = actionLabel;
+                    matchRuleLabel   = ruleLabel;
+                    matchIsSalvage   = isSalvage;
+                }
+                // Don't break — keep evaluating to mark non-matches processed
+            }
+            else
+            {
+                // No match — mark processed so we never re-evaluate
+                _processedCorpseItems.Add(item.Id);
+            }
+        }
+
+        // Empty corpse check
+        if (visibleItemCount == 0)
+        {
+            if (openAge >= Math.Max(200, settings.LootEmptyCorpseMs))
+            {
+                LootDiag($"[RynthAi] Corpse loot: no items on 0x{(uint)corpseId:X8} after {openAge}ms; marking complete.");
                 MarkCorpseCompleted(corpseId);
             }
             return;
         }
 
-        if (_busyCount > 0)
-            return; // Client is busy — don't queue item pickup
-
-        if (_lastLootActionAt != 0 && now - _lastLootActionAt < Math.Max(50, settings.LootInterItemDelayMs))
-            return;
-
-        if (nextItemId == 0)
+        // Matched item — attempt pickup (gated on busy count)
+        if (firstMatchId != 0)
         {
-            LootDiag($"[RynthAi] Corpse loot: all {visibleItemCount} cached child item(s) for 0x{(uint)corpseId:X8} are already processed.");
+            if (_busyCount > 0)
+                return; // Wait for busy to clear before pickup only
+
+            ChatLine($"[RynthAi] Loot rule: {matchItemName} -> [{matchActionLabel}] {matchRuleLabel}");
+            _currentLootItemId = firstMatchId;
+            Host.SelectItem(unchecked((uint)firstMatchId));
+            LootDiag($"[RynthAi] Corpse loot: using 0x{(uint)firstMatchId:X8} '{matchItemName}' from corpse 0x{(uint)corpseId:X8}.");
+            bool moved = Host.UseObject(unchecked((uint)firstMatchId));
+            if (!moved)
+            {
+                LootDiag($"[RynthAi] Corpse loot: use request failed for 0x{(uint)firstMatchId:X8}.");
+                if (IncrementCorpseItemAttempt(firstMatchId) >= 3)
+                    _processedCorpseItems.Add(firstMatchId);
+                ResetCurrentLootItem();
+                _lastLootActionAt = now;
+                return;
+            }
+            _currentLootItemMovePending      = true;
+            _currentLootItemMoveRequestedAt  = now;
+            _currentLootItemMoveAttempts     = 1;
+            _currentLootItemActionLabel      = matchActionLabel;
+            _currentLootItemName             = matchItemName;
+            _currentLootItemIsSalvage        = matchIsSalvage;
+            _lastLootActionAt                = now;
+            return;
+        }
+
+        // All items evaluated, no matches left — mark corpse complete
+        if (pendingDataCount == 0)
+        {
+            LootDiag($"[RynthAi] Corpse loot: all {visibleItemCount} items on 0x{(uint)corpseId:X8} evaluated; marking complete.");
             MarkCorpseCompleted(corpseId);
-            return;
         }
-
-        if (_currentLootItemId != nextItemId)
-            ResetCurrentLootItem();
-
-        if (!_currentLootItemRequested)
-        {
-            _currentLootItemId = nextItemId;
-            LootDiag($"[RynthAi] Corpse loot: requesting ID for 0x{(uint)nextItemId:X8} from corpse 0x{(uint)corpseId:X8}.");
-            _currentLootItemRequested = Host.RequestId(unchecked((uint)nextItemId));
-            _currentLootItemRequestedAt = now;
-            _lastLootActionAt = now;
-
-            if (!_currentLootItemRequested && IncrementCorpseItemAttempt(nextItemId) >= 2)
-                _processedCorpseItems.Add(nextItemId);
-
-            return;
-        }
-
-        if (now - _currentLootItemRequestedAt < Math.Max(100, settings.LootAssessWindowMs))
-            return;
-
-        ProcessCorpseItem(nextItemId);
     }
 
     private void TickPendingCorpsePickup(LegacyUiSettings settings)
@@ -670,6 +890,9 @@ public sealed partial class RynthAiPlugin
         WorldObject? currentItem = _objectCache[_currentLootItemId];
         int currentContainer = currentItem?.Container ?? 0;
         bool stillVisibleOnCorpse = IsCorpseItemVisible(_openedContainerId, _currentLootItemId);
+
+        // Check every tick — confirm immediately as soon as the item leaves the corpse.
+        // Don't gate this on a timer; the timer only applies to the RETRY path below.
         if (currentItem == null || !stillVisibleOnCorpse || (currentContainer != 0 && currentContainer != _openedContainerId))
         {
             ConfirmCurrentLootItemMoved(
@@ -682,7 +905,8 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
-        long verifyWindowMs = Math.Max(250, settings.LootRetryTimeoutMs);
+        // Item still on corpse — wait before retrying the UseObject.
+        long verifyWindowMs = Math.Max(150, settings.LootRetryTimeoutMs);
         if (now - _currentLootItemMoveRequestedAt < verifyWindowMs)
             return;
 
@@ -764,10 +988,50 @@ public sealed partial class RynthAiPlugin
     private bool IsCorpseNavigationClaimActive(LegacyUiSettings? settings = null)
     {
         settings ??= _dashboard?.Settings;
-        if (settings == null || !ShouldDriveCorpseOpening(settings))
+        if (settings == null || !settings.IsMacroRunning || !settings.EnableLooting)
             return false;
 
-        return _targetCorpseId != 0 || _openedContainerId != 0 || _corpseAutorunActive;
+        if (settings.BoostNavPriority)
+            return false;
+
+        // Active corpse target or open container — always block nav
+        if (_targetCorpseId != 0 || _openedContainerId != 0 || _corpseAutorunActive)
+            return true;
+
+        // No active target, but check if unlooted corpses exist within range.
+        // This prevents navigation from moving the player away between corpses.
+        double maxMeters = GetCorpseApproachRangeMaxMeters(settings);
+        if (maxMeters <= 0.25)
+            return false;
+
+        return HasUnlootedCorpsesInRange(maxMeters);
+    }
+
+    /// <summary>Returns true if at least one lootable, non-completed corpse is within range.</summary>
+    private bool HasUnlootedCorpsesInRange(double maxMeters)
+    {
+        if (_objectCache == null || _playerId == 0)
+            return false;
+
+        long now = CorpseNowMs;
+        int playerId = unchecked((int)_playerId);
+        foreach (WorldObject candidate in _objectCache.GetLandscapeObjects())
+        {
+            if (candidate.ObjectClass != AcObjectClass.Corpse)
+                continue;
+            if (_completedCorpses.Contains(candidate.Id))
+                continue;
+            if (_corpseCooldownUntil.TryGetValue(candidate.Id, out long blockedUntil) && blockedUntil > now)
+                continue;
+            if (!ShouldLootCorpse(candidate))
+                continue;
+
+            double dist = _objectCache.Distance(playerId, candidate.Id);
+            if (dist <= maxMeters)
+                return true;
+        }
+
+        return false;
     }
 
     private void PauseNavigationForCorpse()
@@ -789,114 +1053,190 @@ public sealed partial class RynthAiPlugin
             LootDiag($"[RynthAi] Corpse loot: pausing navigation for corpse 0x{(uint)corpseId:X8}.");
     }
 
-    private void ProcessCorpseItem(int itemId)
+    /// <summary>
+    /// Pure classification — evaluates an item against the active loot profile
+    /// without performing any pickup or side effects.  Returns true if the item
+    /// matched a loot/salvage rule.
+    /// </summary>
+    private bool ClassifyItemAgainstProfile(WorldObject item, out string actionLabel, out bool isSalvage, out string ruleLabel)
     {
-        if (_objectCache == null)
-            return;
-
-        long now = CorpseNowMs;
-        WorldObject? item = _objectCache[itemId];
-        if (item == null || string.IsNullOrWhiteSpace(item.Name))
-        {
-            if (IncrementCorpseItemAttempt(itemId) >= 2)
-                _processedCorpseItems.Add(itemId);
-
-            ResetCurrentLootItem();
-            _lastLootActionAt = now;
-            return;
-        }
-
-        if (_openedContainerId != 0 && item.Container != _openedContainerId)
-        {
-            _processedCorpseItems.Add(itemId);
-            ResetCurrentLootItem();
-            _lastLootActionAt = now;
-            return;
-        }
-
-        // ── Classify item against active loot profile ─────────────────────────
-        string actionLabel;
-        bool isSalvage;
+        actionLabel = string.Empty;
+        isSalvage   = false;
+        ruleLabel   = string.Empty;
 
         if (TryLoadNativeLootProfile(out LootProfile nativeProfile, out _))
         {
-            // Native .json profile path
+            _corpseItemsEvaluated++;
             var (nativeAction, nativeRule) = LootEvaluator.Classify(nativeProfile, item, _charSkills);
             if (nativeRule == null)
             {
-                LootDiag($"[RynthAi] Corpse loot: no loot rule matched 0x{(uint)itemId:X8} '{item.Name}'.");
-                _processedCorpseItems.Add(itemId);
-                ResetCurrentLootItem();
-                _lastLootActionAt = now;
-                return;
+                LootDiag($"[RynthAi] Corpse loot: no loot rule matched 0x{(uint)item.Id:X8} '{item.Name}'.");
+                return false;
             }
+            _corpseItemsMatched++;
             actionLabel = nativeAction.ToString();
             isSalvage   = nativeAction == LootAction.Salvage;
-            string nativeLabel = string.IsNullOrWhiteSpace(nativeRule.Name) ? "rule" : nativeRule.Name.Trim();
-            ChatLine($"[RynthAi] Loot rule: {item.Name} -> [{actionLabel}] {nativeLabel}");
+            ruleLabel   = string.IsNullOrWhiteSpace(nativeRule.Name) ? "rule" : nativeRule.Name.Trim();
+            return true;
         }
-        else
-        {
-            // VTank .utl profile fallback
-            if (!TryLoadLootProfile(string.Empty, out VTankLootProfile vtankProfile, out _))
-            {
-                _processedCorpseItems.Add(itemId);
-                ResetCurrentLootItem();
-                _lastLootActionAt = now;
-                return;
-            }
 
-            VTankLootRule? matchedRule = null;
-            int matchedRuleIndex      = -1;
-            for (int ri = 0; ri < vtankProfile.Rules.Count; ri++)
+        // VTank .utl profile fallback
+        if (!TryLoadLootProfile(string.Empty, out VTankLootProfile vtankProfile, out _))
+            return false;
+
+        _corpseItemsEvaluated++;
+        VTankLootContext lootCtx = new(Host, _playerId) { Cache = _objectCache };
+        VTankLootRule? matchedRule = null;
+        int matchedRuleIndex      = -1;
+        for (int ri = 0; ri < vtankProfile.Rules.Count; ri++)
+        {
+            if (vtankProfile.Rules[ri].IsMatch(item, lootCtx))
             {
-                if (vtankProfile.Rules[ri].IsMatch(item))
+                matchedRule      = vtankProfile.Rules[ri];
+                matchedRuleIndex = ri;
+                break;
+            }
+        }
+
+        if (matchedRule == null)
+        {
+            LootDiag($"[RynthAi] Corpse loot: no loot rule matched 0x{(uint)item.Id:X8} '{item.Name}'.");
+            return false;
+        }
+
+        _corpseItemsMatched++;
+        ruleLabel = string.IsNullOrWhiteSpace(matchedRule.Name)
+            ? $"#{matchedRuleIndex}"
+            : matchedRule.Name.Trim();
+        actionLabel = matchedRule.Action.ToString();
+        isSalvage   = matchedRule.Action == VTankLootAction.Salvage;
+        return true;
+    }
+
+    /// <summary>
+    /// Returns true if the active loot profile has at least one rule that
+    /// (a) could match this item's object class, AND
+    /// (b) uses conditions that require appraisal data (numeric stats, spell counts, etc.)
+    ///
+    /// When false, the item can be definitively evaluated from name/class data alone,
+    /// so we skip Host.RequestId() to avoid inflating the client busy count.
+    /// </summary>
+    private bool ItemNeedsAppraisalForLoot(WorldObject item)
+    {
+        if (TryLoadNativeLootProfile(out LootProfile nativeProfile, out _))
+            return NativeProfileNeedsAppraisalForClass(nativeProfile, item.ObjectClass);
+
+        if (TryLoadLootProfile(string.Empty, out VTankLootProfile vtankProfile, out _))
+            return VTankProfileNeedsAppraisalForClass(vtankProfile, item.ObjectClass);
+
+        return false; // No active profile — no ID request needed
+    }
+
+    private static bool NativeProfileNeedsAppraisalForClass(LootProfile profile, AcObjectClass cls)
+    {
+        foreach (var rule in profile.Rules)
+        {
+            if (!rule.Enabled) continue;
+
+            // Determine whether the rule targets this class
+            bool hasClassFilter = false;
+            bool classMatches   = false;
+            foreach (var cond in rule.Conditions)
+            {
+                if (cond is ObjectClassCondition occ)
                 {
-                    matchedRule      = vtankProfile.Rules[ri];
-                    matchedRuleIndex = ri;
-                    break;
+                    hasClassFilter = true;
+                    if ((AcObjectClass)(int)occ.ObjectClass == cls)
+                        classMatches = true;
                 }
             }
+            if (hasClassFilter && !classMatches) continue; // Rule filters out this class
 
-            if (matchedRule == null)
+            // Rule can match this class — does it require appraisal data?
+            foreach (var cond in rule.Conditions)
             {
-                LootDiag($"[RynthAi] Corpse loot: no loot rule matched 0x{(uint)itemId:X8} '{item.Name}'.");
-                _processedCorpseItems.Add(itemId);
-                ResetCurrentLootItem();
-                _lastLootActionAt = now;
-                return;
+                if (cond is LongValKeyGECondition
+                        or LongValKeyLECondition
+                        or LongValKeyECondition
+                        or LongValKeyNECondition
+                        or LongValKeyFlagCondition
+                        or DoubleValKeyGECondition
+                        or DoubleValKeyLECondition
+                        or TotalRatingsGECondition
+                        or MinDamageGECondition
+                        or DamagePercentGECondition)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool VTankProfileNeedsAppraisalForClass(VTankLootProfile profile, AcObjectClass cls)
+    {
+        // Requirement types that need appraisal data from the server
+        static bool TypeNeedsAppraisal(int t) => t is
+            2 or 3 or 4 or 5 or 6 or 8 or 9 or 10 or 11 or 12 or 13 or
+            14 or 15 or 16 or 17 or 2000 or 2001 or 2003 or 2005 or 2006 or 2007 or 2008;
+
+        // Number of data lines consumed by each requirement type (mirrors VTankLootParser)
+        static int DataCount(int t) => t switch
+        {
+            0    => 1, 1    => 2, 2    => 2, 3    => 2, 4    => 2, 5    => 2,
+            6    => 1, 7    => 1, 8    => 1, 9    => 3, 10   => 1, 11   => 2,
+            12   => 2, 13   => 2, 14   => 5, 15   => 6, 16   => 6, 17   => 2,
+            1000 => 2, 1001 => 1, 1002 => 1, 1003 => 1, 1004 => 3,
+            2000 => 1, 2001 => 1, 2003 => 2, 2005 => 2, 2006 => 1, 2007 => 1, 2008 => 3,
+            9999 => 1, _    => 0,
+        };
+
+        int targetClass = (int)cls;
+
+        foreach (var rule in profile.Rules)
+        {
+            if (string.IsNullOrWhiteSpace(rule.RawInfoLine)) continue;
+
+            string[] parts = rule.RawInfoLine.Split(';');
+            if (parts.Length < 3) continue; // 0 or 2 parts = no requirements
+
+            bool hasClassReq   = false;
+            bool classMatches  = false;
+            bool needsAppraisal = false;
+
+            var dataQueue = new System.Collections.Generic.Queue<string>(rule.RawDataLines);
+
+            for (int i = 2; i < parts.Length; i++)
+            {
+                if (!int.TryParse(parts[i], System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture, out int type))
+                    continue;
+
+                int dataCount = DataCount(type);
+
+                if (type == 7) // ObjectClass requirement
+                {
+                    hasClassReq = true;
+                    if (dataQueue.Count > 0)
+                    {
+                        if (int.TryParse(dataQueue.Peek(), System.Globalization.NumberStyles.Integer,
+                                System.Globalization.CultureInfo.InvariantCulture, out int cls2)
+                            && cls2 == targetClass)
+                            classMatches = true;
+                    }
+                }
+                else if (TypeNeedsAppraisal(type))
+                {
+                    needsAppraisal = true;
+                }
+
+                for (int d = 0; d < dataCount && dataQueue.Count > 0; d++)
+                    dataQueue.Dequeue();
             }
 
-            string ruleLabel = string.IsNullOrWhiteSpace(matchedRule.Name)
-                ? $"#{matchedRuleIndex}"
-                : matchedRule.Name.Trim();
-            ChatLine($"[RynthAi] Loot rule: {item.Name} -> [{matchedRule.Action}] {ruleLabel}");
-            actionLabel = matchedRule.Action.ToString();
-            isSalvage   = matchedRule.Action == VTankLootAction.Salvage;
+            bool ruleApplies = !hasClassReq || classMatches;
+            if (ruleApplies && needsAppraisal) return true;
         }
 
-        // ── Dispatch ──────────────────────────────────────────────────────────
-        Host.SelectItem(unchecked((uint)itemId));
-        LootDiag($"[RynthAi] Corpse loot: using 0x{(uint)itemId:X8} '{item.Name}' from corpse 0x{(uint)_openedContainerId:X8}.");
-        bool moved = Host.UseObject(unchecked((uint)itemId));
-        if (!moved)
-        {
-            LootDiag($"[RynthAi] Corpse loot: use request failed immediately for 0x{(uint)itemId:X8}.");
-            if (IncrementCorpseItemAttempt(itemId) >= 3)
-                _processedCorpseItems.Add(itemId);
-
-            ResetCurrentLootItem();
-            _lastLootActionAt = now;
-            return;
-        }
-
-        _currentLootItemMovePending      = true;
-        _currentLootItemMoveRequestedAt  = now;
-        _currentLootItemMoveAttempts     = 1;
-        _currentLootItemActionLabel      = actionLabel;
-        _currentLootItemName             = item.Name;
-        _currentLootItemIsSalvage        = isSalvage;
-        _lastLootActionAt                = now;
+        return false;
     }
 
     private void MarkCorpseCompleted(int corpseId)
@@ -908,8 +1248,36 @@ public sealed partial class RynthAiPlugin
         _corpseCooldownUntil.Remove(corpseId);
         _processedCorpseItems.Clear();
         _corpseItemAttempts.Clear();
+        _corpseIdsRequested = false;
         ResetCurrentLootItem();
-        _lastLootActionAt = CorpseNowMs;
+
+        // Clear container state immediately. Do NOT send UseObject(corpse) to close it —
+        // that increments busy count and blocks the next open until the server acks the close.
+        // The server will auto-close this corpse when the next UseObject open is sent.
+        // SyncCorpseContainerState guards against re-claiming via _completedCorpses.
+        if (_openedContainerId == corpseId)
+        {
+            _openedContainerId = 0;
+            _openedContainerAt = 0;
+            _openedContainerInventoryObservedAt = 0;
+            LootDiag($"[RynthAi] Corpse loot: completed 0x{(uint)corpseId:X8}, cleared container state.");
+        }
+
+        if (_corpseItemsEvaluated > 0 && _corpseItemsMatched == 0)
+        {
+            string corpseName = _objectCache?[corpseId]?.Name ?? $"0x{(uint)corpseId:X8}";
+            ChatLine($"[RynthAi] Nothing on {corpseName} matches the loot profile.");
+        }
+        LootDiag($"[RynthAi] Corpse loot: completed 0x{(uint)corpseId:X8}, releasing container.");
+
+        // Lightweight target reset — keep BotAction="Looting" and _corpsePausedNav
+        // so the next tick immediately claims the next corpse without a gap where
+        // the proactive buff check or navigation could jump in.
+        StopCorpseMovement();
+        _targetCorpseId = 0;
+        _corpseTargetSince = 0;
+        _lastCorpseOpenAttemptAt = 0;
+        _lastLootActionAt = 0;
     }
 
     private int IncrementCorpseItemAttempt(int itemId)
@@ -1011,6 +1379,12 @@ public sealed partial class RynthAiPlugin
 
         if (_openedContainerId == 0 && rawOpen != 0 && IsCorpseLikeObject(rawOpen))
         {
+            // Don't re-claim a corpse we've already completed — the server still
+            // reports it as open, but we're done with it. It will close when we
+            // open the next corpse or move away.
+            if (_completedCorpses.Contains(rawOpen))
+                return;
+
             bool switchedTarget = _targetCorpseId != 0 && _targetCorpseId != rawOpen;
             _openedContainerId = rawOpen;
             _openedContainerAt = now;
@@ -1039,6 +1413,7 @@ public sealed partial class RynthAiPlugin
         _openedContainerInventoryObservedAt = 0;
         _lastCorpseOpenAttemptAt = 0;
         _lastLootActionAt = 0;
+        _corpseIdsRequested = false;
         ResetCurrentLootItem();
         _processedCorpseItems.Clear();
         _corpseItemAttempts.Clear();
@@ -1059,6 +1434,8 @@ public sealed partial class RynthAiPlugin
         _processedCorpseItems.Remove(sid);
         _corpseItemAttempts.Remove(sid);
         _corpseCooldownUntil.Remove(sid);
+        _ownershipSkipLogged.Remove(sid);
+        _corpseIdRequested.Remove(sid);
 
         if (_targetCorpseId == sid)
             ResetCorpseTarget(releaseState: true);
@@ -1160,14 +1537,13 @@ public sealed partial class RynthAiPlugin
         _completedCorpses.Add(corpseId);
         _corpseCooldownUntil.Remove(corpseId);
 
-        if (_openedContainerId == corpseId && _busyCount == 0)
+        // Force-clear container state — don't try UseObject to close.
+        // The server will auto-close when we open the next corpse or move away.
+        if (_openedContainerId == corpseId)
         {
-            Host.SelectItem(unchecked((uint)corpseId));
-            Host.UseObject(unchecked((uint)corpseId));
-            LootDiag($"[RynthAi] Corpse loot: requested close for timed out corpse 0x{(uint)corpseId:X8}.");
-            _lastLootActionAt = now;
-            ResetCurrentLootItem();
-            return;
+            _openedContainerId = 0;
+            _openedContainerAt = 0;
+            _openedContainerInventoryObservedAt = 0;
         }
 
         ResetCorpseTarget(releaseState: true);

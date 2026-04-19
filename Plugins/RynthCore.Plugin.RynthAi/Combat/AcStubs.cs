@@ -129,16 +129,110 @@ public class SpellInfo
         " VIII", " VII", " VI", " V", " IV", " III", " II", " I",
     };
 
+    /// <summary>
+    /// Maps tier 7 lore names back to their base spell names so all tiers
+    /// of the same spell produce the same family hash. Without this,
+    /// "Inferno's Bane" (tier 7) and "Incantation of Flame Bane" (tier 8)
+    /// would hash to different families, breaking timer lookups.
+    /// </summary>
+    private static readonly Dictionary<string, string> LoreToBase = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // Creature buffs
+        { "Might of the Lugians", "Strength" },
+        { "Preservance", "Endurance" }, { "Perseverance", "Endurance" },
+        { "Honed Control", "Coordination" },
+        { "Hastening", "Quickness" },
+        { "Inner Calm", "Focus" },
+        { "Mind Blossom", "Willpower" },
+        { "Aura of Defense", "Invulnerability" },
+        { "Aura of Deflection", "Impregnability" },
+        { "Aura of Resistance", "Magic Resistance" },
+        // Life protections
+        { "Executor's Blessing", "Armor" },
+        { "Caustic Blessing", "Acid Protection" },
+        { "Blessing of the Blade Turner", "Blade Protection" },
+        { "Blessing of the Mace Turner", "Bludgeoning Protection" },
+        { "Icy Blessing", "Cold Protection" },
+        { "Fiery Blessing", "Fire Protection" },
+        { "Storm's Blessing", "Lightning Protection" },
+        { "Blessing of the Arrow Turner", "Piercing Protection" },
+        { "Battlemage's Blessing", "Mana Renewal" },
+        { "Robustify", "Regeneration" },
+        { "Unflinching Persistence", "Rejuvenation" }, { "Unfinching Persistance", "Rejuvenation" },
+        { "Adja's Intervention", "Heal" },
+        { "Robustification", "Revitalize" },
+        { "Meditative Trance", "Stamina to Mana" },
+        { "Rushed Recovery", "Stamina to Health" },
+        // Skill masteries
+        { "Topheron's Blessing", "Monster Attunement" },
+        { "Kaluhc's Blessing", "Person Attunement" },
+        { "Aliester's Blessing", "Arcane Enlightenment" },
+        { "Jibril's Blessing", "Armor Tinkering Expertise" },
+        { "Yoshi's Blessing", "Item Tinkering Expertise" },
+        { "Koga's Blessing", "Weapon Tinkering Expertise" },
+        { "Nuhmidira's Blessing", "Mana Conversion Mastery" },
+        { "Saladur's Blessing", "Sprint" },
+        { "Jahannan's Blessing", "Jumping Mastery" },
+        { "Odif's Blessing", "Fealty" }, { "Odif's Boon", "Fealty" },
+        { "Ar-Pei's Blessing", "Leadership Mastery" },
+        { "Ketnan's Blessing", "Deception Mastery" },
+        { "Avalenne's Blessing", "Healing Mastery" },
+        { "Oswald's Blessing", "Lockpick Mastery" },
+        { "Morimoto's Blessing", "Cooking Mastery" },
+        { "Lilitha's Blessing", "Fletching Mastery" },
+        { "Silencia's Blessing", "Alchemy Mastery" },
+        { "Adja's Blessing", "Creature Enchantment Mastery" },
+        { "Celcynd's Blessing", "Item Enchantment Mastery" },
+        { "Harlune's Blessing", "Life Magic Mastery" },
+        { "Hieromancer's Blessing", "War Magic Mastery" },
+        // Weapon auras
+        { "Aura of Infected Caress", "Blood Drinker" },
+        { "Aura of Mystic's Blessing", "Hermetic Link" },
+        { "Aura of Elysa's Sight", "Heart Seeker" },
+        { "Aura of Infected Spirit Carress", "Spirit Drinker" },
+        { "Aura of Infected Spirit Caress", "Spirit Drinker" },
+        { "Aura of Atlan's Alacrity", "Swift Killer" },
+        { "Aura of Cragstone's Will", "Defender" },
+        // Armor banes
+        { "Brogard's Defiance", "Impenetrability" },
+        { "Olthoi's Bane", "Acid Bane" },
+        { "Swordsman's Bane", "Blade Bane" }, { "Swordman's Bane", "Blade Bane" },
+        { "Tusker's Bane", "Bludgeoning Bane" },
+        { "Inferno's Bane", "Flame Bane" },
+        { "Gelidite's Bane", "Frost Bane" },
+        { "Astyrrian's Bane", "Lightning Bane" },
+        { "Archer's Bane", "Piercing Bane" },
+    };
+
     private static int ComputeFamily(string spellName)
     {
         string n = spellName;
+
+        // 1. Strip tier suffixes (e.g. " Self VII", " VIII")
         foreach (var s in TierSuffixes)
         {
             if (n.EndsWith(s, StringComparison.OrdinalIgnoreCase))
             { n = n[..^s.Length].Trim(); break; }
         }
-        if (n.StartsWith("Incantation of ", StringComparison.OrdinalIgnoreCase))
-            n = n[15..].Trim();
+
+        // 2. Map tier 7 lore names to base names BEFORE stripping prefixes,
+        //    since lore names like "Aura of Infected Caress" include the prefix.
+        if (LoreToBase.TryGetValue(n, out string? baseName))
+            n = baseName;
+
+        // 3. Strip "Incantation of " and "Aura of " prefixes (handles
+        //    "Aura of Incantation of X Self" layered prefix forms)
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            if (n.StartsWith("Incantation of ", StringComparison.OrdinalIgnoreCase))
+            { n = n[15..].Trim(); changed = true; }
+            if (n.StartsWith("Aura of ", StringComparison.OrdinalIgnoreCase))
+            { n = n[8..].Trim(); changed = true; }
+        }
+
+        // 4. Strip " Self" / " Other" target suffixes, then lowercase
         n = n.Replace(" Self", "").Replace(" Other", "").Trim().ToLowerInvariant();
 
         // FNV-1a — deterministic across sessions (String.GetHashCode is randomized in .NET 5+)

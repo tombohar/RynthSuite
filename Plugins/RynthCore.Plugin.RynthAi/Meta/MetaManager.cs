@@ -25,6 +25,7 @@ internal sealed class MetaManager
     /// Set by the plugin after construction via <see cref="SetMtCommandHandler"/>.
     /// </summary>
     private Func<string, bool>? _mtCommandHandler;
+    private Action<string>? _raCommandHandler;
 
     // ── State tracking ───────────────────────────────────────────────────────
     private string _lastState = "";
@@ -71,6 +72,7 @@ internal sealed class MetaManager
     }
 
     public void SetMtCommandHandler(Func<string, bool> handler) => _mtCommandHandler = handler;
+    public void SetRaCommandHandler(Action<string> handler) => _raCommandHandler = handler;
 
     public void SetObjectCache(WorldObjectCache cache)
     {
@@ -592,7 +594,12 @@ internal sealed class MetaManager
                 {
                     if (!TryHandleVtCommand(cmd) && !(_mtCommandHandler?.Invoke(cmd) == true))
                     {
-                        if (_host.HasInvokeChatParser)
+                        if (cmd.StartsWith("/ra ", StringComparison.OrdinalIgnoreCase)
+                            || cmd.Equals("/ra", StringComparison.OrdinalIgnoreCase))
+                        {
+                            _raCommandHandler?.Invoke(cmd);
+                        }
+                        else if (_host.HasInvokeChatParser)
                             _host.InvokeChatParser(cmd);
                         else
                             _host.WriteToChat($"[RynthAi] ChatCommand (no parser): {cmd}", 1);

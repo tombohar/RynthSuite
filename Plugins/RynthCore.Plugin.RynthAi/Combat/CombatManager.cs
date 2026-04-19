@@ -56,7 +56,7 @@ public class CombatManager : IDisposable
     private bool _wasMacroRunning;
 
     private DateTime _lastSpellCast = DateTime.MinValue;
-    private const double SPELL_CAST_COOLDOWN_MS = 1500.0;
+    private bool _lastCastWasRing = false;
     private const double ATTACK_SPELL_COOLDOWN_MS = 100.0;
 
     private bool _returnToPhysicalCombat = false;
@@ -469,7 +469,10 @@ public class CombatManager : IDisposable
         if (!isRanged && !useNative)
             ClearCombatTurnMotions();
 
-        if ((DateTime.Now - lastAttackCmd).TotalMilliseconds >= 1000)
+        double attackCmdIntervalMs = CurrentCombatMode == CombatMode.Magic
+            ? _settings.SpellCastIntervalMs
+            : 1000.0;
+        if ((DateTime.Now - lastAttackCmd).TotalMilliseconds >= attackCmdIntervalMs)
         {
             // Client is busy processing a previous action — don't queue more
             if (BusyCount > 0)
@@ -554,7 +557,10 @@ public class CombatManager : IDisposable
                 AttackTarget();
             }
 
-            TrackAttackAttempt(activeTargetId);
+            // Ring spells hit an area — no per-target damage feedback is generated,
+            // so they must not count toward the blacklist miss counter.
+            if (!_lastCastWasRing)
+                TrackAttackAttempt(activeTargetId);
             lastAttackCmd = DateTime.Now;
         }
         return true;
@@ -586,14 +592,19 @@ public class CombatManager : IDisposable
             try { ScanNearbyTargets(); }
             catch (Exception ex) { _host.Log($"[RynthAi] ScanNearbyTargets CRASH: {ex.Message}"); }
 
+            // Never overwrite "Buffing" — buffs take absolute priority over combat.
             if (activeTargetId != 0 || _scannedTargets.Count > 0)
-                _settings.BotAction = "Combat";
+            {
+                if (_settings.BotAction != "Buffing")
+                    _settings.BotAction = "Combat";
+            }
             else if (_settings.BotAction == "Combat")
                 _settings.BotAction = "Default";
         }
 
         // Combat can run in Default/Combat, can interrupt navigation unless nav boost is on,
         // and can interrupt looting unless loot boost is on.
+        // Buffing always blocks combat — if buffs drop, the character dies.
         bool canRun = _settings.BotAction == "Default"
                    || _settings.BotAction == "Combat"
                    || (_settings.BotAction == "Navigating" && !_settings.BoostNavPriority)
@@ -608,7 +619,10 @@ public class CombatManager : IDisposable
             // Think() already called ScanNearbyTargets internally — update BotAction
             // again with the post-Think scan results (target selection may have changed).
             if (activeTargetId != 0 || _scannedTargets.Count > 0)
-                _settings.BotAction = "Combat";
+            {
+                if (_settings.BotAction != "Buffing")
+                    _settings.BotAction = "Combat";
+            }
             else if (_settings.BotAction == "Combat")
                 _settings.BotAction = "Default";
         }
@@ -960,7 +974,7 @@ public class CombatManager : IDisposable
         // as wielded yet. _lastEquipTime is set whenever UseObject is called for a wand swap.
         if ((DateTime.Now - _lastEquipTime).TotalMilliseconds < 3000)
             return;
-        if ((DateTime.Now - _lastSpellCast).TotalMilliseconds < SPELL_CAST_COOLDOWN_MS) return;
+        if ((DateTime.Now - _lastSpellCast).TotalMilliseconds < _settings.SpellCastIntervalMs) return;
 
         if (_waitingForDebuffResult)
         {
@@ -1002,6 +1016,7 @@ public class CombatManager : IDisposable
                 {
                     _host.CastSpell((uint)activeTargetId, spellId);
                     _lastSpellCast = DateTime.Now;
+                    _lastCastWasRing = false;
                     _pendingDebuffKey = debuffKey;
                     _pendingDebuffTargetId = activeTargetId;
                     _pendingDebuffTier = castTier;
@@ -1027,6 +1042,7 @@ public class CombatManager : IDisposable
             {
                 _host.CastSpell((uint)activeTargetId, offensiveSpellId);
                 _lastSpellCast = DateTime.Now;
+                _lastCastWasRing = isRing;
             }
             catch { }
         }

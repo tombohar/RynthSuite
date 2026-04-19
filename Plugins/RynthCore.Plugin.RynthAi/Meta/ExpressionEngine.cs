@@ -67,8 +67,9 @@ internal sealed class ExpressionEngine
     private readonly Dictionary<string, bool> _wantedMotion = new(StringComparer.OrdinalIgnoreCase);
 
     // Keeps delayexec timers rooted so the GC doesn't collect them before they fire.
-    private static readonly List<System.Threading.Timer> _activeTimers = new();
+    private static readonly List<(System.Threading.Timer Timer, DateTime AddedAt)> _activeTimers = new();
     private static readonly object _timerLock = new();
+    private static readonly TimeSpan TimerMaxAge = TimeSpan.FromMinutes(10);
 
     private uint _playerId;
     private LegacyUiSettings? _settings;
@@ -2361,11 +2362,12 @@ internal sealed class ExpressionEngine
                 catch { return "0"; }
             }
 
+            VTankLootContext lootCtx = new(_host, _playerId) { Cache = _worldObjectCache };
             foreach (var wo in _worldObjectCache.GetInventory())
             {
                 VTankLootRule? match = null;
                 foreach (var rule in vtProfile.Rules)
-                    if (rule.IsMatch(wo)) { match = rule; break; }
+                    if (rule.IsMatch(wo, lootCtx)) { match = rule; break; }
 
                 if (match == null || match.Action != VTankLootAction.Keep) continue;
                 int amount = Math.Max(1, wo.Values(LongValueKey.StackCount, 1));
@@ -2824,18 +2826,32 @@ internal sealed class ExpressionEngine
         int ms = (int)Math.Max(0, delayMs);
         var engine = this;
         string expr = exprArg;
+
+        var addedAt = DateTime.UtcNow;
         System.Threading.Timer? t = null;
+
         t = new System.Threading.Timer(_ =>
         {
             try { engine.Evaluate(expr); }
             catch { }
             lock (_timerLock)
             {
-                if (t != null) _activeTimers.Remove(t);
+                for (int i = _activeTimers.Count - 1; i >= 0; i--)
+                    if (ReferenceEquals(_activeTimers[i].Timer, t)) { _activeTimers.RemoveAt(i); break; }
+
+                // Also prune any entries older than TimerMaxAge (stuck timers from prior errors)
+                var cutoff = DateTime.UtcNow - TimerMaxAge;
+                for (int i = _activeTimers.Count - 1; i >= 0; i--)
+                    if (_activeTimers[i].AddedAt < cutoff)
+                    {
+                        _activeTimers[i].Timer.Dispose();
+                        _activeTimers.RemoveAt(i);
+                    }
             }
         }, null, ms, System.Threading.Timeout.Infinite);
+
         lock (_timerLock)
-            _activeTimers.Add(t);
+            _activeTimers.Add((t, addedAt));
         return "1";
     }
 

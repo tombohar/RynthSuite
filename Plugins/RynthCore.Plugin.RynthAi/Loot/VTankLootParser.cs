@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text.RegularExpressions;
+using RynthCore.PluginSdk;
 
 namespace RynthCore.Plugin.RynthAi;
 
@@ -13,6 +14,107 @@ public enum VTankLootAction
     Sell = 3,
     Read = 4,
     KeepUpTo = 10,
+}
+
+/// <summary>
+/// Character + host context that VTank rules need to evaluate beyond the item itself:
+/// buffed/base skill values, character level, main-pack empty slots, item spell IDs.
+/// Built per-evaluation-pass by the caller; cheap lookups cached inside.
+/// </summary>
+public sealed class VTankLootContext
+{
+    public RynthCoreHost Host { get; }
+    public uint PlayerId { get; }
+
+    private readonly Dictionary<uint, (int Buffed, int Base)> _skillCache = new();
+    private readonly Dictionary<uint, string[]> _spellNameCache = new();
+    private readonly Dictionary<uint, uint[]> _spellIdCache = new();
+    private int? _level;
+    private int? _mainPackEmptySlots;
+
+    public VTankLootContext(RynthCoreHost host, uint playerId)
+    {
+        Host = host;
+        PlayerId = playerId;
+    }
+
+    public (int Buffed, int Base) GetSkill(uint stypeSkill)
+    {
+        if (_skillCache.TryGetValue(stypeSkill, out var cached)) return cached;
+        (int Buffed, int Base) result = (0, 0);
+        if (PlayerId != 0 && Host.HasGetObjectSkill
+            && Host.TryGetObjectSkill(PlayerId, stypeSkill, out int buffed, out int training))
+            result = (buffed, training); // VTank "Base" == advancement class check; we use training as a proxy
+        _skillCache[stypeSkill] = result;
+        return result;
+    }
+
+    public int GetLevel()
+    {
+        if (_level.HasValue) return _level.Value;
+        int lvl = 0;
+        if (PlayerId != 0 && Host.HasGetObjectIntProperty
+            && Host.TryGetObjectIntProperty(PlayerId, 25 /* STypeInt.LEVEL */, out int v))
+            lvl = v;
+        _level = lvl;
+        return lvl;
+    }
+
+    public int GetMainPackEmptySlots()
+    {
+        if (_mainPackEmptySlots.HasValue) return _mainPackEmptySlots.Value;
+        int used = 0;
+        if (Cache != null && PlayerId != 0)
+        {
+            int playerIdSigned = unchecked((int)PlayerId);
+            foreach (var wo in Cache.GetDirectInventory(forceRefresh: false))
+            {
+                if (wo.Container != playerIdSigned) continue;
+                if (wo.ObjectClass == AcObjectClass.Container) continue;
+                if (wo.ObjectClass == AcObjectClass.Foci) continue;
+                if (wo.Values(LongValueKey.EquippedSlots, 0) > 0) continue;
+                used++;
+            }
+        }
+        int slots = Math.Max(0, 102 - used);
+        _mainPackEmptySlots = slots;
+        return slots;
+    }
+
+    public uint[] GetItemSpellIds(uint itemId)
+    {
+        if (_spellIdCache.TryGetValue(itemId, out var ids)) return ids;
+        uint[] result = Array.Empty<uint>();
+        if (Host.HasGetObjectSpellIds)
+        {
+            uint[] buf = new uint[64];
+            int n = Host.GetObjectSpellIds(itemId, buf, buf.Length);
+            if (n > 0)
+            {
+                int take = Math.Min(n, buf.Length);
+                result = new uint[take];
+                Array.Copy(buf, result, take);
+            }
+        }
+        _spellIdCache[itemId] = result;
+        return result;
+    }
+
+    public string[] GetItemSpellNames(uint itemId)
+    {
+        if (_spellNameCache.TryGetValue(itemId, out var cached)) return cached;
+        uint[] ids = GetItemSpellIds(itemId);
+        var names = new string[ids.Length];
+        for (int i = 0; i < ids.Length; i++)
+        {
+            SpellInfo? info = SpellTableStub.GetById((int)ids[i]);
+            names[i] = info?.Name ?? string.Empty;
+        }
+        _spellNameCache[itemId] = names;
+        return names;
+    }
+
+    internal WorldObjectCache? Cache { get; set; }
 }
 
 public sealed class VTankLootRule
@@ -26,7 +128,9 @@ public sealed class VTankLootRule
     // for LongValKey* it's [value, key]; etc. — matching VTank's Write order.
     public List<string> RawDataLines { get; set; } = new();
 
-    public bool IsMatch(WorldObject? item)
+    public bool IsMatch(WorldObject? item) => IsMatch(item, null);
+
+    public bool IsMatch(WorldObject? item, VTankLootContext? ctx)
     {
         if (item is null || string.IsNullOrWhiteSpace(RawInfoLine))
             return false;
@@ -42,6 +146,7 @@ public sealed class VTankLootRule
                 return true;
 
             Queue<string> data = new(RawDataLines);
+            uint itemId = unchecked((uint)item.Id);
 
             for (int i = 2; i < parts.Length; i++)
             {
@@ -50,37 +155,37 @@ public sealed class VTankLootRule
 
                 bool result = type switch
                 {
-                    0    => MatchSpellNamePattern(data),            // SpellNameMatch
-                    1    => MatchStringValue(item, data),           // StringValueMatch
-                    2    => MatchLongLE(item, data),                // LongValKeyLE
-                    3    => MatchLongGE(item, data),                // LongValKeyGE
-                    4    => MatchDoubleLE(item, data),              // DoubleValKeyLE
-                    5    => MatchDoubleGE(item, data),              // DoubleValKeyGE
-                    6    => SkipDouble(data),                       // DamagePercentGE (VTank returns false; skip + false)
-                    7    => MatchObjectClass(item, data),           // ObjectClass
-                    8    => MatchSpellCountGE(data),                // SpellCountGE
-                    9    => MatchSpellMatch(data),                  // SpellMatch
-                    10   => MatchMinDamageGE(item, data),           // MinDamageGE
-                    11   => MatchLongFlagExists(item, data),        // LongValKeyFlagExists
-                    12   => MatchLongE(item, data),                 // LongValKeyE
-                    13   => MatchLongNE(item, data),                // LongValKeyNE
-                    14   => SkipColorRule(data, 5),                 // AnySimilarColor
-                    15   => SkipColorRule(data, 6),                 // SimilarColorArmorType
-                    16   => SkipColorRule(data, 6),                 // SlotSimilarColor
-                    17   => SkipColorRule(data, 2),                 // SlotExactPalette
-                    1000 => MatchCharacterSkillGE(data),            // CharacterSkillGE
-                    1001 => MatchCharacterPackSlotsGE(data),        // CharacterMainPackEmptySlotsGE
-                    1002 => SkipInt(data),                          // CharacterLevelGE (no char level API; optimistic)
-                    1003 => SkipInt(data),                          // CharacterLevelLE (optimistic)
-                    1004 => MatchCharacterBaseSkill(data),          // CharacterBaseSkill
-                    2000 => MatchBuffedMedianDamageGE(item, data),  // BuffedMedianDamageGE
-                    2001 => SkipDouble(data),                       // BuffedMissileDamageGE (no missile calc; skip)
-                    2003 => SkipDoubleAndInt(data),                 // BuffedLongValKeyGE (no buff calc; skip)
-                    2005 => SkipDoubleAndInt(data),                 // BuffedDoubleValKeyGE (no buff calc; skip)
-                    2006 => SkipDouble(data),                       // CalcdBuffedTinkedDamageGE (skip)
-                    2007 => MatchTotalRatingsGE(item, data),        // TotalRatingsGE
-                    2008 => SkipThreeDoubles(data),                 // CalcedBuffedTinkedTargetMeleeGE (skip)
-                    9999 => MatchDisabledRule(data),                // DisabledRule (false = rule disabled)
+                    0    => MatchSpellNameMatch(itemId, ctx, data),         // SpellNameMatch
+                    1    => MatchStringValue(item, data),                   // StringValueMatch
+                    2    => MatchLongLE(item, data),                        // LongValKeyLE
+                    3    => MatchLongGE(item, data),                        // LongValKeyGE
+                    4    => MatchDoubleLE(item, data),                      // DoubleValKeyLE
+                    5    => MatchDoubleGE(item, data),                      // DoubleValKeyGE
+                    6    => MatchDamagePercentGE(data),                     // DamagePercentGE (VTank: always false)
+                    7    => MatchObjectClass(item, data),                   // ObjectClass
+                    8    => MatchSpellCountGE(itemId, ctx, data),           // SpellCountGE
+                    9    => MatchSpellMatch(itemId, ctx, data),             // SpellMatch
+                    10   => MatchMinDamageGE(item, data),                   // MinDamageGE
+                    11   => MatchLongFlagExists(item, data),                // LongValKeyFlagExists
+                    12   => MatchLongE(item, data),                         // LongValKeyE
+                    13   => MatchLongNE(item, data),                        // LongValKeyNE
+                    14   => SkipColorRule(data, 5),                         // AnySimilarColor (no palette API)
+                    15   => SkipColorRule(data, 6),                         // SimilarColorArmorType
+                    16   => SkipColorRule(data, 6),                         // SlotSimilarColor
+                    17   => SkipColorRule(data, 2),                         // SlotExactPalette
+                    1000 => MatchCharacterSkillGE(ctx, data),               // CharacterSkillGE (buffed)
+                    1001 => MatchCharacterPackSlotsGE(ctx, data),           // CharacterMainPackEmptySlotsGE
+                    1002 => MatchCharacterLevelGE(ctx, data),               // CharacterLevelGE
+                    1003 => MatchCharacterLevelLE(ctx, data),               // CharacterLevelLE
+                    1004 => MatchCharacterBaseSkill(ctx, data),             // CharacterBaseSkill (training in [min,max])
+                    2000 => MatchBuffedMedianDamageGE(item, data),          // BuffedMedianDamageGE (unbuffed approx)
+                    2001 => MatchBuffedMissileDamageGE(item, data),         // BuffedMissileDamageGE (unbuffed approx)
+                    2003 => MatchBuffedLongGE(item, data),                  // BuffedLongValKeyGE (unbuffed lower bound)
+                    2005 => MatchBuffedDoubleGE(item, data),                // BuffedDoubleValKeyGE (unbuffed lower bound)
+                    2006 => MatchCalcdBuffedTinkedDamageGE(item, data),     // CalcdBuffedTinkedDamageGE (unbuffed approx)
+                    2007 => MatchTotalRatingsGE(item, data),                // TotalRatingsGE
+                    2008 => MatchCalcedBuffedTinkedTargetMelee(data),       // CalcedBuffedTinkedTargetMeleeGE (skip — false)
+                    9999 => MatchDisabledRule(data),                        // DisabledRule (false = rule disabled)
                     _    => throw new InvalidOperationException($"Unsupported VTank loot node type {type}."),
                 };
 
@@ -98,12 +203,15 @@ public sealed class VTankLootRule
 
     // ── Requirement matchers ──────────────────────────────────────────────
 
-    // Type 0: SpellNameMatch — reads: pattern
-    // We have no item-spell-list API, so always return true (optimistic).
-    private static bool MatchSpellNamePattern(Queue<string> data)
+    // Type 0: SpellNameMatch — reads: pattern. Any cast spell on the item matches regex.
+    private static bool MatchSpellNameMatch(uint itemId, VTankLootContext? ctx, Queue<string> data)
     {
-        data.Dequeue(); // pattern
-        return true;
+        string pattern = data.Dequeue();
+        if (ctx is null) return true; // optimistic fallback when no host context
+        Regex rx = new(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        foreach (string n in ctx.GetItemSpellNames(itemId))
+            if (!string.IsNullOrEmpty(n) && rx.IsMatch(n)) return true;
+        return false;
     }
 
     // Type 1: StringValueMatch — reads: pattern, key
@@ -147,11 +255,11 @@ public sealed class VTankLootRule
         return item.Values((DoubleValueKey)key, 0.0) >= threshold;
     }
 
-    // Type 6: DamagePercentGE — reads: value. VTank's own implementation returns false; skip.
-    private static bool SkipDouble(Queue<string> data)
+    // Type 6: DamagePercentGE — VTank source returns false unconditionally.
+    private static bool MatchDamagePercentGE(Queue<string> data)
     {
-        data.Dequeue();
-        return true; // optimistic skip
+        data.Dequeue(); // value
+        return false;
     }
 
     // Type 7: ObjectClass — reads: class value
@@ -161,20 +269,33 @@ public sealed class VTankLootRule
         return (int)item.ObjectClass == objectClass;
     }
 
-    // Type 8: SpellCountGE — reads: count. No item-spell-list API; optimistic.
-    private static bool MatchSpellCountGE(Queue<string> data)
+    // Type 8: SpellCountGE — reads: count.
+    private static bool MatchSpellCountGE(uint itemId, VTankLootContext? ctx, Queue<string> data)
     {
-        data.Dequeue(); // count
-        return true;
+        int count = ReadInt(data);
+        if (ctx is null) return true;
+        return ctx.GetItemSpellIds(itemId).Length >= count;
     }
 
-    // Type 9: SpellMatch — reads: match_pattern, no_match_pattern, count. No item-spell API; optimistic.
-    private static bool MatchSpellMatch(Queue<string> data)
+    // Type 9: SpellMatch — reads: match_pattern, no_match_pattern, count.
+    // At least `count` spells match the positive regex AND (negative empty OR don't match negative).
+    private static bool MatchSpellMatch(uint itemId, VTankLootContext? ctx, Queue<string> data)
     {
-        data.Dequeue(); // rxDoesMatch
-        data.Dequeue(); // rxDoesNotMatch
-        data.Dequeue(); // count
-        return true;
+        string pos = data.Dequeue();
+        string neg = data.Dequeue();
+        int count  = ReadInt(data);
+        if (ctx is null) return true;
+        Regex rxPos = new(pos, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        bool negEmpty = string.IsNullOrWhiteSpace(neg);
+        Regex? rxNeg = negEmpty ? null : new Regex(neg, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        int c = 0;
+        foreach (string name in ctx.GetItemSpellNames(itemId))
+        {
+            if (string.IsNullOrEmpty(name)) continue;
+            if (rxPos.IsMatch(name) && (rxNeg is null || !rxNeg.IsMatch(name)))
+                if (++c >= count) return true;
+        }
+        return false;
     }
 
     // Type 10: MinDamageGE — reads: value.
@@ -221,35 +342,50 @@ public sealed class VTankLootRule
         return true;
     }
 
-    // Type 1000: CharacterSkillGE — reads: value, skillId. No character context; optimistic.
-    private static bool MatchCharacterSkillGE(Queue<string> data)
+    // Type 1000: CharacterSkillGE — reads: value, skillId (stored as VTCSkillID which matches STypeSkill).
+    private static bool MatchCharacterSkillGE(VTankLootContext? ctx, Queue<string> data)
     {
-        data.Dequeue(); // value
-        data.Dequeue(); // skillId
-        return true;
+        int value = ReadInt(data);
+        int skillId = ReadInt(data);
+        if (ctx is null) return true;
+        var (buffed, _) = ctx.GetSkill(unchecked((uint)skillId));
+        return buffed >= value;
     }
 
-    // Type 1001: CharacterMainPackEmptySlotsGE — reads: count. No character context; optimistic.
-    private static bool MatchCharacterPackSlotsGE(Queue<string> data)
+    // Type 1001: CharacterMainPackEmptySlotsGE — reads: count.
+    private static bool MatchCharacterPackSlotsGE(VTankLootContext? ctx, Queue<string> data)
     {
-        data.Dequeue();
-        return true;
+        int count = ReadInt(data);
+        if (ctx is null) return true;
+        return ctx.GetMainPackEmptySlots() >= count;
     }
 
-    // Helper for CharacterLevelGE/LE (types 1002/1003): reads 1 int, returns true (optimistic).
-    private static bool SkipInt(Queue<string> data)
+    // Type 1002: CharacterLevelGE — reads: value
+    private static bool MatchCharacterLevelGE(VTankLootContext? ctx, Queue<string> data)
     {
-        if (data.Count > 0) data.Dequeue();
-        return true;
+        int value = ReadInt(data);
+        if (ctx is null) return true;
+        return ctx.GetLevel() >= value;
     }
 
-    // Type 1004: CharacterBaseSkill — reads: skillId, min, max. No character context; optimistic.
-    private static bool MatchCharacterBaseSkill(Queue<string> data)
+    // Type 1003: CharacterLevelLE — reads: value
+    private static bool MatchCharacterLevelLE(VTankLootContext? ctx, Queue<string> data)
     {
-        data.Dequeue(); // skillId
-        data.Dequeue(); // min
-        data.Dequeue(); // max
-        return true;
+        int value = ReadInt(data);
+        if (ctx is null) return true;
+        return ctx.GetLevel() <= value;
+    }
+
+    // Type 1004: CharacterBaseSkill — reads: skillId, min, max. Uses training as "base" proxy
+    // (VTank reads COM skillinfo.Base; our TryGetObjectSkill returns (buffed, training)).
+    private static bool MatchCharacterBaseSkill(VTankLootContext? ctx, Queue<string> data)
+    {
+        int skillId = ReadInt(data);
+        int min = ReadInt(data);
+        int max = ReadInt(data);
+        if (ctx is null) return true;
+        var (_, baseVal) = ctx.GetSkill(unchecked((uint)skillId));
+        return baseVal >= min && baseVal <= max;
     }
 
     // Type 2000: BuffedMedianDamageGE — reads: value. Uses unbuffed values as approximation.
@@ -264,20 +400,49 @@ public sealed class VTankLootRule
         return (minDamage + maxDamage) / 2.0 >= threshold;
     }
 
-    // Helper: skip 1 double + 1 int (types 2003, 2005)
-    private static bool SkipDoubleAndInt(Queue<string> data)
+    // Type 2001: BuffedMissileDamageGE — reads: value. Approximation: MaxDamage * (1 + ElementalDamageBonus).
+    // Real VTank adds aura buffs; we use unbuffed (conservative lower bound).
+    private static bool MatchBuffedMissileDamageGE(WorldObject item, Queue<string> data)
     {
-        if (data.Count > 0) data.Dequeue(); // value
-        if (data.Count > 0) data.Dequeue(); // key
-        return true;
+        double threshold = ReadDouble(data);
+        int maxDamage = item.Values(54, 0); // STypeInt MAX_DAMAGE
+        if (maxDamage == 0) return false;
+        double elemBonus = item.Values((DoubleValueKey)152 /* ElementalDamageVersusMonsters */, 1.0);
+        if (elemBonus < 1.0) elemBonus = 1.0;
+        return maxDamage * elemBonus >= threshold;
     }
 
-    // Helper: skip 3 doubles (type 2008)
-    private static bool SkipThreeDoubles(Queue<string> data)
+    // Type 2003: BuffedLongValKeyGE — reads: value, key. Unbuffed lower-bound: item[key] >= threshold.
+    private static bool MatchBuffedLongGE(WorldObject item, Queue<string> data)
+    {
+        double threshold = ReadDouble(data);
+        int key = ReadInt(data);
+        return item.Values((LongValueKey)key, 0) >= threshold;
+    }
+
+    // Type 2005: BuffedDoubleValKeyGE — reads: value, key. Unbuffed lower-bound.
+    private static bool MatchBuffedDoubleGE(WorldObject item, Queue<string> data)
+    {
+        double threshold = ReadDouble(data);
+        int key = ReadInt(data);
+        return item.Values((DoubleValueKey)key, 0.0) >= threshold;
+    }
+
+    // Type 2006: CalcdBuffedTinkedDamageGE — reads: value. Uses unbuffed MaxDamage as lower bound.
+    private static bool MatchCalcdBuffedTinkedDamageGE(WorldObject item, Queue<string> data)
+    {
+        double threshold = ReadDouble(data);
+        int maxDamage = item.Values(54, 0);
+        return maxDamage >= threshold;
+    }
+
+    // Type 2008: CalcedBuffedTinkedTargetMeleeGE — reads: 3 doubles.
+    // Requires full weapon-tinker simulation; not implemented → rule never matches.
+    private static bool MatchCalcedBuffedTinkedTargetMelee(Queue<string> data)
     {
         for (int i = 0; i < 3; i++)
             if (data.Count > 0) data.Dequeue();
-        return true;
+        return false;
     }
 
     // Type 2007: TotalRatingsGE — reads: value. Sums all 8 rating properties.

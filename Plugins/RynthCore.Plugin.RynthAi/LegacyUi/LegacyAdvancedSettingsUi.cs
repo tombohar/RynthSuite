@@ -109,6 +109,14 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.SliderInt("Blacklist Timeout (sec)", ref _settings.BlacklistTimeoutSec, 5, 120);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("How long a blacklisted mob is ignored before re-trying.");
+
+                ImGui.Separator();
+                ImGui.Spacing();
+                ImGui.Text("Give Queue");
+                ImGui.SetNextItemWidth(150);
+                ImGui.SliderInt("Give Interval (ms)", ref _settings.GiveQueueIntervalMs, 50, 2000);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Minimum delay between each item sent by /ra givea commands.\nLower = faster but may drop items if the server can't keep up.");
                 break;
 
             case "Recharge":
@@ -205,6 +213,16 @@ internal sealed class LegacyAdvancedSettingsUi
             case "Spell Combat":
                 ImGui.Text("War/Void Casting Settings");
                 ImGui.Separator();
+
+                ImGui.SetNextItemWidth(180);
+                ImGui.SliderInt("Spell Interval (ms)", ref _settings.SpellCastIntervalMs, 100, 1500);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "Delay between spell casts (buffing and combat).\n" +
+                        "Lower = faster spell chains. 400ms is a good balance.\n" +
+                        "Below 200ms may cause fizzles or dropped casts on laggy servers.");
+
+                ImGui.Spacing();
                 ImGui.Checkbox("Cast Dispel Self", ref _settings.CastDispelSelf);
 
                 ImGui.Spacing();

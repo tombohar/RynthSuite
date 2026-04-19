@@ -24,55 +24,90 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         /// </summary>
         private const int ARC_SAMPLE_COUNT = 10;
 
+        // Shoulder / height offsets used for multi-ray dungeon LOS checks.
+        // Covers the approximate silhouette of a standing player character.
+        private const float RayLateralOffset = 0.35f; // left/right shoulder spread (meters)
+        private const float RayVerticalOffset = 0.30f; // up/down spread (meters)
+
         /// <summary>
         /// Tests if a straight-line path (magic spells, crossbow bolts) is blocked
         /// by any collision geometry.
-        /// 
+        ///
+        /// In dungeon mode (multiRay=true) casts 5 rays — center plus left/right/up/down
+        /// offsets covering the player silhouette.  Any single blocked ray returns blocked.
+        /// This catches thin corner geometry that a single center ray slips through.
+        ///
         /// Returns true if the path IS blocked (an obstacle exists between origin and target).
         /// Returns false if the path is clear.
         /// </summary>
-        public static bool IsLinearPathBlocked(Vector3 origin, Vector3 target, List<BoundingVolume> geometry)
+        public static bool IsLinearPathBlocked(Vector3 origin, Vector3 target,
+                                               List<BoundingVolume> geometry,
+                                               bool multiRay = false)
         {
             if (geometry == null || geometry.Count == 0)
                 return false;
 
-            // Validate inputs
             if (float.IsNaN(origin.X) || float.IsNaN(origin.Y) || float.IsNaN(origin.Z) ||
                 float.IsNaN(target.X) || float.IsNaN(target.Y) || float.IsNaN(target.Z))
                 return false;
 
-            // Calculate direction and distance
+            if (multiRay)
+            {
+                // Build perpendicular axes for offset rays.
+                // Lateral = direction × world-up, then re-derive true up from lateral × direction.
+                Vector3 dir = (target - origin);
+                float len = dir.Length();
+                if (len < 1e-4f) return false;
+                dir = dir / len;
+
+                Vector3 worldUp = new Vector3(0, 0, 1);
+                Vector3 lateral = Vector3.Cross(dir, worldUp);
+                float latLen = lateral.Length();
+                if (latLen < 1e-4f) lateral = new Vector3(1, 0, 0); // dir is vertical — use arbitrary lateral
+                else lateral = lateral / latLen;
+
+                Vector3 up = Vector3.Cross(lateral, dir);
+                float upLen = up.Length();
+                if (upLen > 1e-4f) up = up / upLen;
+
+                Vector3 L = lateral * RayLateralOffset;
+                Vector3 U = up       * RayVerticalOffset;
+
+                // 5 rays: center, left shoulder, right shoulder, slightly up, slightly down
+                if (IsSingleRayBlocked(origin,     target,     geometry)) return true;
+                if (IsSingleRayBlocked(origin - L, target - L, geometry)) return true;
+                if (IsSingleRayBlocked(origin + L, target + L, geometry)) return true;
+                if (IsSingleRayBlocked(origin + U, target + U, geometry)) return true;
+                if (IsSingleRayBlocked(origin - U, target - U, geometry)) return true;
+                return false;
+            }
+
+            return IsSingleRayBlocked(origin, target, geometry);
+        }
+
+        private static bool IsSingleRayBlocked(Vector3 origin, Vector3 target, List<BoundingVolume> geometry)
+        {
             Vector3 delta = target - origin;
             float distanceToTarget = delta.Length();
+            if (distanceToTarget < 1e-4f) return false;
 
-            // Origin and target are the same point — no obstruction possible
-            if (distanceToTarget < 1e-4f)
-                return false;
-
-            // Normalize direction
             Vector3 direction = delta / distanceToTarget;
 
-            // Test ray against each bounding volume
             foreach (var volume in geometry)
             {
-                // Skip doors (state is unreliable)
-                if (volume.IsDoor)
-                    continue;
+                if (volume.IsDoor) continue;
 
-                // Test intersection
                 float hitDist;
                 if (volume.RayIntersect(origin, direction, distanceToTarget, out hitDist))
                 {
-                    // Ignore hits right at the player origin (self-intersection) and
-                    // hits right at the target (walls behind/adjacent to the target).
-                    if (hitDist > 0.5f && hitDist < distanceToTarget - 1.0f)
-                    {
-                        return true; // Path is blocked
-                    }
+                    // Ignore self-intersection at origin and hits within 0.3m of target
+                    // (reduced from 1.0m — the old 1m zone was hiding corner walls next to mobs).
+                    if (hitDist > 0.5f && hitDist < distanceToTarget - 0.3f)
+                        return true;
                 }
             }
 
-            return false; // Path is clear
+            return false;
         }
 
         /// <summary>

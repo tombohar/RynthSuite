@@ -65,13 +65,13 @@ public sealed class LegacyUiSettings
     public bool EnableMissileCrafting = true;
     public int MissileCraftAmmoThreshold = 1000;
 
-    public int LootInterItemDelayMs = 100;
+    public int LootInterItemDelayMs = 50;
     public int LootContentSettleMs = 100;
-    public int LootEmptyCorpseMs = 400;
+    public int LootEmptyCorpseMs = 300;
     public int LootClosingDelayMs = 200;
-    public int LootAssessWindowMs = 800;
-    public int LootRetryTimeoutMs = 800;
-    public int LootOpenRetryMs = 3000;
+    public int LootAssessWindowMs = 200;
+    public int LootRetryTimeoutMs = 500;
+    public int LootOpenRetryMs = 1500;
     public int LootCorpseTimeoutMs = 12000;
 
     public int SalvageOpenDelayFirstMs = 400;
@@ -128,6 +128,10 @@ public sealed class LegacyUiSettings
 
     public int BlacklistAttempts = 3;
     public int BlacklistTimeoutSec = 30;
+
+    public int GiveQueueIntervalMs = 150;
+
+    public int SpellCastIntervalMs = 400;
 
     public int MeleeAttackPower = -1;
     public int MissileAttackPower = -1;

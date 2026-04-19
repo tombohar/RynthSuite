@@ -75,13 +75,26 @@ internal static class AfFileWriter
 
     // ── Public API ──────────────────────────────────────────────────────────
 
+    public static string SaveToString(List<MetaRule> rules,
+        IReadOnlyDictionary<string, List<string>> embeddedNavs)
+    {
+        var sb = new System.Text.StringBuilder();
+        using var writer = new StringWriter(sb);
+        WriteContent(writer, rules, embeddedNavs);
+        return sb.ToString();
+    }
+
     public static void Save(string filePath, List<MetaRule> rules,
         IReadOnlyDictionary<string, List<string>> embeddedNavs)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(filePath) ?? ".");
-
         using var writer = new StreamWriter(filePath, false);
+        WriteContent(writer, rules, embeddedNavs);
+    }
 
+    private static void WriteContent(TextWriter writer, List<MetaRule> rules,
+        IReadOnlyDictionary<string, List<string>> embeddedNavs)
+    {
         // Group rules by state
         var grouped = rules
             .GroupBy(r => r.State)
@@ -97,9 +110,7 @@ internal static class AfFileWriter
         {
             writer.WriteLine($"STATE: {{{group.Key}}} ~~ {{");
             foreach (var rule in group)
-            {
                 WriteRule(writer, rule);
-            }
             writer.WriteLine("~~ }");
         }
 
@@ -113,7 +124,7 @@ internal static class AfFileWriter
 
     // ── Rule writing ────────────────────────────────────────────────────────
 
-    private static void WriteRule(StreamWriter writer, MetaRule rule)
+    private static void WriteRule(TextWriter writer, MetaRule rule)
     {
         // Write IF: line
         writer.Write("\tIF:\t");
@@ -126,7 +137,7 @@ internal static class AfFileWriter
         writer.WriteLine();
     }
 
-    private static void WriteCondition(StreamWriter writer, MetaRule rule, string childIndent)
+    private static void WriteCondition(TextWriter writer, MetaRule rule, string childIndent)
     {
         string keyword = ConditionKeywordMap.TryGetValue(rule.Condition, out string? kw) ? kw : "Never";
 
@@ -242,7 +253,7 @@ internal static class AfFileWriter
         }
     }
 
-    private static void WriteAction(StreamWriter writer, MetaRule rule, string childIndent)
+    private static void WriteAction(TextWriter writer, MetaRule rule, string childIndent)
     {
         string keyword = ActionKeywordMap.TryGetValue(rule.Action, out string? kw) ? kw : "None";
 
@@ -330,7 +341,7 @@ internal static class AfFileWriter
 
     // ── NAV section writing ─────────────────────────────────────────────────
 
-    private static void WriteNavSection(StreamWriter writer, string navName, IReadOnlyList<string> lines)
+    private static void WriteNavSection(TextWriter writer, string navName, IReadOnlyList<string> lines)
     {
         try
         {

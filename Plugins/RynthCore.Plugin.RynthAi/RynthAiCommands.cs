@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using RynthCore.Plugin.RynthAi.Meta;
 using RynthCore.Plugin.RynthAi.Raycasting;
 
@@ -33,6 +35,13 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra listvars      — show session variables");
         ChatLine("[RynthAi] /ra listpvars     — show persistent variables");
         ChatLine("[RynthAi] /ra listgvars     — show global variables");
+        ChatLine("[RynthAi] /ra give [count] <item> to <player>         — give exact-named item(s) to player");
+        ChatLine("[RynthAi] /ra givep [count] <item> to <player>        — partial item name match");
+        ChatLine("[RynthAi] /ra givexp [count] <item> to <player>       — partial player name match");
+        ChatLine("[RynthAi] /ra givepp [count] <item> to <player>       — partial item and player");
+        ChatLine("[RynthAi] /ra giver [count] <regex> to <player>       — regex item name match");
+        ChatLine("[RynthAi] /ra ig <profile> to <player>                — give items matching loot profile");
+        ChatLine("[RynthAi] /ra igp <profile> to <player>               — ig with partial player name");
         ChatLine("[RynthAi] /ra use[i|l][p|pi|lp] <name> [on <name2>]  — use item (i=inv, l=land, p=partial)");
         ChatLine("[RynthAi] /ra raycast       — raycast system status");
         ChatLine("[RynthAi] /ra lostest       — line-of-sight test to target");
@@ -44,6 +53,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra fellowinfo    — show fellowship tracker state");
         ChatLine("[RynthAi] /ra lootparse     — inspect the selected loot profile");
         ChatLine("[RynthAi] /ra lootcheckinv  — test the loot profile against inventory");
+        ChatLine("[RynthAi] /ra lootcheck     — classify selected item (on|off = auto on click)");
         ChatLine("[RynthAi] /ra dumpinv       — dump all inventory items (cache + direct)");
         ChatLine("[RynthAi] /ra clearbusy     — force-clear busy state (hourglass cursor)");
     }
@@ -726,13 +736,14 @@ public sealed partial class RynthAiPlugin
         var actionCounts = new System.Collections.Generic.Dictionary<VTankLootAction, int>();
         int shown = 0;
 
+        VTankLootContext lootCtx = new(Host, _playerId) { Cache = _objectCache };
         foreach (var item in _objectCache.GetInventory())
         {
             total++;
             VTankLootRule? firstMatch = null;
             foreach (var rule in profile.Rules)
             {
-                if (rule.IsMatch(item))
+                if (rule.IsMatch(item, lootCtx))
                 {
                     firstMatch = rule;
                     break;
@@ -766,6 +777,66 @@ public sealed partial class RynthAiPlugin
 
         if (matched > shown)
             ChatLine($"[RynthAi]   ... {matched - shown} more matched item(s)");
+    }
+
+    // /ra lootcheck               — one-shot classify currently selected item
+    // /ra lootcheck on | off      — toggle auto-inspect on selection change
+    private void HandleLootCheckSelectedCommand(string[] parts)
+    {
+        if (parts.Length >= 3)
+        {
+            string mode = parts[2].Trim().ToLowerInvariant();
+            if (mode is "on" or "1" or "true")
+            {
+                _lootInspectMode = true;
+                ChatLine("[RynthAi] Loot inspect: ON — classifying each item you select.");
+                return;
+            }
+            if (mode is "off" or "0" or "false")
+            {
+                _lootInspectMode = false;
+                ChatLine("[RynthAi] Loot inspect: OFF.");
+                return;
+            }
+        }
+
+        if (!Host.HasGetSelectedItemId)
+        {
+            ChatLine("[RynthAi] Host does not expose selected item id.");
+            return;
+        }
+        uint selected = Host.GetSelectedItemId();
+        if (selected == 0)
+        {
+            ChatLine("[RynthAi] No item selected. Click an item in the world or inventory first.");
+            return;
+        }
+        InspectLootRuleForItem(unchecked((int)selected));
+    }
+
+    internal void InspectLootRuleForItem(int itemId, bool quiet = false)
+    {
+        if (_objectCache == null) return;
+        WorldObject? item = _objectCache[itemId];
+        if (item == null)
+        {
+            if (!quiet)
+                ChatLine($"[RynthAi] Loot inspect: item 0x{(uint)itemId:X8} not in cache yet.");
+            return;
+        }
+        if (!TryLoadLootProfile(string.Empty, out VTankLootProfile profile, out _))
+            return;
+
+        VTankLootContext ctx = new(Host, _playerId) { Cache = _objectCache };
+        for (int i = 0; i < profile.Rules.Count; i++)
+        {
+            VTankLootRule rule = profile.Rules[i];
+            if (!rule.IsMatch(item, ctx)) continue;
+            string ruleName = string.IsNullOrWhiteSpace(rule.Name) ? $"#{i}" : rule.Name.Trim();
+            ChatLine($"[RynthAi] {item.Name}: [{rule.Action}] {ruleName}");
+            return;
+        }
+        ChatLine($"[RynthAi] {item.Name}: no loot rule matched.");
     }
 
     private bool TryLoadLootProfile(string explicitPath, out VTankLootProfile profile, out string loadedPath)
@@ -959,10 +1030,45 @@ public sealed partial class RynthAiPlugin
             Host.ForceResetBusyCount();
         if (Host.HasStopCompletely)
             Host.StopCompletely();
-        if (_combatManager != null)
-            _combatManager.BusyCount = 0;
+        // Reset all tracked counts — engine, plugin, combat, buff
+        _busyCount = 0;
+        _busyCountLastIncrementAt = 0;
+        _busyCountBecamePositiveAt = 0;
+        if (_combatManager != null) _combatManager.BusyCount = 0;
+        if (_buffManager != null)   _buffManager.BusyCount = 0;
         int after = Host.HasGetBusyState ? Host.GetBusyState() : -1;
         ChatLine($"[RynthAi] Busy state cleared (was {before} → {after})");
+    }
+
+    private void HandleBusyInfoCommand()
+    {
+        int engineBusy = Host.HasGetBusyState ? Host.GetBusyState() : -1;
+        long now = CorpseNowMs;
+        long lastIncrMs  = _busyCountLastIncrementAt  == 0 ? -1 : now - _busyCountLastIncrementAt;
+        long elevatedMs  = _busyCountBecamePositiveAt == 0 ? -1 : now - _busyCountBecamePositiveAt;
+
+        ChatLine($"[RynthAi] === Busy State ===");
+        ChatLine($"  Engine busy count : {engineBusy}");
+        ChatLine($"  Plugin busy count : {_busyCount}");
+        ChatLine($"  Combat busy count : {(_combatManager?.BusyCount.ToString() ?? "n/a")}");
+        ChatLine($"  Buff busy count   : {(_buffManager?.BusyCount.ToString() ?? "n/a")}");
+        ChatLine($"  Last increment    : {(lastIncrMs  < 0 ? "never" : $"{lastIncrMs}ms ago")}");
+        ChatLine($"  Elevated since    : {(elevatedMs  < 0 ? "not elevated" : $"{elevatedMs}ms ago")} (timeout at {BUSY_TIMEOUT_MS}ms)");
+
+        ChatLine($"[RynthAi] === Corpse / Loot State ===");
+        ChatLine($"  Target corpse     : 0x{(uint)_targetCorpseId:X8}");
+        ChatLine($"  Opened container  : 0x{(uint)_openedContainerId:X8}");
+        ChatLine($"  Current loot item : 0x{(uint)_currentLootItemId:X8}");
+        ChatLine($"  Completed corpses : {_completedCorpses.Count}");
+
+        ChatLine($"[RynthAi] === Give Queue ===");
+        ChatLine($"  Pending gives     : {_pendingGives.Count}");
+        ChatLine($"  Give interval     : {(_dashboard?.Settings.GiveQueueIntervalMs.ToString() ?? "n/a")}ms");
+
+        string botAction = _dashboard?.Settings.BotAction ?? "n/a";
+        ChatLine($"[RynthAi] === Bot ===");
+        ChatLine($"  BotAction         : {botAction}");
+        ChatLine($"  Macro running     : {(_dashboard?.Settings.IsMacroRunning.ToString() ?? "n/a")}");
     }
 
     private void HandleMapDumpCommand()
@@ -1071,5 +1177,179 @@ public sealed partial class RynthAiPlugin
         if (obj == null) { ChatLine($"[RynthAi] Not found: '{name}'"); return; }
         Host.SelectItem((uint)obj.Id);
         ChatLine($"[RynthAi] Selected: {obj.Name} (0x{obj.Id:X})");
+    }
+
+    // ── Give commands ─────────────────────────────────────────────────────────
+    //
+    //  /ra give [count] <itemName> to <playerName>         exact item (first match),  exact player
+    //  /ra givea <itemName> to <playerName>               exact item (ALL matches),  exact player
+    //  /ra givep [count] <itemName> to <playerName>       partial item (first),      exact player
+    //  /ra giveap <itemName> to <playerName>              partial item (ALL),        exact player
+    //  /ra givexp [count] <itemName> to <playerName>      exact item (first),        partial player
+    //  /ra giveaxp <itemName> to <playerName>             exact item (ALL),          partial player
+    //  /ra givepp [count] <itemName> to <playerName>      partial item (first),      partial player
+    //  /ra giveapp <itemName> to <playerName>             partial item (ALL),        partial player
+    //  /ra giver [count] <regex> to <playerName>          regex item (first),        exact player
+    //  /ra givear <regex> to <playerName>                 regex item (ALL),          exact player
+    //  /ra ig <profile> to <playerName>                   loot profile, exact player
+    //  /ra igp <profile> to <playerName>                  loot profile, partial player
+    //
+    //  count is optional; omit to give all matching stacks.
+
+    private enum GiveItemMatch { Exact, Partial, Regex }
+
+    private void HandleGiveCommand(string[] parts, GiveItemMatch itemMatch, bool partialPlayer, bool allItems = false)
+    {
+        if (_objectCache == null) { ChatLine("[RynthAi] Object cache not ready."); return; }
+        if (!Host.HasMoveItemExternal)  { ChatLine("[RynthAi] MoveItemExternal not available."); return; }
+
+        string argStr = string.Join(" ", parts, 2, parts.Length - 2).Trim();
+
+        // Split on last " to " so player names that contain "to" still work
+        int toIdx = argStr.LastIndexOf(" to ", StringComparison.OrdinalIgnoreCase);
+        if (toIdx < 0)
+        {
+            ChatLine("[RynthAi] Usage: /ra give[a][p|P|pp|r] [count] <item> to <player>");
+            return;
+        }
+
+        string itemPart   = argStr.Substring(0, toIdx).Trim();
+        string playerPart = argStr.Substring(toIdx + 4).Trim();
+
+        if (string.IsNullOrEmpty(itemPart) || string.IsNullOrEmpty(playerPart))
+        {
+            ChatLine("[RynthAi] Item name and player name must not be empty.");
+            return;
+        }
+
+        // allItems: give every matching stack; otherwise honour optional leading count (default 1)
+        int maxCount = allItems ? int.MaxValue : 1;
+        string[] itemTokens = itemPart.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        if (!allItems && itemTokens.Length >= 2 && int.TryParse(itemTokens[0], out int parsedCount) && parsedCount > 0)
+        {
+            maxCount = parsedCount;
+            itemPart = itemTokens[1].Trim();
+        }
+
+        // Find target in landscape by name (player, NPC, container, etc.)
+        WorldObject? target = null;
+        foreach (var wo in _objectCache.GetLandscape())
+        {
+            bool match = partialPlayer
+                ? wo.Name.IndexOf(playerPart, StringComparison.OrdinalIgnoreCase) >= 0
+                : string.Equals(wo.Name, playerPart, StringComparison.OrdinalIgnoreCase);
+            if (match) { target = wo; break; }
+        }
+        if (target == null) { ChatLine($"[RynthAi] Target not found: '{playerPart}'"); return; }
+
+        // Compile regex if needed
+        Regex? rx = null;
+        if (itemMatch == GiveItemMatch.Regex)
+        {
+            try   { rx = new Regex(itemPart, RegexOptions.IgnoreCase); }
+            catch { ChatLine($"[RynthAi] Invalid regex: {itemPart}"); return; }
+        }
+
+        // Collect matching inventory stacks
+        var matches = new List<WorldObject>();
+        foreach (var wo in _objectCache.GetDirectInventory(forceRefresh: true))
+        {
+            bool hit = itemMatch switch
+            {
+                GiveItemMatch.Exact   => string.Equals(wo.Name, itemPart, StringComparison.OrdinalIgnoreCase),
+                GiveItemMatch.Partial => wo.Name.IndexOf(itemPart, StringComparison.OrdinalIgnoreCase) >= 0,
+                GiveItemMatch.Regex   => rx!.IsMatch(wo.Name),
+                _                     => false,
+            };
+            if (hit) matches.Add(wo);
+            if (matches.Count >= maxCount) break;
+        }
+
+        if (matches.Count == 0) { ChatLine($"[RynthAi] No items found matching '{itemPart}'"); return; }
+
+        if (allItems)
+        {
+            foreach (var item in matches)
+            {
+                int stackSize = Math.Max(1, item.Values(LongValueKey.StackCount, 1));
+                EnqueueGive((uint)item.Id, (uint)target.Id, stackSize);
+            }
+            ChatLine($"[RynthAi] Queued {matches.Count} stack(s) matching '{itemPart}' → {target.Name}");
+        }
+        else
+        {
+            var item = matches[0];
+            int stackSize = Math.Max(1, item.Values(LongValueKey.StackCount, 1));
+            Host.MoveItemExternal((uint)item.Id, (uint)target.Id, stackSize);
+            ChatLine($"[RynthAi] Giving '{item.Name}' to {target.Name}");
+        }
+    }
+
+    private void HandleGiveProfileCommand(string[] parts, bool partialPlayer)
+    {
+        if (_objectCache == null) { ChatLine("[RynthAi] Object cache not ready."); return; }
+        if (!Host.HasMoveItemExternal)  { ChatLine("[RynthAi] MoveItemExternal not available."); return; }
+
+        string argStr = string.Join(" ", parts, 2, parts.Length - 2).Trim();
+        int toIdx = argStr.LastIndexOf(" to ", StringComparison.OrdinalIgnoreCase);
+        if (toIdx < 0) { ChatLine("[RynthAi] Usage: /ra ig[p] <lootProfile> to <player>"); return; }
+
+        string profileArg = argStr.Substring(0, toIdx).Trim();
+        string playerPart = argStr.Substring(toIdx + 4).Trim();
+
+        // Resolve profile path — bare name resolved from ItemGiver dir, .utl extension added if needed
+        const string itemGiverDir = @"C:\Games\RynthSuite\RynthAi\ItemGiver";
+        string profilePath = System.IO.Path.IsPathRooted(profileArg)
+            ? profileArg
+            : System.IO.Path.Combine(itemGiverDir, profileArg);
+
+        bool isJson = profilePath.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+        if (!isJson && !profilePath.EndsWith(".utl", StringComparison.OrdinalIgnoreCase))
+            profilePath += ".utl";
+
+        if (!System.IO.File.Exists(profilePath)) { ChatLine($"[RynthAi] Profile not found: {profilePath}"); return; }
+
+        // Find target in landscape by name (player, NPC, container, etc.)
+        WorldObject? target = null;
+        foreach (var wo in _objectCache.GetLandscape())
+        {
+            bool match = partialPlayer
+                ? wo.Name.IndexOf(playerPart, StringComparison.OrdinalIgnoreCase) >= 0
+                : string.Equals(wo.Name, playerPart, StringComparison.OrdinalIgnoreCase);
+            if (match) { target = wo; break; }
+        }
+        if (target == null) { ChatLine($"[RynthAi] Target not found: '{playerPart}'"); return; }
+
+        // Load profile and give all matching items
+        int given = 0;
+        if (isJson)
+        {
+            var nativeProfile = RynthCore.Loot.LootProfile.Load(profilePath);
+            foreach (var item in _objectCache.GetDirectInventory(forceRefresh: true))
+            {
+                var (action, _) = Loot.LootEvaluator.Classify(nativeProfile, item, null);
+                if (action != RynthCore.Loot.LootAction.Keep) continue;
+                Host.MoveItemExternal((uint)item.Id, (uint)target.Id, Math.Max(1, item.Values(LongValueKey.StackCount, 1)));
+                given++;
+            }
+        }
+        else
+        {
+            var vtProfile = VTankLootParser.Load(profilePath);
+            var lootCtx   = new VTankLootContext(Host, Host.GetPlayerId()) { Cache = _objectCache };
+            foreach (var item in _objectCache.GetDirectInventory(forceRefresh: true))
+            {
+                VTankLootRule? matched = null;
+                foreach (var rule in vtProfile.Rules)
+                    if (rule.IsMatch(item, lootCtx)) { matched = rule; break; }
+                if (matched == null || (matched.Action != VTankLootAction.Keep && matched.Action != VTankLootAction.KeepUpTo)) continue;
+                Host.MoveItemExternal((uint)item.Id, (uint)target.Id, Math.Max(1, item.Values(LongValueKey.StackCount, 1)));
+                given++;
+            }
+        }
+
+        ChatLine(given > 0
+            ? $"[RynthAi] Giving {given} stack(s) from profile '{System.IO.Path.GetFileName(profilePath)}' to {target.Name}"
+            : $"[RynthAi] No items in inventory matched profile '{System.IO.Path.GetFileName(profilePath)}'");
     }
 }
