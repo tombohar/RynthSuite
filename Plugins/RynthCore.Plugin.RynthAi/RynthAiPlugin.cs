@@ -33,6 +33,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private QuestTracker? _questTracker;
     private InventoryManager? _inventoryManager;
     private SalvageManager? _salvageManager;
+    private ManaStoneManager? _manaStoneManager;
     private PlayerVitalsCache _vitals = new();
     private uint _playerId;
     private int _vitalsTickCounter;
@@ -85,6 +86,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _questTracker = null;
         _inventoryManager = null;
         _salvageManager = null;
+        _manaStoneManager = null;
         _buffManager?.Dispose();
         _buffManager = null;
         _spellManager = null;
@@ -202,7 +204,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         if (_buffManager != null) _metaManager.SetBuffManager(_buffManager);
 
         if (_objectCache != null)
-            _inventoryManager = new InventoryManager(Host, _dashboard.Settings, _objectCache);
+        {
+            _inventoryManager  = new InventoryManager(Host, _dashboard.Settings, _objectCache);
+            _manaStoneManager  = new ManaStoneManager(Host, _dashboard.Settings, _objectCache);
+        }
 
         _salvageManager = new SalvageManager(Host, _dashboard.Settings, _objectCache);
 
@@ -272,6 +277,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 }
 
                 _salvageManager?.OnTick(_busyCount);
+
+                // Mana stone tapping — runs after salvage, independent of looting state.
+                _manaStoneManager?.OnHeartbeat(_busyCount);
 
                 // Missile crafting runs before combat — blocks everything while active
                 if (_missileCraftingManager != null && settings.IsMacroRunning)
@@ -431,6 +439,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     {
         if (string.IsNullOrEmpty(text)) return;
         _buffManager?.OnChatWindowText(text, chatType);
+        _manaStoneManager?.OnChatWindowText(text);
         _combatManager?.HandleChatForDebuffs(text);
         _missileCraftingManager?.HandleChat(text);
         _metaManager?.HandleChat(text);
@@ -596,6 +605,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "dumpinv":      HandleDumpInventoryCommand(); break;
             case "mapdump":      HandleMapDumpCommand(); break;
             case "clearbusy":    HandleClearBusyCommand(); break;
+            case "settings":     HandleSettingsCommand(parts); break;
             case "busyinfo":     HandleBusyInfoCommand(); break;
             // give variants — first-match (with optional count prefix)
             case "give":         HandleGiveCommand(parts, GiveItemMatch.Exact,   partialPlayer: false); break;
@@ -666,6 +676,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             _navMarkerRenderer?.Render();
             if (_dashboard?.Settings.ShowTerrainPassability == true)
                 _terrainOverlay?.Render();
+
+            // Map renders independently of whether the main dashboard is visible.
+            _dashboard?.RenderMapWindow();
 
             if (_windowVisible && _dashboard is not null)
             {

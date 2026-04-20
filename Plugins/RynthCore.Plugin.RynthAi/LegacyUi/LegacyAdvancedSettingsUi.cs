@@ -386,6 +386,12 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Checkbox("Enable Looting", ref _settings.EnableLooting);
                 ImGui.Checkbox("Boost Loot Priority", ref _settings.BoostLootPriority);
                 ImGui.Checkbox("Loot Only Rare Corpses", ref _settings.LootOnlyRareCorpses);
+                ImGui.Checkbox("Jump When Looting", ref _settings.LootJumpEnabled);
+                if (_settings.LootJumpEnabled)
+                {
+                    ImGui.SetNextItemWidth(120);
+                    ImGui.SliderInt("Jump Height", ref _settings.LootJumpHeight, 1, 100);
+                }
 
                 ImGui.Spacing();
                 ImGui.Text("Corpse Ownership");

@@ -81,6 +81,27 @@ public sealed class VTankLootContext
         return slots;
     }
 
+    private readonly Dictionary<uint, (uint[] SubIds, uint[] Offsets)> _paletteCache = new();
+
+    public (uint[] SubIds, uint[] Offsets) GetItemPalettes(uint itemId)
+    {
+        if (_paletteCache.TryGetValue(itemId, out var cached)) return cached;
+        var empty = (Array.Empty<uint>(), Array.Empty<uint>());
+        if (!Host.HasGetObjectPalettes) { _paletteCache[itemId] = empty; return empty; }
+        var subIds = new uint[16];
+        var offsets = new uint[16];
+        int n = Host.GetObjectPalettes(itemId, subIds, offsets, 16);
+        if (n <= 0) { _paletteCache[itemId] = empty; return empty; }
+        int take = Math.Min(n, 16);
+        var ids2 = new uint[take];
+        var offs2 = new uint[take];
+        Array.Copy(subIds, ids2, take);
+        Array.Copy(offsets, offs2, take);
+        var result = (ids2, offs2);
+        _paletteCache[itemId] = result;
+        return result;
+    }
+
     public uint[] GetItemSpellIds(uint itemId)
     {
         if (_spellIdCache.TryGetValue(itemId, out var ids)) return ids;
@@ -169,10 +190,10 @@ public sealed class VTankLootRule
                     11   => MatchLongFlagExists(item, data),                // LongValKeyFlagExists
                     12   => MatchLongE(item, data),                         // LongValKeyE
                     13   => MatchLongNE(item, data),                        // LongValKeyNE
-                    14   => SkipColorRule(data, 5),                         // AnySimilarColor (no palette API)
-                    15   => SkipColorRule(data, 6),                         // SimilarColorArmorType
-                    16   => SkipColorRule(data, 6),                         // SlotSimilarColor
-                    17   => SkipColorRule(data, 2),                         // SlotExactPalette
+                    14   => SkipColorRule(data, 5),                         // AnySimilarColor (needs portal.dat)
+                    15   => SkipColorRule(data, 6),                         // SimilarColorArmorType (needs portal.dat)
+                    16   => SkipColorRule(data, 6),                         // SlotSimilarColor (needs portal.dat)
+                    17   => MatchSlotExactPalette(itemId, ctx, data),       // SlotExactPalette
                     1000 => MatchCharacterSkillGE(ctx, data),               // CharacterSkillGE (buffed)
                     1001 => MatchCharacterPackSlotsGE(ctx, data),           // CharacterMainPackEmptySlotsGE
                     1002 => MatchCharacterLevelGE(ctx, data),               // CharacterLevelGE
@@ -334,7 +355,23 @@ public sealed class VTankLootRule
         return item.Values((LongValueKey)key, 0) != threshold;
     }
 
-    // Types 14-17: color palette rules — reads N lines. No palette API; optimistic.
+    // Type 17: SlotExactPalette — reads: slot (0-based index), paletteId.
+    // Match if the item's subpalette at index `slot` (sorted by offset) has the target palette DID.
+    // Palette IDs in the UTL are stored as raw 16-24 bit values; Subpalette.subID may include the
+    // 0x04000000 DID prefix, so we compare the low 24 bits only.
+    private static bool MatchSlotExactPalette(uint itemId, VTankLootContext? ctx, Queue<string> data)
+    {
+        int slot = ReadInt(data);
+        uint targetPaletteId = (uint)ReadInt(data);
+        if (ctx is null) return true;
+        var (subIds, _) = ctx.GetItemPalettes(itemId);
+        if (subIds.Length == 0) return true; // no data captured — optimistic
+        if (slot < 0 || slot >= subIds.Length) return false;
+        uint actual = subIds[slot];
+        return (actual & 0x00FFFFFFu) == (targetPaletteId & 0x00FFFFFFu);
+    }
+
+    // Types 14-16: color palette rules — reads N lines. Optimistic until portal.dat reader available.
     private static bool SkipColorRule(Queue<string> data, int lineCount)
     {
         for (int i = 0; i < lineCount; i++)

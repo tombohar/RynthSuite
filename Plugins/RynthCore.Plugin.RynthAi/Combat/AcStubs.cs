@@ -12,6 +12,7 @@ namespace RynthCore.Plugin.RynthAi;
 /// </summary>
 public enum LongValueKey
 {
+    TemplateType           = 2,   // WeenieType / creature template type ID
     ItemsCapacity          = 6,   // max items a container can hold
     ContainersCapacity     = 7,   // max sub-containers a container can hold
     Locations              = 9,   // equipment slot bitmask (valid equip locations)
@@ -19,6 +20,8 @@ public enum LongValueKey
     MaxStackSize           = 11,  // max stack size (StackMax)
     StackCount             = 12,  // current stack size (StackSize)
     DamageType             = 45,  // DAMAGE_TYPE flags
+    MaximumHealth          = 39,  // creature base max HP (STypeInt 39)
+    CreatureType           = 62,  // creature type / species ID
 
     // Legacy alias kept for call-site compatibility
     EquippedSlots          = 10,

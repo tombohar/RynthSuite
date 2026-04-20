@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using RynthCore.PluginSdk;
+using RynthCore.Plugin.RynthAi.Combat;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.Plugin.RynthAi.Raycasting;
 
@@ -194,7 +195,11 @@ public class CombatManager : IDisposable
 
     public void SetSpellManager(SpellManager spellManager) => _spellManager = spellManager;
     public void SetCharacterSkills(CharacterSkills skills) => _charSkills = skills;
-    public void SetPlayerId(uint playerId) => _playerId = playerId;
+    public void SetPlayerId(uint playerId)
+    {
+        _playerId = playerId;
+        _monsterMatchEval = new MonsterMatchEvaluator(_worldFilter, playerId);
+    }
     public void SetRaycastSystem(MainLogic raycast)
     {
         _raycastSystem = raycast;
@@ -202,6 +207,7 @@ public class CombatManager : IDisposable
     }
 
     private uint _playerId;
+    private MonsterMatchEvaluator? _monsterMatchEval;
 
     private Dictionary<string, string> _monsterWeaknesses = new(StringComparer.OrdinalIgnoreCase);
     public void SetMonsterWeaknesses(Dictionary<string, string> weaknesses)
@@ -959,10 +965,32 @@ public class CombatManager : IDisposable
     private MonsterRule? GetRuleForTarget(WorldObject? target)
     {
         if (target == null) return null;
-        var rule = _settings.MonsterRules.FirstOrDefault(
-            r => !r.Name.Equals("Default", StringComparison.OrdinalIgnoreCase) &&
-                 target.Name.IndexOf(r.Name, StringComparison.OrdinalIgnoreCase) >= 0);
-        if (rule != null) return rule;
+
+        string metaState = _settings.CurrentState ?? "Default";
+
+        foreach (var r in _settings.MonsterRules)
+        {
+            if (r.Name.Equals("Default", StringComparison.OrdinalIgnoreCase)) continue;
+
+            bool matches;
+            if (!string.IsNullOrWhiteSpace(r.MatchExpression))
+            {
+                // Expression match: eval first; if expression is true AND name is non-empty, also check name.
+                bool exprTrue = _monsterMatchEval?.Evaluate(r.MatchExpression, target, metaState) ?? false;
+                if (!string.IsNullOrWhiteSpace(r.Name))
+                    matches = exprTrue && target.Name.IndexOf(r.Name, StringComparison.OrdinalIgnoreCase) >= 0;
+                else
+                    matches = exprTrue;
+            }
+            else
+            {
+                matches = !string.IsNullOrWhiteSpace(r.Name) &&
+                          target.Name.IndexOf(r.Name, StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            if (matches) return r;
+        }
+
         return _settings.MonsterRules.FirstOrDefault(
             m => m.Name.Equals("Default", StringComparison.OrdinalIgnoreCase));
     }

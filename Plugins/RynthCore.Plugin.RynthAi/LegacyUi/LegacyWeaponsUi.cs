@@ -170,6 +170,37 @@ internal sealed class LegacyWeaponsUi
         ImGui.SameLine();
         ImGui.TextDisabled("(Click an item in inventory first)");
 
+        // ── Mana Stone Tapping ──────────────────────────────────────────────
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+        ImGui.TextColored(LegacyDashboardRenderer.ColAmber, "Mana Stone Tapping");
+        ImGui.Spacing();
+        ImGui.Text("Keep up to:");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(70);
+        ImGui.DragInt("##StoneKeep", ref _settings.ManaStoneKeepCount, 0.2f, 1, 999);
+        if (_settings.ManaStoneKeepCount < 1)  _settings.ManaStoneKeepCount = 1;
+        if (_settings.ManaStoneKeepCount > 999) _settings.ManaStoneKeepCount = 999;
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Maximum number of mana stones to keep in inventory.\nStones on corpses are skipped once this count is reached.");
+        ImGui.SameLine(0, 16);
+        ImGui.Checkbox("Enable Tapping", ref _settings.EnableManaTapping);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Use mana stones on inventory items with high MaxMana,\nthen apply the charged stone to the player to recharge gear.");
+        if (_settings.EnableManaTapping)
+        {
+            ImGui.SameLine(0, 16);
+            ImGui.Text("Min MaxMana:");
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(90);
+            ImGui.DragInt("##TapThresh", ref _settings.ManaTapMinMana, 50f, 100, 99999);
+            if (_settings.ManaTapMinMana < 100)  _settings.ManaTapMinMana = 100;
+            if (_settings.ManaTapMinMana > 99999) _settings.ManaTapMinMana = 99999;
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Only tap items whose MaxMana is at or above this value.");
+        }
+
         ImGui.End();
     }
 

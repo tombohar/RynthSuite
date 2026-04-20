@@ -73,6 +73,8 @@ public sealed class LegacyUiSettings
     public int LootRetryTimeoutMs = 500;
     public int LootOpenRetryMs = 1500;
     public int LootCorpseTimeoutMs = 12000;
+    public bool LootJumpEnabled = false;
+    public int LootJumpHeight = 10; // 0–100; maps to 0.0–1.0 JumpNonAutonomous extent
 
     public int SalvageOpenDelayFirstMs = 400;
     public int SalvageOpenDelayFastMs = 50;
@@ -154,6 +156,10 @@ public sealed class LegacyUiSettings
     public int MinSkillLevelTier6 = 285;
     public int MinSkillLevelTier7 = 335;
     public int MinSkillLevelTier8 = 435;
+
+    public bool EnableManaTapping   = false;
+    public int  ManaTapMinMana      = 2500;
+    public int  ManaStoneKeepCount  = 5;
 
     public List<MonsterRule> MonsterRules { get; set; } = new();
     public List<ItemRule> ItemRules { get; set; } = new();
@@ -246,6 +252,8 @@ public sealed class LegacyUiSettings
 public sealed class MonsterRule
 {
     public string Name { get; set; } = "New Monster";
+    public string Category { get; set; } = "";
+    public string MatchExpression { get; set; } = "";
     public int Priority { get; set; } = 1;
     public string DamageType { get; set; } = "Auto";
     public int WeaponId { get; set; }

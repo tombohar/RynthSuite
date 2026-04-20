@@ -37,6 +37,7 @@ internal sealed class LegacyDashboardRenderer
     private readonly LegacyLuaUi _luaUi;
     private readonly LegacyWeaponsUi _weaponsUi;
     private readonly LegacyMetaUi _metaUi;
+    private readonly LegacyMonstersUi _monstersUi;
     private readonly DungeonMapUi _dungeonMapUi;
 
     private readonly List<string> _profiles = new();
@@ -47,6 +48,7 @@ internal sealed class LegacyDashboardRenderer
     private readonly string _lootFolder = @"C:\Games\RynthSuite\RynthAi\LootProfiles";
     private readonly string _metaFolder = @"C:\Games\RynthSuite\RynthAi\MetaFiles";
     private readonly string _settingsRoot = @"C:\Games\RynthSuite\RynthAi\SettingsProfiles\ACEmulator";
+    private readonly string _monstersFolder = @"C:\Games\RynthSuite\RynthAi\MonsterProfiles";
 
     private int _selectedNavIdx;
     private bool _isMinimized;
@@ -96,6 +98,12 @@ internal sealed class LegacyDashboardRenderer
         _luaUi = new LegacyLuaUi(_settings, host);
         _weaponsUi = new LegacyWeaponsUi(_settings, host);
         _metaUi = new LegacyMetaUi(_settings, _navFiles);
+        _monstersUi = new LegacyMonstersUi(
+            _settings,
+            host,
+            onMonstersChanged: SaveMonstersFile,
+            onLaunchExternalEditor: LaunchMonsterEditor,
+            getCurrentTarget: GetCurrentTargetForMonsterAdd);
         _dungeonMapUi = new DungeonMapUi(host, _settings);
         _dungeonMapUi.OnSettingChanged = SaveSettings;
         RefreshAllLists();
@@ -226,6 +234,36 @@ internal sealed class LegacyDashboardRenderer
         catch { }
     }
 
+    public string SaveAsProfile(string name)
+    {
+        if (string.IsNullOrEmpty(_charFolder)) return "Not logged in.";
+        try
+        {
+            CaptureTransientUiState();
+            Directory.CreateDirectory(_charFolder);
+            string json = JsonSerializer.Serialize(_settings, RynthAiJsonContext.Default.LegacyUiSettings);
+            string path = GetProfileFilePath(name);
+            File.WriteAllText(path, json);
+            _settings.SelectedProfile = name;
+            _settingsFilePath = path;
+            _lastSavedJson = json;
+            WriteActiveProfile(name);
+            RefreshProfilesList();
+            return $"Saved profile '{name}'.";
+        }
+        catch (Exception ex) { return $"Save failed: {ex.Message}"; }
+    }
+
+    public string LoadProfile(string name)
+    {
+        if (string.IsNullOrEmpty(_charFolder)) return "Not logged in.";
+        string path = GetProfileFilePath(name);
+        if (!File.Exists(path))
+            return SaveAsProfile(name);
+        SwitchProfile(name);
+        return $"Loaded profile '{name}'.";
+    }
+
     private void CheckAndSave()
     {
         if (string.IsNullOrEmpty(_settingsFilePath)) return;
@@ -246,22 +284,48 @@ internal sealed class LegacyDashboardRenderer
 
     // ── monsters.json support ────────────────────────────────────────────────
 
-    private string MonstersFilePath => string.IsNullOrEmpty(_charFolder)
+    private string MonstersFilePath
+    {
+        get
+        {
+            if (string.IsNullOrEmpty(_charFolder)) return string.Empty;
+            string charKey = Path.GetFileName(_charFolder); // e.g. "Toon Name"
+            return Path.Combine(_monstersFolder, charKey + ".json");
+        }
+    }
+
+    private string MonstersFilePathLegacy => string.IsNullOrEmpty(_charFolder)
         ? string.Empty
         : Path.Combine(_charFolder, "monsters.json");
 
     /// <summary>
-    /// If monsters.json doesn't exist yet but the profile already has non-default rules,
-    /// write them to monsters.json so the editor can pick them up on first launch.
+    /// Moves any existing monsters.json from the old per-char settings folder into
+    /// the new MonsterProfiles folder, then seeds from in-memory rules if still absent.
     /// </summary>
     private void MigrateMonstersToFile()
     {
         string path = MonstersFilePath;
-        if (string.IsNullOrEmpty(path) || File.Exists(path)) return;
+        if (string.IsNullOrEmpty(path)) return;
+
+        // Move legacy file if present and destination doesn't exist yet
+        string legacyPath = MonstersFilePathLegacy;
+        if (!string.IsNullOrEmpty(legacyPath) && File.Exists(legacyPath) && !File.Exists(path))
+        {
+            try
+            {
+                Directory.CreateDirectory(_monstersFolder);
+                File.Move(legacyPath, path);
+                return; // moved; no need to seed from memory
+            }
+            catch { }
+        }
+
+        if (File.Exists(path)) return;
         if (_settings.MonsterRules.Count <= 1) return; // only Default, nothing to migrate
 
         try
         {
+            Directory.CreateDirectory(_monstersFolder);
             string json = JsonSerializer.Serialize(_settings.MonsterRules, RynthAiJsonContext.Default.MonsterRuleList);
             File.WriteAllText(path, json);
         }
@@ -289,11 +353,12 @@ internal sealed class LegacyDashboardRenderer
         _monsterWatcher = null;
 
         string path = MonstersFilePath;
-        if (string.IsNullOrEmpty(path) || !Directory.Exists(_charFolder)) return;
+        if (string.IsNullOrEmpty(path) || !Directory.Exists(_monstersFolder)) return;
 
         try
         {
-            _monsterWatcher = new FileSystemWatcher(_charFolder, "monsters.json")
+            string charKey = Path.GetFileName(_charFolder);
+            _monsterWatcher = new FileSystemWatcher(_monstersFolder, charKey + ".json")
             {
                 NotifyFilter       = NotifyFilters.LastWrite,
                 EnableRaisingEvents = true
@@ -311,6 +376,42 @@ internal sealed class LegacyDashboardRenderer
         if (!_monsterFileChanged) return;
         _monsterFileChanged = false;
         LoadMonstersFromFile();
+    }
+
+    /// <summary>Writes the in-memory MonsterRules to monsters.json so the external editor sees them.</summary>
+    private void SaveMonstersFile()
+    {
+        string path = MonstersFilePath;
+        if (string.IsNullOrEmpty(path)) return;
+
+        try
+        {
+            // Suspend the watcher so our own write doesn't cause a redundant reload.
+            bool wasEnabled = false;
+            if (_monsterWatcher != null)
+            {
+                wasEnabled = _monsterWatcher.EnableRaisingEvents;
+                _monsterWatcher.EnableRaisingEvents = false;
+            }
+
+            Directory.CreateDirectory(_monstersFolder);
+            string json = JsonSerializer.Serialize(_settings.MonsterRules, RynthAiJsonContext.Default.MonsterRuleList);
+            File.WriteAllText(path, json);
+
+            if (_monsterWatcher != null)
+                _monsterWatcher.EnableRaisingEvents = wasEnabled;
+        }
+        catch { }
+    }
+
+    private (uint Id, string Name)? GetCurrentTargetForMonsterAdd()
+    {
+        if (_currentTargetId == 0) return null;
+        string name = _targetLabel;
+        if (_host.HasGetObjectName && _host.TryGetObjectName(_currentTargetId, out string resolved) && !string.IsNullOrWhiteSpace(resolved))
+            name = resolved;
+        if (string.IsNullOrWhiteSpace(name) || name == "NO TARGET") return null;
+        return (_currentTargetId, name);
     }
 
     /// <summary>Launches the standalone Monster Rules editor for the current char folder.</summary>
@@ -357,6 +458,7 @@ internal sealed class LegacyDashboardRenderer
         _settings.DashShowLua        = DashWindows.ShowLua;
         _settings.DashShowNavigation = DashWindows.ShowNavigation;
         _settings.DashShowMacroRules = DashWindows.ShowMacroRules;
+        _settings.DashShowMonsters   = DashWindows.ShowMonsters;
         _settings.DashShowDungeonMap = DashWindows.ShowDungeonMap;
     }
 
@@ -368,7 +470,7 @@ internal sealed class LegacyDashboardRenderer
         DashWindows.ShowLua         = _settings.DashShowLua;
         DashWindows.ShowNavigation  = _settings.DashShowNavigation;
         DashWindows.ShowMacroRules  = _settings.DashShowMacroRules;
-        DashWindows.ShowMonsters    = false; // launcher, not a window toggle — always starts closed
+        DashWindows.ShowMonsters    = _settings.DashShowMonsters;
         DashWindows.ShowDungeonMap  = _settings.DashShowDungeonMap;
     }
 
@@ -585,6 +687,7 @@ internal sealed class LegacyDashboardRenderer
         dst.EnableFPSLimit           = tmp.EnableFPSLimit;
         dst.TargetFPSFocused         = tmp.TargetFPSFocused;
         dst.TargetFPSBackground      = tmp.TargetFPSBackground;
+        // MonsterRule deep-copy preserves Category + MatchExpression via JSON round-trip
         dst.MonsterRules             = tmp.MonsterRules;
         dst.ItemRules                = tmp.ItemRules;
         dst.ConsumableRules          = tmp.ConsumableRules;
@@ -617,6 +720,9 @@ internal sealed class LegacyDashboardRenderer
         dst.MinSkillLevelTier6       = tmp.MinSkillLevelTier6;
         dst.MinSkillLevelTier7       = tmp.MinSkillLevelTier7;
         dst.MinSkillLevelTier8       = tmp.MinSkillLevelTier8;
+        dst.EnableManaTapping        = tmp.EnableManaTapping;
+        dst.ManaTapMinMana           = tmp.ManaTapMinMana;
+        dst.ManaStoneKeepCount       = tmp.ManaStoneKeepCount;
         dst.MetaDebug                = tmp.MetaDebug;
         dst.StartMacroOnLogin        = tmp.StartMacroOnLogin;
         dst.ShowTerrainPassability   = tmp.ShowTerrainPassability;
@@ -712,18 +818,36 @@ internal sealed class LegacyDashboardRenderer
 
             _metaUi.Render();
             TickMonsterReload();
+            _monstersUi.Render();
             _weaponsUi.Render();
 
             // Hooked up the new Lua UI here
             _luaUi.Render();
 
             if (DashWindows.ShowNavigation) _navigationUi.Render();
-            if (DashWindows.ShowDungeonMap || _dungeonMapUi.IsAutoHidden) _dungeonMapUi.Render();
             if (_settings.ShowAdvancedWindow) _advancedSettingsUi.Render();
         }
         finally
         {
             ImGui.PopStyleColor(8);
+        }
+    }
+
+    // Rendered every frame regardless of whether the main dashboard is visible.
+    public void RenderMapWindow()
+    {
+        ImGui.PushStyleColor(ImGuiCol.FrameBg,        new Vector4(0.15f, 0.55f, 0.95f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.FrameBgHovered, new Vector4(0.22f, 0.62f, 1.00f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.FrameBgActive,  new Vector4(0.10f, 0.45f, 0.82f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.CheckMark,      new Vector4(0.00f, 0.00f, 0.00f, 1.00f));
+        try
+        {
+            if (DashWindows.ShowDungeonMap || _dungeonMapUi.IsAutoHidden)
+                _dungeonMapUi.Render();
+        }
+        finally
+        {
+            ImGui.PopStyleColor(4);
         }
     }
 
@@ -865,10 +989,12 @@ internal sealed class LegacyDashboardRenderer
         ImGui.SetNextItemWidth(-1);
         if (ImGui.BeginCombo("##ProfCombo", TruncateName(_settings.SelectedProfile, 16)))
         {
+            string? pendingSwitch = null;
             foreach (string profile in _profiles)
                 if (ImGui.Selectable(profile, profile == _settings.SelectedProfile))
-                    SwitchProfile(profile);
+                    pendingSwitch = profile;
             ImGui.EndCombo();
+            if (pendingSwitch != null) SwitchProfile(pendingSwitch);
         }
 
         ImGui.TextColored(ColTextMute, "Nav:");
@@ -1046,9 +1172,7 @@ internal sealed class LegacyDashboardRenderer
         ImGui.TableNextRow();
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Macro Rules", "gear", ref DashWindows.ShowMacroRules);
         ImGui.TableNextColumn();
-        bool prevMonsters = DashWindows.ShowMonsters;
         LegacyDashboardDrawing.GridBtn("Monsters", "target", ref DashWindows.ShowMonsters);
-        if (DashWindows.ShowMonsters && !prevMonsters) { LaunchMonsterEditor(); DashWindows.ShowMonsters = false; }
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Settings", "wrench", ref _settings.ShowAdvancedWindow);
         ImGui.TableNextRow();
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Navigation", "map", ref DashWindows.ShowNavigation);
@@ -1088,6 +1212,7 @@ internal sealed class LegacyDashboardRenderer
                     string name = Path.GetFileNameWithoutExtension(file);
                     if (name.Equals("settings", StringComparison.OrdinalIgnoreCase)) continue;
                     if (name.Equals("Default", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (name.Equals("monsters", StringComparison.OrdinalIgnoreCase)) continue;
                     if (!_profiles.Contains(name, StringComparer.OrdinalIgnoreCase))
                         _profiles.Add(name);
                 }

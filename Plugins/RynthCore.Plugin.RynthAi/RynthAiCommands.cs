@@ -56,6 +56,8 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra lootcheck     — classify selected item (on|off = auto on click)");
         ChatLine("[RynthAi] /ra dumpinv       — dump all inventory items (cache + direct)");
         ChatLine("[RynthAi] /ra clearbusy     — force-clear busy state (hourglass cursor)");
+        ChatLine("[RynthAi] /ra settings savechar <name> — save current settings to named profile (create if new)");
+        ChatLine("[RynthAi] /ra settings loadchar <name> — load named settings profile (create from current if new)");
     }
 
     private void HandlePowerCommand(string[] parts)
@@ -1021,6 +1023,36 @@ public sealed partial class RynthAiPlugin
         return fullCommand.Length > prefix.Length
             ? fullCommand[prefix.Length..].Trim()
             : string.Empty;
+    }
+
+    private void HandleSettingsCommand(string[] parts)
+    {
+        if (parts.Length < 4)
+        {
+            ChatLine("[RynthAi] Usage: /ra settings loadchar <name> | /ra settings savechar <name>");
+            return;
+        }
+
+        string sub = parts[2].ToLower();
+        if (sub != "loadchar" && sub != "savechar")
+        {
+            ChatLine("[RynthAi] Usage: /ra settings loadchar <name> | /ra settings savechar <name>");
+            return;
+        }
+
+        string name = string.Join(" ", parts, 3, parts.Length - 3).Trim();
+        if (string.IsNullOrEmpty(name))
+        {
+            ChatLine($"[RynthAi] Usage: /ra settings {sub} <name>");
+            return;
+        }
+
+        if (_dashboard == null) { ChatLine("[RynthAi] Dashboard not ready."); return; }
+
+        string result = sub == "loadchar"
+            ? _dashboard.LoadProfile(name)
+            : _dashboard.SaveAsProfile(name);
+        ChatLine($"[RynthAi] {result}");
     }
 
     private void HandleClearBusyCommand()

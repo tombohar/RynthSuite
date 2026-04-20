@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.Plugin.RynthAi.Loot;
 
@@ -30,6 +31,8 @@ public sealed partial class RynthAiPlugin
     private long _busyCountLastIncrementAt;
     private long _busyCountBecamePositiveAt; // when count first went 0→positive
     private const long BUSY_TIMEOUT_MS = 10_000; // safety: force-clear if stuck >10s
+    private const uint MotionTurnRight = 0x6500000D;
+    private const uint MotionTurnLeft  = 0x6500000E;
     private int _openedContainerId;
     private int _pendingLootCheckContainerId; // non-corpse container opened natively: run lootcheck on inventory arrival
     private int _corpseItemsEvaluated;  // items checked against loot profile this corpse session
@@ -53,6 +56,7 @@ public sealed partial class RynthAiPlugin
     private bool _currentLootItemIsSalvage;
     private bool _corpseIdsRequested;
     private long _corpseIdsRequestedAt;
+    private bool _corpseApproachTurnsActive;
 
     private static long CorpseNowMs => Environment.TickCount64;
     private void LootDiag(string message)
@@ -264,17 +268,18 @@ public sealed partial class RynthAiPlugin
 
         SyncCorpseContainerState();
 
-        // ── Hard disable: macro off, looting off, nav-boost, or buffing ──
-        // Buffing has absolute priority — halt all loot work until buffs are restored.
-        // The current corpse target is retained so looting resumes immediately after.
-        if (string.Equals(settings.BotAction, "Buffing", StringComparison.OrdinalIgnoreCase))
-            return;
-
+        // ── Macro off / looting disabled / nav-boost — full stop and reset ──
+        // Must come before the Buffing check so that turning off the macro always
+        // clears motion state (smooth turns, autorun) set during corpse approach.
         if (!settings.IsMacroRunning || !settings.EnableLooting || settings.BoostNavPriority)
         {
             ResetCorpseTarget(releaseState: true);
             return;
         }
+
+        // ── Buffing: halt loot work but retain target so looting resumes immediately ──
+        if (string.Equals(settings.BotAction, "Buffing", StringComparison.OrdinalIgnoreCase))
+            return;
 
         // ── Combat takes priority over claiming NEW corpses ───────────────
         // But if we already have an opened container, finish looting it
@@ -752,7 +757,7 @@ public sealed partial class RynthAiPlugin
                     // Pre-classify: if no match, mark processed so we never re-evaluate.
                     // Items that DO match (e.g. name-only rules) stay unprocessed and will
                     // be picked up in the eval loop below on this same tick.
-                    if (!ClassifyItemAgainstProfile(item, out _, out _, out _))
+                    if (!ClassifyItemAgainstProfile(item, settings, out _, out _, out _))
                         _processedCorpseItems.Add(item.Id);
                     preClassified++;
                     continue; // No busy-count-inflating ID request
@@ -809,7 +814,7 @@ public sealed partial class RynthAiPlugin
             }
 
             // Evaluate against loot profile — pure classification, no UseObject.
-            if (ClassifyItemAgainstProfile(item, out string actionLabel, out bool isSalvage, out string ruleLabel))
+            if (ClassifyItemAgainstProfile(item, settings, out string actionLabel, out bool isSalvage, out string ruleLabel))
             {
                 // First match wins — save it for pickup below
                 if (firstMatchId == 0)
@@ -840,19 +845,49 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
-        // Matched item — attempt pickup (gated on busy count)
+        // Matched item — attempt pickup
         if (firstMatchId != 0)
         {
-            if (_busyCount > 0)
-                return; // Wait for busy to clear before pickup only
+            // Within the assess window, gate on busy count so we don't race with
+            // RequestId responses still in flight. After the window, items without
+            // data are already being skipped — items we're picking up here have their
+            // own ID response back (and their busy-count contribution already decremented).
+            if (_busyCount > 0 && !assessTimedOut)
+                return;
 
             ChatLine($"[RynthAi] Loot rule: {matchItemName} -> [{matchActionLabel}] {matchRuleLabel}");
             _currentLootItemId = firstMatchId;
             Host.SelectItem(unchecked((uint)firstMatchId));
             LootDiag($"[RynthAi] Corpse loot: using 0x{(uint)firstMatchId:X8} '{matchItemName}' from corpse 0x{(uint)corpseId:X8}.");
-            bool moved = Host.UseObject(unchecked((uint)firstMatchId));
+
+            // Jump-loot: jump before MoveItemExternal to cancel the pickup animation.
+            // Only jump when multiple items remain (single-item: no animation worth cancelling).
+            // Guards: needs both hooks, stamina > 5 to cover the cost.
+            bool moved;
+            int remainingItems = visibleItemCount - _processedCorpseItems.Count;
+            bool useJumpLoot = settings.LootJumpEnabled
+                && Host.HasJumpNonAutonomous
+                && Host.HasMoveItemExternal
+                && _vitals.CurrentStamina > 5;
+
+            if (useJumpLoot)
+            {
+                if (remainingItems > 1)
+                    Host.JumpNonAutonomous(Math.Clamp(settings.LootJumpHeight / 100f, 0.01f, 1f));
+                moved = Host.MoveItemExternal(unchecked((uint)firstMatchId), _playerId, 0);
+            }
+            else
+            {
+                moved = Host.UseObject(unchecked((uint)firstMatchId));
+            }
+
             if (!moved)
             {
+                // If the game rejected the request due to its own busy state, don't
+                // count it as a failed attempt — just return and retry next tick.
+                if (_busyCount > 0)
+                    return;
+
                 LootDiag($"[RynthAi] Corpse loot: use request failed for 0x{(uint)firstMatchId:X8}.");
                 if (IncrementCorpseItemAttempt(firstMatchId) >= 3)
                     _processedCorpseItems.Add(firstMatchId);
@@ -998,6 +1033,11 @@ public sealed partial class RynthAiPlugin
         if (_targetCorpseId != 0 || _openedContainerId != 0 || _corpseAutorunActive)
             return true;
 
+        // BotAction may still be "Looting" between corpse claims (e.g. after MarkCorpseCompleted
+        // but before the next corpse is targeted). Block nav during this gap.
+        if (settings.BotAction == "Looting")
+            return true;
+
         // No active target, but check if unlooted corpses exist within range.
         // This prevents navigation from moving the player away between corpses.
         double maxMeters = GetCorpseApproachRangeMaxMeters(settings);
@@ -1058,11 +1098,30 @@ public sealed partial class RynthAiPlugin
     /// without performing any pickup or side effects.  Returns true if the item
     /// matched a loot/salvage rule.
     /// </summary>
-    private bool ClassifyItemAgainstProfile(WorldObject item, out string actionLabel, out bool isSalvage, out string ruleLabel)
+    private bool ClassifyItemAgainstProfile(WorldObject item, LegacyUiSettings settings, out string actionLabel, out bool isSalvage, out string ruleLabel)
     {
         actionLabel = string.Empty;
         isSalvage   = false;
         ruleLabel   = string.Empty;
+
+        // Consumable overrides — checked before loot profile so e.g. mana stones
+        // are always looted when the user has added them to the Consumables list,
+        // up to the configured keep count.
+        if (item.ObjectClass == AcObjectClass.ManaStone &&
+            settings.ConsumableRules.Any(r => r.Type.Equals("ManaStone", StringComparison.OrdinalIgnoreCase)))
+        {
+            int haveCount = _objectCache?.GetInventory()
+                .Count(inv => inv.ObjectClass == AcObjectClass.ManaStone) ?? 0;
+            if (haveCount < settings.ManaStoneKeepCount)
+            {
+                actionLabel = "Keep";
+                ruleLabel   = $"ManaStone (Consumable, {haveCount}/{settings.ManaStoneKeepCount})";
+                return true;
+            }
+            // Already at cap — leave on corpse
+            LootDiag($"[RynthAi] Corpse loot: skipping mana stone (have {haveCount}/{settings.ManaStoneKeepCount}).");
+            return false;
+        }
 
         if (TryLoadNativeLootProfile(out LootProfile nativeProfile, out _))
         {
@@ -1305,15 +1364,28 @@ public sealed partial class RynthAiPlugin
 
     private void ApproachCorpse(int corpseId)
     {
-        if (!TryGetHeadingToObject(corpseId, out double desiredDeg, out double absError))
+        if (!TryGetHeadingToObject(corpseId, out double desiredDeg, out double absError, out double signedError))
             return;
 
         if (absError > 18.0)
         {
             StopCorpseMovement();
-            Host.TurnToHeading((float)desiredDeg);
+            // Use smooth motion turns, same as NavigationEngine/CombatManager
+            if (signedError > 0)
+            {
+                Host.SetMotion(MotionTurnRight, true);
+                Host.SetMotion(MotionTurnLeft, false);
+            }
+            else
+            {
+                Host.SetMotion(MotionTurnLeft, true);
+                Host.SetMotion(MotionTurnRight, false);
+            }
+            _corpseApproachTurnsActive = true;
             return;
         }
+
+        ClearCorpseTurnMotions();
 
         long now = CorpseNowMs;
         if (!_corpseAutorunActive || now - _lastCorpseApproachHeartbeatAt >= 500)
@@ -1324,8 +1396,19 @@ public sealed partial class RynthAiPlugin
         }
     }
 
+    private void ClearCorpseTurnMotions()
+    {
+        if (!_corpseApproachTurnsActive)
+            return;
+        _corpseApproachTurnsActive = false;
+        Host.SetMotion(MotionTurnRight, false);
+        Host.SetMotion(MotionTurnLeft, false);
+    }
+
     private void StopCorpseMovement()
     {
+        ClearCorpseTurnMotions();
+
         if (!_corpseAutorunActive)
             return;
 
@@ -1414,6 +1497,7 @@ public sealed partial class RynthAiPlugin
         _lastCorpseOpenAttemptAt = 0;
         _lastLootActionAt = 0;
         _corpseIdsRequested = false;
+        _corpseApproachTurnsActive = false;
         ResetCurrentLootItem();
         _processedCorpseItems.Clear();
         _corpseItemAttempts.Clear();
@@ -1471,10 +1555,11 @@ public sealed partial class RynthAiPlugin
             || name.StartsWith("corpse of ", StringComparison.OrdinalIgnoreCase);
     }
 
-    private bool TryGetHeadingToObject(int targetId, out double desiredDeg, out double absError)
+    private bool TryGetHeadingToObject(int targetId, out double desiredDeg, out double absError, out double signedError)
     {
         desiredDeg = 0;
         absError = 180.0;
+        signedError = 0;
 
         if (!Host.TryGetPlayerPose(out _, out float px, out float py, out _, out float qw, out _, out _, out float qz))
             return false;
@@ -1494,6 +1579,7 @@ public sealed partial class RynthAiPlugin
         double error = desiredDeg - currentDeg;
         while (error > 180.0) error -= 360.0;
         while (error < -180.0) error += 360.0;
+        signedError = error;
         absError = Math.Abs(error);
         return true;
     }
