@@ -418,10 +418,12 @@ public class BuffManager : IDisposable
         int targetLevel = GetSpellLevel(targetSpell);
         int rebufferMin = 5; // recast when < 5 min remaining
 
-        // Item spells (armor banes, Impenetrability) tracked in their own dictionary
+        // Item spells (armor banes, Impenetrability) tracked in their own dictionary.
+        // Always check the timer first — RecordItemSpellCast() writes it immediately on cast
+        // so it exists by the next heartbeat. _isForceRebuffing only matters when there is no
+        // timer (i.e. hasn't been cast yet this session), and in that case both paths return false.
         if (IsArmorEnchantment(targetSpell.Name))
         {
-            if (_isForceRebuffing) return false;
             if (_itemSpellTimers.TryGetValue(targetSpell.Family, out ItemSpellRecord? itemTimer))
                 if (itemTimer.SpellLevel >= targetLevel &&
                     DateTime.Now < itemTimer.ExpiresAt.AddMinutes(-rebufferMin))

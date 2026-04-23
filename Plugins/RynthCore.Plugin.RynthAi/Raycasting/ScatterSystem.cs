@@ -36,8 +36,9 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         // Scene cache (portal.dat scenes)
         private Dictionary<uint, List<ScatterObjectDesc>> _sceneCache = new Dictionary<uint, List<ScatterObjectDesc>>();
 
-        // Height grid cache: landblockKey → 81-byte vertex heights
-        private readonly Dictionary<uint, byte[]> _heightGridCache = new Dictionary<uint, byte[]>();
+        // Landblock cache: landblockKey → parsed CellLandblock (terrain words, height indices, decoded Zs).
+        // Replaces the old raw-byte[] height cache; LoadHeightGrid now delegates here.
+        private readonly Dictionary<uint, LandblockData> _landblockCache = new Dictionary<uint, LandblockData>();
         private const int MAX_HEIGHT_GRID_CACHE = 30;
 
         // Reference to dat files
@@ -92,40 +93,31 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         // ===================================================================
 
         /// <summary>
-        /// Returns the 9×9 height grid (81 bytes) for a landblock, cached after first load.
+        /// Returns the parsed CellLandblock (terrain + heights + decoded Zs) for a landblock, cached after first load.
         /// Returns null if the landblock data is unavailable or the height table wasn't loaded.
         /// </summary>
-        public byte[] LoadHeightGrid(uint landblockKey)
+        public LandblockData LoadLandblockData(uint landblockKey)
         {
             if (_landHeightTable == null || _cellDat == null) return null;
 
-            if (_heightGridCache.TryGetValue(landblockKey, out var cached))
+            if (_landblockCache.TryGetValue(landblockKey, out var cached))
                 return cached;
 
-            uint cellId = (landblockKey << 16) | 0xFFFF;
-            byte[] data = _cellDat.GetFileData(cellId);
-            if (data == null || data.Length < 170) return null;
+            var data = LandblockData.Load(_cellDat, landblockKey, _landHeightTable);
+            if (data == null) return null;
 
-            var heights = new byte[81];
-            try
-            {
-                using (var ms = new MemoryStream(data))
-                using (var reader = new BinaryReader(ms))
-                {
-                    reader.ReadUInt32();        // id
-                    reader.ReadUInt32();        // hasObjects
-                    ms.Position += 81 * 2;     // skip terrain ushort[81]
-                    for (int i = 0; i < 81; i++)
-                        heights[i] = reader.ReadByte();
-                }
-            }
-            catch { return null; }
-
-            if (_heightGridCache.Count >= MAX_HEIGHT_GRID_CACHE)
-                _heightGridCache.Clear();
-            _heightGridCache[landblockKey] = heights;
-            return heights;
+            if (_landblockCache.Count >= MAX_HEIGHT_GRID_CACHE)
+                _landblockCache.Clear();
+            _landblockCache[landblockKey] = data;
+            return data;
         }
+
+        /// <summary>
+        /// Returns the 9×9 height grid (81 bytes) for a landblock. Thin shim over <see cref="LoadLandblockData"/>
+        /// kept for existing callers that still pass raw byte[] into the passability helpers.
+        /// </summary>
+        public byte[] LoadHeightGrid(uint landblockKey)
+            => LoadLandblockData(landblockKey)?.HeightIndices;
 
         /// <summary>
         /// World-space Z of vertex (ix, iy) in the 9×9 grid (ix and iy are 0–8).
@@ -214,35 +206,19 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
 
             try
             {
-                // Read CellLandblock (0xXXYYFFFF) from cell.dat
-                uint cellLandblockId = (landblockKey << 16) | 0xFFFF;
-                byte[] data = _cellDat.GetFileData(cellLandblockId);
-                if (data == null || data.Length < 170) // Minimum: 4+4+81*2+81*1 = 255
-                    return volumes;
+                // Parsed CellLandblock (cached) — terrain words + height indices + decoded Zs.
+                var lbData = LoadLandblockData(landblockKey);
+                if (lbData == null) return volumes;
 
-                // Parse terrain and height arrays
-                ushort[] terrain = new ushort[81];
-                byte[] height = new byte[81];
-
-                using (var ms = new MemoryStream(data))
-                using (var reader = new BinaryReader(ms))
-                {
-                    uint id = reader.ReadUInt32();
-                    uint hasObjects = reader.ReadUInt32();
-
-                    for (int i = 0; i < 81; i++)
-                        terrain[i] = reader.ReadUInt16();
-
-                    for (int i = 0; i < 81; i++)
-                        height[i] = reader.ReadByte();
-                }
+                ushort[] terrain = lbData.TerrainWords;
+                byte[] height = lbData.HeightIndices;
 
                 // Compute block offsets (global cell coordinates)
                 uint blockX = ((landblockKey >> 8) & 0xFF) * 8;
                 uint blockY = (landblockKey & 0xFF) * 8;
 
-                float globalOffsetX = ((landblockKey >> 8) & 0xFF) * BlockLength;
-                float globalOffsetY = (landblockKey & 0xFF) * BlockLength;
+                float globalOffsetX = lbData.WorldOriginX;
+                float globalOffsetY = lbData.WorldOriginY;
 
                 int scatterCount = 0;
 

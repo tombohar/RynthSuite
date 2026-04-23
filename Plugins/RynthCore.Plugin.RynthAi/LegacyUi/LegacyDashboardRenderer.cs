@@ -58,6 +58,10 @@ internal sealed class LegacyDashboardRenderer
 
     public bool CloseRequested { get; internal set; }
 
+    /// <summary>Wired by RynthAiPlugin to forward force-rebuff / cancel requests to BuffManager.</summary>
+    public Action? OnForceRebuffRequested { get; set; }
+    public Action? OnCancelForceRebuffRequested { get; set; }
+
     // ── Per-character settings persistence ───────────────────────────────────
     private string _charFolder = string.Empty;
     private string _settingsFilePath = string.Empty;
@@ -884,7 +888,7 @@ internal sealed class LegacyDashboardRenderer
             ImGui.PushStyleColor(ImGuiCol.ChildBg, ColPanelBg);
             ImGui.PushStyleColor(ImGuiCol.Border, ColBtnBord);
             ImGui.PushStyleVar(ImGuiStyleVar.ChildBorderSize, 1.0f);
-            if (ImGui.BeginChild("CombatPanel", new Vector2(-1, 180), ImGuiChildFlags.Borders, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)) { RenderCombatPanel(); ImGui.Dummy(new Vector2(0, 2)); }
+            if (ImGui.BeginChild("CombatPanel", new Vector2(-1, 200), ImGuiChildFlags.Borders, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)) { RenderCombatPanel(); ImGui.Dummy(new Vector2(0, 2)); }
             ImGui.EndChild();
             ImGui.PopStyleVar();
             ImGui.PopStyleColor(2);
@@ -968,7 +972,7 @@ internal sealed class LegacyDashboardRenderer
         // Status circle beside the button
         ImDrawListPtr dl = ImGui.GetWindowDrawList();
         uint circleColor = _settings.IsMacroRunning ? ImGui.ColorConvertFloat4ToU32(ColGreen) : ImGui.ColorConvertFloat4ToU32(ColTextMute);
-        Vector2 circlePos = pos + new Vector2(128, 14);
+        Vector2 circlePos = pos + new Vector2(138, 14);
         dl.AddCircleFilled(circlePos, 5, circleColor);
         if (_settings.IsMacroRunning) dl.AddCircle(circlePos, 8, circleColor, 12, 1.5f);
 
@@ -1104,6 +1108,26 @@ internal sealed class LegacyDashboardRenderer
         LegacyDashboardDrawing.DrawSquareToggle("shoe", ref _settings.EnableNavigation, togglePos + new Vector2(0, 34), "NavTgl");
         LegacyDashboardDrawing.DrawSquareToggle("bag", ref _settings.EnableLooting, togglePos + new Vector2(34, 34), "LootTgl");
         LegacyDashboardDrawing.DrawWideToggle("MACRO", "gear", ref _settings.EnableMeta, togglePos + new Vector2(0, 68), "MetaTgl", 64f, 20f);
+
+        // FR (Force Rebuff) — small button, below MACRO toggle
+        Vector2 frPos = togglePos + new Vector2(0, 92);
+        ImGui.SetCursorScreenPos(frPos);
+        ImGui.PushStyleColor(ImGuiCol.Button,        new Vector4(0.28f, 0.20f, 0.04f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.46f, 0.33f, 0.06f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive,  new Vector4(0.20f, 0.14f, 0.03f, 1.00f));
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 3.0f);
+        if (ImGui.Button("FR##ForceRebuff", new Vector2(64, 16)))
+            OnForceRebuffRequested?.Invoke();
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Force-recast all buffs.\nRight-click to cancel.");
+        if (ImGui.BeginPopupContextItem("##FRCtx"))
+        {
+            if (ImGui.MenuItem("Cancel Force Rebuff"))
+                OnCancelForceRebuffRequested?.Invoke();
+            ImGui.EndPopup();
+        }
+        ImGui.PopStyleVar();
+        ImGui.PopStyleColor(3);
+
         ImGui.TableNextColumn();
         ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 4);
         ImGui.TextColored(ColTextDim, TruncateName(_targetLabel, 32).ToUpperInvariant());

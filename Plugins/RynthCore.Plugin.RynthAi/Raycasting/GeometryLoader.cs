@@ -736,6 +736,13 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         // ===================================================================
 
         /// <summary>
+        /// Returns the parsed CellLandblock (terrain words, height indices, decoded Zs, world origin)
+        /// for the given landblock, cached after first load. Returns null if unavailable.
+        /// </summary>
+        public LandblockData GetLandblockData(uint landblockKey)
+            => _scatterSystem?.LoadLandblockData(landblockKey);
+
+        /// <summary>
         /// Returns the 9×9 height grid (81 bytes) for the given landblock, cached after first load.
         /// Returns null if scatter system is unavailable or data is missing.
         /// </summary>
@@ -778,6 +785,121 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             var heights = _scatterSystem.LoadHeightGrid(landblockKey);
             if (heights == null) return;
             _scatterSystem.GetTrianglePassability(heights, cellX, cellY, out tri1Passable, out tri2Passable);
+        }
+
+        /// <summary>
+        /// Plane-interpolated terrain Z at world (X, Y). Returns NaN if the landblock is
+        /// unavailable (e.g. dungeon) or the point is outside the world grid.
+        /// </summary>
+        public float GetTerrainZWorld(float worldX, float worldY)
+        {
+            if (_scatterSystem == null) return float.NaN;
+            int lbX = (int)(worldX / LandblockData.BlockLength);
+            int lbY = (int)(worldY / LandblockData.BlockLength);
+            if (lbX < 0 || lbY < 0 || lbX > 255 || lbY > 255) return float.NaN;
+            uint key = (uint)((lbX << 8) | lbY);
+            var lb = _scatterSystem.LoadLandblockData(key);
+            if (lb == null) return float.NaN;
+            return lb.GetTerrainZWorld(worldX, worldY);
+        }
+
+        /// <summary>
+        /// World-space ray vs. landscape. Walks landblocks along the ray (192 m DDA) and
+        /// delegates to <see cref="LandblockData.RaycastTerrainLocal"/> inside each.
+        /// Returns the nearest hit within <paramref name="maxDist"/>.
+        /// <paramref name="hitNormal"/> is the unit upward normal of the triangle hit.
+        /// </summary>
+        public bool RaycastLandscape(Vector3 worldOrigin, Vector3 dir, float maxDist,
+            out float hitDist, out Vector3 hitPoint, out Vector3 hitNormal)
+        {
+            hitDist = 0f;
+            hitPoint = Vector3.Zero;
+            hitNormal = Vector3.Zero;
+            if (_scatterSystem == null) return false;
+
+            const float L = LandblockData.BlockLength;
+            float px = worldOrigin.X, py = worldOrigin.Y;
+            float vx = dir.X, vy = dir.Y;
+
+            int lbX = (int)Math.Floor(px / L);
+            int lbY = (int)Math.Floor(py / L);
+
+            int stepX = vx > 0 ? 1 : (vx < 0 ? -1 : 0);
+            int stepY = vy > 0 ? 1 : (vy < 0 ? -1 : 0);
+
+            float tMaxX = float.PositiveInfinity, tDeltaX = float.PositiveInfinity;
+            float tMaxY = float.PositiveInfinity, tDeltaY = float.PositiveInfinity;
+            if (stepX != 0)
+            {
+                float nextX = (stepX > 0 ? (lbX + 1) : lbX) * L;
+                tMaxX = (nextX - px) / vx;
+                tDeltaX = L / Math.Abs(vx);
+            }
+            if (stepY != 0)
+            {
+                float nextY = (stepY > 0 ? (lbY + 1) : lbY) * L;
+                tMaxY = (nextY - py) / vy;
+                tDeltaY = L / Math.Abs(vy);
+            }
+
+            float tStart = 0f;
+            float bestT = maxDist;
+            Vector3 bestNormal = Vector3.Zero;
+            bool found = false;
+            int iterLimit = 32; // >6 km — more than any sane ray
+
+            while (iterLimit-- > 0 && tStart < bestT)
+            {
+                if (lbX < 0 || lbY < 0 || lbX > 255 || lbY > 255) break;
+
+                uint key = (uint)((lbX << 8) | lbY);
+                var lb = _scatterSystem.LoadLandblockData(key);
+                if (lb != null)
+                {
+                    Vector3 entry = worldOrigin + dir * tStart;
+                    Vector3 localOrigin = new Vector3(
+                        entry.X - lb.WorldOriginX,
+                        entry.Y - lb.WorldOriginY,
+                        entry.Z);
+
+                    float localMax = bestT - tStart;
+                    if (lb.RaycastTerrainLocal(localOrigin, dir, localMax,
+                            out float tLocal, out Vector3 n))
+                    {
+                        float tWorld = tStart + tLocal;
+                        if (tWorld < bestT)
+                        {
+                            bestT = tWorld;
+                            bestNormal = n;
+                            found = true;
+                        }
+                    }
+                }
+
+                if (tMaxX < tMaxY)
+                {
+                    tStart = tMaxX;
+                    tMaxX += tDeltaX;
+                    lbX += stepX;
+                }
+                else
+                {
+                    tStart = tMaxY;
+                    tMaxY += tDeltaY;
+                    lbY += stepY;
+                }
+
+                if (stepX == 0 && stepY == 0) break; // vertical ray: single landblock
+            }
+
+            if (found)
+            {
+                hitDist = bestT;
+                hitPoint = worldOrigin + dir * bestT;
+                hitNormal = bestNormal;
+                return true;
+            }
+            return false;
         }
 
         /// <summary>

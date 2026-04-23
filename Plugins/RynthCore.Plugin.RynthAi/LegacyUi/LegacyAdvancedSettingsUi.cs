@@ -100,6 +100,28 @@ internal sealed class LegacyAdvancedSettingsUi
 
                 ImGui.Separator();
                 ImGui.Spacing();
+                ImGui.Text("Missile Arc Velocities (m/s)");
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Per-weapon projectile speed used for line-of-sight arc checks.\nLower velocity = higher arc. Tune until LoS matches in-game hits.\nDungeons always use linear checks to avoid false ceiling blocks.");
+                ImGui.Checkbox("Use Arcs for Missile LoS", ref _settings.UseArcs);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("When off, all missile LoS checks are linear (eye-to-eye).");
+                if (_settings.UseArcs)
+                {
+                    ImGui.Indent();
+                    ImGui.SetNextItemWidth(150);
+                    ImGui.SliderFloat("Bow",      ref _settings.BowArcVelocity,      10.0f, 60.0f, "%.1f");
+                    ImGui.SetNextItemWidth(150);
+                    ImGui.SliderFloat("Crossbow", ref _settings.CrossbowArcVelocity, 10.0f, 80.0f, "%.1f");
+                    ImGui.SetNextItemWidth(150);
+                    ImGui.SliderFloat("Atlatl",   ref _settings.AtlatlArcVelocity,   10.0f, 60.0f, "%.1f");
+                    ImGui.SetNextItemWidth(150);
+                    ImGui.SliderFloat("Magic Arc", ref _settings.MagicArcVelocity,   10.0f, 60.0f, "%.1f");
+                    ImGui.Unindent();
+                }
+
+                ImGui.Separator();
+                ImGui.Spacing();
                 ImGui.Text("Monster Blacklist");
                 ImGui.SetNextItemWidth(150);
                 ImGui.SliderInt("Attempts Before Blacklist", ref _settings.BlacklistAttempts, 1, 20);

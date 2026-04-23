@@ -58,6 +58,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             public Vector3[] Vertices;
             public float CellX, CellY, CellZ; // world-space cell centre
             public bool IsPortal;
+            public uint CellId; // full landcell id (0xXXYYNNNN) — for per-cell "explored" tracking
         }
 
         /// <summary>
@@ -204,7 +205,8 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                             CellX     = envCell.PosX + globalOffsetX,
                             CellY     = envCell.PosY + globalOffsetY,
                             CellZ     = envCell.PosZ,
-                            IsPortal  = poly.IsPortal
+                            IsPortal  = poly.IsPortal,
+                            CellId    = cellId
                         });
                     }
                 }

@@ -1104,22 +1104,31 @@ public sealed partial class RynthAiPlugin
         isSalvage   = false;
         ruleLabel   = string.Empty;
 
-        // Consumable overrides — checked before loot profile so e.g. mana stones
-        // are always looted when the user has added them to the Consumables list,
-        // up to the configured keep count.
-        if (item.ObjectClass == AcObjectClass.ManaStone &&
-            settings.ConsumableRules.Any(r => r.Type.Equals("ManaStone", StringComparison.OrdinalIgnoreCase)))
+        // Consumable overrides — checked before loot profile.  Only match items
+        // whose name appears in the user's Consumables tab with type "ManaStone";
+        // a generic "Mana Stone" name match is too loose and floods the bag.
+        bool isConfiguredManaStone = settings.ConsumableRules.Any(r =>
+            r.Type.Equals("ManaStone", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(r.Name) &&
+            r.Name.Equals(item.Name, StringComparison.OrdinalIgnoreCase));
+
+        if (isConfiguredManaStone)
         {
             int haveCount = _objectCache?.GetInventory()
-                .Count(inv => inv.ObjectClass == AcObjectClass.ManaStone) ?? 0;
+                .Count(inv => settings.ConsumableRules.Any(r =>
+                    r.Type.Equals("ManaStone", StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(r.Name) &&
+                    r.Name.Equals(inv.Name, StringComparison.OrdinalIgnoreCase))) ?? 0;
+
             if (haveCount < settings.ManaStoneKeepCount)
             {
                 actionLabel = "Keep";
                 ruleLabel   = $"ManaStone (Consumable, {haveCount}/{settings.ManaStoneKeepCount})";
+                ChatLine($"[RynthAi] Mana stone match: '{item.Name}' (have {haveCount}/{settings.ManaStoneKeepCount}) — looting.");
                 return true;
             }
-            // Already at cap — leave on corpse
-            LootDiag($"[RynthAi] Corpse loot: skipping mana stone (have {haveCount}/{settings.ManaStoneKeepCount}).");
+
+            ChatLine($"[RynthAi] Mana stone match: '{item.Name}' (have {haveCount}/{settings.ManaStoneKeepCount}) — at cap, leaving.");
             return false;
         }
 

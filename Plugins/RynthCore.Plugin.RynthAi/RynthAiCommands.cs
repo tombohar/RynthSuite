@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.Plugin.RynthAi.Meta;
 using RynthCore.Plugin.RynthAi.Raycasting;
 
@@ -44,9 +45,13 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra igp <profile> to <player>               — ig with partial player name");
         ChatLine("[RynthAi] /ra use[i|l][p|pi|lp] <name> [on <name2>]  — use item (i=inv, l=land, p=partial)");
         ChatLine("[RynthAi] /ra raycast       — raycast system status");
-        ChatLine("[RynthAi] /ra lostest       — line-of-sight test to target");
+        ChatLine("[RynthAi] /ra lostest [mode] — LoS test (mode: linear|bow|crossbow|atlatl|magic)");
+        ChatLine("[RynthAi] /ra landtest      — terrain heightmap info for player's landblock");
+        ChatLine("[RynthAi] /ra rayland       — landscape raycast test (down + 4 cardinals)");
         ChatLine("[RynthAi] /ra buildinfo     — nearby geometry info");
         ChatLine("[RynthAi] /ra navdebug      — show nav coordinate/debug info");
+        ChatLine("[RynthAi] /ra addnavpt      — append a waypoint at current location to loaded nav");
+        ChatLine("[RynthAi] /ra jump[swzxc] [heading] [holdtime] — jump with optional face/direction (s=run w=fwd x=back z=strafeL c=strafeR)");
         ChatLine("[RynthAi] /ra corpseinfo    — show corpse range/open diagnostics");
         ChatLine("[RynthAi] /ra corpsecheck   — explain whether a corpse would be looted");
         ChatLine("[RynthAi] /ra corpseopen    — force the nearest corpse open flow");
@@ -56,6 +61,8 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra lootcheck     — classify selected item (on|off = auto on click)");
         ChatLine("[RynthAi] /ra dumpinv       — dump all inventory items (cache + direct)");
         ChatLine("[RynthAi] /ra clearbusy     — force-clear busy state (hourglass cursor)");
+        ChatLine("[RynthAi] /ra forcebuff          — force-recast all buffs immediately");
+        ChatLine("[RynthAi] /ra cancelforcebuff    — cancel an in-progress force rebuff");
         ChatLine("[RynthAi] /ra settings savechar <name> — save current settings to named profile (create if new)");
         ChatLine("[RynthAi] /ra settings loadchar <name> — load named settings profile (create from current if new)");
     }
@@ -194,7 +201,7 @@ public sealed partial class RynthAiPlugin
         ChatLine($"[RynthAi]   Status: {_raycast.StatusMessage}");
     }
 
-    private void HandleLosTestCommand()
+    private void HandleLosTestCommand(string[] parts)
     {
         if (_raycast == null || !_raycast.IsInitialized)
         {
@@ -208,8 +215,27 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
+        // Mode parsing: /ra lostest [linear|bow|crossbow|atlatl|magic].
+        // parts[0]="ra", parts[1]="lostest", parts[2]=optional mode. No arg = linear.
+        string modeArg = parts.Length > 2 ? parts[2].ToLowerInvariant() : "linear";
+        var settings = _dashboard?.Settings;
+        bool isArc = false;
+        float arcVelocity = 0f;
+        string modeLabel = "Linear";
+        switch (modeArg)
+        {
+            case "linear":   isArc = false; modeLabel = "Linear"; break;
+            case "bow":      isArc = true;  arcVelocity = settings?.BowArcVelocity      ?? 25.0f; modeLabel = $"Bow arc (v={arcVelocity:F1})"; break;
+            case "crossbow": isArc = true;  arcVelocity = settings?.CrossbowArcVelocity ?? 40.0f; modeLabel = $"Crossbow arc (v={arcVelocity:F1})"; break;
+            case "atlatl":   isArc = true;  arcVelocity = settings?.AtlatlArcVelocity   ?? 22.0f; modeLabel = $"Atlatl arc (v={arcVelocity:F1})"; break;
+            case "magic":    isArc = true;  arcVelocity = settings?.MagicArcVelocity    ?? 25.0f; modeLabel = $"Magic arc (v={arcVelocity:F1})"; break;
+            default:
+                ChatLine($"[RynthAi LOS] Unknown mode '{modeArg}'. Use: linear | bow | crossbow | atlatl | magic");
+                return;
+        }
+
         Host.TryGetObjectName(_currentTargetId, out string targetName);
-        ChatLine($"[RynthAi LOS] Target: {targetName} (0x{_currentTargetId:X8})");
+        ChatLine($"[RynthAi LOS] Target: {targetName} (0x{_currentTargetId:X8})  Mode: {modeLabel}");
 
         // Player position
         if (!Host.TryGetPlayerPose(out uint pCell, out float px, out float py, out float pz,
@@ -223,7 +249,8 @@ public sealed partial class RynthAiPlugin
         uint pBlockY = (pCell >> 16) & 0xFF;
         float playerGX = pBlockX * 192.0f + px;
         float playerGY = pBlockY * 192.0f + py;
-        ChatLine($"[RynthAi LOS] Player Landcell=0x{pCell:X8} Block=({pBlockX},{pBlockY})");
+        bool isDungeon = (pCell & 0xFFFF) >= 0x0100;
+        ChatLine($"[RynthAi LOS] Player Landcell=0x{pCell:X8} Block=({pBlockX},{pBlockY})  {(isDungeon ? "[DUNGEON]" : "[OUTDOOR]")}");
         ChatLine($"[RynthAi LOS] Player Local=({px:F1},{py:F1},{pz:F1})");
         ChatLine($"[RynthAi LOS] Player Global=({playerGX:F1},{playerGY:F1},{pz:F1})");
 
@@ -246,38 +273,292 @@ public sealed partial class RynthAiPlugin
         float dist = (float)Math.Sqrt(dx * dx + dy * dy);
         ChatLine($"[RynthAi LOS] Distance: {dist:F1}m, Delta=({dx:F1},{dy:F1})");
 
-        // Load geometry
-        var geometry = _raycast.GeometryLoader.GetLandblockGeometry(pCell);
+        // Eye-to-eye endpoints.
+        var origin = new Raycasting.Vector3(playerGX, playerGY, pz + 1.0f);
+        var targetPos = new Raycasting.Vector3(targetGX, targetGY, tz + 1.0f);
+        var rayDir = targetPos - origin;
+        float rayLen = rayDir.Length();
+        if (rayLen > 0.001f) rayDir = rayDir / rayLen;
+
+        var geo = _raycast.GeometryLoader;
+        var geometry = geo.GetLandblockGeometry(pCell);
         ChatLine($"[RynthAi LOS] Geometry: {geometry?.Count ?? 0} volumes loaded");
 
-        if (geometry != null && geometry.Count > 0)
+        bool terrainBlocked = false;
+        float terrainHitDist = 0f;
+        bool staticBlocked = false;
+
+        if (isArc)
         {
-            var origin = new Raycasting.Vector3(playerGX, playerGY, pz + 1.0f);
-            var targetPos = new Raycasting.Vector3(targetGX, targetGY, tz + 1.0f);
-
-            var rayDir = targetPos - origin;
-            float rayLen = rayDir.Length();
-            if (rayLen > 0.001f) rayDir = rayDir / rayLen;
-
-            int hitCount = 0;
-            foreach (var vol in geometry)
+            // ── Arc mode: sample the parabola; test terrain per sample + static as a whole. ──
+            if (isDungeon)
             {
-                if (vol.RayIntersect(origin, rayDir, rayLen, out float volDist))
-                {
-                    if (volDist > 0.5f && volDist < rayLen - 1.0f)
-                    {
-                        hitCount++;
-                        if (hitCount <= 5)
-                            ChatLine($"[RynthAi LOS]   HIT at {volDist:F2}m: center=({vol.Center.X:F1},{vol.Center.Y:F1},{vol.Center.Z:F1}) type={vol.Type}");
-                    }
-                }
+                // Outdoor heightmap is meaningless once you're inside — the dungeon
+                // cell is self-contained geometry. The arc test below will surface
+                // ceiling/floor hits via static.
+                ChatLine("[RynthAi LOS] Terrain (arc): n/a (dungeon — no landscape)");
+            }
+            else
+            {
+                terrainBlocked = TerrainBlockedAlongArc(origin, targetPos, arcVelocity, geo, out terrainHitDist, out var arcHit);
+                if (terrainBlocked)
+                    ChatLine($"[RynthAi LOS] Terrain (arc): BLOCKED at {terrainHitDist:F1}m  arc=({arcHit.X:F0},{arcHit.Y:F0},{arcHit.Z:F1})");
+                else
+                    ChatLine("[RynthAi LOS] Terrain (arc): clear");
             }
 
-            bool nearby = RaycastEngine.HasNearbyGeometry(origin, targetPos, geometry);
-            bool blocked = RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry);
-            ChatLine($"[RynthAi LOS] HasNearbyGeometry: {nearby}");
-            ChatLine($"[RynthAi LOS] IsLinearPathBlocked: {blocked}");
-            ChatLine($"[RynthAi LOS] Summary: {geometry.Count} total volumes, {hitCount} ray hits");
+            if (geometry != null && geometry.Count > 0)
+            {
+                staticBlocked = RaycastEngine.IsArcPathBlocked(origin, targetPos, arcVelocity, geometry);
+                ChatLine($"[RynthAi LOS] IsArcPathBlocked: {staticBlocked}{(isDungeon && staticBlocked ? "  (likely ceiling — combat LoS forces Linear in dungeons)" : "")}");
+            }
+        }
+        else
+        {
+            // ── Linear mode: straight-line terrain + straight-line static. ──
+            if (isDungeon)
+            {
+                ChatLine("[RynthAi LOS] Terrain: n/a (dungeon — no landscape)");
+            }
+            else if (geo.RaycastLandscape(origin, rayDir, rayLen,
+                    out float tDist, out var tHit, out var tNormal))
+            {
+                if (tDist > 0.5f && tDist < rayLen - 1.0f)
+                {
+                    terrainBlocked = true;
+                    terrainHitDist = tDist;
+                    ChatLine($"[RynthAi LOS] Terrain: BLOCKED at {tDist:F1}m  ground=({tHit.X:F0},{tHit.Y:F0},{tHit.Z:F1})  normalZ={tNormal.Z:F3}");
+                }
+                else
+                {
+                    ChatLine($"[RynthAi LOS] Terrain: clear (intersection at {tDist:F1}m is outside segment)");
+                }
+            }
+            else
+            {
+                ChatLine("[RynthAi LOS] Terrain: clear (no intersection)");
+            }
+
+            if (geometry != null && geometry.Count > 0)
+            {
+                int hitCount = 0;
+                foreach (var vol in geometry)
+                {
+                    if (vol.RayIntersect(origin, rayDir, rayLen, out float volDist))
+                    {
+                        if (volDist > 0.5f && volDist < rayLen - 1.0f)
+                        {
+                            hitCount++;
+                            if (hitCount <= 5)
+                                ChatLine($"[RynthAi LOS]   HIT at {volDist:F2}m: center=({vol.Center.X:F1},{vol.Center.Y:F1},{vol.Center.Z:F1}) type={vol.Type}");
+                        }
+                    }
+                }
+
+                bool nearby = RaycastEngine.HasNearbyGeometry(origin, targetPos, geometry);
+                // Dungeon LoS uses multi-ray checks to catch thin corner geometry —
+                // mirrors TargetingFSM.IsTargetBlocked's behavior.
+                staticBlocked = RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: isDungeon);
+                ChatLine($"[RynthAi LOS] HasNearbyGeometry: {nearby}");
+                ChatLine($"[RynthAi LOS] IsLinearPathBlocked ({(isDungeon ? "multi-ray" : "single-ray")}): {staticBlocked}");
+                ChatLine($"[RynthAi LOS] Summary: {geometry.Count} total volumes, {hitCount} ray hits");
+            }
+        }
+
+        string verdict;
+        if (terrainBlocked && staticBlocked)
+            verdict = $"BLOCKED (terrain @ {terrainHitDist:F1}m + static)";
+        else if (terrainBlocked)
+            verdict = $"BLOCKED by terrain @ {terrainHitDist:F1}m";
+        else if (staticBlocked)
+            verdict = "BLOCKED by static geometry";
+        else
+            verdict = "CLEAR";
+        ChatLine($"[RynthAi LOS] Combined LoS ({modeLabel}): {verdict}");
+    }
+
+    // Samples a parabolic arc from origin→target at the given launch velocity,
+    // returns true if any sample point dips below terrain Z. Mirrors the math
+    // in RaycastEngine.IsArcPathBlocked so the terrain check tracks the same
+    // trajectory the static-geometry check uses.
+    private static bool TerrainBlockedAlongArc(Raycasting.Vector3 origin, Raycasting.Vector3 target,
+        float velocity, Raycasting.GeometryLoader geo,
+        out float hitDist, out Raycasting.Vector3 hitPoint)
+    {
+        hitDist = 0f;
+        hitPoint = origin;
+        const float GRAVITY = 9.81f;
+        const int   SAMPLES = 20;
+
+        var delta = target - origin;
+        float horiz = delta.Length2D();
+        if (horiz < 0.1f) return false;
+
+        float maxRange = (velocity * velocity) / GRAVITY;
+        if (horiz > maxRange) return false; // out-of-range is the shooter's problem, not terrain's
+
+        float sinArg = (GRAVITY * horiz) / (velocity * velocity);
+        if (sinArg > 1.0f) sinArg = 1.0f;
+        float launchAngle = (float)(0.5 * Math.Asin(sinArg));
+        if (launchAngle < 0.1f) launchAngle = (float)(Math.PI / 4);
+
+        float cosA = (float)Math.Cos(launchAngle);
+        float sinA = (float)Math.Sin(launchAngle);
+        float vH = velocity * cosA;
+        float vV = velocity * sinA;
+        if (vH < 0.01f) return false;
+
+        float totalTime = horiz / vH;
+        float hdx = delta.X / horiz;
+        float hdy = delta.Y / horiz;
+
+        for (int i = 1; i <= SAMPLES; i++)
+        {
+            float t = (float)i / SAMPLES;
+            float time = t * totalTime;
+            float hDistAlong = vH * time;
+            float z = origin.Z + vV * time - 0.5f * GRAVITY * time * time;
+            z += delta.Z * t * (1.0f - t); // same blend IsArcPathBlocked uses
+
+            float wx = origin.X + hdx * hDistAlong;
+            float wy = origin.Y + hdy * hDistAlong;
+            float groundZ = geo.GetTerrainZWorld(wx, wy);
+            if (float.IsNaN(groundZ)) continue;
+
+            if (z < groundZ)
+            {
+                hitDist  = hDistAlong;
+                hitPoint = new Raycasting.Vector3(wx, wy, z);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void HandleLandTestCommand()
+    {
+        if (_raycast == null || !_raycast.IsInitialized)
+        {
+            ChatLine("[RynthAi LAND] Raycast system not initialized.");
+            return;
+        }
+
+        if (!Host.TryGetPlayerPose(out uint pCell, out float px, out float py, out float pz,
+                out _, out _, out _, out _))
+        {
+            ChatLine("[RynthAi LAND] Player position unavailable.");
+            return;
+        }
+
+        // Landcell 0xXXYYCCCC → landblock key 0xXXYY (the high word).
+        uint landblockKey = pCell >> 16;
+        uint pBlockX = (pCell >> 24) & 0xFF;
+        uint pBlockY = (pCell >> 16) & 0xFF;
+        float playerGX = pBlockX * 192.0f + px;
+        float playerGY = pBlockY * 192.0f + py;
+
+        ChatLine($"[RynthAi LAND] Landcell=0x{pCell:X8}  LandblockKey=0x{landblockKey:X4}");
+        ChatLine($"[RynthAi LAND] Player local=({px:F1},{py:F1},{pz:F1})  global=({playerGX:F1},{playerGY:F1})");
+
+        var lb = _raycast.GeometryLoader.GetLandblockData(landblockKey);
+        if (lb == null)
+        {
+            ChatLine("[RynthAi LAND] Landblock data unavailable (dungeon, or height table not loaded).");
+            return;
+        }
+
+        lb.GetHeightRange(out float minZ, out float maxZ);
+        ChatLine($"[RynthAi LAND] Origin=({lb.WorldOriginX:F1},{lb.WorldOriginY:F1})  HasObjects={lb.HasObjects}");
+        ChatLine($"[RynthAi LAND] Height range: min={minZ:F2}  max={maxZ:F2}  span={(maxZ - minZ):F2}m");
+
+        // Four corners of the 9×9 vertex grid.
+        float zSW = lb.GetVertexZ(0, 0);
+        float zSE = lb.GetVertexZ(8, 0);
+        float zNW = lb.GetVertexZ(0, 8);
+        float zNE = lb.GetVertexZ(8, 8);
+        ChatLine($"[RynthAi LAND] Corners Z: SW={zSW:F2} SE={zSE:F2} NW={zNW:F2} NE={zNE:F2}");
+
+        // Nearest vertex under the player's world XY.
+        float nearZ = lb.GetNearestVertexHeightWorld(playerGX, playerGY);
+        if (float.IsNaN(nearZ))
+        {
+            ChatLine("[RynthAi LAND] Nearest-vertex Z: out of landblock bounds.");
+        }
+        else
+        {
+            float delta = pz - nearZ;
+            ChatLine($"[RynthAi LAND] Nearest vertex Z={nearZ:F2}  Player Z={pz:F2}  Delta={delta:+0.00;-0.00;0}m");
+        }
+    }
+
+    private void HandleRaylandCommand()
+    {
+        if (_raycast == null || !_raycast.IsInitialized)
+        {
+            ChatLine("[RynthAi RAYLAND] Raycast system not initialized.");
+            return;
+        }
+        if (!Host.TryGetPlayerPose(out uint pCell, out float px, out float py, out float pz,
+                out _, out _, out _, out _))
+        {
+            ChatLine("[RynthAi RAYLAND] Player position unavailable.");
+            return;
+        }
+
+        uint pBlockX = (pCell >> 24) & 0xFF;
+        uint pBlockY = (pCell >> 16) & 0xFF;
+        float worldX = pBlockX * 192.0f + px;
+        float worldY = pBlockY * 192.0f + py;
+        var geo = _raycast.GeometryLoader;
+
+        ChatLine($"[RynthAi RAYLAND] Player world=({worldX:F1},{worldY:F1},{pz:F2})");
+
+        // Triangle-exact Z at the player's (X, Y), direct lookup.
+        float exactZ = geo.GetTerrainZWorld(worldX, worldY);
+        if (float.IsNaN(exactZ))
+        {
+            ChatLine("[RynthAi RAYLAND] GetTerrainZWorld: unavailable (dungeon or off-map).");
+        }
+        else
+        {
+            float delta = pz - exactZ;
+            ChatLine($"[RynthAi RAYLAND] TerrainZ exact={exactZ:F2}  PlayerZ={pz:F2}  Delta={delta:+0.00;-0.00;0}m");
+        }
+
+        // Down-ray from 20 m above player.
+        const float dropHeight = 20.0f;
+        var dropOrigin = new Raycasting.Vector3(worldX, worldY, pz + dropHeight);
+        var dropDir    = new Raycasting.Vector3(0, 0, -1);
+        if (geo.RaycastLandscape(dropOrigin, dropDir, dropHeight + 200.0f,
+                out float dropDist, out var dropHit, out var dropNormal))
+        {
+            ChatLine($"[RynthAi RAYLAND] Down-ray: hit at {dropDist:F2}m  groundZ={dropHit.Z:F2}  normalZ={dropNormal.Z:F3}");
+        }
+        else
+        {
+            ChatLine("[RynthAi RAYLAND] Down-ray: no hit (unexpected).");
+        }
+
+        // Four 300 m cardinal rays from eye height.
+        var eye = new Raycasting.Vector3(worldX, worldY, pz + 1.5f);
+        RaylandCardinal(geo, eye, new Raycasting.Vector3( 1,  0, 0), "East ");
+        RaylandCardinal(geo, eye, new Raycasting.Vector3(-1,  0, 0), "West ");
+        RaylandCardinal(geo, eye, new Raycasting.Vector3( 0,  1, 0), "North");
+        RaylandCardinal(geo, eye, new Raycasting.Vector3( 0, -1, 0), "South");
+    }
+
+    private void RaylandCardinal(GeometryLoader geo, Raycasting.Vector3 origin,
+        Raycasting.Vector3 dir, string label)
+    {
+        const float maxDist = 300.0f;
+        if (geo.RaycastLandscape(origin, dir, maxDist,
+                out float dist, out var hit, out var normal))
+        {
+            ChatLine($"[RynthAi RAYLAND] {label} 300m: hit at {dist:F1}m  ({hit.X:F0},{hit.Y:F0},{hit.Z:F1})  normalZ={normal.Z:F3}");
+        }
+        else
+        {
+            ChatLine($"[RynthAi RAYLAND] {label} 300m: no hit");
         }
     }
 
@@ -645,6 +926,114 @@ public sealed partial class RynthAiPlugin
             double activeDistYards = Math.Sqrt(Math.Pow(active.NS - basisNS, 2) + Math.Pow(active.EW - basisEW, 2)) * 240.0;
             ChatLine($"[RynthAi]   Active point: [{settings.ActiveNavIndex}] {active.Type} NS={active.NS:F4} EW={active.EW:F4} Z={active.Z:F2} dist={activeDistYards:F1} yd");
         }
+    }
+
+    /// <summary>
+    /// /ra jump[swzxc] [heading] [holdtime] — UtilityBelt-compatible jump with optional
+    /// face-heading and per-direction keys baked into the command name.
+    /// </summary>
+    private void HandleJumpCommand(string cmd, string[] parts)
+    {
+        if (_jumper == null)
+        {
+            ChatLine("[RynthAi] Jumper not ready (not logged in yet).");
+            return;
+        }
+
+        // "jumpsw" / "jumpx" / "jumpsx" / bare "jump"
+        string letters = cmd.Length > 4 ? cmd.Substring(4) : string.Empty;
+        foreach (char c in letters)
+        {
+            if (c != 's' && c != 'w' && c != 'x' && c != 'z' && c != 'c')
+            {
+                ChatLine("[RynthAi] Usage: /ra jump[swzxc] [heading] [holdtime]");
+                return;
+            }
+        }
+
+        float? heading = null;
+        int holdMs = 0;
+
+        // args shape: parts[0]=/ra  parts[1]=jump...  [parts[2]=heading]  [parts[3]=holdtime]
+        //          or parts[2]=holdtime (no heading).
+        if (parts.Length >= 3)
+        {
+            // Heading must be 0-359 with a dot optionally; holdtime is an integer.
+            // Try heading-first form (heading + optional holdtime).
+            if (float.TryParse(parts[2], System.Globalization.NumberStyles.Float,
+                               System.Globalization.CultureInfo.InvariantCulture, out float maybeHeading)
+                && maybeHeading >= 0 && maybeHeading < 360
+                && parts.Length >= 4)
+            {
+                heading = maybeHeading;
+                if (!int.TryParse(parts[3], out holdMs))
+                {
+                    ChatLine("[RynthAi] Usage: /ra jump[swzxc] [heading] [holdtime]");
+                    return;
+                }
+            }
+            else if (parts.Length == 3 && int.TryParse(parts[2], out int onlyHold))
+            {
+                // Single numeric arg is holdtime.
+                holdMs = onlyHold;
+            }
+            else if (parts.Length == 3
+                && float.TryParse(parts[2], System.Globalization.NumberStyles.Float,
+                                  System.Globalization.CultureInfo.InvariantCulture, out float onlyHeading)
+                && onlyHeading >= 0 && onlyHeading < 360)
+            {
+                heading = onlyHeading;
+            }
+            else
+            {
+                ChatLine("[RynthAi] Usage: /ra jump[swzxc] [heading] [holdtime]");
+                return;
+            }
+        }
+
+        _jumper.Start(letters, heading, holdMs);
+    }
+
+    private void HandleAddNavPointCommand()
+    {
+        var settings = _dashboard?.Settings;
+        if (settings == null)
+        {
+            ChatLine("[RynthAi] Settings not ready.");
+            return;
+        }
+
+        // Stop any active turn motion so the character doesn't keep spinning
+        Host.SetMotion(0x6500000D, false); // TurnRight
+        Host.SetMotion(0x6500000E, false); // TurnLeft
+
+        if (!Host.HasGetPlayerPose || !Host.TryGetPlayerPose(out _, out _, out _, out float z, out _, out _, out _, out _))
+        {
+            ChatLine("[RynthAi] Player pose unavailable.");
+            return;
+        }
+
+        if (!NavCoordinateHelper.TryGetNavCoords(Host, out double ns, out double ew))
+        {
+            ChatLine("[RynthAi] Could not resolve current coords.");
+            return;
+        }
+
+        var newPt = new NavPoint { NS = ns, EW = ew, Z = z };
+        settings.CurrentRoute.Points.Add(newPt);
+
+        string navName = string.IsNullOrEmpty(settings.CurrentNavPath)
+            ? "(unsaved)"
+            : System.IO.Path.GetFileName(settings.CurrentNavPath);
+
+        if (!string.IsNullOrEmpty(settings.CurrentNavPath))
+        {
+            try { settings.CurrentRoute.Save(settings.CurrentNavPath); }
+            catch (Exception ex) { ChatLine($"[RynthAi] Added point but save failed: {ex.Message}"); }
+        }
+
+        int idx = settings.CurrentRoute.Points.Count - 1;
+        ChatLine($"[RynthAi] Added waypoint [{idx}] NS={ns:F3} EW={ew:F3} Z={z:F2} to {navName}.");
     }
 
     private void HandleScanCommand()
@@ -1072,6 +1461,18 @@ public sealed partial class RynthAiPlugin
         ChatLine($"[RynthAi] Busy state cleared (was {before} → {after})");
     }
 
+    private void HandleForceBuff()
+    {
+        if (_buffManager == null) { ChatLine("[RynthAi] Buff manager not ready."); return; }
+        _buffManager.ForceFullRebuff();
+    }
+
+    private void HandleCancelForceBuff()
+    {
+        if (_buffManager == null) { ChatLine("[RynthAi] Buff manager not ready."); return; }
+        _buffManager.CancelBuffing();
+    }
+
     private void HandleBusyInfoCommand()
     {
         int engineBusy = Host.HasGetBusyState ? Host.GetBusyState() : -1;
@@ -1352,8 +1753,9 @@ public sealed partial class RynthAiPlugin
         }
         if (target == null) { ChatLine($"[RynthAi] Target not found: '{playerPart}'"); return; }
 
-        // Load profile and give all matching items
-        int given = 0;
+        // Load profile and enqueue all matching items through the throttled give queue,
+        // mirroring the givea* commands so the server isn't flooded with MoveItemExternal calls.
+        int queued = 0;
         if (isJson)
         {
             var nativeProfile = RynthCore.Loot.LootProfile.Load(profilePath);
@@ -1361,8 +1763,9 @@ public sealed partial class RynthAiPlugin
             {
                 var (action, _) = Loot.LootEvaluator.Classify(nativeProfile, item, null);
                 if (action != RynthCore.Loot.LootAction.Keep) continue;
-                Host.MoveItemExternal((uint)item.Id, (uint)target.Id, Math.Max(1, item.Values(LongValueKey.StackCount, 1)));
-                given++;
+                int stackSize = Math.Max(1, item.Values(LongValueKey.StackCount, 1));
+                EnqueueGive((uint)item.Id, (uint)target.Id, stackSize);
+                queued++;
             }
         }
         else
@@ -1375,13 +1778,14 @@ public sealed partial class RynthAiPlugin
                 foreach (var rule in vtProfile.Rules)
                     if (rule.IsMatch(item, lootCtx)) { matched = rule; break; }
                 if (matched == null || (matched.Action != VTankLootAction.Keep && matched.Action != VTankLootAction.KeepUpTo)) continue;
-                Host.MoveItemExternal((uint)item.Id, (uint)target.Id, Math.Max(1, item.Values(LongValueKey.StackCount, 1)));
-                given++;
+                int stackSize = Math.Max(1, item.Values(LongValueKey.StackCount, 1));
+                EnqueueGive((uint)item.Id, (uint)target.Id, stackSize);
+                queued++;
             }
         }
 
-        ChatLine(given > 0
-            ? $"[RynthAi] Giving {given} stack(s) from profile '{System.IO.Path.GetFileName(profilePath)}' to {target.Name}"
+        ChatLine(queued > 0
+            ? $"[RynthAi] Queued {queued} stack(s) from profile '{System.IO.Path.GetFileName(profilePath)}' → {target.Name}"
             : $"[RynthAi] No items in inventory matched profile '{System.IO.Path.GetFileName(profilePath)}'");
     }
 }

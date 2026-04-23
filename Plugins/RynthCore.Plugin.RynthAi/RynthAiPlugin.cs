@@ -20,6 +20,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private LegacyDashboardRenderer? _dashboard;
     private NavigationEngine? _navigationEngine;
     private NavMarkerRenderer? _navMarkerRenderer;
+    private RadarWallRenderer? _radarWallRenderer;
     private TerrainPassabilityOverlay? _terrainOverlay;
     private MainLogic? _raycast;
     private WorldObjectCache? _objectCache;
@@ -34,6 +35,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private InventoryManager? _inventoryManager;
     private SalvageManager? _salvageManager;
     private ManaStoneManager? _manaStoneManager;
+    private Jumper? _jumper;
     private PlayerVitalsCache _vitals = new();
     private uint _playerId;
     private int _vitalsTickCounter;
@@ -75,6 +77,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _navigationEngine?.Stop();
         _navigationEngine = null;
         _navMarkerRenderer = null;
+        _radarWallRenderer?.Flush();
+        _radarWallRenderer = null;
         _terrainOverlay = null;
         _raycast?.Dispose();
         _raycast = null;
@@ -90,6 +94,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _buffManager?.Dispose();
         _buffManager = null;
         _spellManager = null;
+        _jumper?.Cancel();
+        _jumper = null;
         _objectCache = null;
         _playerId = 0;
         _initialized = false;
@@ -108,6 +114,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _navigationEngine = new NavigationEngine(Host, _dashboard.Settings);
         if (_objectCache != null) _navigationEngine.SetWorldObjectCache(_objectCache);
         _navMarkerRenderer = new NavMarkerRenderer(Host, _dashboard.Settings);
+        _radarWallRenderer = new RadarWallRenderer(Host, _dashboard.Settings);
         _terrainOverlay = new TerrainPassabilityOverlay(Host);
         Log($"RynthAi: NavMarkerRenderer created, HasNav3D={Host.HasNav3D}, version={Host.Version}");
 
@@ -125,6 +132,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     _combatManager?.SetRaycastSystem(raycastRef);
                     _dashboard?.SetRaycast(raycastRef);
                     _terrainOverlay?.SetRaycast(raycastRef);
+                    _radarWallRenderer?.SetRaycast(raycastRef);
                 }
             }
             catch (Exception ex)
@@ -163,6 +171,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         // character data lives in one place and the directory is guaranteed to exist.
         if (!string.IsNullOrEmpty(_dashboard.CharFolder))
             _buffManager.SetTimerPath(_dashboard.CharFolder);
+
+        _dashboard.OnForceRebuffRequested       = () => _buffManager?.ForceFullRebuff();
+        _dashboard.OnCancelForceRebuffRequested = () => _buffManager?.CancelBuffing();
 
         // Override disk timers with live client memory — gets accurate remaining times
         // including login-restored enchantments the event hook missed at startup.
@@ -211,11 +222,14 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
         _salvageManager = new SalvageManager(Host, _dashboard.Settings, _objectCache);
 
+        _jumper = new Jumper(Host, _dashboard.Settings, s => Host.WriteToChat(s, 1));
+
         Log("RynthAi: login complete, legacy ImGui dashboard ready.");
     }
 
     private bool _combatDbgActive = false;
     private int _combatDbgFrames = 0;
+    private bool _buffingPausedNav;
     private bool _combatPausedNav;
     private bool _corpsePausedNav;
     private long _combatEndedAt;       // Timestamp when combat stopped blocking
@@ -228,6 +242,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             _objectCache?.Tick();
             _questTracker?.Tick();
             DrainGiveQueue();
+            _jumper?.Tick();
 
             if (_loginComplete)
             {
@@ -249,23 +264,39 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 CheckBusyTimeout(); // safety: force-clear stuck busy count
                 _buffManager?.OnHeartbeat();
 
-                // Buffs take absolute priority — if any buff is missing, block everything.
-                // BuffManager sets BotAction = "Buffing" when actively casting, but there
-                // can be a gap between casts where BotAction resets to "Default" and another
-                // system sneaks in. This ensures everything stays blocked until all buffs
-                // are restored. Looting is NOT exempted — buffing overrides it too.
-                if (_buffManager != null
-                    && _dashboard.Settings.EnableBuffing
-                    && _buffManager.NeedsAnyBuff()
-                    && _dashboard.Settings.BotAction != "Buffing")
-                {
-                    _dashboard.Settings.BotAction = "Buffing";
-                }
-
-                // Combat runs first — it can claim priority over navigation
                 var settings = _dashboard?.Settings;
                 if (settings == null)
                     return;
+
+                // Gap-fill: BuffManager sets BotAction = "Buffing" while casting, but
+                // resets it to "Default" between casts. If buffs are still needed,
+                // keep it locked to "Buffing" so nothing sneaks in between casts.
+                if (_buffManager != null
+                    && settings.EnableBuffing
+                    && _buffManager.NeedsAnyBuff()
+                    && settings.BotAction != "Buffing")
+                {
+                    settings.BotAction = "Buffing";
+                }
+
+                // ── Priority 1: Buffing ───────────────────────────────────────────
+                // Blocks combat, looting, and navigation entirely.
+                if (settings.IsMacroRunning
+                    && string.Equals(settings.BotAction, "Buffing", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!_buffingPausedNav)
+                    {
+                        _navigationEngine?.Stop();
+                        if (Host.HasStopCompletely) Host.StopCompletely();
+                        _buffingPausedNav   = true;
+                        _combatPausedNav    = false;
+                        _corpsePausedNav    = false;
+                        _combatEndedAt      = 0;
+                    }
+                    _metaManager?.Think();
+                    return;
+                }
+                _buffingPausedNav = false;
 
                 // AutoCram / AutoStack — only while idle (not looting a corpse, not crafting).
                 // Gated on busy count inside the manager so it won't move items mid-cast.
@@ -277,6 +308,24 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 }
 
                 _salvageManager?.OnTick(_busyCount);
+
+                // Gap-fill: while a container is open for active looting OR while salvage
+                // has items queued, hold BotAction at "Salvaging" so combat Think() won't
+                // fire and interrupt the current loot/salvage session.
+                // "Buffing" and already-active "Combat" (mid-fight) are never overridden.
+                if (settings.IsMacroRunning
+                    && settings.BotAction != "Buffing"
+                    && settings.BotAction != "Combat"
+                    && (_openedContainerId != 0 || _salvageManager?.IsBusy == true))
+                {
+                    settings.BotAction = "Salvaging";
+                }
+                else if (settings.BotAction == "Salvaging"
+                         && _openedContainerId == 0
+                         && _salvageManager?.IsBusy != true)
+                {
+                    settings.BotAction = "Default";
+                }
 
                 // Mana stone tapping — runs after salvage, independent of looting state.
                 _manaStoneManager?.OnHeartbeat(_busyCount);
@@ -504,6 +553,15 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             return;
         }
 
+        // UtilityBelt /ub command compatibility
+        if (trimmed.StartsWith("/ub ", StringComparison.OrdinalIgnoreCase))
+        {
+            eat = 1;
+            if (!HandleUbCommand(trimmed))
+                ChatLine("[RynthAi] Unrecognized /ub command.");
+            return;
+        }
+
         if (!trimmed.StartsWith("/ra", StringComparison.OrdinalIgnoreCase))
             return;
 
@@ -572,7 +630,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         {
             case "power":        HandlePowerCommand(parts); break;
             case "raycast":      HandleRaycastCommand(parts); break;
-            case "lostest":      HandleLosTestCommand(); break;
+            case "lostest":      HandleLosTestCommand(parts); break;
+            case "landtest":     HandleLandTestCommand(); break;
+            case "rayland":      HandleRaylandCommand(); break;
             case "cast":         HandleCastCommand(parts); break;
             case "cache":        HandleCacheCommand(); break;
             case "cache2":       HandleCache2Command(); break;
@@ -593,6 +653,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "scan":         HandleScanCommand(); break;
             case "buildinfo":    HandleBuildInfoCommand(); break;
             case "navdebug":     HandleNavDebugCommand(); break;
+            case "addnavpt":     HandleAddNavPointCommand(); break;
             case "lootparse":    HandleLootParseCommand(trimmed); break;
             case "lootcheckinv": HandleLootCheckInventoryCommand(trimmed); break;
             case "lootcheck":    HandleLootCheckSelectedCommand(parts); break;
@@ -605,6 +666,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "dumpinv":      HandleDumpInventoryCommand(); break;
             case "mapdump":      HandleMapDumpCommand(); break;
             case "clearbusy":    HandleClearBusyCommand(); break;
+            case "forcebuff":        HandleForceBuff(); break;
+            case "cancelforcebuff":  HandleCancelForceBuff(); break;
             case "settings":     HandleSettingsCommand(parts); break;
             case "busyinfo":     HandleBusyInfoCommand(); break;
             // give variants — first-match (with optional count prefix)
@@ -650,7 +713,14 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "selectpi": case "selectip": HandleSelectCommand(parts, inv: true,  land: false, partial: true); break;
             case "selectlp": case "selectpl": HandleSelectCommand(parts, inv: false, land: true,  partial: true); break;
             case "selectp":      HandleSelectCommand(parts, inv: true,  land: true,  partial: true); break;
-            default:             eat = 0; break;
+            default:
+                if (cmd.StartsWith("jump", StringComparison.Ordinal))
+                {
+                    HandleJumpCommand(cmd, parts);
+                    break;
+                }
+                eat = 0;
+                break;
         }
     }
 
@@ -674,6 +744,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
             // Always render nav markers and terrain overlay when logged in
             _navMarkerRenderer?.Render();
+            _radarWallRenderer?.Render();
             if (_dashboard?.Settings.ShowTerrainPassability == true)
                 _terrainOverlay?.Render();
 

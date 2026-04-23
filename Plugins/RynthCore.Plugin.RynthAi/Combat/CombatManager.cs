@@ -345,7 +345,15 @@ public class CombatManager : IDisposable
         _blacklistManager.TimeoutSeconds   = _settings.BlacklistTimeoutSec;
 
         if (_raycastSystem?.TargetingFSM != null)
-            _raycastSystem.TargetingFSM.MaxScanDistanceMeters = _settings.MonsterRange + 40.0f;
+        {
+            var fsm = _raycastSystem.TargetingFSM;
+            fsm.MaxScanDistanceMeters = _settings.MonsterRange + 40.0f;
+            fsm.UseArcs               = _settings.UseArcs;
+            fsm.BowArcVelocity        = _settings.BowArcVelocity;
+            fsm.CrossbowArcVelocity   = _settings.CrossbowArcVelocity;
+            fsm.AtlatlArcVelocity     = _settings.AtlatlArcVelocity;
+            fsm.MagicArcVelocity      = _settings.MagicArcVelocity;
+        }
 
         // Update the pre-scanned target list (distance, attackable, LOS — no selection)
         try { ScanNearbyTargets(); } catch (Exception ex) { _host.Log($"[RynthAi] ScanNearbyTargets crashed: {ex.Message}"); }
@@ -598,10 +606,11 @@ public class CombatManager : IDisposable
             try { ScanNearbyTargets(); }
             catch (Exception ex) { _host.Log($"[RynthAi] ScanNearbyTargets CRASH: {ex.Message}"); }
 
-            // Never overwrite "Buffing" — buffs take absolute priority over combat.
+            // Never overwrite "Buffing" or "Salvaging" — both take priority over combat.
+            // "Salvaging" covers active loot-container + queued salvage items.
             if (activeTargetId != 0 || _scannedTargets.Count > 0)
             {
-                if (_settings.BotAction != "Buffing")
+                if (_settings.BotAction != "Buffing" && _settings.BotAction != "Salvaging")
                     _settings.BotAction = "Combat";
             }
             else if (_settings.BotAction == "Combat")

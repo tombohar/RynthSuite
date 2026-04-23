@@ -27,22 +27,20 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         // Attack type determines which raycast to use
         public enum AttackType
         {
-            Linear,    // Bolts, streaks, crossbow bolts, melee
-            BowArc,    // Bows — moderate arc, arrows go higher than you'd think
-            ThrownArc, // Thrown weapons, atlatls — similar arc to bows
-            MagicArc   // War/Void magic Arc spells — same trajectory as missile weapons
+            Linear,       // Melee, peace, or arcs-disabled missiles
+            BowArc,       // Bows — moderate arc, arrows go higher than you'd think
+            CrossbowArc,  // Crossbows — fastest projectile, flattest arc
+            AtlatlArc,    // Atlatls, thrown weapons, darts — similar arc to bows
+            MagicArc      // War/Void magic Arc spells — same trajectory as missile weapons
         }
 
-        // AC arrows arc noticeably — they go HIGH. A lower velocity = higher arc.
-        // At 70 yard range, arrows visibly arc 3-4 meters above the direct line.
-        // This must match the actual game trajectory to detect ceiling hits in dungeons.
-        public float BowArcVelocity { get; set; } = 25.0f;
-
-        // Thrown weapons arc similarly to bows
-        public float ThrownArcVelocity { get; set; } = 22.0f;
-
-        // Magic arc spells (War/Void Arc) have the same trajectory as missile weapons
-        public float MagicArcVelocity { get; set; } = 25.0f;
+        // Lower velocity = higher arc. Defaults tuned against in-game trajectories;
+        // CombatManager overrides these from LegacyUiSettings each tick so the user
+        // can fine-tune per-weapon in the Misc advanced-settings tab.
+        public float BowArcVelocity      { get; set; } = 25.0f;
+        public float CrossbowArcVelocity { get; set; } = 40.0f;
+        public float AtlatlArcVelocity   { get; set; } = 22.0f;
+        public float MagicArcVelocity    { get; set; } = 25.0f;
 
         // If true, use arc checks for missile weapons. If false, treat all as linear.
         public bool UseArcs { get; set; } = true;
@@ -124,10 +122,19 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                         }
                         return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: isDungeon);
 
-                    case AttackType.ThrownArc:
+                    case AttackType.CrossbowArc:
                         if (UseArcs)
                         {
-                            if (!RaycastEngine.IsArcPathBlocked(origin, targetPos, ThrownArcVelocity, geometry))
+                            if (!RaycastEngine.IsArcPathBlocked(origin, targetPos, CrossbowArcVelocity, geometry))
+                                return false;
+                            return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: isDungeon);
+                        }
+                        return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: isDungeon);
+
+                    case AttackType.AtlatlArc:
+                        if (UseArcs)
+                        {
+                            if (!RaycastEngine.IsArcPathBlocked(origin, targetPos, AtlatlArcVelocity, geometry))
                                 return false;
                             return RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: isDungeon);
                         }
@@ -260,8 +267,8 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         /// <summary>
         /// Determines the attack type based on combat mode and wielded weapon name.
         /// Magic mode ALWAYS returns Linear (spells travel straight).
-        /// Bows get a flat arc (high velocity). Thrown weapons arc more.
-        /// Melee and crossbows are Linear.
+        /// Missile weapons each get their own arc when UseArcs is true: bow, crossbow,
+        /// or atlatl. Melee and peace modes are Linear.
         ///
         /// Combat modes: 1=noncombat, 2=melee, 4=missile, 8=magic
         /// </summary>
@@ -287,13 +294,13 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 {
                     string name = wieldedWeaponName.ToLower();
 
-                    // Crossbows fire bolts in a straight line
+                    // Crossbows — flattest arc, high velocity
                     if (name.Contains("crossbow"))
-                        return AttackType.Linear;
+                        return UseArcs ? AttackType.CrossbowArc : AttackType.Linear;
 
                     // Atlatls and thrown weapons arc more
                     if (name.Contains("atlatl") || name.Contains("thrown") || name.Contains("dart"))
-                        return UseArcs ? AttackType.ThrownArc : AttackType.Linear;
+                        return UseArcs ? AttackType.AtlatlArc : AttackType.Linear;
 
                     // Regular bows — fast, flat arc
                     if (name.Contains("bow"))

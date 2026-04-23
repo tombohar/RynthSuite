@@ -142,6 +142,15 @@ public sealed class LegacyUiSettings
     public int MeleeAttackHeight = 1;
     public int MissileAttackHeight = 1;
 
+    // Projectile arc velocities for missile-weapon LoS checks.
+    // Lower velocity = higher arc. Must approximate the AC client trajectory
+    // so dungeon-ceiling hits are detected.
+    public bool  UseArcs              = true;
+    public float BowArcVelocity       = 25.0f;
+    public float CrossbowArcVelocity  = 40.0f;
+    public float AtlatlArcVelocity    = 22.0f;
+    public float MagicArcVelocity     = 25.0f;
+
     public bool EnableFPSLimit = true;
     public int TargetFPSFocused = 60;
     public int TargetFPSBackground = 30;
@@ -209,6 +218,10 @@ public sealed class LegacyUiSettings
     public bool  MapShowCreatures = true;
     public bool  MapShowToolbar   = true;
     public float MapBgOpacity     = 1.0f;
+
+    // Radar dungeon-wall overlay
+    public bool  ShowRadarWalls        = false; // WIP — renders as black box, disabled by default
+    public float RadarWallWorldRange   = 35f; // world units shown edge-to-edge on the radar
 
     [JsonIgnore]
     public readonly string[] AdvancedTabs =
