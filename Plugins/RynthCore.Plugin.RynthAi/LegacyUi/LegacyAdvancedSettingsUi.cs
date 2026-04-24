@@ -320,6 +320,34 @@ internal sealed class LegacyAdvancedSettingsUi
 
                 ImGui.Spacing();
                 ImGui.Separator();
+                ImGui.Text("Radar");
+
+                ImGui.Checkbox("Get Rid of Retail Radar", ref _settings.SuppressRetailRadar);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Suppress the game's built-in radar (bezel, compass, coords, blips).");
+
+                ImGui.Checkbox("Show RynthRadar", ref _settings.ShowRynthRadar);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Render the custom square radar widget (indoor walls + dot markers, works outdoors).");
+
+                ImGui.Checkbox("Radar Click-Through", ref _settings.RadarClickThrough);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Mouse events over the radar pass through to the game instead of the widget.");
+
+                ImGui.Checkbox("Get Rid of Retail Chatbox", ref _settings.SuppressRetailChat);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Hide the game's built-in chat window.\nThe AC chat input still works underneath — your typed commands and tells function unchanged.");
+
+                ImGui.Checkbox("Show RynthChat", ref _settings.ShowRynthChat);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Render the custom chat viewer (scrollback + channel coloring).");
+
+                ImGui.Checkbox("Chat Click-Through", ref _settings.ChatClickThrough);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Mouse events over the chat pass through to the game. The gear button stays clickable.");
+
+                ImGui.Spacing();
+                ImGui.Separator();
                 ImGui.Text("Doors");
 
                 ImGui.Checkbox("Open Doors While Navigating", ref _settings.OpenDoors);

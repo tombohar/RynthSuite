@@ -28,15 +28,27 @@ internal sealed class DungeonMapUi
     private MainLogic? _raycast;
     private WorldObjectCache? _objectCache;
 
-    private uint _cachedLandblock;
+    internal uint _cachedLandblock;
 
-    private enum CellType : byte { Flat = 0, SlopeUp = 1, SlopeDown = 2 }
+    internal enum CellType : byte { Flat = 0, SlopeUp = 1, SlopeDown = 2 }
 
-    // Pre-built per Z-layer
-    private Dictionary<float, List<(float ax, float ay, float bx, float by, CellType type)>>? _outerEdges;
-    private Dictionary<float, List<(float x0, float y0, float x1, float y1, CellType type)>>? _fillStrips;
-    private List<float>? _zLayers;
-    private int _autoLayerIdx;
+    // Pre-built per Z-layer — internal so RynthRadarUi can share the cache.
+    internal Dictionary<float, List<(float ax, float ay, float bx, float by, CellType type)>>? _outerEdges;
+    // Raw (unmerged) outer edges with source grid-cell coord, used by RynthRadarUi
+    // for per-cell visited-state coloring.
+    internal Dictionary<float, List<(float ax, float ay, float bx, float by, CellType type, int gx, int gy)>>? _outerEdgesRaw;
+    internal Dictionary<float, List<(float x0, float y0, float x1, float y1, CellType type)>>? _fillStrips;
+    internal List<float>? _zLayers;
+    internal int _autoLayerIdx;
+
+    /// <summary>Force the landblock cache to be built. Used by RynthRadarUi to share walls/fills.</summary>
+    internal void EnsureCache(uint landblock)
+    {
+        if (landblock != _cachedLandblock || _outerEdges is null)
+            RefreshMap(landblock);
+    }
+
+    internal int BestLayerIdxFor(float playerZ) => BestLayerIdx(playerZ);
 
     private readonly HashSet<int> _visibleLayers = new();
 
@@ -249,6 +261,7 @@ internal sealed class DungeonMapUi
         _cachedLandblock = landblock;
         _pan = Vector2.Zero;
         _outerEdges = null;
+        _outerEdgesRaw = null;
         _fillStrips  = null;
 
         var los = _raycast?.GeometryLoader?.DungeonLOS;
@@ -383,17 +396,19 @@ internal sealed class DungeonMapUi
 
             // ── Outer edges ──────────────────────────────────────────────
             var outer = new List<(float, float, float, float, CellType)>(filled.Count * 2);
+            var outerRaw = new List<(float, float, float, float, CellType, int, int)>(filled.Count * 2);
             foreach (var ((gx, gy), type) in filled)
             {
                 float x0 = gx * GridCell, y0 = gy * GridCell;
                 float x1 = x0 + GridCell, y1 = y0 + GridCell;
 
-                if (!filled.ContainsKey((gx + 1, gy))) outer.Add((x1, y0, x1, y1, type));
-                if (!filled.ContainsKey((gx - 1, gy))) outer.Add((x0, y0, x0, y1, type));
-                if (!filled.ContainsKey((gx, gy + 1))) outer.Add((x0, y1, x1, y1, type));
-                if (!filled.ContainsKey((gx, gy - 1))) outer.Add((x0, y0, x1, y0, type));
+                if (!filled.ContainsKey((gx + 1, gy))) { outer.Add((x1, y0, x1, y1, type)); outerRaw.Add((x1, y0, x1, y1, type, gx, gy)); }
+                if (!filled.ContainsKey((gx - 1, gy))) { outer.Add((x0, y0, x0, y1, type)); outerRaw.Add((x0, y0, x0, y1, type, gx, gy)); }
+                if (!filled.ContainsKey((gx, gy + 1))) { outer.Add((x0, y1, x1, y1, type)); outerRaw.Add((x0, y1, x1, y1, type, gx, gy)); }
+                if (!filled.ContainsKey((gx, gy - 1))) { outer.Add((x0, y0, x1, y0, type)); outerRaw.Add((x0, y0, x1, y0, type, gx, gy)); }
             }
             if (outer.Count > 0) _outerEdges[layerZ] = MergeEdges(outer);
+            if (outerRaw.Count > 0) (_outerEdgesRaw ??= new())[layerZ] = outerRaw;
 
             // ── Fill strips: merge cells → horizontal rows → vertical columns ─
             var rows = new Dictionary<int, List<(int gx, CellType type)>>(filled.Count / 4);

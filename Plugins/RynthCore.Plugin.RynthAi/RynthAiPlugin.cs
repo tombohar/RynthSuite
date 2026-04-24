@@ -111,6 +111,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
         _loginComplete = true;
         _dashboard.OnLoginComplete();
+        _dashboard.ChatSubmitHandler = HandleRynthChatSubmit;
         _navigationEngine = new NavigationEngine(Host, _dashboard.Settings);
         if (_objectCache != null) _navigationEngine.SetWorldObjectCache(_objectCache);
         _navMarkerRenderer = new NavMarkerRenderer(Host, _dashboard.Settings);
@@ -487,6 +488,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     public override void OnChatWindowText(string? text, int chatType, ref int eat)
     {
         if (string.IsNullOrEmpty(text)) return;
+        _dashboard?.PushChatLine(text, chatType);
         _buffManager?.OnChatWindowText(text, chatType);
         _manaStoneManager?.OnChatWindowText(text);
         _combatManager?.HandleChatForDebuffs(text);
@@ -578,6 +580,30 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         string cmd = parts[1].ToLower();
         eat = 1;
         DispatchRaCommand(cmd, parts, ref eat);
+    }
+
+    /// <summary>
+    /// Called by RynthChatUi when the user submits a line. Slash commands we
+    /// own (/ra, /mt, /ub) are routed through OnChatBarEnter so they run the
+    /// same code path as the retail chatbar. Anything else falls through to
+    /// Host.InvokeChatParser (say/tell/channels via direct Event_* calls).
+    /// </summary>
+    private void HandleRynthChatSubmit(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+
+        int eat = 0;
+        try { OnChatBarEnter(text, ref eat); }
+        catch (Exception ex)
+        {
+            Host.Log($"[RynthAi] RynthChat OnChatBarEnter threw: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        if (eat != 0)
+            return; // handled locally (/ra, /mt, /ub, etc.)
+
+        if (Host.HasInvokeChatParser)
+            Host.InvokeChatParser(text);
     }
 
     internal void EnqueueGive(uint itemId, uint targetId, int stackSize)
@@ -732,7 +758,13 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         // ── Push FPS limit settings to engine each frame ──────────
         var settings = _dashboard?.Settings;
         if (settings != null)
+        {
             Host.SetFpsLimit(settings.EnableFPSLimit, settings.TargetFPSFocused, settings.TargetFPSBackground);
+            if (Host.HasSetRadarSuppressed)
+                Host.SetRadarSuppressed(settings.SuppressRetailRadar);
+            if (Host.HasSetChatSuppressed)
+                Host.SetChatSuppressed(settings.SuppressRetailChat);
+        }
 
         IntPtr previousContext = ImGui.GetCurrentContext();
         ImGui.SetCurrentContext(Host.ImGuiContext);

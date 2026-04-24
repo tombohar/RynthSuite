@@ -228,14 +228,26 @@ public class BuffManager : IDisposable
     {
         if (!_settings.IsMacroRunning) return;
 
+        // Safety: if a cast has been pending for too long without confirmation
+        // (lost chat, disconnected mid-cast, etc.), clear the flag so we don't
+        // lock BotAction to "Buffing" forever.
+        if (_pendingSpellId != 0 && (DateTime.Now - _lastCastAttempt).TotalSeconds > 10)
+            _pendingSpellId = 0;
+
         if ((DateTime.Now - _lastCastAttempt).TotalMilliseconds < _settings.SpellCastIntervalMs)
         {
             _settings.BotAction = "Buffing";
             return;
         }
 
-        // Client is busy — don't queue CastSpell/UseObject or we'll cause hourglass hang
-        if (BusyCount > 0) return;
+        // Client is busy — don't queue CastSpell/UseObject or we'll cause hourglass hang.
+        // Keep BotAction pinned to "Buffing" while our cast is in flight so CombatManager
+        // can't sneak in a peace-mode switch mid-cast.
+        if (BusyCount > 0)
+        {
+            if (_pendingSpellId != 0) _settings.BotAction = "Buffing";
+            return;
+        }
 
         if (CheckVitals())
         {
@@ -258,7 +270,11 @@ public class BuffManager : IDisposable
             }
         }
 
-        if (_settings.BotAction == "Buffing")
+        // Don't release the "Buffing" state while a cast is still pending server
+        // confirmation — otherwise CombatManager.OnHeartbeat runs in the window
+        // between cast-issued and "You cast X" chat arriving, and the peace-mode
+        // switch fizzles the spell.
+        if (_settings.BotAction == "Buffing" && _pendingSpellId == 0)
             _settings.BotAction = "Default";
     }
 

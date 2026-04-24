@@ -223,6 +223,34 @@ public sealed class LegacyUiSettings
     public bool  ShowRadarWalls        = false; // WIP — renders as black box, disabled by default
     public float RadarWallWorldRange   = 35f; // world units shown edge-to-edge on the radar
 
+    // When true, the engine suppresses the vanilla retail radar entirely.
+    public bool  SuppressRetailRadar   = false;
+
+    // When true, the engine hides the vanilla retail chatbox.
+    public bool  SuppressRetailChat    = false;
+
+    // Custom chat viewer
+    public bool  ShowRynthChat         = false;
+    public float ChatOpacity           = 0.15f;
+    public int   ChatMaxLines          = 500;
+    public bool  ChatShowTimestamps    = false;
+    public bool  ChatClickThrough      = false;   // mouse passes through to game; gear stays clickable
+
+    // When true, the custom RynthRadar widget is rendered.
+    public bool  ShowRynthRadar        = false;
+    public bool  RadarRotateWithPlayer = false;   // false = north-up; true = player always faces up
+    public float RadarOpacity          = 0.85f;
+    public float RadarZoom             = 3.5f;    // pixels per world unit
+    public bool  RadarShowMonsters     = true;
+    public bool  RadarShowNpcs         = true;
+    public bool  RadarShowPortals      = true;
+    public bool  RadarShowDoors        = true;
+    // Grid-cell radius (0.5m per cell) of the "visited" paint stamp placed each
+    // frame around the player. Higher = walls light up from further away.
+    public int   RadarWallPaintRadius  = 3;
+    public bool  RadarCircular         = false;   // false = square frame, true = circular
+    public bool  RadarClickThrough     = false;   // mouse passes through to the game
+
     [JsonIgnore]
     public readonly string[] AdvancedTabs =
     {

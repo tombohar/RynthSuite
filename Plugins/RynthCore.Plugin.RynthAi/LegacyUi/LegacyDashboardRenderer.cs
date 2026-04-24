@@ -39,6 +39,8 @@ internal sealed class LegacyDashboardRenderer
     private readonly LegacyMetaUi _metaUi;
     private readonly LegacyMonstersUi _monstersUi;
     private readonly DungeonMapUi _dungeonMapUi;
+    private readonly RynthRadarUi _rynthRadarUi;
+    private readonly RynthChatUi _rynthChatUi;
 
     private readonly List<string> _profiles = new();
     private readonly List<string> _navFiles = new();
@@ -110,6 +112,11 @@ internal sealed class LegacyDashboardRenderer
             getCurrentTarget: GetCurrentTargetForMonsterAdd);
         _dungeonMapUi = new DungeonMapUi(host, _settings);
         _dungeonMapUi.OnSettingChanged = SaveSettings;
+        _rynthRadarUi = new RynthRadarUi(host, _settings);
+        _rynthRadarUi.OnSettingChanged = SaveSettings;
+        _rynthRadarUi.SetMapData(_dungeonMapUi);
+        _rynthChatUi = new RynthChatUi(host, _settings);
+        _rynthChatUi.OnSettingChanged = SaveSettings;
         RefreshAllLists();
     }
 
@@ -125,8 +132,27 @@ internal sealed class LegacyDashboardRenderer
 
     public void SetMissileCraftingManager(MissileCraftingManager mgr) => _advancedSettingsUi.SetMissileCraftingManager(mgr);
 
-    public void SetRaycast(Raycasting.MainLogic raycast) => _dungeonMapUi.SetRaycast(raycast);
-    public void SetWorldObjectCache(WorldObjectCache cache) => _dungeonMapUi.SetWorldObjectCache(cache);
+    public void SetRaycast(Raycasting.MainLogic raycast)
+    {
+        _dungeonMapUi.SetRaycast(raycast);
+        _rynthRadarUi.SetRaycast(raycast);
+    }
+
+    public void PushChatLine(string? text, int chatType) => _rynthChatUi.Push(text, chatType);
+
+    /// <summary>Set the handler invoked when the user submits a line from the
+    /// custom chat widget. Wired by the plugin so slash commands can be routed
+    /// through OnChatBarEnter before falling back to InvokeChatParser.</summary>
+    public Action<string>? ChatSubmitHandler
+    {
+        get => _rynthChatUi.OnSubmit;
+        set => _rynthChatUi.OnSubmit = value;
+    }
+    public void SetWorldObjectCache(WorldObjectCache cache)
+    {
+        _dungeonMapUi.SetWorldObjectCache(cache);
+        _rynthRadarUi.SetWorldObjectCache(cache);
+    }
 
     // ── Settings persistence ─────────────────────────────────────────────────
 
@@ -733,6 +759,24 @@ internal sealed class LegacyDashboardRenderer
         dst.GiveQueueIntervalMs      = tmp.GiveQueueIntervalMs;
         dst.SpellCastIntervalMs      = tmp.SpellCastIntervalMs;
         dst.EmbeddedNavs             = tmp.EmbeddedNavs;
+        dst.SuppressRetailRadar      = tmp.SuppressRetailRadar;
+        dst.ShowRynthRadar           = tmp.ShowRynthRadar;
+        dst.RadarRotateWithPlayer    = tmp.RadarRotateWithPlayer;
+        dst.RadarOpacity             = tmp.RadarOpacity;
+        dst.RadarZoom                = tmp.RadarZoom;
+        dst.RadarShowMonsters        = tmp.RadarShowMonsters;
+        dst.RadarShowNpcs            = tmp.RadarShowNpcs;
+        dst.RadarShowPortals         = tmp.RadarShowPortals;
+        dst.RadarShowDoors           = tmp.RadarShowDoors;
+        dst.RadarWallPaintRadius     = tmp.RadarWallPaintRadius;
+        dst.RadarCircular            = tmp.RadarCircular;
+        dst.RadarClickThrough        = tmp.RadarClickThrough;
+        dst.SuppressRetailChat       = tmp.SuppressRetailChat;
+        dst.ShowRynthChat            = tmp.ShowRynthChat;
+        dst.ChatOpacity              = tmp.ChatOpacity;
+        dst.ChatMaxLines             = tmp.ChatMaxLines;
+        dst.ChatShowTimestamps       = tmp.ChatShowTimestamps;
+        dst.ChatClickThrough         = tmp.ChatClickThrough;
     }
 
     private static double NormalizeCorpseRangeYards(double value, double fallbackYards)
@@ -848,6 +892,8 @@ internal sealed class LegacyDashboardRenderer
         {
             if (DashWindows.ShowDungeonMap || _dungeonMapUi.IsAutoHidden)
                 _dungeonMapUi.Render();
+            _rynthRadarUi.Render();
+            _rynthChatUi.Render();
         }
         finally
         {
