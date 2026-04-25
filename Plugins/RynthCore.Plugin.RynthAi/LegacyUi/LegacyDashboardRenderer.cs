@@ -706,6 +706,7 @@ internal sealed class LegacyDashboardRenderer
         dst.LootOnlyRareCorpses      = tmp.LootOnlyRareCorpses;
         dst.PeaceModeWhenIdle        = tmp.PeaceModeWhenIdle;
         dst.RebuffWhenIdle           = tmp.RebuffWhenIdle;
+        dst.RebuffSecondsRemaining   = tmp.RebuffSecondsRemaining;
         dst.BlacklistAttempts        = tmp.BlacklistAttempts;
         dst.BlacklistTimeoutSec      = tmp.BlacklistTimeoutSec;
         dst.MeleeAttackPower         = tmp.MeleeAttackPower;
@@ -772,6 +773,7 @@ internal sealed class LegacyDashboardRenderer
         dst.RadarCircular            = tmp.RadarCircular;
         dst.RadarClickThrough        = tmp.RadarClickThrough;
         dst.SuppressRetailChat       = tmp.SuppressRetailChat;
+        dst.SuppressRetailPowerbar   = tmp.SuppressRetailPowerbar;
         dst.ShowRynthChat            = tmp.ShowRynthChat;
         dst.ChatOpacity              = tmp.ChatOpacity;
         dst.ChatMaxLines             = tmp.ChatMaxLines;
@@ -850,15 +852,21 @@ internal sealed class LegacyDashboardRenderer
             CheckAndSave();
         }
 
-        // Plugin-wide style overrides: mana-blue input/dropdown fields, black checkmarks
-        ImGui.PushStyleColor(ImGuiCol.FrameBg,        new Vector4(0.15f, 0.55f, 0.95f, 1.00f));
-        ImGui.PushStyleColor(ImGuiCol.FrameBgHovered, new Vector4(0.22f, 0.62f, 1.00f, 1.00f));
-        ImGui.PushStyleColor(ImGuiCol.FrameBgActive,  new Vector4(0.10f, 0.45f, 0.82f, 1.00f));
-        ImGui.PushStyleColor(ImGuiCol.CheckMark,      new Vector4(0.00f, 0.00f, 0.00f, 1.00f));
-        ImGui.PushStyleColor(ImGuiCol.PopupBg,        new Vector4(0.08f, 0.30f, 0.65f, 1.00f));
-        ImGui.PushStyleColor(ImGuiCol.Header,         new Vector4(0.15f, 0.55f, 0.95f, 1.00f));
-        ImGui.PushStyleColor(ImGuiCol.HeaderHovered,  new Vector4(0.22f, 0.62f, 1.00f, 1.00f));
-        ImGui.PushStyleColor(ImGuiCol.HeaderActive,   new Vector4(0.10f, 0.45f, 0.82f, 1.00f));
+        // Plugin-wide style overrides: muted slate-blue accents instead of the
+        // previous vivid sky-blue, which was overpowering in the macro tab.
+        ImGui.PushStyleColor(ImGuiCol.FrameBg,         new Vector4(0.18f, 0.22f, 0.28f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.FrameBgHovered,  new Vector4(0.24f, 0.30f, 0.38f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.FrameBgActive,   new Vector4(0.30f, 0.38f, 0.48f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.CheckMark,       new Vector4(0.85f, 0.90f, 1.00f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.PopupBg,         new Vector4(0.10f, 0.14f, 0.20f, 0.98f));
+        ImGui.PushStyleColor(ImGuiCol.Header,          new Vector4(0.20f, 0.28f, 0.36f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.HeaderHovered,   new Vector4(0.26f, 0.36f, 0.46f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.HeaderActive,    new Vector4(0.32f, 0.44f, 0.58f, 1.00f));
+        // Title bars — same slate-blue family. TitleBgActive replaces ImGui's
+        // default vivid yellow that's especially jarring on detached viewports.
+        ImGui.PushStyleColor(ImGuiCol.TitleBg,         new Vector4(0.14f, 0.18f, 0.24f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.TitleBgActive,   new Vector4(0.22f, 0.30f, 0.40f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.TitleBgCollapsed,new Vector4(0.10f, 0.14f, 0.20f, 0.85f));
 
         try
         {
@@ -877,7 +885,7 @@ internal sealed class LegacyDashboardRenderer
         }
         finally
         {
-            ImGui.PopStyleColor(8);
+            ImGui.PopStyleColor(11);
         }
     }
 
@@ -1149,11 +1157,28 @@ internal sealed class LegacyDashboardRenderer
             ImGui.PopStyleColor(3);
         }
         Vector2 togglePos = ImGui.GetCursorScreenPos() + new Vector2(2, _isMinimized ? 6 : 28);
+
+        // Right-click on each main toggle opens the matching settings window/tab —
+        // a quick shortcut so users don't have to hunt through Advanced Settings.
         LegacyDashboardDrawing.DrawSquareToggle("sword", ref _settings.EnableCombat, togglePos, "CombatTgl");
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Right)) OpenAdvancedTab("Melee Combat");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Combat — left-click to toggle, right-click for settings");
+
         LegacyDashboardDrawing.DrawSquareToggle("buff", ref _settings.EnableBuffing, togglePos + new Vector2(34, 0), "BuffTgl");
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Right)) OpenAdvancedTab("Buffing");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Buffing — left-click to toggle, right-click for settings");
+
         LegacyDashboardDrawing.DrawSquareToggle("shoe", ref _settings.EnableNavigation, togglePos + new Vector2(0, 34), "NavTgl");
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Right)) DashWindows.ShowNavigation = true;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Navigation — left-click to toggle, right-click for routes");
+
         LegacyDashboardDrawing.DrawSquareToggle("bag", ref _settings.EnableLooting, togglePos + new Vector2(34, 34), "LootTgl");
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Right)) OpenAdvancedTab("Looting");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Looting — left-click to toggle, right-click for settings");
+
         LegacyDashboardDrawing.DrawWideToggle("MACRO", "gear", ref _settings.EnableMeta, togglePos + new Vector2(0, 68), "MetaTgl", 64f, 20f);
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Right)) DashWindows.ShowMacroRules = true;
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Macro/Meta — left-click to toggle, right-click for rules");
 
         // FR (Force Rebuff) — small button, below MACRO toggle
         Vector2 frPos = togglePos + new Vector2(0, 92);
@@ -1196,6 +1221,21 @@ internal sealed class LegacyDashboardRenderer
         LegacyDashboardDrawing.DrawVitalRow("run", "ST", ToRatio(_playerStamina, _playerMaxStamina), ColGreen, FormatVital(_playerStamina, _playerMaxStamina));
         LegacyDashboardDrawing.DrawVitalRow("drop", "MN", ToRatio(_playerMana, _playerMaxMana), ColMana, FormatVital(_playerMana, _playerMaxMana));
         ImGui.EndTable();
+    }
+
+    private void OpenAdvancedTab(string tabName)
+    {
+        for (int i = 0; i < _settings.AdvancedTabs.Length; i++)
+        {
+            if (string.Equals(_settings.AdvancedTabs[i], tabName, StringComparison.OrdinalIgnoreCase))
+            {
+                _settings.SelectedAdvancedTab = i;
+                _settings.ShowAdvancedWindow = true;
+                return;
+            }
+        }
+        // Tab not found — at least open the window so the user lands somewhere useful.
+        _settings.ShowAdvancedWindow = true;
     }
 
     private void RefreshPlayerVitals()

@@ -118,6 +118,111 @@ public class CombatManager : IDisposable
     /// <summary>True only when actively attacking a specific target. Unlike HasTargets, this is false between kills even when more monsters are scanned nearby.</summary>
     public bool IsActivelyEngaged => activeTargetId != 0;
 
+    /// <summary>Diagnostic snapshot for /ra combat — exposes the internal state machine fields.</summary>
+    public CombatStateSnapshot GetStateSnapshot()
+    {
+        // Pick the same weapon EquipWeaponAndSetStance would pick for the active target,
+        // so the dump shows which weapon combat is trying to swing/cast with.
+        WorldObject? targetObj = activeTargetId != 0 ? _worldFilter[activeTargetId] : null;
+        int    pickedWeaponId    = 0;
+        string pickedWeaponName  = "";
+        int    pickedWeaponMode  = 0;
+        int    weaponWieldLoc    = -1;
+        if (targetObj != null)
+        {
+            var rule = _settings.MonsterRules.FirstOrDefault(
+                r => targetObj.Name.IndexOf(r.Name, StringComparison.OrdinalIgnoreCase) >= 0)
+                ?? _settings.MonsterRules.FirstOrDefault(m => m.Name.Equals("Default", StringComparison.OrdinalIgnoreCase));
+
+            if (rule != null && rule.WeaponId != 0)
+                pickedWeaponId = rule.WeaponId;
+            else
+            {
+                var bestWeapon = _settings.ItemRules.FirstOrDefault();
+                if (bestWeapon != null) pickedWeaponId = bestWeapon.Id;
+            }
+            if (pickedWeaponId == 0) pickedWeaponId = FindWandInItems();
+
+            if (pickedWeaponId != 0)
+            {
+                var w = _worldFilter[pickedWeaponId];
+                if (w != null)
+                {
+                    pickedWeaponName = w.Name ?? "";
+                    weaponWieldLoc   = w.Values(LongValueKey.CurrentWieldedLocation, 0);
+                    pickedWeaponMode = w.ObjectClass switch
+                    {
+                        AcObjectClass.WandStaffOrb  => CombatMode.Magic,
+                        AcObjectClass.MissileWeapon => CombatMode.Missile,
+                        AcObjectClass.MeleeWeapon   => CombatMode.Melee,
+                        _                           => CombatMode.Melee,
+                    };
+                }
+            }
+        }
+
+        int liveMode = -1;
+        if (_host.HasGetCurrentCombatMode)
+        {
+            try { liveMode = _host.GetCurrentCombatMode(); } catch { liveMode = -1; }
+        }
+
+        bool hasAmmo = false;
+        try { hasAmmo = HasWieldedAmmo(); } catch { hasAmmo = false; }
+
+        return new()
+        {
+            ActiveTargetId       = activeTargetId,
+            LockedTargetId       = _lockedTargetId,
+            ScannedCount         = _scannedTargets.Count,
+            ClosestScannedId     = _scannedTargets.Count > 0 ? _scannedTargets[0].Id        : 0,
+            ClosestScannedName   = _scannedTargets.Count > 0 ? _scannedTargets[0].Name ?? "" : "",
+            ClosestScannedDist   = _scannedTargets.Count > 0 ? _scannedTargets[0].Distance  : 0.0,
+            BusyCount            = BusyCount,
+            FacingTarget         = _facingTarget,
+            TargetLostScanTime   = _targetLostScanTime,
+            LastAttackCmd        = lastAttackCmd,
+            LastStanceAttempt    = lastStanceAttempt,
+            LastEquipTime        = _lastEquipTime,
+            CurrentCombatMode    = CurrentCombatMode,
+            LiveCombatMode       = liveMode,
+            BotAction            = _settings.BotAction ?? "",
+            EnableCombat         = _settings.EnableCombat,
+            IsMacroRunning       = _settings.IsMacroRunning,
+            PickedWeaponId       = pickedWeaponId,
+            PickedWeaponName     = pickedWeaponName,
+            PickedWeaponMode     = pickedWeaponMode,
+            PickedWeaponWieldLoc = weaponWieldLoc,
+            HasWieldedAmmoFlag   = hasAmmo,
+        };
+    }
+
+    public struct CombatStateSnapshot
+    {
+        public int      ActiveTargetId;
+        public int      LockedTargetId;
+        public int      ScannedCount;
+        public int      ClosestScannedId;
+        public string   ClosestScannedName;
+        public double   ClosestScannedDist;
+        public int      BusyCount;
+        public bool     FacingTarget;
+        public DateTime TargetLostScanTime;
+        public DateTime LastAttackCmd;
+        public DateTime LastStanceAttempt;
+        public DateTime LastEquipTime;
+        public int      CurrentCombatMode;
+        public int      LiveCombatMode;
+        public string   BotAction;
+        public bool     EnableCombat;
+        public bool     IsMacroRunning;
+        public int      PickedWeaponId;
+        public string   PickedWeaponName;
+        public int      PickedWeaponMode;
+        public int      PickedWeaponWieldLoc;
+        public bool     HasWieldedAmmoFlag;
+    }
+
     /// <summary>
     /// Periodic scan of all creatures. Filters: distance, self, blacklist, IsAttackable, raycast LOS.
     /// Call from OnHeartbeat or Think.
@@ -616,6 +721,12 @@ public class CombatManager : IDisposable
             else if (_settings.BotAction == "Combat")
                 _settings.BotAction = "Default";
         }
+        else if (_settings.BotAction == "Combat")
+        {
+            // Combat was disabled mid-run — release the stuck "Combat" BotAction.
+            // The reset paths above are gated on EnableCombat and won't fire once it's off.
+            _settings.BotAction = "Default";
+        }
 
         // Combat can run in Default/Combat, can interrupt navigation unless nav boost is on,
         // and can interrupt looting unless loot boost is on.
@@ -909,17 +1020,44 @@ public class CombatManager : IDisposable
     private bool HasWieldedAmmo()
     {
         int playerId = unchecked((int)_playerId);
-        foreach (var item in _worldFilter.GetDirectInventory())
-        {
-            if (item.WieldedLocation <= 0) continue;
-            if (playerId != 0 && item.Wielder != 0 && item.Wielder != playerId) continue;
-            string n = item.Name;
-            if (string.IsNullOrEmpty(n)) continue;
-            if (n.Contains("Bundle") || n.Contains("Wrapped")) continue;
-            if (n.Contains("Arrow") || n.Contains("Quarrel") || n.Contains("Bolt") || n.Contains("Dart"))
-                return true;
-        }
+
+        // Walk every cached object. The cache's `_inventory` set doesn't always
+        // include wielded items (the wielderInfo probe is async), so iterating
+        // only GetInventory()/GetDirectInventory() can miss arrows that the cache
+        // already knows about by id. AllKnownObjects() is the comprehensive view.
+        foreach (var item in _worldFilter.AllKnownObjects())
+            if (LooksLikeWieldedAmmo(item, playerId)) return true;
+
         return false;
+    }
+
+    // EquipMask bit for the ammunition slot. Items wielded in this slot are ammo
+    // by definition — far more reliable than name or ItemType inspection because
+    // some servers type their arrows as MissileWeapon (0x100) rather than the
+    // MissileAmmo bit (0x400) that AC's vanilla data has.
+    private const int AmmunitionSlot = 0x00800000;
+
+    private bool LooksLikeWieldedAmmo(WorldObject item, int playerId)
+    {
+        if (item == null) return false;
+
+        int locInq   = item.Values(LongValueKey.CurrentWieldedLocation, 0);
+        int locCache = item.WieldedLocation;
+        int loc = locInq > 0 ? locInq : locCache;
+        if (loc <= 0) return false;
+
+        if (playerId != 0 && item.Wielder != 0 && item.Wielder != playerId) return false;
+
+        // Authoritative: the AC client puts ammo in slot 0x800000.
+        if ((loc & AmmunitionSlot) != 0)
+            return true;
+
+        // Name-based fallback for the rare case where slot isn't yet populated
+        // but the cached name is — keeps behavior compatible with the old check.
+        string n = item.Name;
+        if (string.IsNullOrEmpty(n)) return false;
+        if (n.Contains("Bundle") || n.Contains("Wrapped")) return false;
+        return n.Contains("Arrow") || n.Contains("Quarrel") || n.Contains("Bolt") || n.Contains("Dart");
     }
 
     private void AttackTarget()

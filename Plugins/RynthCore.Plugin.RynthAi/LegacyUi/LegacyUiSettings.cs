@@ -126,6 +126,13 @@ public sealed class LegacyUiSettings
     public bool LootOnlyRareCorpses;
     public bool PeaceModeWhenIdle = true;
     public bool RebuffWhenIdle;
+    /// <summary>
+    /// Re-cast a self buff when its remaining duration drops below this many seconds.
+    /// Default 300 (5 minutes). Lower values rebuff more eagerly; very low values
+    /// (under ~60s) risk recasting between an old buff dropping and the new one
+    /// landing.
+    /// </summary>
+    public int RebuffSecondsRemaining = 300;
     public bool StartMacroOnLogin;
 
     public int BlacklistAttempts = 3;
@@ -229,6 +236,10 @@ public sealed class LegacyUiSettings
     // When true, the engine hides the vanilla retail chatbox.
     public bool  SuppressRetailChat    = false;
 
+    // When true, the engine no-ops the gmPowerbarUI notices so the vanilla
+    // attack/magic power bar never appears on screen.
+    public bool  SuppressRetailPowerbar = false;
+
     // Custom chat viewer
     public bool  ShowRynthChat         = false;
     public float ChatOpacity           = 0.15f;
@@ -254,7 +265,7 @@ public sealed class LegacyUiSettings
     [JsonIgnore]
     public readonly string[] AdvancedTabs =
     {
-        "Display", "Misc", "Recharge", "Melee Combat", "Spell Combat",
+        "Display", "UI", "Misc", "Recharge", "Melee Combat", "Spell Combat",
         "Ranges", "Navigation", "Buffing", "Crafting", "Looting"
     };
 

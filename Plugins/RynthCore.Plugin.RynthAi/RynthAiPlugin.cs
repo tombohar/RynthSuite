@@ -104,11 +104,14 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _dashboard = null;
     }
 
+    private DateTime _loginCompletedAt = DateTime.MinValue;
+
     public override void OnLoginComplete()
     {
         if (!_initialized || _dashboard is null)
             return;
 
+        _loginCompletedAt = DateTime.Now;
         _loginComplete = true;
         _dashboard.OnLoginComplete();
         _dashboard.ChatSubmitHandler = HandleRynthChatSubmit;
@@ -262,7 +265,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     }
                 }
 
-                CheckBusyTimeout(); // safety: force-clear stuck busy count
+                CheckBusyTimeout();
                 _buffManager?.OnHeartbeat();
 
                 var settings = _dashboard?.Settings;
@@ -301,7 +304,14 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
                 // AutoCram / AutoStack — only while idle (not looting a corpse, not crafting).
                 // Gated on busy count inside the manager so it won't move items mid-cast.
-                if (_inventoryManager != null
+                // Skip InventoryManager for a short settle window after login.
+                // Its first call does a forced GetDirectInventory which walks every
+                // container via native calls — when the cache is still classifying
+                // hundreds of pending CreateObjects (RL hot-reload, fresh login),
+                // the concurrent native walk has been causing intermittent crashes.
+                bool inventorySettled = (DateTime.Now - _loginCompletedAt).TotalMilliseconds > 3000;
+                if (inventorySettled
+                    && _inventoryManager != null
                     && _openedContainerId == 0
                     && _targetCorpseId == 0)
                 {
@@ -331,8 +341,11 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 // Mana stone tapping — runs after salvage, independent of looting state.
                 _manaStoneManager?.OnHeartbeat(_busyCount);
 
-                // Missile crafting runs before combat — blocks everything while active
-                if (_missileCraftingManager != null && settings.IsMacroRunning)
+                // Missile crafting runs before combat — blocks everything while active.
+                // Gated on the same settle window as InventoryManager: ProcessCrafting
+                // also does a forced GetDirectInventory walk which races with cache
+                // classification right after login/RL.
+                if (inventorySettled && _missileCraftingManager != null && settings.IsMacroRunning)
                 {
                     _missileCraftingManager.ProcessCrafting();
                     if (_missileCraftingManager.IsCrafting)
@@ -497,19 +510,26 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _questTracker?.OnChatLine(text);
     }
 
-    private int _createObjectCount;
     public override void OnCreateObject(uint objectId)
     {
-        _createObjectCount++;
-        if (_createObjectCount <= 3)
-            Host.Log($"[RynthAi] OnCreateObject #{_createObjectCount}: id=0x{objectId:X8}, cache={(_objectCache != null ? "ok" : "NULL")}");
-        _objectCache?.OnCreateObject(objectId);
+        try { _objectCache?.OnCreateObject(objectId); }
+        catch (Exception ex)
+        {
+            Host.Log($"[RynthAi] OnCreateObject EXCEPTION on id=0x{objectId:X8}: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     public override void OnDeleteObject(uint objectId)
     {
-        _objectCache?.OnDeleteObject(objectId);
-        HandleCorpseObjectDeleted(objectId);
+        try
+        {
+            _objectCache?.OnDeleteObject(objectId);
+            HandleCorpseObjectDeleted(objectId);
+        }
+        catch (Exception ex)
+        {
+            Host.Log($"[RynthAi] OnDeleteObject EXCEPTION on id=0x{objectId:X8}: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     public override void OnUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth)
@@ -690,6 +710,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "fellowship":   HandleFellowshipCommand(parts); break;
             case "fellowinfo":   HandleFellowshipInfoCommand(); break;
             case "dumpinv":      HandleDumpInventoryCommand(); break;
+            case "combat":       HandleCombatStateCommand(); break;
             case "mapdump":      HandleMapDumpCommand(); break;
             case "clearbusy":    HandleClearBusyCommand(); break;
             case "forcebuff":        HandleForceBuff(); break;
@@ -764,6 +785,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 Host.SetRadarSuppressed(settings.SuppressRetailRadar);
             if (Host.HasSetChatSuppressed)
                 Host.SetChatSuppressed(settings.SuppressRetailChat);
+            if (Host.HasSetPowerbarSuppressed)
+                Host.SetPowerbarSuppressed(settings.SuppressRetailPowerbar);
         }
 
         IntPtr previousContext = ImGui.GetCurrentContext();

@@ -60,6 +60,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra lootcheckinv  — test the loot profile against inventory");
         ChatLine("[RynthAi] /ra lootcheck     — classify selected item (on|off = auto on click)");
         ChatLine("[RynthAi] /ra dumpinv       — dump all inventory items (cache + direct)");
+        ChatLine("[RynthAi] /ra combat        — dump combat state machine snapshot");
         ChatLine("[RynthAi] /ra clearbusy     — force-clear busy state (hourglass cursor)");
         ChatLine("[RynthAi] /ra forcebuff          — force-recast all buffs immediately");
         ChatLine("[RynthAi] /ra cancelforcebuff    — cancel an in-progress force rebuff");
@@ -1316,6 +1317,79 @@ public sealed partial class RynthAiPlugin
             ChatLine($"[RynthAi] Failed to load native loot profile: {ex.Message}");
             return false;
         }
+    }
+
+    private void HandleCombatStateCommand()
+    {
+        if (_combatManager == null) { ChatLine("[RynthAi] Combat manager not ready."); return; }
+
+        var s = _combatManager.GetStateSnapshot();
+        var now = DateTime.Now;
+        double sinceAttackS = s.LastAttackCmd      == DateTime.MinValue ? -1 : (now - s.LastAttackCmd).TotalSeconds;
+        double sinceLostS   = s.TargetLostScanTime == DateTime.MinValue ? -1 : (now - s.TargetLostScanTime).TotalSeconds;
+        double sinceStanceS = s.LastStanceAttempt  == DateTime.MinValue ? -1 : (now - s.LastStanceAttempt).TotalSeconds;
+        double sinceEquipS  = s.LastEquipTime      == DateTime.MinValue ? -1 : (now - s.LastEquipTime).TotalSeconds;
+
+        static string ModeName(int m) => m switch
+        {
+            -1 => "?",
+            1 => "NonCombat",
+            2 => "Melee",
+            4 => "Missile",
+            8 => "Magic",
+            _ => $"mode={m}",
+        };
+
+        string cachedMode = ModeName(s.CurrentCombatMode);
+        string liveMode   = ModeName(s.LiveCombatMode);
+        string desiredMode = ModeName(s.PickedWeaponMode);
+
+        ChatLine("[RynthAi] === Combat State ===");
+        ChatLine($"[RynthAi] macro={s.IsMacroRunning}  enableCombat={s.EnableCombat}  botAction={s.BotAction}");
+        ChatLine($"[RynthAi] mode cached={cachedMode}  live={liveMode}  desired={desiredMode}");
+        ChatLine($"[RynthAi] activeTargetId=0x{(uint)s.ActiveTargetId:X8}  lockedTargetId=0x{(uint)s.LockedTargetId:X8}  facing={s.FacingTarget}");
+        ChatLine($"[RynthAi] scanned={s.ScannedCount}  closest=0x{(uint)s.ClosestScannedId:X8} '{s.ClosestScannedName}' @ {s.ClosestScannedDist:F1}yd");
+        ChatLine($"[RynthAi] weapon=0x{(uint)s.PickedWeaponId:X8} '{s.PickedWeaponName}' wieldLoc={s.PickedWeaponWieldLoc} ammoWielded={s.HasWieldedAmmoFlag}");
+        ChatLine($"[RynthAi] busy={s.BusyCount}  sinceAtk={sinceAttackS:F1}s sinceStance={sinceStanceS:F1}s sinceEquip={sinceEquipS:F1}s sinceLost={sinceLostS:F1}s");
+
+        // Dump every cache-known object that's wielded — broader than GetInventory()
+        // which only covers the cache's _inventory set. The bow we know is wielded
+        // wasn't appearing there.
+        if (_objectCache != null)
+        {
+            int wieldedShown = 0;
+            int totalKnown   = 0;
+            ChatLine("[RynthAi] wielded items:");
+            foreach (var item in _objectCache.AllKnownObjects())
+            {
+                totalKnown++;
+                int locInq   = item.Values(LongValueKey.CurrentWieldedLocation, 0);
+                int locCache = item.WieldedLocation;
+                if (locInq <= 0 && locCache <= 0) continue;
+
+                uint flags = 0;
+                if (Host.HasGetItemType) Host.TryGetItemType(unchecked((uint)item.Id), out flags);
+                ChatLine($"[RynthAi]   0x{(uint)item.Id:X8} '{item.Name}' inqLoc={locInq} cacheLoc={locCache} typeFlags=0x{flags:X}");
+                if (++wieldedShown >= 25) { ChatLine("[RynthAi]   …truncated"); break; }
+            }
+            ChatLine($"[RynthAi]   ({wieldedShown} wielded shown of {totalKnown} cache-known objects)");
+        }
+
+        if (_buffManager != null)
+        {
+            var b = _buffManager.GetStateSnapshot();
+            double sinceCastS = b.LastCastAttempt == DateTime.MinValue ? -1 : (now - b.LastCastAttempt).TotalSeconds;
+            ChatLine($"[RynthAi] buff: enable={b.EnableBuffing} needsBuff={b.NeedsAnyBuffNow} pendingSpell={b.PendingSpellId} sinceCast={sinceCastS:F1}s");
+            ChatLine($"[RynthAi] buff: forceRebuff={b.IsForceRebuffing} healSelf={b.IsHealingSelf} restam={b.IsRechargingStamina} remana={b.IsRechargingMana}");
+            ChatLine($"[RynthAi] buff: ramTimers={b.RamBuffTimerCount} itemTimers={b.ItemSpellTimerCount} hp={b.HealthPct}% mana={b.ManaPct}% stam={b.StaminaPct}%");
+        }
+
+        Host.Log($"[RynthAi combat] macro={s.IsMacroRunning} ec={s.EnableCombat} ba={s.BotAction} " +
+                 $"mode_cached={cachedMode} mode_live={liveMode} desired={desiredMode} " +
+                 $"active=0x{(uint)s.ActiveTargetId:X8} locked=0x{(uint)s.LockedTargetId:X8} facing={s.FacingTarget} " +
+                 $"scanned={s.ScannedCount} closest=0x{(uint)s.ClosestScannedId:X8} '{s.ClosestScannedName}' @ {s.ClosestScannedDist:F1}yd " +
+                 $"weapon=0x{(uint)s.PickedWeaponId:X8} '{s.PickedWeaponName}' wieldLoc={s.PickedWeaponWieldLoc} " +
+                 $"busy={s.BusyCount} sinceAtk={sinceAttackS:F1}s sinceStance={sinceStanceS:F1}s sinceEquip={sinceEquipS:F1}s sinceLost={sinceLostS:F1}s");
     }
 
     private void HandleDumpInventoryCommand()

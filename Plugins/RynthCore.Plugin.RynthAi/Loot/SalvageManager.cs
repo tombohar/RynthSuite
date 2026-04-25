@@ -290,22 +290,76 @@ public sealed class SalvageManager
         if (_cache == null)
             return 0;
 
-        foreach (WorldObject item in _cache.GetDirectInventory(forceRefresh: false))
+        // Pass 1 — type-based via the cached ObjectClass. Authoritative across
+        // every server, every UST variant (server-renamed, custom legendaries,
+        // etc.), and every per-character GUID. Cache classification reads the
+        // ItemType bits and tags any tinkering tool as AcObjectClass.Ust.
+        foreach (var item in _cache.AllKnownObjects())
         {
-            if (IsUst(item.Name))
-                return unchecked((uint)item.Id);
+            if (item.ObjectClass != AcObjectClass.Ust) continue;
+            if (!IsCarriedByPlayer(item)) continue;
+            return unchecked((uint)item.Id);
         }
 
+        // Pass 2 — name-based fallback. Some items get cached before their
+        // ItemType is read; the cache stays AcObjectClass.Unknown until then.
+        // The name path catches those.
+        foreach (WorldObject item in _cache.GetDirectInventory(forceRefresh: false))
+        {
+            if (IsUst(item.Name)) return unchecked((uint)item.Id);
+        }
+
+        // Pass 3 — same name fallback after a forced refresh.
+        var fresh = _cache.GetDirectInventory(forceRefresh: true);
+        foreach (WorldObject item in fresh)
+        {
+            if (IsUst(item.Name)) return unchecked((uint)item.Id);
+        }
+
+        // Diagnostic on miss — sample what's in inventory so we can see
+        // whether the UST really isn't there or just has an unexpected name.
+        int shown = 0;
+        var names = new List<string>();
+        foreach (WorldObject item in fresh)
+        {
+            if (string.IsNullOrEmpty(item.Name)) continue;
+            names.Add(item.Name);
+            if (++shown >= 40) break;
+        }
+        Log($"[Salvage] UST search miss. {fresh.Count} item(s) scanned. Sample: {string.Join(", ", names)}");
+
         return 0;
+    }
+
+    /// <summary>
+    /// True when the item lives in the player's pack (or one of the player's
+    /// side-packs). Skips USTs lying in nearby corpses or another player's pack.
+    /// </summary>
+    private bool IsCarriedByPlayer(WorldObject item)
+    {
+        if (_cache == null) return false;
+        uint playerId = _host.GetPlayerId();
+        if (playerId == 0) return true;
+
+        int pid = unchecked((int)playerId);
+        if (item.Wielder != 0 && item.Wielder != pid) return false;
+        if (item.Container == 0 || item.Container == pid) return true;
+
+        var owner = _cache[item.Container];
+        if (owner == null) return false;
+        if (owner.ObjectClass == AcObjectClass.Corpse) return false;
+        return owner.Wielder == pid || owner.Container == pid;
     }
 
     private static bool IsUst(string? name)
     {
         if (string.IsNullOrEmpty(name))
             return false;
-        // AC salvage tool name contains "Ust" but not "Salvage" (salvage bags are "Salvage (X)")
+        // UST names end in "Ust" (e.g. "Salvaging Ust", "Aged Legendary Salvaging Ust",
+        // "Sturdy Iron Salvaging Ust"). Exclude only actual salvage bags — those follow
+        // the precise "Salvage (Material)" format, caught by IsSalvageBag.
         return name.Contains("Ust", StringComparison.OrdinalIgnoreCase)
-            && !name.Contains("Salvage", StringComparison.OrdinalIgnoreCase);
+            && !IsSalvageBag(name);
     }
 
     private static bool IsSalvageBag(string? name)

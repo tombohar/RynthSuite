@@ -224,9 +224,68 @@ public class BuffManager : IDisposable
         _host.WriteToChat("[RynthAi] Sequence cancelled.", 5);
     }
 
+    public BuffStateSnapshot GetStateSnapshot() => new()
+    {
+        EnableBuffing       = _settings.EnableBuffing,
+        IsForceRebuffing    = _isForceRebuffing,
+        IsRechargingMana    = _isRechargingMana,
+        IsRechargingStamina = _isRechargingStamina,
+        IsHealingSelf       = _isHealingSelf,
+        PendingSpellId      = _pendingSpellId,
+        LastCastAttempt     = _lastCastAttempt,
+        RamBuffTimerCount   = _ramBuffTimers.Count,
+        ItemSpellTimerCount = _itemSpellTimers.Count,
+        NeedsAnyBuffNow     = NeedsAnyBuff(),
+        HealthPct           = _vitals.HealthPct,
+        ManaPct             = _vitals.ManaPct,
+        StaminaPct          = _vitals.StaminaPct,
+    };
+
+    public struct BuffStateSnapshot
+    {
+        public bool     EnableBuffing;
+        public bool     IsForceRebuffing;
+        public bool     IsRechargingMana;
+        public bool     IsRechargingStamina;
+        public bool     IsHealingSelf;
+        public int      PendingSpellId;
+        public DateTime LastCastAttempt;
+        public int      RamBuffTimerCount;
+        public int      ItemSpellTimerCount;
+        public bool     NeedsAnyBuffNow;
+        public int      HealthPct;
+        public int      ManaPct;
+        public int      StaminaPct;
+    }
+
+    private bool _liveBuffsRefreshed;
+    private DateTime _lastLiveRefreshAttempt = DateTime.MinValue;
+
     public void OnHeartbeat()
     {
         if (!_settings.IsMacroRunning) return;
+
+        // RefreshFromLiveMemory at OnLoginComplete fails when the server-time
+        // packet hasn't landed yet (GetServerTime returns 0). On those
+        // logins we have NO timers and would recast every buff that has
+        // hours left server-side. Retry every second until we get the
+        // live snapshot, and BLOCK any cast attempts in the meantime.
+        if (!_liveBuffsRefreshed)
+        {
+            if ((DateTime.Now - _lastLiveRefreshAttempt).TotalMilliseconds > 1000)
+            {
+                _lastLiveRefreshAttempt = DateTime.Now;
+                int n = RefreshFromLiveMemory();
+                if (n >= 0)
+                {
+                    _liveBuffsRefreshed = true;
+                    _host.WriteToChat($"[RynthAi] Live buff timers ready ({n} loaded).", 1);
+                }
+            }
+            // Don't cast anything until we have a real snapshot — otherwise
+            // we'd recast over a 1-hour-old buff at the start of every login.
+            return;
+        }
 
         // Safety: if a cast has been pending for too long without confirmation
         // (lost chat, disconnected mid-cast, etc.), clear the flag so we don't
@@ -309,6 +368,7 @@ public class BuffManager : IDisposable
         int spellId = FindBestSpellId(baseName, AcSkillType.LifeMagic);
         if (spellId == 0) return false;
         if (!EnsureMagicMode()) return true;
+        _pendingSpellId = spellId;
         _host.CastSpell((uint)_host.GetPlayerId(), spellId);
         _lastCastAttempt = DateTime.Now;
         return true;
@@ -432,7 +492,9 @@ public class BuffManager : IDisposable
         if (targetSpell == null) return false;
 
         int targetLevel = GetSpellLevel(targetSpell);
-        int rebufferMin = 5; // recast when < 5 min remaining
+        // Recast when remaining duration drops below this many seconds.
+        // User-configurable via Advanced Settings → Buffing.
+        int rebufferSec = Math.Max(0, _settings.RebuffSecondsRemaining);
 
         // Item spells (armor banes, Impenetrability) tracked in their own dictionary.
         // Always check the timer first — RecordItemSpellCast() writes it immediately on cast
@@ -442,7 +504,7 @@ public class BuffManager : IDisposable
         {
             if (_itemSpellTimers.TryGetValue(targetSpell.Family, out ItemSpellRecord? itemTimer))
                 if (itemTimer.SpellLevel >= targetLevel &&
-                    DateTime.Now < itemTimer.ExpiresAt.AddMinutes(-rebufferMin))
+                    DateTime.Now < itemTimer.ExpiresAt.AddSeconds(-rebufferSec))
                     return true;
             return false;
         }
@@ -450,7 +512,7 @@ public class BuffManager : IDisposable
         // Player buffs — use RAM timers
         if (_ramBuffTimers.TryGetValue(targetSpell.Family, out RamTimerInfo? timer))
         {
-            if (DateTime.Now < timer.Expiration.AddMinutes(-rebufferMin))
+            if (DateTime.Now < timer.Expiration.AddSeconds(-rebufferSec))
             {
                 if (timer.SpellLevel >= targetLevel) return true;
             }
@@ -564,6 +626,7 @@ public class BuffManager : IDisposable
             _ramBuffTimers.TryAdd(kvp.Key, kvp.Value);
 
         SaveBuffTimers();
+        _liveBuffsRefreshed = true;
         return _ramBuffTimers.Count;
     }
 

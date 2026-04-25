@@ -15,6 +15,19 @@ internal sealed class LegacyMetaUi
 
     private bool _showMetaEditor;
     private MetaRule _editingRule = new();
+
+    // Indices of rules whose multi-action body is expanded inline. The user
+    // toggles this via right-click on the row — left-click opens the editor.
+    private readonly HashSet<int> _expandedRuleIndices = new();
+
+    // ── Popped-out expression editor ─────────────────────────────────────
+    // Right-clicking a condition/action expression input opens a much larger
+    // multi-line window so long expressions are easy to read and edit.
+    private bool                _exprPopupOpen;
+    private string              _exprPopupTitle = "";
+    private string              _exprPopupBuffer = "";
+    private Action<string>?     _exprPopupApply;
+    private bool                _exprPopupRequestFocus;
     private int _editingRuleIndex = -1;
     private string _newStateName = "";
     private bool _openCreateStatePopup;
@@ -280,6 +293,21 @@ internal sealed class LegacyMetaUi
                     ImGui.TableNextColumn();
                     string condText = rule.Condition.ToString() +
                         (string.IsNullOrEmpty(rule.ConditionData) ? "" : $": {rule.ConditionData}");
+
+                    // Local helper — capture this row index so the action-cell right-click
+                    // handler below toggles the same rule. SpanAllColumns + per-cell items
+                    // means a single right-click can hit multiple IsItemClicked checks in
+                    // one frame; the `_toggled` guard makes sure we flip exactly once.
+                    int rowGlobalIdx = globalIdx;
+                    bool _toggled = false;
+                    void ToggleExpand()
+                    {
+                        if (_toggled) return;
+                        _toggled = true;
+                        if (!_expandedRuleIndices.Add(rowGlobalIdx))
+                            _expandedRuleIndices.Remove(rowGlobalIdx);
+                    }
+
                     if (ImGui.Selectable($"{condText}##edit{globalIdx}", false, ImGuiSelectableFlags.SpanAllColumns))
                     {
                         _editingRule = new MetaRule
@@ -295,24 +323,48 @@ internal sealed class LegacyMetaUi
                         _editingRuleIndex = globalIdx;
                         _showMetaEditor = true;
                     }
+                    if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
+                        ToggleExpand();
 
                     ImGui.TableNextColumn();
                     if (rule.Action == MetaActionType.All)
                     {
-                        int childCount = rule.ActionChildren?.Count ?? 0;
-                        if (childCount == 0) childCount = rule.Children?.Count ?? 0;
-                        ImGui.TextColored(new Vector4(1, 1, 0, 1), $"All: [{childCount} actions]");
+                        var actionList = (rule.ActionChildren != null && rule.ActionChildren.Count > 0)
+                            ? rule.ActionChildren
+                            : rule.Children;
+                        int childCount = actionList?.Count ?? 0;
+                        bool expanded = _expandedRuleIndices.Contains(globalIdx);
+                        ImGui.TextColored(new Vector4(1, 1, 0, 1), $"All: [{childCount} actions] (right-click to expand)");
+                        if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
+                            ToggleExpand();
+
+                        if (expanded && actionList != null)
+                        {
+                            for (int ai = 0; ai < actionList.Count; ai++)
+                            {
+                                var child = actionList[ai];
+                                string childText = child.Action.ToString() +
+                                    (string.IsNullOrEmpty(child.ActionData) ? "" : $": {child.ActionData}");
+                                ImGui.TextDisabled($"   {ai + 1}. {childText}");
+                                if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
+                                    ToggleExpand();
+                            }
+                        }
                     }
                     else if (rule.Action == MetaActionType.EmbeddedNavRoute &&
                              !string.IsNullOrEmpty(rule.ActionData) && rule.ActionData.Contains(';'))
                     {
                         var parts = rule.ActionData.Split(';');
                         ImGui.Text($"EmbeddedNavRoute: {parts[0]} ({parts[1]} pts)");
+                        if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
+                            ToggleExpand();
                     }
                     else
                     {
                         ImGui.Text(rule.Action.ToString() +
                             (string.IsNullOrEmpty(rule.ActionData) ? "" : $": {rule.ActionData}"));
+                        if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
+                            ToggleExpand();
                     }
 
                     if (isFlashing) ImGui.PopStyleColor();
@@ -395,13 +447,17 @@ internal sealed class LegacyMetaUi
         }
 
         RenderMetaEditorPopup();
+        RenderExpressionPopup();
     }
 
     private void RenderMetaEditorPopup()
     {
         if (!_showMetaEditor) return;
 
-        ImGui.SetNextWindowSize(new Vector2(650, 450), ImGuiCond.Appearing);
+        // FirstUseEver — only set the default size if no persisted size is in
+        // imgui.ini. ImGuiCond.Appearing was forcing the size every time the
+        // popup re-opened, throwing away the user's resize.
+        ImGui.SetNextWindowSize(new Vector2(650, 450), ImGuiCond.FirstUseEver);
         if (!ImGui.Begin("Edit Meta Rule##RynthAiEditor", ref _showMetaEditor, ImGuiWindowFlags.NoCollapse))
         {
             ImGui.End();
@@ -636,6 +692,13 @@ internal sealed class LegacyMetaUi
                 string cData = rule.ConditionData ?? "";
                 if (ImGui.InputTextWithHint("##Data", condHint, ref cData, 256))
                     rule.ConditionData = cData;
+                if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
+                {
+                    var localRule = rule;
+                    OpenExpressionPopup("Condition Data", localRule.ConditionData ?? "", v => localRule.ConditionData = v);
+                }
+                if (ImGui.IsItemHovered() && !string.IsNullOrEmpty(cData))
+                    ImGui.SetTooltip("Right-click for a larger editor");
                 CopyButton("CondData", cData);
             }
             else if (rule.Condition != MetaConditionType.InventoryItemCount_LE &&
@@ -808,6 +871,13 @@ internal sealed class LegacyMetaUi
                     ImGui.SetNextItemWidth(-28);
                     if (ImGui.InputTextWithHint("##Expr", "Expression (e.g. [SlotCount] < 5)", ref expr, 256))
                         rule.ActionData = expr;
+                    if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
+                    {
+                        var localRule = rule;
+                        OpenExpressionPopup("Action Expression", localRule.ActionData ?? "", v => localRule.ActionData = v);
+                    }
+                    if (ImGui.IsItemHovered() && !string.IsNullOrEmpty(expr))
+                        ImGui.SetTooltip("Right-click for a larger editor");
                     CopyButton("Expr", expr);
                     break;
 
@@ -834,6 +904,61 @@ internal sealed class LegacyMetaUi
         }
 
         ImGui.PopID();
+    }
+
+    /// <summary>
+    /// Opens the popped-out expression editor for the given current value with
+    /// a callback that writes the edited value back to its source.
+    /// </summary>
+    private void OpenExpressionPopup(string title, string current, Action<string> apply)
+    {
+        _exprPopupTitle        = title;
+        _exprPopupBuffer       = current ?? string.Empty;
+        _exprPopupApply        = apply;
+        _exprPopupOpen         = true;
+        _exprPopupRequestFocus = true;
+    }
+
+    /// <summary>
+    /// Renders the popped-out editor window when one is open. Larger multi-line
+    /// input than the inline meta editor field, with a hint at the right-click
+    /// trigger and an Apply/Close pair.
+    /// </summary>
+    private void RenderExpressionPopup()
+    {
+        if (!_exprPopupOpen) return;
+
+        ImGui.SetNextWindowSize(new Vector2(720, 380), ImGuiCond.FirstUseEver);
+        if (_exprPopupRequestFocus)
+            ImGui.SetNextWindowFocus();
+        if (ImGui.Begin($"Expression Editor - {_exprPopupTitle}##ExpressionPopup", ref _exprPopupOpen))
+        {
+            ImGui.TextDisabled("Edit the expression here. Apply writes it back to the rule.");
+            ImGui.Separator();
+
+            if (_exprPopupRequestFocus)
+            {
+                ImGui.SetKeyboardFocusHere();
+                _exprPopupRequestFocus = false;
+            }
+
+            Vector2 inputSize = new Vector2(-1, ImGui.GetContentRegionAvail().Y - 36);
+            ImGui.InputTextMultiline("##ExprPopupText", ref _exprPopupBuffer, 4096, inputSize);
+
+            ImGui.Separator();
+            if (ImGui.Button("Apply", new Vector2(120, 0)))
+            {
+                _exprPopupApply?.Invoke(_exprPopupBuffer);
+                TryAutoSaveMeta();
+                _exprPopupOpen = false;
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel", new Vector2(120, 0)))
+            {
+                _exprPopupOpen = false;
+            }
+        }
+        ImGui.End();
     }
 
     private static void ClearConditionDataIfNeeded(MetaRule rule)

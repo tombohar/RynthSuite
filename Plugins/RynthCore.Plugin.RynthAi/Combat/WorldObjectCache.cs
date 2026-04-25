@@ -562,6 +562,14 @@ public class WorldObjectCache
     }
 
     /// <summary>
+    /// Every object the cache currently knows about, indexed by id. Useful for
+    /// wielded-item lookups when the `_inventory` set hasn't picked them up
+    /// yet (the cache classifies items asynchronously and the wielderInfo probe
+    /// can race with consumers like HasWieldedAmmo).
+    /// </summary>
+    public IEnumerable<WorldObject> AllKnownObjects() => _byId.Values;
+
+    /// <summary>
     /// Lightweight live inventory snapshot built from GetContainerContents.
     /// This bypasses the crash-prone full cache scan and is the source of truth
     /// for crafting and ammo diagnostics.

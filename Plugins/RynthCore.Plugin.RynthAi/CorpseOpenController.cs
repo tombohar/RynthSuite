@@ -37,6 +37,17 @@ public sealed partial class RynthAiPlugin
     private int _pendingLootCheckContainerId; // non-corpse container opened natively: run lootcheck on inventory arrival
     private int _corpseItemsEvaluated;  // items checked against loot profile this corpse session
     private int _corpseItemsMatched;    // items that matched a loot rule this corpse session
+    // Mana stones we've approved for loot but whose cache arrival hasn't landed yet.
+    // Added to haveCount so the KeepCount cap isn't bypassed in the window between
+    // MoveItemExternal confirmation and the player-inventory CreateObject event.
+    // HashSet (not a plain count) because ClassifyItemAgainstProfile is called for
+    // every item on the corpse every tick — a counter would over-count by N each
+    // re-evaluation pass.
+    private readonly HashSet<int> _pendingManaStoneIds = new();
+
+    // Same idea for ManaTap candidates: tracks items approved this corpse
+    // session so we don't approve more than the available empty-stone slots.
+    private readonly HashSet<int> _pendingManaTapIds = new();
     private int _targetCorpseId;
     private int _currentLootItemId;
     private long _corpseTargetSince;
@@ -167,6 +178,7 @@ public sealed partial class RynthAiPlugin
         {
             _processedCorpseItems.Clear();
             _corpseItemAttempts.Clear();
+            _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear();
         }
         LootDiag($"[RynthAi] Corpse loot: opened container 0x{objectId:X8}.");
         if (wasCompleted)
@@ -1114,17 +1126,80 @@ public sealed partial class RynthAiPlugin
 
         if (isConfiguredManaStone)
         {
-            int haveCount = _objectCache?.GetInventory()
-                .Count(inv => settings.ConsumableRules.Any(r =>
-                    r.Type.Equals("ManaStone", StringComparison.OrdinalIgnoreCase) &&
-                    !string.IsNullOrWhiteSpace(r.Name) &&
-                    r.Name.Equals(inv.Name, StringComparison.OrdinalIgnoreCase))) ?? 0;
+            // Cache-side counting: both GetInventory() and GetDirectInventory()
+            // miss items intermittently (the same bug that hid wielded arrows).
+            // Walk every cache-known object and match by player ownership +
+            // configured mana stone name. We exclude items that look like they're
+            // on the world or on a corpse (Wielder set to a non-player, or
+            // ObjectClass==Corpse) so we don't double-count loose stones on
+            // nearby corpses.
+            int liveCount = 0;
+            int playerId = unchecked((int)_playerId);
+            if (_objectCache != null)
+            {
+                foreach (var inv in _objectCache.AllKnownObjects())
+                {
+                    if (string.IsNullOrEmpty(inv.Name)) continue;
+                    if (inv.ObjectClass == AcObjectClass.Corpse) continue;
+                    if (inv.Wielder != 0 && playerId != 0 && inv.Wielder != playerId) continue;
+
+                    // Container check: if the item lives inside another container, the
+                    // root container has to be the player. Anything inside a corpse or
+                    // another player's pack must be excluded — and corpses have
+                    // Wielder=0, so we have to check ObjectClass==Corpse explicitly,
+                    // not just inspect Wielder.
+                    if (inv.Container != 0 && playerId != 0 && inv.Container != playerId)
+                    {
+                        var owner = _objectCache[inv.Container];
+                        bool ownedByPlayer = owner != null
+                            && owner.ObjectClass != AcObjectClass.Corpse
+                            && (owner.Wielder == playerId || owner.Container == playerId);
+                        if (!ownedByPlayer) continue;
+                    }
+
+                    foreach (var r in settings.ConsumableRules)
+                    {
+                        if (!r.Type.Equals("ManaStone", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (string.IsNullOrWhiteSpace(r.Name)) continue;
+                        if (r.Name.Equals(inv.Name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            liveCount++;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Include stones already approved this session whose CreateObject event
+            // hasn't landed yet. Distinct ids only — same item re-evaluated across
+            // ticks must not bump the count.
+            int pendingNotYetCounted = 0;
+            foreach (int id in _pendingManaStoneIds)
+            {
+                if (id == item.Id) continue; // current item handled below
+                pendingNotYetCounted++;
+            }
+            int haveCount = liveCount + pendingNotYetCounted;
+
+            // One-time-per-corpse log so we can see what the count was based on.
+            if (_pendingManaStoneIds.Count == 0)
+                Host.Log($"[RynthAi] ManaStone count for cap check: live={liveCount} pending={pendingNotYetCounted} cap={settings.ManaStoneKeepCount} (cache_known={_objectCache?.AllKnownObjects().Count() ?? 0})");
+
+            // If this specific stone is already approved, return the same answer
+            // we returned last time (no further log spam, no count change).
+            if (_pendingManaStoneIds.Contains(item.Id))
+            {
+                actionLabel = "Keep";
+                ruleLabel   = $"ManaStone (Consumable, {haveCount + 1}/{settings.ManaStoneKeepCount})";
+                return true;
+            }
 
             if (haveCount < settings.ManaStoneKeepCount)
             {
                 actionLabel = "Keep";
-                ruleLabel   = $"ManaStone (Consumable, {haveCount}/{settings.ManaStoneKeepCount})";
-                ChatLine($"[RynthAi] Mana stone match: '{item.Name}' (have {haveCount}/{settings.ManaStoneKeepCount}) — looting.");
+                ruleLabel   = $"ManaStone (Consumable, {haveCount + 1}/{settings.ManaStoneKeepCount})";
+                ChatLine($"[RynthAi] Mana stone match: '{item.Name}' (have {haveCount}/{settings.ManaStoneKeepCount}, +1) — looting.");
+                _pendingManaStoneIds.Add(item.Id);
                 return true;
             }
 
@@ -1138,6 +1213,11 @@ public sealed partial class RynthAiPlugin
             var (nativeAction, nativeRule) = LootEvaluator.Classify(nativeProfile, item, _charSkills);
             if (nativeRule == null)
             {
+                if (TryClassifyAsManaTap(item, settings, out actionLabel, out ruleLabel))
+                {
+                    _corpseItemsMatched++;
+                    return true;
+                }
                 LootDiag($"[RynthAi] Corpse loot: no loot rule matched 0x{(uint)item.Id:X8} '{item.Name}'.");
                 return false;
             }
@@ -1168,6 +1248,11 @@ public sealed partial class RynthAiPlugin
 
         if (matchedRule == null)
         {
+            if (TryClassifyAsManaTap(item, settings, out actionLabel, out ruleLabel))
+            {
+                _corpseItemsMatched++;
+                return true;
+            }
             LootDiag($"[RynthAi] Corpse loot: no loot rule matched 0x{(uint)item.Id:X8} '{item.Name}'.");
             return false;
         }
@@ -1178,6 +1263,51 @@ public sealed partial class RynthAiPlugin
             : matchedRule.Name.Trim();
         actionLabel = matchedRule.Action.ToString();
         isSalvage   = matchedRule.Action == VTankLootAction.Salvage;
+        return true;
+    }
+
+    /// <summary>
+    /// Loot-for-tap fallback: when an item doesn't match any loot rule but it
+    /// holds at least the configured mana threshold AND the player has an
+    /// uncharged mana stone in inventory, loot the item so ManaStoneManager
+    /// can drain it (which destroys the item and charges the stone).
+    /// </summary>
+    private bool TryClassifyAsManaTap(WorldObject item, LegacyUiSettings settings,
+                                      out string actionLabel, out string ruleLabel)
+    {
+        actionLabel = string.Empty;
+        ruleLabel   = string.Empty;
+
+        if (_manaStoneManager == null) return false;
+        if (!Host.HasGetObjectIntProperty) return false;
+
+        int threshold = settings.ManaTapMinMana;
+        if (threshold <= 0) return false;
+
+        if (!Host.TryGetObjectIntProperty(unchecked((uint)item.Id),
+                                          (uint)AcIntProperty.CurrentMana, out int curMana))
+            return false;
+        if (curMana < threshold) return false;
+
+        // Already approved this session — return same answer without re-logging
+        // or re-counting against the quota.
+        if (_pendingManaTapIds.Contains(item.Id))
+        {
+            actionLabel = "ManaTap";
+            ruleLabel   = $"ManaTap (mana={curMana} ≥ {threshold})";
+            return true;
+        }
+
+        // Quota: each ManaTap pickup consumes one empty stone. Don't loot more
+        // candidates than we have free empty-stone slots, otherwise we end up
+        // with a pile of mana items the bot can't drain.
+        int freeSlots = _manaStoneManager.FreeEmptyStoneSlots() - _pendingManaTapIds.Count;
+        if (freeSlots <= 0) return false;
+
+        actionLabel = "ManaTap";
+        ruleLabel   = $"ManaTap (mana={curMana} ≥ {threshold})";
+        ChatLine($"[RynthAi] Mana tap candidate: '{item.Name}' (mana {curMana}, slot {_pendingManaTapIds.Count + 1}) — looting to drain.");
+        _pendingManaTapIds.Add(item.Id);
         return true;
     }
 
@@ -1317,6 +1447,7 @@ public sealed partial class RynthAiPlugin
         _processedCorpseItems.Clear();
         _corpseItemAttempts.Clear();
         _corpseIdsRequested = false;
+        _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear();
         ResetCurrentLootItem();
 
         // Clear container state immediately. Do NOT send UseObject(corpse) to close it —
@@ -1487,6 +1618,7 @@ public sealed partial class RynthAiPlugin
             {
                 _processedCorpseItems.Clear();
                 _corpseItemAttempts.Clear();
+                _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear();
             }
 
             _targetCorpseId = rawOpen;
@@ -1510,6 +1642,7 @@ public sealed partial class RynthAiPlugin
         ResetCurrentLootItem();
         _processedCorpseItems.Clear();
         _corpseItemAttempts.Clear();
+        _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear();
         _corpsePausedNav = false;
 
         if (!releaseState)
