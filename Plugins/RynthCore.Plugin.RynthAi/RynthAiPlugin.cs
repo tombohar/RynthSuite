@@ -320,13 +320,16 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
                 _salvageManager?.OnTick(_busyCount);
 
-                // Gap-fill: while a container is open for active looting OR while salvage
-                // has items queued, hold BotAction at "Salvaging" so combat Think() won't
-                // fire and interrupt the current loot/salvage session.
-                // "Buffing" and already-active "Combat" (mid-fight) are never overridden.
+                // Salvage-priority gap-fill: while a container is open for active
+                // looting OR while the salvage queue has items waiting, hold
+                // BotAction at "Salvaging" so CombatManager.Think() won't fire
+                // and pull the bot away mid-session. We DO override "Combat"
+                // here — finishing the salvage queue takes priority over
+                // engaging a new monster, otherwise items meant for salvage
+                // pile up in inventory after combat resumes navigation.
+                // "Buffing" still wins (buffs dropping = death).
                 if (settings.IsMacroRunning
                     && settings.BotAction != "Buffing"
-                    && settings.BotAction != "Combat"
                     && (_openedContainerId != 0 || _salvageManager?.IsBusy == true))
                 {
                     settings.BotAction = "Salvaging";

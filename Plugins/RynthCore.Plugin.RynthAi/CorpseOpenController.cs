@@ -1133,30 +1133,17 @@ public sealed partial class RynthAiPlugin
             // on the world or on a corpse (Wielder set to a non-player, or
             // ObjectClass==Corpse) so we don't double-count loose stones on
             // nearby corpses.
+            // Use GetDirectInventory(forceRefresh:true) which actively walks the
+            // player's containers via Host.GetContainerContents — it's immune
+            // to the cache-classification race that bites AllKnownObjects()
+            // immediately after RL/login (when stones-in-pack haven't been
+            // re-classified yet, the count comes back 0 and the bot over-loots).
             int liveCount = 0;
-            int playerId = unchecked((int)_playerId);
             if (_objectCache != null)
             {
-                foreach (var inv in _objectCache.AllKnownObjects())
+                foreach (var inv in _objectCache.GetDirectInventory(forceRefresh: true))
                 {
                     if (string.IsNullOrEmpty(inv.Name)) continue;
-                    if (inv.ObjectClass == AcObjectClass.Corpse) continue;
-                    if (inv.Wielder != 0 && playerId != 0 && inv.Wielder != playerId) continue;
-
-                    // Container check: if the item lives inside another container, the
-                    // root container has to be the player. Anything inside a corpse or
-                    // another player's pack must be excluded — and corpses have
-                    // Wielder=0, so we have to check ObjectClass==Corpse explicitly,
-                    // not just inspect Wielder.
-                    if (inv.Container != 0 && playerId != 0 && inv.Container != playerId)
-                    {
-                        var owner = _objectCache[inv.Container];
-                        bool ownedByPlayer = owner != null
-                            && owner.ObjectClass != AcObjectClass.Corpse
-                            && (owner.Wielder == playerId || owner.Container == playerId);
-                        if (!ownedByPlayer) continue;
-                    }
-
                     foreach (var r in settings.ConsumableRules)
                     {
                         if (!r.Type.Equals("ManaStone", StringComparison.OrdinalIgnoreCase)) continue;

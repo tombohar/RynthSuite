@@ -42,6 +42,13 @@ public sealed class SalvageManager
     private int _combineItemIdx;
     private long _combineActionAt;
 
+    // Per-item retry counter so a failed salvage gets re-queued a few times
+    // before we give up. AC sometimes drops a Salvage execute when the bot is
+    // busy with other actions; the item stays in the pack and we want to try
+    // again when the queue gets back to idle.
+    private readonly Dictionary<uint, int> _itemRetryCount = new();
+    private const int MaxItemRetries = 3;
+
     private static long NowMs => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     public SalvageManager(RynthCoreHost host, LegacyUiSettings settings, WorldObjectCache? cache)
@@ -180,7 +187,9 @@ public sealed class SalvageManager
     {
         if (!_host.SalvagePanelExecute())
         {
-            Log($"[Salvage] SalvagePanelExecute failed.");
+            Log($"[Salvage] SalvagePanelExecute failed for 0x{_currentItemId:X8} — re-queuing.");
+            RequeueOrDrop(_currentItemId, "execute failed");
+            _currentItemId = 0;
             _phase = Phase.Idle;
             return;
         }
@@ -201,11 +210,53 @@ public sealed class SalvageManager
 
     private void OnResultReady(long now)
     {
+        // If the item we tried to salvage is STILL in the cache after the
+        // result delay, the salvage didn't actually consume it (the panel
+        // may have closed mid-execute, the bot got busy, AC dropped the
+        // request, etc.). Re-queue so we try again instead of leaving the
+        // item dangling in the player's pack with mana value still on it.
+        uint itemId = _currentItemId;
+        bool itemStillPresent = itemId != 0 && _cache != null && _cache[unchecked((int)itemId)] != null;
+
         _currentItemId = 0;
         _phase = Phase.Idle;
+
+        if (itemStillPresent)
+        {
+            Log($"[Salvage] Item 0x{itemId:X8} still in inventory after salvage cycle — re-queuing.");
+            RequeueOrDrop(itemId, "item still present after result");
+            return;
+        }
+
+        // Successful salvage — clear retry counter for this id (defensive; the
+        // server has destroyed it anyway, but the dict shouldn't leak entries).
+        _itemRetryCount.Remove(itemId);
+
         // If queue is now empty, trigger a combine scan on the next idle tick.
         if (_queue.Count == 0)
             _pendingCombineScan = true;
+    }
+
+    /// <summary>
+    /// Re-queue an item that failed a salvage step. Counts retries per id and
+    /// drops the item once it's failed MaxItemRetries times in a row, so a
+    /// truly un-salvageable item doesn't trap the queue forever.
+    /// </summary>
+    private void RequeueOrDrop(uint itemId, string reason)
+    {
+        if (itemId == 0) return;
+
+        int prior = _itemRetryCount.TryGetValue(itemId, out int n) ? n : 0;
+        int next = prior + 1;
+        if (next > MaxItemRetries)
+        {
+            _itemRetryCount.Remove(itemId);
+            Log($"[Salvage] Giving up on 0x{itemId:X8} after {MaxItemRetries} attempts ({reason}).");
+            return;
+        }
+        _itemRetryCount[itemId] = next;
+        _queue.Enqueue(itemId);
+        Log($"[Salvage] Re-queued 0x{itemId:X8} ({reason}) — attempt {next}/{MaxItemRetries}.");
     }
 
     // ── Combine salvage bags ──────────────────────────────────────────────────
@@ -285,15 +336,32 @@ public sealed class SalvageManager
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    // Canonical UST weenie class id. Same for every UST instance on every
+    // character and every server (the WCID is part of the weenie definition,
+    // not the per-instance GUID). Most reliable signal we have.
+    private const uint UstWcid = 20646;
+
     private uint FindUst()
     {
         if (_cache == null)
             return 0;
 
-        // Pass 1 — type-based via the cached ObjectClass. Authoritative across
-        // every server, every UST variant (server-renamed, custom legendaries,
-        // etc.), and every per-character GUID. Cache classification reads the
-        // ItemType bits and tags any tinkering tool as AcObjectClass.Ust.
+        // Pass 1 — WCID match. Universal: every UST shares weenie class 20646
+        // so this works on every server / variant / character regardless of
+        // name, ItemType classification, or cache state.
+        if (_host.HasGetObjectWcid)
+        {
+            foreach (var item in _cache.AllKnownObjects())
+            {
+                if (!IsCarriedByPlayer(item)) continue;
+                if (!_host.TryGetObjectWcid(unchecked((uint)item.Id), out uint wcid)) continue;
+                if (wcid == UstWcid) return unchecked((uint)item.Id);
+            }
+        }
+
+        // Pass 2 — type-based via the cached ObjectClass. Same intent as the
+        // WCID pass but reads the cached classification (ItemType TinkeringTool
+        // bit). Catches USTs whose WCID lookup hasn't been bound on the host.
         foreach (var item in _cache.AllKnownObjects())
         {
             if (item.ObjectClass != AcObjectClass.Ust) continue;
@@ -301,7 +369,7 @@ public sealed class SalvageManager
             return unchecked((uint)item.Id);
         }
 
-        // Pass 2 — name-based fallback. Some items get cached before their
+        // Pass 3 — name-based fallback. Some items get cached before their
         // ItemType is read; the cache stays AcObjectClass.Unknown until then.
         // The name path catches those.
         foreach (WorldObject item in _cache.GetDirectInventory(forceRefresh: false))
@@ -309,11 +377,22 @@ public sealed class SalvageManager
             if (IsUst(item.Name)) return unchecked((uint)item.Id);
         }
 
-        // Pass 3 — same name fallback after a forced refresh.
+        // Pass 4 — same name fallback after a forced refresh.
         var fresh = _cache.GetDirectInventory(forceRefresh: true);
         foreach (WorldObject item in fresh)
         {
             if (IsUst(item.Name)) return unchecked((uint)item.Id);
+        }
+
+        // Pass 5 — WCID retry over the freshly-walked direct inventory in case
+        // a UST only just appeared in the cache via the forced refresh.
+        if (_host.HasGetObjectWcid)
+        {
+            foreach (var item in fresh)
+            {
+                if (!_host.TryGetObjectWcid(unchecked((uint)item.Id), out uint wcid)) continue;
+                if (wcid == UstWcid) return unchecked((uint)item.Id);
+            }
         }
 
         // Diagnostic on miss — sample what's in inventory so we can see
