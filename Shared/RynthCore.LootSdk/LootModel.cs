@@ -109,6 +109,13 @@ public sealed class LootProfile
     /// <summary>Rules evaluated top-to-bottom. First match wins.</summary>
     public List<LootRule> Rules { get; set; } = new();
 
+    /// <summary>
+    /// Optional per-material salvage combine rules — see SalvageCombineSettings.
+    /// When null or Enabled=false, salvage combine falls back to material-only
+    /// grouping (combine any same-material under-full bags regardless of WM).
+    /// </summary>
+    public SalvageCombineSettings? SalvageCombine { get; set; }
+
     // ── Persistence ──────────────────────────────────────────────────────────
 
     public void Save(string path)
@@ -146,4 +153,5 @@ public sealed class LootProfile
     UseStringEnumConverter = true,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingDefault)]
 [JsonSerializable(typeof(LootProfile))]
+[JsonSerializable(typeof(SalvageCombineSettings))]
 public sealed partial class LootJsonContext : JsonSerializerContext { }

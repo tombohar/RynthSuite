@@ -450,6 +450,33 @@ internal sealed class LegacyAdvancedSettingsUi
                         "Default 300 (5 minutes). Lower values rebuff more eagerly; very low\n" +
                         "values (<60s) risk a gap between the old buff dropping and the new one\n" +
                         "landing.");
+
+                ImGui.Spacing();
+                ImGui.Separator();
+                ImGui.Text("Buff Difficulty (Min Buffed Skill)");
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "Minimum buffed skill level required to cast each self-buff tier.\n" +
+                        "Separate from Spell Combat thresholds so you can tune buffing\n" +
+                        "more aggressively — buff fizzles just retry on the next heartbeat.\n" +
+                        "AC's hard minimums are 1/50/100/150/200/250/300/350.");
+
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 1##Buff", ref _settings.BuffMinSkillLevelTier1);
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 2##Buff", ref _settings.BuffMinSkillLevelTier2);
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 3##Buff", ref _settings.BuffMinSkillLevelTier3);
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 4##Buff", ref _settings.BuffMinSkillLevelTier4);
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 5##Buff", ref _settings.BuffMinSkillLevelTier5);
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 6##Buff", ref _settings.BuffMinSkillLevelTier6);
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 7##Buff", ref _settings.BuffMinSkillLevelTier7);
+                ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Level 8##Buff", ref _settings.BuffMinSkillLevelTier8);
                 break;
 
             case "Looting":
@@ -473,6 +500,11 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Checkbox("Enable Autostack", ref _settings.EnableAutostack);
                 ImGui.Checkbox("Enable Autocram", ref _settings.EnableAutocram);
                 ImGui.Checkbox("Combine Salvage Bags", ref _settings.EnableCombineSalvage);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("After the salvage queue empties, move same-name bags together so the server merges them.");
+                ImGui.Checkbox("Combine Bags During Salvage", ref _settings.CombineBagsDuringSalvage);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("When salvaging an item, also add any under-full salvage bag of the same material to the salvage panel — the salvage operation merges them into a single bag.");
 
                 ImGui.Spacing();
                 ImGui.Separator();

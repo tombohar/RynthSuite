@@ -6,6 +6,8 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using RynthCore.PluginSdk;
 using RynthCore.Plugin.RynthAi.LegacyUi;
+using RynthCore.Plugin.RynthAi.Loot;
+using RynthCore.Loot.VTank;
 
 namespace RynthCore.Plugin.RynthAi.Meta;
 
@@ -2367,7 +2369,7 @@ internal sealed class ExpressionEngine
             {
                 VTankLootRule? match = null;
                 foreach (var rule in vtProfile.Rules)
-                    if (rule.IsMatch(wo, lootCtx)) { match = rule; break; }
+                    if (VTankLootEvaluator.Match(rule, wo, lootCtx)) { match = rule; break; }
 
                 if (match == null || match.Action != VTankLootAction.Keep) continue;
                 int amount = Math.Max(1, wo.Values(LongValueKey.StackCount, 1));

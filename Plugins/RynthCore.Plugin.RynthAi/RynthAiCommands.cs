@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using RynthCore.Plugin.RynthAi.LegacyUi;
+using RynthCore.Plugin.RynthAi.Loot;
 using RynthCore.Plugin.RynthAi.Meta;
 using RynthCore.Plugin.RynthAi.Raycasting;
+using RynthCore.Loot.VTank;
 
 namespace RynthCore.Plugin.RynthAi;
 
@@ -1091,11 +1093,8 @@ public sealed partial class RynthAiPlugin
 
         int unconditional = 0;
         foreach (var rule in profile.Rules)
-        {
-            string[] parts = rule.RawInfoLine.Split(';', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 2)
+            if (rule.Conditions.Count == 0)
                 unconditional++;
-        }
 
         ChatLine($"[RynthAi]   Unconditional rules: {unconditional}");
 
@@ -1135,7 +1134,7 @@ public sealed partial class RynthAiPlugin
             VTankLootRule? firstMatch = null;
             foreach (var rule in profile.Rules)
             {
-                if (rule.IsMatch(item, lootCtx))
+                if (VTankLootEvaluator.Match(rule, item, lootCtx))
                 {
                     firstMatch = rule;
                     break;
@@ -1223,7 +1222,7 @@ public sealed partial class RynthAiPlugin
         for (int i = 0; i < profile.Rules.Count; i++)
         {
             VTankLootRule rule = profile.Rules[i];
-            if (!rule.IsMatch(item, ctx)) continue;
+            if (!VTankLootEvaluator.Match(rule, item, ctx)) continue;
             string ruleName = string.IsNullOrWhiteSpace(rule.Name) ? $"#{i}" : rule.Name.Trim();
             ChatLine($"[RynthAi] {item.Name}: [{rule.Action}] {ruleName}");
             return;
@@ -1352,24 +1351,37 @@ public sealed partial class RynthAiPlugin
         ChatLine($"[RynthAi] weapon=0x{(uint)s.PickedWeaponId:X8} '{s.PickedWeaponName}' wieldLoc={s.PickedWeaponWieldLoc} ammoWielded={s.HasWieldedAmmoFlag}");
         ChatLine($"[RynthAi] busy={s.BusyCount}  sinceAtk={sinceAttackS:F1}s sinceStance={sinceStanceS:F1}s sinceEquip={sinceEquipS:F1}s sinceLost={sinceLostS:F1}s");
 
-        // Dump every cache-known object that's wielded — broader than GetInventory()
-        // which only covers the cache's _inventory set. The bow we know is wielded
-        // wasn't appearing there.
+        // Dump every cache-known object that's wielded — using Host.TryGetObjectWielderInfo
+        // as the authoritative check, not the cached WieldedLocation/Wielder fields
+        // (those stay 0 for items that arrived via OnCreateObject and never went
+        // through the GetDirectInventory walk).
         if (_objectCache != null)
         {
+            uint pid = Host.GetPlayerId();
             int wieldedShown = 0;
             int totalKnown   = 0;
             ChatLine("[RynthAi] wielded items:");
             foreach (var item in _objectCache.AllKnownObjects())
             {
                 totalKnown++;
-                int locInq   = item.Values(LongValueKey.CurrentWieldedLocation, 0);
-                int locCache = item.WieldedLocation;
-                if (locInq <= 0 && locCache <= 0) continue;
+
+                int  locInq   = item.Values(LongValueKey.CurrentWieldedLocation, 0);
+                int  locCache = item.WieldedLocation;
+                int  locApi   = 0;
+                bool apiHit   = false;
+                if (Host.HasGetObjectWielderInfo
+                    && Host.TryGetObjectWielderInfo(unchecked((uint)item.Id), out uint wlder, out uint locFromApi)
+                    && wlder == pid && locFromApi > 0)
+                {
+                    locApi = unchecked((int)locFromApi);
+                    apiHit = true;
+                }
+
+                if (!apiHit && locInq <= 0 && locCache <= 0) continue;
 
                 uint flags = 0;
                 if (Host.HasGetItemType) Host.TryGetItemType(unchecked((uint)item.Id), out flags);
-                ChatLine($"[RynthAi]   0x{(uint)item.Id:X8} '{item.Name}' inqLoc={locInq} cacheLoc={locCache} typeFlags=0x{flags:X}");
+                ChatLine($"[RynthAi]   0x{(uint)item.Id:X8} '{item.Name}' apiLoc={locApi} inqLoc={locInq} cacheLoc={locCache} typeFlags=0x{flags:X}");
                 if (++wieldedShown >= 25) { ChatLine("[RynthAi]   …truncated"); break; }
             }
             ChatLine($"[RynthAi]   ({wieldedShown} wielded shown of {totalKnown} cache-known objects)");
@@ -1850,7 +1862,7 @@ public sealed partial class RynthAiPlugin
             {
                 VTankLootRule? matched = null;
                 foreach (var rule in vtProfile.Rules)
-                    if (rule.IsMatch(item, lootCtx)) { matched = rule; break; }
+                    if (VTankLootEvaluator.Match(rule, item, lootCtx)) { matched = rule; break; }
                 if (matched == null || (matched.Action != VTankLootAction.Keep && matched.Action != VTankLootAction.KeepUpTo)) continue;
                 int stackSize = Math.Max(1, item.Values(LongValueKey.StackCount, 1));
                 EnqueueGive((uint)item.Id, (uint)target.Id, stackSize);

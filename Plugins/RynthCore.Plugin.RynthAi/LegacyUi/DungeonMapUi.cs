@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Numerics;
 using ImGuiNET;
+using RynthCore.Plugin.RynthAi.Maps;
 using RynthCore.Plugin.RynthAi.Raycasting;
 using RynthCore.PluginSdk;
 using RynthCore.Plugin.RynthAi;
@@ -40,6 +42,9 @@ internal sealed class DungeonMapUi
     internal Dictionary<float, List<(float x0, float y0, float x1, float y1, CellType type)>>? _fillStrips;
     internal List<float>? _zLayers;
     internal int _autoLayerIdx;
+    // EnvCell list for the cached landblock — used by edit mode to map a screen
+    // click back to the prefab + local-grid cell it should patch.
+    internal List<DungeonLOS.MapCell>? _lbCells;
 
     /// <summary>Force the landblock cache to be built. Used by RynthRadarUi to share walls/fills.</summary>
     internal void EnsureCache(uint landblock)
@@ -68,6 +73,38 @@ internal sealed class DungeonMapUi
     private Vector2 _fullWindowSize;   // window size when toolbar is visible
     private Vector2 _canvasPos;        // canvas top-left when toolbar is visible
     private Vector2 _canvasSize;       // canvas size      when toolbar is visible
+
+    // ── Edit mode (paint patches over polygon-derived map) ──────────────────
+    private static readonly string PatchFilePath =
+        Path.Combine(Environment.GetEnvironmentVariable("ProgramFiles") is { Length: > 0 } pf
+            ? Path.GetPathRoot(pf) ?? @"C:\"
+            : @"C:\",
+            "Games", "RynthSuite", "RynthAi", "MapPatches.txt");
+    private readonly MapPatchStore _patches = new MapPatchStore(PatchFilePath);
+    private bool _editMode;
+    private MapPatchStore.PatchKind _brushKind = MapPatchStore.PatchKind.AddFlat;
+    private bool _eraseMode;        // right-click brush
+    private (int gx, int gy)? _hoverPatchCell;  // brush highlight position in last hovered cell's local space
+    private uint _hoverEnvId;
+    private uint _hoverCsIdx;
+    private float _hoverCellRotation;
+    private float _hoverCellWorldX, _hoverCellWorldY;
+
+    // Walking-paint: patches the player's current grid cell on every frame they
+    // step into a new one. Defaults ON because the user's natural mental model
+    // is "the floor I walked through obviously had floor". Patches are per-prefab,
+    // so walking through one corridor cell fixes that prefab everywhere.
+    private (uint envId, uint csIdx, int lgx, int lgy)? _lastWalkPaintCell;
+    private bool _walkPaintEnabled = true;
+    private DateTime _lastPatchSave = DateTime.UtcNow;
+
+    // Auto-scan: at every landblock change, run a "discover everything" pass that
+    // rasterises with full permissive logic (including zero-coverage fallback) and
+    // captures every filled cell as a per-prefab patch. Toggle off if it's too heavy.
+    private bool _autoScanEnabled = true;
+    private uint _lastScannedLandblock;
+    private bool _scanInProgress;
+    private int  _lastScanPatchCount;
 
     // Edge colours
     private static readonly uint ColBg           = ImGui.ColorConvertFloat4ToU32(new Vector4(0.04f, 0.07f, 0.12f, 1.00f));
@@ -232,6 +269,13 @@ internal sealed class DungeonMapUi
         float gx = ((landblock >> 8) & 0xFF) * 192.0f;
         float gy =  (landblock        & 0xFF) * 192.0f;
 
+        // Walking-paint: every frame the player stands in a new 0.5u grid cell,
+        // record a Flat patch for that prefab. Walking through gaps in the
+        // polygon-derived map fills them in, and because patches key per-prefab,
+        // one trip through a "Marble Hallway 03" cell paints that prefab in every
+        // dungeon that uses it.
+        if (_walkPaintEnabled) UpdateWalkPaint(px + gx, py + gy, pz);
+
         if (!hideToolbar)
         {
             if (ImGui.SmallButton("^##tbToggle")) _settings.MapShowToolbar = false;
@@ -258,6 +302,12 @@ internal sealed class DungeonMapUi
 
     private void RefreshMap(uint landblock)
     {
+        // Landblock change → save accumulated walking-paint patches from the previous
+        // dungeon. This is a natural commit point and saves work if the player crashes
+        // out without ever toggling edit mode.
+        if (_cachedLandblock != 0 && _cachedLandblock != landblock)
+            _patches.SaveIfDirty();
+
         _cachedLandblock = landblock;
         _pan = Vector2.Zero;
         _outerEdges = null;
@@ -269,6 +319,11 @@ internal sealed class DungeonMapUi
 
         var polys = los.GetDungeonMapPolygons(landblock);
         if (polys.Count == 0) return;
+
+        // Per-prefab patches: we need each EnvCell's (envId, cellStructIdx, world position,
+        // rotation, layer) so a click in world space maps back to the correct prefab.
+        _lbCells = los.GetDungeonMapCells(landblock);
+        var lbCells = _lbCells;
 
         var zSet = new SortedSet<float>();
         foreach (var p in polys)
@@ -302,8 +357,14 @@ internal sealed class DungeonMapUi
                 var verts = poly.Vertices;
                 if (verts == null || verts.Length < 3) continue;
 
+                // Match what raycast sees: every polygon contributes its XY projection.
+                // Vertical walls have zero-area shadows (the 4 wall verts share 2 XY
+                // positions, so the projected polygon collapses to a line and
+                // rasterisation fills nothing). Tilted slabs / borderline-classified
+                // polys add their real XY footprint. This catches geometry the
+                // floor-orientation classifier was rejecting outright.
                 CellType type = ClassifyPoly(verts, layerZ);
-                if ((byte)type == NotFloor) continue;
+                if ((byte)type == NotFloor) type = CellType.Flat;
 
                 RasterizeXY(verts, filled, type);
             }
@@ -392,6 +453,88 @@ internal sealed class DungeonMapUi
                 }
             }
 
+            // ── Apply user-drawn patches (per-prefab) ────────────────────
+            // For each EnvCell at this layer, look up patches keyed by its
+            // (envId, cellStructIdx) and overlay them into the world grid.
+            // 90°-rotation aware: local (gx,gy) → world via cell.Rotation +
+            // cell.WorldX/Y. Same prefab in another dungeon picks up the
+            // same patches automatically.
+            foreach (var c in lbCells)
+            {
+                if (MathF.Abs(c.CellZ - layerZ) > LayerTol) continue;
+                var cellPatches = _patches.GetPatches(c.EnvironmentId, c.CellStructureIndex);
+                if (cellPatches == null || cellPatches.Count == 0) continue;
+
+                float sinR = MathF.Sin(c.Rotation);
+                float cosR = MathF.Cos(c.Rotation);
+
+                foreach (var ((lgx, lgy), kind) in cellPatches)
+                {
+                    // Local-grid centre (lgx,lgy) → local XY → rotated → world XY → world grid
+                    float lx = (lgx + 0.5f) * GridCell;
+                    float ly = (lgy + 0.5f) * GridCell;
+                    float wx = c.WorldX + lx * cosR - ly * sinR;
+                    float wy = c.WorldY + lx * sinR + ly * cosR;
+                    int wgx = (int)MathF.Floor(wx / GridCell);
+                    int wgy = (int)MathF.Floor(wy / GridCell);
+
+                    if (kind == MapPatchStore.PatchKind.Remove)
+                    {
+                        filled.Remove((wgx, wgy));
+                    }
+                    else if (!filled.ContainsKey((wgx, wgy)))
+                    {
+                        // Additive only: don't override polygon-derived slope/flat
+                        // classifications. Walking-paint marks every traversed cell
+                        // as Flat, but if the polygons say Slope here we want the
+                        // polygon's answer to win.
+                        var type = kind switch
+                        {
+                            MapPatchStore.PatchKind.AddSlopeUp   => CellType.SlopeUp,
+                            MapPatchStore.PatchKind.AddSlopeDown => CellType.SlopeDown,
+                            _                                    => CellType.Flat,
+                        };
+                        filled[(wgx, wgy)] = type;
+                    }
+                }
+            }
+
+            // ── Edit-mode safety net: zero-coverage cell fallback ────────
+            // For every EnvCell at this layer, if NO grid cells in its 10×10
+            // world footprint are filled (polygon classification rejected
+            // every poly, OR the prefab's geometry only encodes walls/ceiling
+            // that fell outside our floor heuristic), fill the entire
+            // footprint as Flat. Raycast can see geometry there, so the player
+            // can clearly walk there — the map just couldn't classify it. This
+            // lights up empty cells immediately on first dungeon entry without
+            // the player having to walk through them. L-shape cells with
+            // partial polygon coverage are unaffected (they have non-zero
+            // coverage so this branch doesn't trigger).
+            if (_editMode)
+            {
+                foreach (var c in lbCells)
+                {
+                    if (MathF.Abs(c.CellZ - layerZ) > LayerTol) continue;
+
+                    int cgxMin = (int)MathF.Floor((c.WorldX - 5f) / GridCell);
+                    int cgxMax = (int)MathF.Ceiling((c.WorldX + 5f) / GridCell);
+                    int cgyMin = (int)MathF.Floor((c.WorldY - 5f) / GridCell);
+                    int cgyMax = (int)MathF.Ceiling((c.WorldY + 5f) / GridCell);
+
+                    bool anyFilled = false;
+                    for (int gy = cgyMin; gy < cgyMax && !anyFilled; gy++)
+                    for (int gx = cgxMin; gx < cgxMax; gx++)
+                    {
+                        if (filled.ContainsKey((gx, gy))) { anyFilled = true; break; }
+                    }
+                    if (anyFilled) continue;
+
+                    for (int gy = cgyMin; gy < cgyMax; gy++)
+                    for (int gx = cgxMin; gx < cgxMax; gx++)
+                        filled[(gx, gy)] = CellType.Flat;
+                }
+            }
+
             if (filled.Count == 0) continue;
 
             // ── Outer edges ──────────────────────────────────────────────
@@ -467,6 +610,112 @@ internal sealed class DungeonMapUi
             }
             if (strips.Count > 0) _fillStrips[layerZ] = strips;
         }
+
+        // Auto-scan: first time we land in this landblock with auto-scan on, run
+        // a discover-everything pass and save the result as patches. Future entries
+        // skip this (they already have the patches).
+        if (_autoScanEnabled && !_scanInProgress && _lastScannedLandblock != landblock)
+        {
+            _lastScannedLandblock = landblock;
+            _lastScanPatchCount = DoLandblockScan();
+        }
+    }
+
+    /// <summary>
+    /// "Discover everything" pass: re-rasterises the landblock with the most
+    /// permissive logic (Edit-mode behavior — every polygon contributes XY shadow,
+    /// plus zero-coverage cells get full footprint fill), then captures every
+    /// filled grid cell as a per-prefab patch. Patches apply to every dungeon
+    /// using the same prefab, so a single scan benefits more than just this map.
+    /// </summary>
+    private int DoLandblockScan()
+    {
+        if (_scanInProgress || _lbCells is null || _fillStrips is null)
+            return 0;
+
+        _scanInProgress = true;
+        try
+        {
+            // Force Edit-mode rasterisation so the zero-coverage fallback runs.
+            bool savedEdit = _editMode;
+            _editMode = true;
+            _outerEdges = null;
+            RefreshMap(_cachedLandblock);
+            _editMode = savedEdit;
+
+            int newPatches = 0;
+            if (_fillStrips != null && _lbCells != null)
+            {
+                foreach (var (layerZ, strips) in _fillStrips)
+                {
+                    foreach (var (x0, y0, x1, y1, type) in strips)
+                    {
+                        int gxMin = (int)MathF.Round(x0 / GridCell);
+                        int gxMax = (int)MathF.Round(x1 / GridCell);
+                        int gyMin = (int)MathF.Round(y0 / GridCell);
+                        int gyMax = (int)MathF.Round(y1 / GridCell);
+
+                        for (int gy = gyMin; gy < gyMax; gy++)
+                        for (int gx = gxMin; gx < gxMax; gx++)
+                        {
+                            if (CapturePatch(gx, gy, type, layerZ)) newPatches++;
+                        }
+                    }
+                }
+            }
+
+            _patches.SaveIfDirty();
+            // Force one more refresh so the live render reflects the new patches.
+            _outerEdges = null;
+            return newPatches;
+        }
+        finally { _scanInProgress = false; }
+    }
+
+    /// <summary>
+    /// Convert a world-grid cell into a per-prefab patch by finding which EnvCell
+    /// the world coord lies in, inverse-rotating into that cell's local space, and
+    /// snapping back to the 0.5u grid. Returns true if a NEW patch was added.
+    /// </summary>
+    private bool CapturePatch(int wgx, int wgy, CellType type, float layerZ)
+    {
+        if (_lbCells is null) return false;
+
+        float wcx = (wgx + 0.5f) * GridCell;
+        float wcy = (wgy + 0.5f) * GridCell;
+
+        foreach (var c in _lbCells)
+        {
+            if (MathF.Abs(c.CellZ - layerZ) > 1.0f) continue;
+
+            float relX = wcx - c.WorldX;
+            float relY = wcy - c.WorldY;
+            float sinR = MathF.Sin(c.Rotation);
+            float cosR = MathF.Cos(c.Rotation);
+            float lcx =  relX * cosR + relY * sinR;
+            float lcy = -relX * sinR + relY * cosR;
+
+            if (lcx < -5.001f || lcx > 5.001f || lcy < -5.001f || lcy > 5.001f) continue;
+
+            int lgx = (int)MathF.Floor(lcx / GridCell);
+            int lgy = (int)MathF.Floor(lcy / GridCell);
+
+            var kind = type switch
+            {
+                CellType.SlopeUp   => MapPatchStore.PatchKind.AddSlopeUp,
+                CellType.SlopeDown => MapPatchStore.PatchKind.AddSlopeDown,
+                _                  => MapPatchStore.PatchKind.AddFlat,
+            };
+
+            // Skip if this prefab already has this exact patch
+            var existing = _patches.GetPatches(c.EnvironmentId, c.CellStructureIndex);
+            if (existing != null && existing.TryGetValue((lgx, lgy), out var existingKind)
+                && existingKind == kind) return false;
+
+            _patches.Set(c.EnvironmentId, c.CellStructureIndex, lgx, lgy, kind);
+            return true;
+        }
+        return false;
     }
 
     // Reduce a colour to ~25 % opacity for non-current-floor rendering.
@@ -757,6 +1006,62 @@ internal sealed class DungeonMapUi
         ImGui.SetNextItemWidth(70);
         ImGui.SliderFloat("##mapOpacity", ref _settings.MapBgOpacity, 0f, 1f, "%.2f");
         _settings.MapBgOpacity = Math.Clamp(_settings.MapBgOpacity, 0f, 1f);
+
+        // ── Edit mode (paint per-prefab patches over polygon-derived map) ─
+        if (FitsOnLine(150f, 12f)) ImGui.SameLine(0, 12);
+        bool wasEditMode = _editMode; // snapshot — button click flips _editMode mid-block
+        if (wasEditMode)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Button,        new Vector4(0.85f, 0.45f, 0.10f, 1.0f));
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.95f, 0.55f, 0.15f, 1.0f));
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive,  new Vector4(0.65f, 0.35f, 0.05f, 1.0f));
+        }
+        if (ImGui.SmallButton(wasEditMode ? "Editing##mapEdit" : "Edit##mapEdit"))
+        {
+            _editMode = !_editMode;
+            // Always invalidate so the zero-coverage fallback kicks in (or off)
+            // on the next frame and the user sees the toggle take effect immediately.
+            _outerEdges = null;
+            _hoverPatchCell = null;
+            if (!_editMode) _patches.SaveIfDirty();
+        }
+        if (wasEditMode) ImGui.PopStyleColor(3);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(_editMode
+                ? "Click to exit edit mode (saves patches).\nEvery cell shows its 10×10 footprint.\nLeft-click paints fine detail, Right-click erases."
+                : $"Edit mode: fills empty cells to their full footprint, enables painting.\n{_patches.TotalPatchCount} patches loaded.");
+
+        if (_editMode)
+        {
+            ImGui.SameLine(0, 6);
+            ImGui.Text("Brush:");
+            ImGui.SameLine(0, 4);
+            int b = (int)_brushKind;
+            string[] brushLabels = { "Flat", "SlopeUp", "SlopeDown" };
+            ImGui.SetNextItemWidth(90);
+            if (ImGui.Combo("##mapBrush", ref b, brushLabels, brushLabels.Length))
+                _brushKind = (MapPatchStore.PatchKind)b;
+        }
+
+        // ── Scan: capture full-permissive rasterisation as per-prefab patches ─
+        if (FitsOnLine(140f, 12f)) ImGui.SameLine(0, 12);
+        if (ImGui.SmallButton("Scan##mapScan"))
+        {
+            _lastScanPatchCount = DoLandblockScan();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Discover every cell in this landblock and save patches.\n" +
+                             "Patches apply to all dungeons using the same prefabs.\n" +
+                             $"Last scan: {_lastScanPatchCount} new patches\n" +
+                             $"Total patches: {_patches.TotalPatchCount}");
+
+        ImGui.SameLine(0, 6);
+        ImGui.Checkbox("Auto##mapAutoScan", ref _autoScanEnabled);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Auto-scan on every dungeon entry.\n" +
+                             "First entry to a dungeon is ~50–200ms slower.\n" +
+                             "After a few dungeons, common prefabs are fully patched\n" +
+                             "and future entries are instant.");
     }
 
     // ── Canvas ────────────────────────────────────────────────────────────────
@@ -1034,10 +1339,15 @@ internal sealed class DungeonMapUi
 
         // Tell the backend to block mouse events from reaching the game when
         // the cursor is over the canvas (fixes click-through to AC world).
-        if (ImGui.IsItemHovered())
-            ImGui.SetNextFrameWantCaptureMouse(true);
+        bool hovered = ImGui.IsItemHovered();
+        if (hovered) ImGui.SetNextFrameWantCaptureMouse(true);
 
-        if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left))
+        if (_editMode)
+        {
+            // Edit mode: left-click paints, right-click erases. No panning.
+            HandleEditMode(dl, hovered, centre, playerWX, playerWY);
+        }
+        else if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left))
         {
             Vector2 delta = ImGui.GetIO().MouseDelta;
             if (float.IsFinite(delta.X) && float.IsFinite(delta.Y))
@@ -1069,6 +1379,194 @@ internal sealed class DungeonMapUi
     {
         uint a = (uint)(Math.Clamp(alpha, 0f, 1f) * 255f);
         return (col & 0x00FFFFFF) | (a << 24);
+    }
+
+    /// <summary>
+    /// Walking-paint: the player's current grid cell becomes a Flat patch on the
+    /// prefab they're standing in. Called every frame the map renders. The patch
+    /// applies to every dungeon that uses the same prefab, so walking one corridor
+    /// teaches the map about that corridor everywhere.
+    /// </summary>
+    private void UpdateWalkPaint(float playerWX, float playerWY, float playerZ)
+    {
+        if (_lbCells is null || _lbCells.Count == 0) return;
+
+        const float CellHalf = 5f;
+        DungeonLOS.MapCell? hit = null;
+        int hitLgx = 0, hitLgy = 0;
+
+        foreach (var c in _lbCells)
+        {
+            // Player Z must be near this cell's floor — ±2u handles small height
+            // variation as the player walks across slopes.
+            if (MathF.Abs(c.CellZ - playerZ) > 2.0f) continue;
+
+            float relX = playerWX - c.WorldX;
+            float relY = playerWY - c.WorldY;
+            float sinR = MathF.Sin(c.Rotation);
+            float cosR = MathF.Cos(c.Rotation);
+            float lx =  relX * cosR + relY * sinR;
+            float ly = -relX * sinR + relY * cosR;
+
+            if (lx < -CellHalf - 0.001f || lx > CellHalf + 0.001f ||
+                ly < -CellHalf - 0.001f || ly > CellHalf + 0.001f) continue;
+
+            hit = c;
+            hitLgx = (int)MathF.Floor(lx / GridCell);
+            hitLgy = (int)MathF.Floor(ly / GridCell);
+            break;
+        }
+        if (hit == null) return;
+
+        // Cheap dedup — only act when the player crosses into a new grid cell.
+        var key = (hit.EnvironmentId, hit.CellStructureIndex, hitLgx, hitLgy);
+        if (_lastWalkPaintCell == key) return;
+        _lastWalkPaintCell = key;
+
+        // If the polygon-derived map already covers this cell, no patch needed.
+        // (The patch store only fills empties at apply time, but skipping here
+        //  also avoids cluttering the file with redundant entries.)
+        var existing = _patches.GetPatches(hit.EnvironmentId, hit.CellStructureIndex);
+        if (existing != null && existing.ContainsKey((hitLgx, hitLgy))) return;
+
+        _patches.Set(hit.EnvironmentId, hit.CellStructureIndex, hitLgx, hitLgy,
+                     MapPatchStore.PatchKind.AddFlat);
+        _outerEdges = null; // invalidate so RefreshMap picks up the patch next frame
+
+        // Throttled save — every 15 seconds while dirty so a crash never costs
+        // more than the last 15 seconds of exploration.
+        if ((DateTime.UtcNow - _lastPatchSave).TotalSeconds >= 15)
+        {
+            _patches.SaveIfDirty();
+            _lastPatchSave = DateTime.UtcNow;
+        }
+    }
+
+    /// <summary>
+    /// Edit-mode mouse handling: figure out which prefab the cursor is over, snap to the
+    /// 0.5u local grid, draw a brush preview, and on click add/remove the patch (which
+    /// applies to every cell in every dungeon that uses that prefab).
+    /// </summary>
+    private void HandleEditMode(ImDrawListPtr dl, bool hovered, Vector2 centre, float playerWX, float playerWY)
+    {
+        _hoverPatchCell = null;
+        if (!hovered || _lbCells is null) return;
+
+        // Mouse screen → world (inverse of project: sx = centre.X + (wx - playerWX) * zoom + pan.X).
+        var mp = ImGui.GetIO().MousePos;
+        float mouseWX = playerWX + (mp.X - centre.X - _pan.X) / _zoom;
+        float mouseWY = playerWY - (mp.Y - centre.Y - _pan.Y) / _zoom;
+
+        // Find which cell on the current floor contains the mouse.
+        float currentLayerZ = (_zLayers is not null && _autoLayerIdx < _zLayers.Count)
+            ? _zLayers[_autoLayerIdx] : float.NaN;
+
+        const float CellHalf = 5f;
+        DungeonLOS.MapCell? hit = null;
+        int hitLgx = 0, hitLgy = 0;
+
+        foreach (var c in _lbCells)
+        {
+            if (!float.IsNaN(currentLayerZ) && MathF.Abs(c.CellZ - currentLayerZ) > 1.0f) continue;
+
+            float relX = mouseWX - c.WorldX;
+            float relY = mouseWY - c.WorldY;
+            float sinR = MathF.Sin(c.Rotation);
+            float cosR = MathF.Cos(c.Rotation);
+            // Inverse rotation (world → cell-local).
+            float lx =  relX * cosR + relY * sinR;
+            float ly = -relX * sinR + relY * cosR;
+
+            if (lx < -CellHalf - 0.001f || lx > CellHalf + 0.001f ||
+                ly < -CellHalf - 0.001f || ly > CellHalf + 0.001f) continue;
+
+            hit = c;
+            hitLgx = (int)MathF.Floor(lx / GridCell);
+            hitLgy = (int)MathF.Floor(ly / GridCell);
+            break;
+        }
+
+        if (hit == null) return;
+
+        _hoverPatchCell      = (hitLgx, hitLgy);
+        _hoverEnvId          = hit.EnvironmentId;
+        _hoverCsIdx          = hit.CellStructureIndex;
+        _hoverCellWorldX     = hit.WorldX;
+        _hoverCellWorldY     = hit.WorldY;
+        _hoverCellRotation   = hit.Rotation;
+
+        // Draw brush highlight at the snapped grid cell, transformed back to screen.
+        DrawBrushHighlight(dl, hit, hitLgx, hitLgy, centre, playerWX, playerWY);
+
+        // Apply on click. We respond to active drags too so the user can paint by
+        // sweeping the mouse — every frame the cursor sits over a new grid cell, that
+        // cell gets patched.
+        bool leftDown  = ImGui.IsMouseDown(ImGuiMouseButton.Left);
+        bool rightDown = ImGui.IsMouseDown(ImGuiMouseButton.Right);
+
+        if (leftDown && !rightDown)
+        {
+            _patches.Set(hit.EnvironmentId, hit.CellStructureIndex, hitLgx, hitLgy, _brushKind);
+            _outerEdges = null; // invalidate cache → next frame rebuilds with new patch
+        }
+        else if (rightDown && !leftDown)
+        {
+            // Right-click paints "Remove" — explicitly hides a polygon-derived cell.
+            // Right-click on an already-removed or empty cell clears the patch entirely.
+            var existing = _patches.GetPatches(hit.EnvironmentId, hit.CellStructureIndex);
+            if (existing != null && existing.TryGetValue((hitLgx, hitLgy), out var kind))
+            {
+                if (kind == MapPatchStore.PatchKind.Remove)
+                    _patches.Clear(hit.EnvironmentId, hit.CellStructureIndex, hitLgx, hitLgy);
+                else
+                    _patches.Set(hit.EnvironmentId, hit.CellStructureIndex, hitLgx, hitLgy, MapPatchStore.PatchKind.Remove);
+            }
+            else
+            {
+                _patches.Set(hit.EnvironmentId, hit.CellStructureIndex, hitLgx, hitLgy, MapPatchStore.PatchKind.Remove);
+            }
+            _outerEdges = null;
+        }
+    }
+
+    private void DrawBrushHighlight(ImDrawListPtr dl, DungeonLOS.MapCell c, int lgx, int lgy,
+                                    Vector2 centre, float playerWX, float playerWY)
+    {
+        // Local-cell rect for the brush.
+        float lx0 = lgx * GridCell;
+        float ly0 = lgy * GridCell;
+        float lx1 = lx0 + GridCell;
+        float ly1 = ly0 + GridCell;
+
+        float sinR = MathF.Sin(c.Rotation);
+        float cosR = MathF.Cos(c.Rotation);
+
+        Vector2 P(float lx, float ly)
+        {
+            float wx = c.WorldX + lx * cosR - ly * sinR;
+            float wy = c.WorldY + lx * sinR + ly * cosR;
+            return new Vector2(centre.X + (wx - playerWX) * _zoom + _pan.X,
+                               centre.Y - (wy - playerWY) * _zoom + _pan.Y);
+        }
+        var p00 = P(lx0, ly0);
+        var p10 = P(lx1, ly0);
+        var p11 = P(lx1, ly1);
+        var p01 = P(lx0, ly1);
+
+        uint fill = _brushKind switch
+        {
+            MapPatchStore.PatchKind.AddSlopeUp   => 0x6020A0FFu, // ABGR-ish; ImGui packs as little-endian
+            MapPatchStore.PatchKind.AddSlopeDown => 0x6040C040u,
+            MapPatchStore.PatchKind.Remove       => 0x80404040u,
+            _                                    => 0x60FFC040u, // flat
+        };
+        uint outline = 0xFFFFFFFFu;
+
+        dl.AddQuadFilled(p00, p10, p11, p01, fill);
+        dl.AddLine(p00, p10, outline, 1.5f);
+        dl.AddLine(p10, p11, outline, 1.5f);
+        dl.AddLine(p11, p01, outline, 1.5f);
+        dl.AddLine(p01, p00, outline, 1.5f);
     }
 
     private static bool IsDoorName(string name)

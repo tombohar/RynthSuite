@@ -69,8 +69,10 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         public class MapCell
         {
             public float WorldX, WorldY, CellZ;
-            public uint  EnvironmentId;   // 0x0D.... portal.dat id — selects the tile image
-            public float Rotation;        // yaw in radians (CCW, from quaternion RotW/RotZ)
+            public uint  EnvironmentId;       // 0x0D.... portal.dat id — selects the tile image
+            public uint  CellStructureIndex;  // index into the env's cellstruct dictionary — different shapes for same env
+            public uint  CellId;              // full landcell id (for per-cell tracking)
+            public float Rotation;            // yaw in radians (CCW, from quaternion RotW/RotZ)
         }
 
         public void Initialize(DatDatabase portalDat, DatDatabase cellDat)
@@ -156,11 +158,13 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     if (envCell == null) continue;
                     result.Add(new MapCell
                     {
-                        WorldX        = envCell.PosX + gx,
-                        WorldY        = envCell.PosY + gy,
-                        CellZ         = envCell.PosZ,
-                        EnvironmentId = envCell.EnvironmentId,
-                        Rotation      = 2f * MathF.Atan2(envCell.RotZ, envCell.RotW)
+                        WorldX             = envCell.PosX + gx,
+                        WorldY             = envCell.PosY + gy,
+                        CellZ              = envCell.PosZ,
+                        EnvironmentId      = envCell.EnvironmentId,
+                        CellStructureIndex = envCell.CellStructureIndex,
+                        CellId             = cellId,
+                        Rotation           = 2f * MathF.Atan2(envCell.RotZ, envCell.RotW)
                     });
                 }
                 catch { }

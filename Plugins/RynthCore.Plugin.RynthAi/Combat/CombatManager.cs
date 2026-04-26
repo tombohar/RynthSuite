@@ -1021,11 +1021,14 @@ public class CombatManager : IDisposable
     {
         int playerId = unchecked((int)_playerId);
 
-        // Walk every cached object. The cache's `_inventory` set doesn't always
-        // include wielded items (the wielderInfo probe is async), so iterating
-        // only GetInventory()/GetDirectInventory() can miss arrows that the cache
-        // already knows about by id. AllKnownObjects() is the comprehensive view.
-        foreach (var item in _worldFilter.AllKnownObjects())
+        // Walk via GetDirectInventory(forceRefresh:true). This is the same path
+        // MissileCraftingManager uses successfully — it triggers per-item
+        // wielder-info lookups on the cache, which populates Wielder /
+        // WieldedLocation. AllKnownObjects() doesn't trigger those probes, so
+        // arrows that arrived via OnCreateObject keep WieldedLocation=0 and
+        // never match. The forced refresh adds ~one InqInt call per pack item
+        // but is cheap and fixes detection definitively.
+        foreach (var item in _worldFilter.GetDirectInventory(forceRefresh: true))
             if (LooksLikeWieldedAmmo(item, playerId)) return true;
 
         return false;
@@ -1041,19 +1044,36 @@ public class CombatManager : IDisposable
     {
         if (item == null) return false;
 
-        int locInq   = item.Values(LongValueKey.CurrentWieldedLocation, 0);
-        int locCache = item.WieldedLocation;
-        int loc = locInq > 0 ? locInq : locCache;
-        if (loc <= 0) return false;
+        // Authoritative: ask AC's runtime for the wielder + slot directly.
+        // The cached WieldedLocation/Wielder fields can be 0 forever if the
+        // item arrived via OnCreateObject and never went through the
+        // GetDirectInventory walk that probes wielder info. Querying the
+        // host API per-candidate side-steps that.
+        int loc = 0;
+        bool slotKnown = false;
+        if (_host.HasGetObjectWielderInfo &&
+            _host.TryGetObjectWielderInfo(unchecked((uint)item.Id), out uint wielder, out uint locFromApi))
+        {
+            if (playerId != 0 && wielder != 0 && wielder != (uint)playerId) return false;
+            if (locFromApi > 0) { loc = unchecked((int)locFromApi); slotKnown = true; }
+        }
 
-        if (playerId != 0 && item.Wielder != 0 && item.Wielder != playerId) return false;
+        // Fall back to InqInt and the cache field if the wielder API didn't answer.
+        if (!slotKnown)
+        {
+            int locInq   = item.Values(LongValueKey.CurrentWieldedLocation, 0);
+            int locCache = item.WieldedLocation;
+            loc = locInq > 0 ? locInq : locCache;
+            if (loc <= 0) return false;
+            if (playerId != 0 && item.Wielder != 0 && item.Wielder != playerId) return false;
+        }
 
-        // Authoritative: the AC client puts ammo in slot 0x800000.
+        // Authoritative: ammunition slot bit.
         if ((loc & AmmunitionSlot) != 0)
             return true;
 
-        // Name-based fallback for the rare case where slot isn't yet populated
-        // but the cached name is — keeps behavior compatible with the old check.
+        // Name-based fallback for items in non-ammo slots that still match
+        // ammo names (rare server-custom configurations).
         string n = item.Name;
         if (string.IsNullOrEmpty(n)) return false;
         if (n.Contains("Bundle") || n.Contains("Wrapped")) return false;
@@ -1393,8 +1413,19 @@ public class CombatManager : IDisposable
         var shapes = useVoid ? VoidSpellShapes : SpellShapes;
         if (!shapes.TryGetValue(element, out string[]? elementShapes))
         {
-            if (!SpellShapes.TryGetValue("Fire", out elementShapes)) return 0;
-            skill = AcSkillType.WarMagic;
+            if (useVoid)
+            {
+                // Void Magic only damages with Nether — fall back to Nether shapes for
+                // ANY element not in VoidSpellShapes (Cold/Lightning/Acid/Blade/Pierce/
+                // Bludgeon/Slash). Previously this fell through to War Magic Fire, which
+                // forced War on Void-only casters whose War skill was untrained.
+                if (!VoidSpellShapes.TryGetValue("Nether", out elementShapes)) return 0;
+            }
+            else
+            {
+                if (!SpellShapes.TryGetValue("Fire", out elementShapes)) return 0;
+                skill = AcSkillType.WarMagic;
+            }
         }
 
         if (shapeIdx >= elementShapes.Length) shapeIdx = elementShapes.Length - 1;
@@ -1419,6 +1450,14 @@ public class CombatManager : IDisposable
 
     private int FindBestRingSpell(string element, AcSkillType skill)
     {
+        // Void Magic doesn't have lore-named rings (Cassius'/Halo/etc. are all War
+        // Magic spells). Returning 0 here makes FindBestShapedSpell fall through to
+        // FindBestOffensiveSpellId(elementShapes[1], skill) where elementShapes comes
+        // from VoidSpellShapes — e.g. "Nether Ring" or "Corrosion Ring" — and the
+        // Void caster gets the right Void ring tier instead of an unknown War spell.
+        if (skill == AcSkillType.VoidMagic)
+            return 0;
+
         if (!RingLoreNames.TryGetValue(element, out string[]? loreNames) || loreNames.Length < 2) return 0;
 
         int maxTier = _spellManager!.GetHighestSpellTier(skill);

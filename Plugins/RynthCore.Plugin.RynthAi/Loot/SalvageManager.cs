@@ -36,11 +36,17 @@ public sealed class SalvageManager
     private bool _firstResultCycle = true;
     private bool _pendingCombineScan;
 
-    // Combine-salvage state
-    private List<(string Name, List<uint> Ids)>? _combineBatches;
+    // Combine-salvage state — process one material group per cycle by opening
+    // the salvage panel, adding all under-full bags of that material, and hitting
+    // Salvage so the server merges them server-side. Far more reliable than the
+    // old MoveItemExternal-into-bag approach which AC silently rejects when the
+    // bags have different workmanship.
+    private enum CombinePhase { None, OpeningPanel, AddingBags, Salvaging, WaitingForResult }
+    private List<List<uint>>? _combineGroups;
     private int _combineGroupIdx;
-    private int _combineItemIdx;
-    private long _combineActionAt;
+    private int _combineAddIdx;
+    private CombinePhase _combinePhase = CombinePhase.None;
+    private long _combinePhaseReadyAt;
 
     // Per-item retry counter so a failed salvage gets re-queued a few times
     // before we give up. AC sometimes drops a Salvage execute when the bot is
@@ -49,7 +55,21 @@ public sealed class SalvageManager
     private readonly Dictionary<uint, int> _itemRetryCount = new();
     private const int MaxItemRetries = 3;
 
+    // Periodic combine sweep — even when no items have been salvaged this
+    // session (or every salvage gave up after retries), we still want to
+    // periodically merge any under-full bags sitting in inventory.
+    private long _lastCombineSweepAt;
+    private const long CombineSweepIntervalMs = 30_000;
+
     private static long NowMs => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+    /// <summary>
+    /// Set by the plugin to point at the currently-loaded loot profile's
+    /// SalvageCombine block (if any). When non-null and Enabled, bags are
+    /// grouped by (MaterialType, WorkmanshipBand) per the profile's rules
+    /// instead of just (MaterialType).
+    /// </summary>
+    public Func<RynthCore.Loot.SalvageCombineSettings?>? CombineConfigProvider { get; set; }
 
     public SalvageManager(RynthCoreHost host, LegacyUiSettings settings, WorldObjectCache? cache)
     {
@@ -117,9 +137,23 @@ public sealed class SalvageManager
     {
         if (_queue.Count == 0)
         {
-            if (_pendingCombineScan && _settings.EnableCombineSalvage && _panelEverOpened)
+            if (_pendingCombineScan && _settings.EnableCombineSalvage)
             {
                 _pendingCombineScan = false;
+                _lastCombineSweepAt = now;
+                BeginCombineSalvage(now);
+                return;
+            }
+            // Periodic standalone sweep: if 30s have passed since the last
+            // combine attempt and there are still under-full bag groups in the
+            // pack, run another pass. Catches bags accumulated from sources
+            // outside the salvage queue (or sessions where every salvage gave
+            // up after retries).
+            if (_settings.EnableCombineSalvage
+                && busyCount == 0
+                && now - _lastCombineSweepAt >= CombineSweepIntervalMs)
+            {
+                _lastCombineSweepAt = now;
                 BeginCombineSalvage(now);
             }
             return;
@@ -176,11 +210,77 @@ public sealed class SalvageManager
             return;
         }
 
+        // Combine-during-salvage: if there's an under-full salvage bag of the
+        // same material as the item being salvaged, add it to the panel too.
+        // The salvage operation will merge the new salvage into the existing
+        // bag instead of creating a fresh one each time.
+        if (_settings.CombineBagsDuringSalvage)
+            TryAddMatchingUnderFullBag(_currentItemId);
+
         bool wasFirstOpen = !_panelEverOpened;
         _panelEverOpened = true;
         int addDelay = wasFirstOpen ? _settings.SalvageAddDelayFirstMs : _settings.SalvageAddDelayFastMs;
         _phaseReadyAt = now + addDelay;
         _phase = Phase.AddingItem;
+    }
+
+    // STypes (canonical values from Chorizite STypes.cs — verified against
+    // the live binary; the PropertyNames.IntNames index in this codebase is
+    // off-by-some-rows so do NOT use it as the source of truth).
+    private const uint StypeMaxStructure    = 91;
+    private const uint StypeStructure       = 92;
+    private const uint StypeItemWorkmanship = 105;
+    private const uint StypeMaterialType    = 131;
+
+    /// <summary>
+    /// If the item being salvaged exposes a MaterialType, scan the player's
+    /// inventory for a salvage bag with the same material whose Structure is
+    /// less than MaxStructure (under-full) and add the first match to the
+    /// salvage panel. The Salvage operation then tops the bag up rather than
+    /// spawning a brand-new partial bag.
+    /// </summary>
+    private void TryAddMatchingUnderFullBag(uint itemId)
+    {
+        if (_cache == null) return;
+        if (!_host.TryGetObjectIntProperty(itemId, StypeMaterialType, out int itemMat) || itemMat == 0)
+            return;
+
+        RynthCore.Loot.SalvageCombineSettings? cfg = CombineConfigProvider?.Invoke();
+        bool useBands = cfg != null && cfg.Enabled;
+
+        // If we're enforcing bands, the item's own workmanship determines which
+        // band the resulting salvage will land in. Only add bags that share both
+        // the material and the band — preserves high-WM bags from being diluted
+        // by lower-WM items.
+        string? itemBand = null;
+        if (useBands)
+        {
+            if (!_host.TryGetObjectIntProperty(itemId, StypeItemWorkmanship, out int itemWm) || itemWm <= 0)
+                return;
+            itemBand = cfg!.GetBandKey(itemMat, itemWm);
+            if (itemBand == null) return;
+        }
+
+        foreach (WorldObject bag in _cache.GetDirectInventory(forceRefresh: false))
+        {
+            uint bagId = unchecked((uint)bag.Id);
+            if (bagId == itemId) continue;
+            if (!IsSalvageBag(bag.Name)) continue;
+            if (!_host.TryGetObjectIntProperty(bagId, StypeMaterialType, out int bagMat) || bagMat != itemMat)
+                continue;
+            if (!IsBagUnderFull(bagId, bag.Name)) continue;
+
+            if (useBands)
+            {
+                if (!_host.TryGetObjectIntProperty(bagId, StypeItemWorkmanship, out int bagWm) || bagWm <= 0) continue;
+                string? bagBand = cfg!.GetBandKey(bagMat, bagWm);
+                if (bagBand != itemBand) continue;
+            }
+
+            if (_host.SalvagePanelAddItem(bagId))
+                Log($"[Salvage] Combine-during-salvage: added bag {bag.Name} 0x{bagId:X8}.");
+            return;
+        }
     }
 
     private void BeginSalvaging(long now)
@@ -263,75 +363,154 @@ public sealed class SalvageManager
 
     private void BeginCombineSalvage(long now)
     {
-        if (_cache == null)
-            return;
+        if (_cache == null) return;
 
-        // Build groups of salvage bags by name.
-        var groups = new Dictionary<string, List<uint>>(StringComparer.OrdinalIgnoreCase);
+        RynthCore.Loot.SalvageCombineSettings? cfg = CombineConfigProvider?.Invoke();
+        bool useBands = cfg != null && cfg.Enabled;
+
+        // Group under-full bags by MaterialType (and Workmanship band, if a
+        // SalvageCombine config is loaded and enabled). Bags at 100/100 are
+        // skipped (already full); singleton groups are skipped (nothing to merge).
+        var byKey = new Dictionary<string, List<uint>>(StringComparer.Ordinal);
         foreach (WorldObject item in _cache.GetDirectInventory(forceRefresh: false))
         {
-            if (!IsSalvageBag(item.Name))
-                continue;
+            if (!IsSalvageBag(item.Name)) continue;
+            uint id = unchecked((uint)item.Id);
+            if (!IsBagUnderFull(id, item.Name)) continue;
+            if (!_host.TryGetObjectIntProperty(id, StypeMaterialType, out int mat) || mat == 0) continue;
 
-            if (!groups.TryGetValue(item.Name, out var list))
+            string key;
+            if (useBands)
             {
-                list = new List<uint>();
-                groups[item.Name] = list;
+                if (!_host.TryGetObjectIntProperty(id, StypeItemWorkmanship, out int wm) || wm <= 0) continue;
+                string? band = cfg!.GetBandKey(mat, wm);
+                if (band == null) continue; // workmanship outside any defined band — keep separate
+                key = $"{mat}|{band}";
             }
-            list.Add(unchecked((uint)item.Id));
+            else
+            {
+                key = mat.ToString();
+            }
+
+            if (!byKey.TryGetValue(key, out var list)) { list = new List<uint>(); byKey[key] = list; }
+            list.Add(id);
         }
 
-        // Only keep groups with more than one bag.
-        _combineBatches = new List<(string, List<uint>)>();
-        foreach (var kv in groups)
-        {
-            if (kv.Value.Count > 1)
-                _combineBatches.Add((kv.Key, kv.Value));
-        }
+        _combineGroups = new List<List<uint>>();
+        foreach (var kv in byKey)
+            if (kv.Value.Count >= 2)
+                _combineGroups.Add(kv.Value);
 
-        if (_combineBatches.Count == 0)
+        if (_combineGroups.Count == 0)
         {
-            _combineBatches = null;
-            return; // Nothing to combine.
+            _combineGroups = null;
+            return;
         }
 
         _combineGroupIdx = 0;
-        _combineItemIdx = 1; // index 0 is the target; start merging from index 1
-        _combineActionAt = now;
+        _combineAddIdx = 0;
+        _combinePhase = CombinePhase.None;
+        _combinePhaseReadyAt = now;
         _phase = Phase.CombiningSalvage;
+        Log($"[Salvage] Combine: {_combineGroups.Count} group(s) of under-full bags to merge ({(useBands ? "by mat+band" : "by mat")}).");
     }
 
     private void TickCombiningSalvage(long now)
     {
-        if (_combineBatches == null || now < _combineActionAt)
-            return;
-
-        if (_combineGroupIdx >= _combineBatches.Count)
+        if (_combineGroups == null) { _phase = Phase.Idle; return; }
+        if (_combineGroupIdx >= _combineGroups.Count)
         {
-            _combineBatches = null;
+            _combineGroups = null;
+            _combinePhase = CombinePhase.None;
             _phase = Phase.Idle;
             return;
         }
 
-        var (name, ids) = _combineBatches[_combineGroupIdx];
-        if (_combineItemIdx >= ids.Count)
-        {
-            _combineGroupIdx++;
-            _combineItemIdx = 1;
-            return;
-        }
+        if (now < _combinePhaseReadyAt) return;
 
-        uint target = ids[0];
-        uint source = ids[_combineItemIdx];
-        if (source != 0 && target != 0 && source != target)
+        var group = _combineGroups[_combineGroupIdx];
+        switch (_combinePhase)
         {
-            // Move source bag into target bag — the server combines same-type salvage.
-            _host.MoveItemExternal(source, target, 0);
-            Log($"[Salvage] Combine: moving {name} 0x{source:X8} → 0x{target:X8}.");
+            case CombinePhase.None:
+            {
+                uint ust = FindUst();
+                if (ust == 0)
+                {
+                    Log("[Salvage] Combine: no UST available — aborting combine cycle.");
+                    _combineGroups = null;
+                    _phase = Phase.Idle;
+                    return;
+                }
+                if (!_host.UseObject(ust))
+                {
+                    Log("[Salvage] Combine: UseObject(UST) failed — skipping this group.");
+                    _combineGroupIdx++;
+                    _combineAddIdx = 0;
+                    return;
+                }
+                int openDelay = _panelEverOpened ? _settings.SalvageOpenDelayFastMs : _settings.SalvageOpenDelayFirstMs;
+                _combinePhaseReadyAt = now + openDelay;
+                _combinePhase = CombinePhase.OpeningPanel;
+                break;
+            }
+            case CombinePhase.OpeningPanel:
+            {
+                _panelEverOpened = true;
+                _combineAddIdx = 0;
+                _combinePhase = CombinePhase.AddingBags;
+                _combinePhaseReadyAt = now;
+                break;
+            }
+            case CombinePhase.AddingBags:
+            {
+                if (_combineAddIdx < group.Count)
+                {
+                    uint bagId = group[_combineAddIdx];
+                    if (_host.SalvagePanelAddItem(bagId))
+                        Log($"[Salvage] Combine: added bag 0x{bagId:X8} to panel ({_combineAddIdx + 1}/{group.Count}).");
+                    else
+                        Log($"[Salvage] Combine: SalvagePanelAddItem failed for 0x{bagId:X8}.");
+                    _combineAddIdx++;
+                    _combinePhaseReadyAt = now + _settings.SalvageAddDelayFastMs;
+                }
+                else
+                {
+                    _combinePhase = CombinePhase.Salvaging;
+                    _combinePhaseReadyAt = now;
+                }
+                break;
+            }
+            case CombinePhase.Salvaging:
+            {
+                if (!_host.SalvagePanelExecute())
+                    Log("[Salvage] Combine: SalvagePanelExecute failed.");
+                _combinePhase = CombinePhase.WaitingForResult;
+                _combinePhaseReadyAt = now + _settings.SalvageSalvageDelayMs + _settings.SalvageResultDelayFastMs;
+                break;
+            }
+            case CombinePhase.WaitingForResult:
+            {
+                _combineGroupIdx++;
+                _combineAddIdx = 0;
+                _combinePhase = CombinePhase.None;
+                _combinePhaseReadyAt = now;
+                break;
+            }
         }
+    }
 
-        _combineItemIdx++;
-        _combineActionAt = now + 150; // pace out combine actions
+    /// <summary>
+    /// Returns true when a salvage bag has structure < max (i.e. not full).
+    /// Prefers the trailing "(NN)" name suffix; falls back to the Structure /
+    /// MaxStructure properties.
+    /// </summary>
+    private bool IsBagUnderFull(uint bagId, string? name)
+    {
+        if (TryParseTrailingNumber(name, out int pct))
+            return pct < 100;
+        if (!_host.TryGetObjectIntProperty(bagId, StypeStructure, out int cur)) return false;
+        if (!_host.TryGetObjectIntProperty(bagId, StypeMaxStructure, out int max)) return false;
+        return max > 0 && cur < max;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -441,11 +620,32 @@ public sealed class SalvageManager
             && !IsSalvageBag(name);
     }
 
+    /// <summary>
+    /// Parses a trailing "(NN)" group from a salvage-bag name (e.g.
+    /// "Gold Salvage (91)" → 91). Returns false if the name has no trailing
+    /// integer in parentheses.
+    /// </summary>
+    private static bool TryParseTrailingNumber(string? name, out int value)
+    {
+        value = 0;
+        if (string.IsNullOrEmpty(name)) return false;
+        int close = name.LastIndexOf(')');
+        if (close <= 0 || close != name.Length - 1) return false;
+        int open = name.LastIndexOf('(', close - 1);
+        if (open < 0) return false;
+        string inside = name.Substring(open + 1, close - open - 1);
+        return int.TryParse(inside, out value);
+    }
+
     private static bool IsSalvageBag(string? name)
     {
         if (string.IsNullOrEmpty(name))
             return false;
-        return name.StartsWith("Salvage (", StringComparison.OrdinalIgnoreCase);
+        // Two known formats observed across servers/emulators:
+        //   "Salvage (Gold)"   — retail-style, material in parens
+        //   "Gold Salvage (91)" — emulator style, fullness in parens
+        // Both contain "Salvage (" as a substring; "Salvaging Ust" doesn't.
+        return name.Contains("Salvage (", StringComparison.OrdinalIgnoreCase);
     }
 
     private void Log(string message) => _host.Log(message);

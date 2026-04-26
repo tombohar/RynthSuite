@@ -59,6 +59,7 @@ public sealed class LegacyUiSettings
     public bool EnableAutostack = true;
     public bool EnableAutocram = true;
     public bool EnableCombineSalvage = true;
+    public bool CombineBagsDuringSalvage = true;
 
     public bool ShowTargetStaminaMana;
 
@@ -162,8 +163,8 @@ public sealed class LegacyUiSettings
     public int TargetFPSFocused = 60;
     public int TargetFPSBackground = 30;
 
-    // Minimum buffed skill level required to cast spells of each tier.
-    // Defaults are tuned above AC's hard minimums to avoid fizzles.
+    // Minimum buffed skill level required to cast spells of each tier — for COMBAT casts.
+    // Defaults are tuned above AC's hard minimums (1/50/100/150/200/250/300/350) to avoid fizzles.
     public int MinSkillLevelTier1 = 35;
     public int MinSkillLevelTier2 = 85;
     public int MinSkillLevelTier3 = 135;
@@ -172,6 +173,20 @@ public sealed class LegacyUiSettings
     public int MinSkillLevelTier6 = 285;
     public int MinSkillLevelTier7 = 335;
     public int MinSkillLevelTier8 = 435;
+
+    // Minimum buffed skill level required to cast self-buffs of each tier.
+    // Buffing is more forgiving than combat — a fizzle just retries on the next
+    // heartbeat with no monster pressure — so defaults here are tighter to AC's
+    // hard minimums than combat thresholds. In particular Tier 8 defaults to 385,
+    // so a 390-buffed character actually gets Incantation buffs.
+    public int BuffMinSkillLevelTier1 = 25;
+    public int BuffMinSkillLevelTier2 = 65;
+    public int BuffMinSkillLevelTier3 = 115;
+    public int BuffMinSkillLevelTier4 = 165;
+    public int BuffMinSkillLevelTier5 = 215;
+    public int BuffMinSkillLevelTier6 = 265;
+    public int BuffMinSkillLevelTier7 = 315;
+    public int BuffMinSkillLevelTier8 = 385;
 
     public bool EnableManaTapping   = false;
     public int  ManaTapMinMana      = 2500;
@@ -213,7 +228,11 @@ public sealed class LegacyUiSettings
     // ── Persisted window/UI state ───────────────────────────────────────────
     public float WindowPosX = -1f;
     public float WindowPosY = -1f;
+    public float WindowSizeX = 430f;
+    public float WindowSizeY = 452f;
     public bool WindowLocked;
+    public bool DashboardVisible = true;
+    public bool DashboardMinimized;
     public float BgOpacity = 0.95f;
     public bool DashShowWeapons;
     public bool DashShowLua;

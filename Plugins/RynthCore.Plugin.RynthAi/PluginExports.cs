@@ -22,6 +22,9 @@ public static unsafe class PluginExports
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnLoginComplete", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnLoginComplete() => Runtime.OnLoginComplete();
 
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnLogout", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void OnLogout() => Runtime.OnLogout();
+
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnBarAction", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnBarAction() => Runtime.OnBarAction();
 

@@ -9,6 +9,7 @@ using RynthCore.Plugin.RynthAi.Loot;
 using RynthCore.Plugin.RynthAi.Meta;
 using RynthCore.Plugin.RynthAi.Raycasting;
 using RynthCore.PluginCore;
+using RynthCore.Loot.VTank;
 
 namespace RynthCore.Plugin.RynthAi;
 
@@ -74,6 +75,30 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
     public override void Shutdown()
     {
+        TeardownSession();
+        _objectCache = null;
+        _initialized = false;
+        _dashboard = null;
+    }
+
+    /// <summary>
+    /// Called by the engine when the player leaves the world (RecvNotice_Logoff).
+    /// Stops every per-session subsystem the way Shutdown does, but leaves
+    /// _initialized / _dashboard / _objectCache intact so the next OnLoginComplete
+    /// can rebuild a fresh session without going through plugin Init again.
+    /// </summary>
+    public override void OnLogout()
+    {
+        Log("RynthAi: logout — tearing down session.");
+        TeardownSession();
+    }
+
+    /// <summary>
+    /// Releases every component that depends on being in-world. Idempotent.
+    /// Used by both Shutdown (full plugin unload) and OnLogout (session-only).
+    /// </summary>
+    private void TeardownSession()
+    {
         _navigationEngine?.Stop();
         _navigationEngine = null;
         _navMarkerRenderer = null;
@@ -94,14 +119,13 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _buffManager?.Dispose();
         _buffManager = null;
         _spellManager = null;
+        _missileCraftingManager = null;
         _jumper?.Cancel();
         _jumper = null;
-        _objectCache = null;
         _playerId = 0;
-        _initialized = false;
         _loginComplete = false;
         _windowVisible = false;
-        _dashboard = null;
+        _pendingGives.Clear();
     }
 
     private DateTime _loginCompletedAt = DateTime.MinValue;
@@ -155,6 +179,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         // Load per-character settings — character name comes from the player's object name
         if (_playerId != 0 && Host.HasGetObjectName && Host.TryGetObjectName(_playerId, out string charName) && !string.IsNullOrWhiteSpace(charName))
             _dashboard.LoadSettings(charName);
+
+        // Restore last-known dashboard visibility so the window reopens where it was after RL/restart.
+        _windowVisible = _dashboard.Settings.DashboardVisible;
 
         // Query own health to get the ratio → derive true MaxHealth immediately
         if (_playerId != 0 && Host.HasQueryHealth)
@@ -225,6 +252,13 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         }
 
         _salvageManager = new SalvageManager(Host, _dashboard.Settings, _objectCache);
+        // Hand the salvage manager a live accessor for the loot profile's
+        // SalvageCombine config so combining respects per-material workmanship
+        // bands when the profile defines them. Prefer the VTank profile (loaded
+        // from .utl) but fall back to the native JSON LootProfile if that's the
+        // active source.
+        _salvageManager.CombineConfigProvider = () =>
+            _loadedLootProfile?.SalvageCombine ?? _nativeLootProfile?.SalvageCombine;
 
         _jumper = new Jumper(Host, _dashboard.Settings, s => Host.WriteToChat(s, 1));
 
@@ -460,6 +494,11 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             return;
 
         _windowVisible = !_windowVisible;
+        if (_dashboard is not null)
+        {
+            _dashboard.Settings.DashboardVisible = _windowVisible;
+            _dashboard.SaveSettings();
+        }
     }
 
     private bool _lootInspectMode = true; // always on; /ra lootcheck off to disable
@@ -689,6 +728,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 if (_buffManager == null) { ChatLine("[RynthAi] BuffManager not ready (not logged in yet)."); break; }
                 if (parts.Length >= 3 && parts[2].Equals("item", StringComparison.OrdinalIgnoreCase))
                     _buffManager.PrintItemBuffDebug();
+                else if (parts.Length >= 3 && parts[2].Equals("tiers", StringComparison.OrdinalIgnoreCase))
+                    _buffManager.PrintBuffTierDebug();
                 else
                     _buffManager.PrintBuffDebug();
                 break;
@@ -815,7 +856,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 if (_dashboard.CloseRequested)
                 {
                     _windowVisible = false;
+                    _dashboard.Settings.DashboardVisible = false;
                     _dashboard.CloseRequested = false;
+                    _dashboard.SaveSettings();
                 }
             }
         }

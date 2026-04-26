@@ -22,6 +22,8 @@ internal sealed class RynthChatUi
 
     private bool _open = true;
     private bool _wantScrollToBottom = true;
+    private bool _prevLDown;
+    private bool _prevRDown;
 
     // Input field state — Enter outside any widget focuses the input,
     // Enter inside the input submits, Esc clears the buffer. The input row
@@ -76,11 +78,17 @@ internal sealed class RynthChatUi
 
         ImGui.SetNextWindowSize(new Vector2(520, 220), ImGuiCond.FirstUseEver);
         ImGui.SetNextWindowSizeConstraints(new Vector2(220, 110), new Vector2(2400, 1400));
-        ImGui.SetNextWindowBgAlpha(0f); // transparent — we paint our own bg
+
+        // Use ImGui's native WindowBg with the user's opacity so the platform
+        // layer can translate it into Platform_SetWindowAlpha on detached
+        // viewports — that gives a uniformly translucent OS window instead of
+        // a black-cleared one with a transparent paint over the top.
+        float opCfg = Math.Clamp(_settings.ChatOpacity, 0f, 1f);
+        ImGui.SetNextWindowBgAlpha(opCfg);
 
         ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(2, 2));
-        ImGui.PushStyleColor(ImGuiCol.WindowBg, 0u);
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0.05f, 0.07f, 0.10f, 1f));
 
         // NoBringToFrontOnFocus keeps the gear sub-window (rendered after) on top
         // even when the user clicks into the main chat (to drag, resize, or select text).
@@ -103,23 +111,49 @@ internal sealed class RynthChatUi
         Vector2 winPos  = ImGui.GetWindowPos();
         Vector2 winSize = ImGui.GetWindowSize();
 
-        // Painted background — the Opacity slider controls how opaque the fill is.
-        // At 0 the background is fully clear (text floats over the game) and at 1
-        // it's a dark panel. The border stays so the drag/resize handles are
-        // discoverable regardless.
+        // ImGui paints the WindowBg for us (with platform alpha on detached
+        // viewports). Just add a thin border for drag/resize affordance.
         var dl = ImGui.GetWindowDrawList();
-        float op = Math.Clamp(_settings.ChatOpacity, 0f, 1f);
-        uint bg = SetAlpha(ImGui.ColorConvertFloat4ToU32(new Vector4(0.05f, 0.07f, 0.10f, 1f)), op);
+        float op = opCfg;
         uint br = ImGui.ColorConvertFloat4ToU32(new Vector4(0.30f, 0.34f, 0.40f, 1f));
-        if (op > 0.001f)
-            dl.AddRectFilled(winPos, winPos + winSize, bg, 4f);
         dl.AddRect(winPos, winPos + winSize, br, 4f, ImDrawFlags.None, 1.5f);
 
-        // Gear + popup hoisted into a separate always-interactive sub-window so
-        // click-through on the main chat doesn't break the settings access.
+        // Gear visual is painted directly on the chat's drawlist (so it's always
+        // visible above the bg, on the same viewport, regardless of z-order).
+        // Clicks are detected manually below so they work whether the chat has
+        // NoInputs (click-through) or not, and on detached viewports.
         const float btn = 14f;
-        Vector2 bPos = new Vector2(winPos.X + winSize.X - btn - 4f, winPos.Y + 4f);
-        RenderGearWindow("##rchat_gear_win", "*##rchat_gear", "##rchat_settings", bPos, btn);
+        Vector2 gearPos = new Vector2(winPos.X + winSize.X - btn - 4f, winPos.Y + 4f);
+        Vector2 gearBR  = gearPos + new Vector2(btn, btn);
+        var io = ImGui.GetIO();
+        bool gearHovered = io.MousePos.X >= gearPos.X && io.MousePos.X < gearBR.X
+                        && io.MousePos.Y >= gearPos.Y && io.MousePos.Y < gearBR.Y;
+        uint gearBg = ImGui.ColorConvertFloat4ToU32(gearHovered
+            ? new Vector4(0.25f, 0.30f, 0.40f, 0.95f)
+            : new Vector4(0f, 0f, 0f, 0.65f));
+        uint gearBorder = ImGui.ColorConvertFloat4ToU32(new Vector4(0.40f, 0.45f, 0.55f, 0.85f));
+        dl.AddRectFilled(gearPos, gearBR, gearBg, 2f);
+        dl.AddRect(gearPos, gearBR, gearBorder, 2f, ImDrawFlags.None, 1f);
+        Vector2 gearTs = ImGui.CalcTextSize("*");
+        Vector2 gearTextPos = new(gearPos.X + (btn - gearTs.X) * 0.5f, gearPos.Y + (btn - gearTs.Y) * 0.5f);
+        dl.AddText(gearTextPos, 0xFFFFFFFFu, "*");
+
+        // Track L/R click transitions via raw IO state (IsMouseClicked is filtered
+        // by hovered-window logic, which fails when the chat has NoInputs or sits
+        // on a detached viewport). We compare current to previous frame ourselves.
+        bool curLDown = io.MouseDown[0];
+        bool curRDown = io.MouseDown[1];
+        bool lClick = curLDown && !_prevLDown;
+        bool rClick = curRDown && !_prevRDown;
+        _prevLDown = curLDown;
+        _prevRDown = curRDown;
+
+        bool inChatRect = io.MousePos.X >= winPos.X && io.MousePos.X < winPos.X + winSize.X
+                       && io.MousePos.Y >= winPos.Y && io.MousePos.Y < winPos.Y + winSize.Y;
+        bool wantOpenSettings = (gearHovered && lClick) || (inChatRect && rClick);
+        if (wantOpenSettings)
+            ImGui.OpenPopup("##rchat_settings");
+        RenderSettingsPopup();
 
         // ── Enter-to-focus input ────────────────────────────────────────
         // When retail chat is suppressed and no ImGui widget is currently
@@ -246,44 +280,6 @@ internal sealed class RynthChatUi
         {
             OnSettingChanged?.Invoke();
         }
-    }
-
-    /// <summary>
-    /// Renders the gear button and its settings popup in a separate always-
-    /// interactive sub-window, so the gear stays clickable even when the
-    /// main chat window has NoInputs (click-through).
-    /// </summary>
-    private void RenderGearWindow(string winId, string btnId, string popupId, Vector2 pos, float size)
-    {
-        ImGui.SetNextWindowPos(pos);
-        ImGui.SetNextWindowSize(new Vector2(size, size));
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
-        ImGui.PushStyleColor(ImGuiCol.WindowBg, 0u);
-
-        const ImGuiWindowFlags flags = ImGuiWindowFlags.NoTitleBar
-                                      | ImGuiWindowFlags.NoResize
-                                      | ImGuiWindowFlags.NoMove
-                                      | ImGuiWindowFlags.NoCollapse
-                                      | ImGuiWindowFlags.NoBackground
-                                      | ImGuiWindowFlags.NoSavedSettings
-                                      | ImGuiWindowFlags.NoBringToFrontOnFocus;
-
-        bool open = true;
-        if (ImGui.Begin(winId, ref open, flags))
-        {
-            ImGui.PushStyleColor(ImGuiCol.Button,        new Vector4(0f, 0f, 0f, 0.45f));
-            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.25f, 0.30f, 0.40f, 0.85f));
-            ImGui.PushStyleColor(ImGuiCol.ButtonActive,  new Vector4(0.20f, 0.25f, 0.35f, 1f));
-            if (ImGui.Button(btnId, new Vector2(size, size)))
-                ImGui.OpenPopup(popupId);
-            ImGui.PopStyleColor(3);
-            RenderSettingsPopup();
-        }
-        ImGui.End();
-
-        ImGui.PopStyleColor();
-        ImGui.PopStyleVar(2);
     }
 
     private void RenderSettingsPopup()

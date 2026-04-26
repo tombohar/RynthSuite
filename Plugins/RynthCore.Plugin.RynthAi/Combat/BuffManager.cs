@@ -496,26 +496,33 @@ public class BuffManager : IDisposable
         // User-configurable via Advanced Settings → Buffing.
         int rebufferSec = Math.Max(0, _settings.RebuffSecondsRemaining);
 
+        // Tier-upgrade rule (applies to both item enchantments and player buffs):
+        // if a better-tier spell is now available than what's currently active,
+        // treat the buff as inactive and recast immediately — regardless of how
+        // much time is left. Silent: callers like NeedsAnyBuff poll IsBuffActive
+        // every tick, so logging here would spam. The actual cast announces
+        // itself via the existing "Casting: X" line in CheckAndCastSelfBuffs.
+
         // Item spells (armor banes, Impenetrability) tracked in their own dictionary.
-        // Always check the timer first — RecordItemSpellCast() writes it immediately on cast
-        // so it exists by the next heartbeat. _isForceRebuffing only matters when there is no
-        // timer (i.e. hasn't been cast yet this session), and in that case both paths return false.
         if (IsArmorEnchantment(targetSpell.Name))
         {
             if (_itemSpellTimers.TryGetValue(targetSpell.Family, out ItemSpellRecord? itemTimer))
-                if (itemTimer.SpellLevel >= targetLevel &&
-                    DateTime.Now < itemTimer.ExpiresAt.AddSeconds(-rebufferSec))
+            {
+                if (itemTimer.SpellLevel < targetLevel)
+                    return false;
+                if (DateTime.Now < itemTimer.ExpiresAt.AddSeconds(-rebufferSec))
                     return true;
+            }
             return false;
         }
 
         // Player buffs — use RAM timers
         if (_ramBuffTimers.TryGetValue(targetSpell.Family, out RamTimerInfo? timer))
         {
+            if (timer.SpellLevel < targetLevel)
+                return false;
             if (DateTime.Now < timer.Expiration.AddSeconds(-rebufferSec))
-            {
-                if (timer.SpellLevel >= targetLevel) return true;
-            }
+                return true;
         }
 
         if (_isForceRebuffing) return false;
@@ -761,6 +768,50 @@ public class BuffManager : IDisposable
                     $"[RynthAi]   {info.SpellName} (Lvl {info.SpellLevel}): {Math.Round(passed / 60, 1)}m passed, " +
                     $"{Math.Round(left.TotalMinutes, 1)}m left. Total: {total / 60}m", 1);
             }
+        }
+    }
+
+    /// <summary>
+    /// Diagnostic dump of buff-tier resolution. For each desired buff, shows the
+    /// skill, current buffed level, the max tier the threshold settings allow,
+    /// and the spell that actually got resolved (with its tier). Lets the user
+    /// see exactly why a low-tier spell is being cast — usually because the
+    /// higher-tier Lore spell isn't in their spellbook yet.
+    /// </summary>
+    public void PrintBuffTierDebug()
+    {
+        List<string> desiredBuffs = BuildDynamicBuffList();
+        var seen = new HashSet<AcSkillType>();
+
+        foreach (string baseName in desiredBuffs)
+        {
+            AcSkillType skill = SkillForBuff(baseName);
+            if (!IsSkillUsable(skill)) continue;
+
+            // Skill summary line — print once per unique skill.
+            if (seen.Add(skill))
+            {
+                int buffed = _charSkills != null ? _charSkills[skill].Buffed : -1;
+                int maxTier = _spellManager.GetHighestBuffSpellTier(skill);
+                _host.WriteToChat($"[RynthAi] -- {skill} (buffed={buffed}, max tier T{maxTier}) --", 1);
+            }
+
+            int spellId = FindBestSpellId(baseName, skill);
+            if (spellId == 0)
+            {
+                _host.WriteToChat($"[RynthAi]   {baseName}: no learnable spell at any tier", 1);
+                continue;
+            }
+
+            var info = SpellTableStub.GetById(spellId);
+            int level = info != null ? GetSpellLevel(info) : 0;
+            string activeTimer = "no timer";
+            if (info != null && _ramBuffTimers.TryGetValue(info.Family, out RamTimerInfo? timer))
+                activeTimer = $"timer T{timer.SpellLevel}, {Math.Round((timer.Expiration - DateTime.Now).TotalMinutes, 1)}m left";
+            else if (info != null && _itemSpellTimers.TryGetValue(info.Family, out ItemSpellRecord? itemTimer))
+                activeTimer = $"item T{itemTimer.SpellLevel}, {Math.Round((itemTimer.ExpiresAt - DateTime.Now).TotalMinutes, 1)}m left";
+
+            _host.WriteToChat($"[RynthAi]   {baseName} → {info?.Name ?? "?"} (T{level}, {activeTimer})", 1);
         }
     }
 

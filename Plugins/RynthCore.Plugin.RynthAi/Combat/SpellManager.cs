@@ -104,20 +104,41 @@ public class SpellManager
     }
 
     /// <summary>
-    /// Returns the highest castable spell tier based on the character's current buffed skill level.
-    /// Thresholds come from LegacyUiSettings (MinSkillLevelTier1..8), letting the user pad above
-    /// AC's hard minimums (1/50/100/150/200/250/300/350) to avoid fizzles.
+    /// Returns the highest castable spell tier for combat (offensive/debuff) casts.
+    /// Uses the combat thresholds in LegacyUiSettings (MinSkillLevelTier1..8) which are
+    /// padded above AC's hard minimums (1/50/100/150/200/250/300/350) to avoid fizzles
+    /// during fights.
     /// </summary>
     public int GetHighestSpellTier(AcSkillType skill)
+        => ComputeTier(skill,
+            _settings.MinSkillLevelTier1, _settings.MinSkillLevelTier2,
+            _settings.MinSkillLevelTier3, _settings.MinSkillLevelTier4,
+            _settings.MinSkillLevelTier5, _settings.MinSkillLevelTier6,
+            _settings.MinSkillLevelTier7, _settings.MinSkillLevelTier8);
+
+    /// <summary>
+    /// Same as <see cref="GetHighestSpellTier"/> but uses the Buffing-specific thresholds
+    /// (BuffMinSkillLevelTier1..8). Buffing fizzles are inexpensive — just retry next
+    /// heartbeat — so these defaults sit closer to AC's hard minimums, ensuring a
+    /// 390-buffed caster actually receives Incantation-tier self buffs.
+    /// </summary>
+    public int GetHighestBuffSpellTier(AcSkillType skill)
+        => ComputeTier(skill,
+            _settings.BuffMinSkillLevelTier1, _settings.BuffMinSkillLevelTier2,
+            _settings.BuffMinSkillLevelTier3, _settings.BuffMinSkillLevelTier4,
+            _settings.BuffMinSkillLevelTier5, _settings.BuffMinSkillLevelTier6,
+            _settings.BuffMinSkillLevelTier7, _settings.BuffMinSkillLevelTier8);
+
+    private int ComputeTier(AcSkillType skill, int t1, int t2, int t3, int t4, int t5, int t6, int t7, int t8)
     {
         int buffed = _charSkills != null ? _charSkills[skill].Buffed : 250;
-        if (buffed >= _settings.MinSkillLevelTier8) return 8;
-        if (buffed >= _settings.MinSkillLevelTier7) return 7;
-        if (buffed >= _settings.MinSkillLevelTier6) return 6;
-        if (buffed >= _settings.MinSkillLevelTier5) return 5;
-        if (buffed >= _settings.MinSkillLevelTier4) return 4;
-        if (buffed >= _settings.MinSkillLevelTier3) return 3;
-        if (buffed >= _settings.MinSkillLevelTier2) return 2;
+        if (buffed >= t8) return 8;
+        if (buffed >= t7) return 7;
+        if (buffed >= t6) return 6;
+        if (buffed >= t5) return 5;
+        if (buffed >= t4) return 4;
+        if (buffed >= t3) return 3;
+        if (buffed >= t2) return 2;
         return 1;
     }
 
@@ -130,7 +151,9 @@ public class SpellManager
 
     public int GetDynamicSelfBuffId(string baseSpellName, AcSkillType magicSkill)
     {
-        int maxTier = GetHighestSpellTier(magicSkill);
+        // Self-buffs use the buffing-specific thresholds so the user can tune
+        // buffing tier independently from combat tier.
+        int maxTier = GetHighestBuffSpellTier(magicSkill);
         string cleanBase = baseSpellName.Replace(" Self", "").Trim();
 
         for (int tier = maxTier; tier >= 1; tier--)

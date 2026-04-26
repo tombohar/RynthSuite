@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.Plugin.RynthAi.Loot;
+using RynthCore.Loot.VTank;
 
 namespace RynthCore.Plugin.RynthAi;
 
@@ -1225,7 +1226,7 @@ public sealed partial class RynthAiPlugin
         int matchedRuleIndex      = -1;
         for (int ri = 0; ri < vtankProfile.Rules.Count; ri++)
         {
-            if (vtankProfile.Rules[ri].IsMatch(item, lootCtx))
+            if (VTankLootEvaluator.Match(vtankProfile.Rules[ri], item, lootCtx))
             {
                 matchedRule      = vtankProfile.Rules[ri];
                 matchedRuleIndex = ri;
@@ -1358,63 +1359,37 @@ public sealed partial class RynthAiPlugin
 
     private static bool VTankProfileNeedsAppraisalForClass(VTankLootProfile profile, AcObjectClass cls)
     {
-        // Requirement types that need appraisal data from the server
+        // Requirement types that need appraisal data from the server.
         static bool TypeNeedsAppraisal(int t) => t is
             2 or 3 or 4 or 5 or 6 or 8 or 9 or 10 or 11 or 12 or 13 or
             14 or 15 or 16 or 17 or 2000 or 2001 or 2003 or 2005 or 2006 or 2007 or 2008;
-
-        // Number of data lines consumed by each requirement type (mirrors VTankLootParser)
-        static int DataCount(int t) => t switch
-        {
-            0    => 1, 1    => 2, 2    => 2, 3    => 2, 4    => 2, 5    => 2,
-            6    => 1, 7    => 1, 8    => 1, 9    => 3, 10   => 1, 11   => 2,
-            12   => 2, 13   => 2, 14   => 5, 15   => 6, 16   => 6, 17   => 2,
-            1000 => 2, 1001 => 1, 1002 => 1, 1003 => 1, 1004 => 3,
-            2000 => 1, 2001 => 1, 2003 => 2, 2005 => 2, 2006 => 1, 2007 => 1, 2008 => 3,
-            9999 => 1, _    => 0,
-        };
 
         int targetClass = (int)cls;
 
         foreach (var rule in profile.Rules)
         {
-            if (string.IsNullOrWhiteSpace(rule.RawInfoLine)) continue;
+            if (rule.Conditions.Count == 0) continue; // unconditional
 
-            string[] parts = rule.RawInfoLine.Split(';');
-            if (parts.Length < 3) continue; // 0 or 2 parts = no requirements
-
-            bool hasClassReq   = false;
-            bool classMatches  = false;
+            bool hasClassReq    = false;
+            bool classMatches   = false;
             bool needsAppraisal = false;
 
-            var dataQueue = new System.Collections.Generic.Queue<string>(rule.RawDataLines);
-
-            for (int i = 2; i < parts.Length; i++)
+            foreach (var cond in rule.Conditions)
             {
-                if (!int.TryParse(parts[i], System.Globalization.NumberStyles.Integer,
-                        System.Globalization.CultureInfo.InvariantCulture, out int type))
-                    continue;
-
-                int dataCount = DataCount(type);
-
-                if (type == 7) // ObjectClass requirement
+                if (cond.NodeType == VTankNodeTypes.ObjectClass)
                 {
                     hasClassReq = true;
-                    if (dataQueue.Count > 0)
-                    {
-                        if (int.TryParse(dataQueue.Peek(), System.Globalization.NumberStyles.Integer,
-                                System.Globalization.CultureInfo.InvariantCulture, out int cls2)
-                            && cls2 == targetClass)
-                            classMatches = true;
-                    }
+                    if (cond.DataLines.Count > 0
+                        && int.TryParse(cond.DataLines[0].Trim(),
+                            System.Globalization.NumberStyles.Integer,
+                            System.Globalization.CultureInfo.InvariantCulture, out int cls2)
+                        && cls2 == targetClass)
+                        classMatches = true;
                 }
-                else if (TypeNeedsAppraisal(type))
+                else if (TypeNeedsAppraisal(cond.NodeType))
                 {
                     needsAppraisal = true;
                 }
-
-                for (int d = 0; d < dataCount && dataQueue.Count > 0; d++)
-                    dataQueue.Dequeue();
             }
 
             bool ruleApplies = !hasClassReq || classMatches;

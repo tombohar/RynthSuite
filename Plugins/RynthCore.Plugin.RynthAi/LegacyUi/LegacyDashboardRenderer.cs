@@ -73,6 +73,7 @@ internal sealed class LegacyDashboardRenderer
 
     private Vector2 _lastWindowPos = new(-1, -1);
     private bool _windowPosRestored;
+    private bool _windowSizeRestored;
     private Vector2 _expandedSize = new(430, 452);
     private string _targetLabel = "NO TARGET";
     private float _targetHealthPercent;
@@ -240,6 +241,7 @@ internal sealed class LegacyDashboardRenderer
         }
 
         _windowPosRestored = false; // will apply saved position on next render
+        _windowSizeRestored = false; // force size restore on first render after load
         RefreshAllLists();
 
         // Load MonsterRules from monsters.json (overrides what was in the profile)
@@ -483,6 +485,9 @@ internal sealed class LegacyDashboardRenderer
     private void CaptureTransientUiState()
     {
         _settings.WindowLocked       = _isLocked;
+        _settings.DashboardMinimized = _isMinimized;
+        _settings.WindowSizeX        = _expandedSize.X;
+        _settings.WindowSizeY        = _expandedSize.Y;
         _settings.BgOpacity          = _bgOpacity;
         _settings.DashShowWeapons    = DashWindows.ShowWeapons;
         _settings.DashShowLua        = DashWindows.ShowLua;
@@ -494,8 +499,10 @@ internal sealed class LegacyDashboardRenderer
 
     private void ApplyUiStateFromSettings()
     {
-        _isLocked  = _settings.WindowLocked;
-        _bgOpacity = _settings.BgOpacity;
+        _isLocked     = _settings.WindowLocked;
+        _isMinimized  = _settings.DashboardMinimized;
+        _expandedSize = new Vector2(_settings.WindowSizeX, _settings.WindowSizeY);
+        _bgOpacity    = _settings.BgOpacity;
         DashWindows.ShowWeapons     = _settings.DashShowWeapons;
         DashWindows.ShowLua         = _settings.DashShowLua;
         DashWindows.ShowNavigation  = _settings.DashShowNavigation;
@@ -597,6 +604,7 @@ internal sealed class LegacyDashboardRenderer
         }
 
         _windowPosRestored = false;
+        _windowSizeRestored = false;
         RefreshAllLists();
     }
 
@@ -649,6 +657,7 @@ internal sealed class LegacyDashboardRenderer
         dst.EnableAutostack          = tmp.EnableAutostack;
         dst.EnableAutocram           = tmp.EnableAutocram;
         dst.EnableCombineSalvage     = tmp.EnableCombineSalvage;
+        dst.CombineBagsDuringSalvage = tmp.CombineBagsDuringSalvage;
         dst.ShowTargetStaminaMana    = tmp.ShowTargetStaminaMana;
         dst.EnableMissileCrafting    = tmp.EnableMissileCrafting;
         dst.MissileCraftAmmoThreshold= tmp.MissileCraftAmmoThreshold;
@@ -732,6 +741,10 @@ internal sealed class LegacyDashboardRenderer
         dst.WindowPosX               = tmp.WindowPosX;
         dst.WindowPosY               = tmp.WindowPosY;
         dst.WindowLocked             = tmp.WindowLocked;
+        dst.DashboardVisible         = tmp.DashboardVisible;
+        dst.DashboardMinimized       = tmp.DashboardMinimized;
+        dst.WindowSizeX              = tmp.WindowSizeX;
+        dst.WindowSizeY              = tmp.WindowSizeY;
         dst.BgOpacity                = tmp.BgOpacity;
         dst.DashShowWeapons          = tmp.DashShowWeapons;
         dst.DashShowLua              = tmp.DashShowLua;
@@ -932,8 +945,23 @@ internal sealed class LegacyDashboardRenderer
         ImGui.SetNextWindowSizeConstraints(new Vector2(400, 0), new Vector2(1200, 2000));
         if (!_isMinimized && !_isLocked)
         {
-            if (_wasMinimized) { ImGui.SetNextWindowSize(_expandedSize, ImGuiCond.Always); _wasMinimized = false; }
+            // Force-apply the saved expanded size on the first frame after login —
+            // imgui.ini may have a stale tiny size from a previous session.
+            if (!_windowSizeRestored)
+            {
+                ImGui.SetNextWindowSize(_expandedSize, ImGuiCond.Always);
+                ImGui.SetNextWindowCollapsed(false, ImGuiCond.Always);
+                _windowSizeRestored = true;
+            }
+            else if (_wasMinimized) { ImGui.SetNextWindowSize(_expandedSize, ImGuiCond.Always); _wasMinimized = false; }
             else ImGui.SetNextWindowSize(_expandedSize, ImGuiCond.FirstUseEver);
+        }
+        else if (_isMinimized && !_windowSizeRestored)
+        {
+            // Even in minimized mode, defensively un-collapse so an old imgui.ini
+            // Collapsed=1 entry can't keep the window iconified.
+            ImGui.SetNextWindowCollapsed(false, ImGuiCond.Always);
+            _windowSizeRestored = true;
         }
         if (ImGui.Begin("RynthAi Dashboard##Main", flags))
         {
@@ -983,7 +1011,7 @@ internal sealed class LegacyDashboardRenderer
         ImGui.SameLine();
         if (ImGui.SmallButton("+")) _bgOpacity = Math.Min(1.0f, _bgOpacity + 0.1f);
         ImGui.SameLine();
-        if (ImGui.SmallButton(_isMinimized ? "^" : "_")) _isMinimized = !_isMinimized;
+        if (ImGui.SmallButton(_isMinimized ? "^" : "_")) { _isMinimized = !_isMinimized; SaveSettings(); }
         ImGui.SameLine();
         if (ImGui.SmallButton("X")) CloseRequested = true;
         ImGui.Dummy(new Vector2(0, 2));

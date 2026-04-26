@@ -1,9 +1,9 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="RynthCore.LootEditor.MainWindow"
-        Title="RynthCore Loot Editor"
-        Width="920" Height="620"
-        MinWidth="700" MinHeight="450"
+        Title="{Binding WindowTitle}"
+        Width="1280" Height="760"
+        MinWidth="900" MinHeight="540"
         WindowStartupLocation="CenterScreen">
 
     <DockPanel>
@@ -11,59 +11,106 @@
         <!-- Menu -->
         <Menu DockPanel.Dock="Top">
             <MenuItem Header="_File">
-                <MenuItem Header="_New"        Command="{Binding FileNew}"/>
-                <MenuItem Header="_Open..."     Command="{Binding FileOpen}"/>
+                <MenuItem Header="_New"        Command="{Binding FileNew}"   InputGesture="Ctrl+N"/>
+                <MenuItem Header="_Open..."    Command="{Binding FileOpen}"  InputGesture="Ctrl+O"/>
                 <Separator/>
-                <MenuItem Header="_Save"        Command="{Binding FileSave}"/>
-                <MenuItem Header="Save _As..."  Command="{Binding FileSaveAs}"/>
+                <MenuItem Header="_Save"       Command="{Binding FileSave}"  InputGesture="Ctrl+S"/>
+                <MenuItem Header="Save _As..." Command="{Binding FileSaveAs}" InputGesture="Ctrl+Shift+S"/>
                 <Separator/>
-                <MenuItem Header="E_xit"        Command="{Binding FileExit}"/>
+                <MenuItem Header="E_xit"       Command="{Binding FileExit}"/>
+            </MenuItem>
+            <MenuItem Header="_Rule">
+                <MenuItem Header="_New rule"        Command="{Binding RuleAdd}"       InputGesture="Ctrl+R"/>
+                <MenuItem Header="_Duplicate rule"  Command="{Binding RuleDuplicate}" InputGesture="Ctrl+D"/>
+                <MenuItem Header="Delete rule"      Command="{Binding RuleDelete}"    InputGesture="Delete"/>
+                <Separator/>
+                <MenuItem Header="Move up"   Command="{Binding RuleMoveUp}"   InputGesture="Alt+Up"/>
+                <MenuItem Header="Move down" Command="{Binding RuleMoveDown}" InputGesture="Alt+Down"/>
             </MenuItem>
         </Menu>
 
+        <!-- Keyboard shortcuts -->
+        <DockPanel.KeyBindings>
+            <KeyBinding Gesture="Ctrl+N"        Command="{Binding FileNew}"/>
+            <KeyBinding Gesture="Ctrl+O"        Command="{Binding FileOpen}"/>
+            <KeyBinding Gesture="Ctrl+S"        Command="{Binding FileSave}"/>
+            <KeyBinding Gesture="Ctrl+Shift+S"  Command="{Binding FileSaveAs}"/>
+            <KeyBinding Gesture="Ctrl+R"        Command="{Binding RuleAdd}"/>
+            <KeyBinding Gesture="Ctrl+D"        Command="{Binding RuleDuplicate}"/>
+            <KeyBinding Gesture="Alt+Up"        Command="{Binding RuleMoveUp}"/>
+            <KeyBinding Gesture="Alt+Down"      Command="{Binding RuleMoveDown}"/>
+        </DockPanel.KeyBindings>
+
         <!-- Status bar -->
-        <Border DockPanel.Dock="Bottom"
-                Background="#080C10"
-                Padding="8,3">
-            <TextBlock x:Name="StatusText"
-                       Text="{Binding StatusMessage}"
-                       Foreground="{StaticResource FgMuted}"
-                       FontSize="11"/>
+        <Border DockPanel.Dock="Bottom" Background="#080C10" Padding="8,3">
+            <TextBlock Text="{Binding StatusMessage}"
+                       Foreground="{StaticResource FgMuted}" FontSize="11"/>
         </Border>
 
-        <!-- Main content -->
-        <Grid>
+        <TabControl Background="#0B1015">
+
+        <!-- ─── Rules tab ─────────────────────────────────────────────────── -->
+        <TabItem Header="Rules">
+        <Grid Background="#0B1015">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="260" MinWidth="160"/>
-                <ColumnDefinition Width="5"/>
-                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="340" MinWidth="260"/>
+                <ColumnDefinition Width="6"/>
+                <ColumnDefinition Width="*"   MinWidth="320"/>
+                <ColumnDefinition Width="6"/>
+                <ColumnDefinition Width="440" MinWidth="320"/>
             </Grid.ColumnDefinitions>
 
-            <!-- Left: Rules panel -->
-            <DockPanel Grid.Column="0" Margin="6,6,0,6">
-
-                <!-- Search box -->
+            <!-- ── Pane 1 — Rules list ────────────────────────────────── -->
+            <Border Grid.Column="0" Margin="6,6,0,6"
+                    Background="#10161D"
+                    BorderBrush="#26303A"
+                    BorderThickness="1"
+                    CornerRadius="4"
+                    Padding="8">
+            <DockPanel>
                 <TextBox DockPanel.Dock="Top"
                          Text="{Binding SearchText}"
                          Watermark="Search rules…"
                          Margin="0,0,0,6"/>
 
-                <!-- Rules label + toolbar -->
+                <!-- Action filter chips -->
+                <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,6">
+                    <ToggleButton Content="All"
+                                  IsChecked="{Binding IsActionFilterAll}"
+                                  Command="{Binding SetActionFilter}"
+                                  Padding="8,2" Margin="0,0,3,3"/>
+                    <ToggleButton Content="Keep"
+                                  IsChecked="{Binding IsActionFilterKeep}"
+                                  Command="{Binding SetActionFilter}" CommandParameter="Keep"
+                                  Background="#1f6f3a" Foreground="White" Padding="8,2" Margin="0,0,3,3"/>
+                    <ToggleButton Content="Keep#"
+                                  IsChecked="{Binding IsActionFilterKeepUpTo}"
+                                  Command="{Binding SetActionFilter}" CommandParameter="KeepUpTo"
+                                  Background="#196e6e" Foreground="White" Padding="8,2" Margin="0,0,3,3"/>
+                    <ToggleButton Content="Salv"
+                                  IsChecked="{Binding IsActionFilterSalvage}"
+                                  Command="{Binding SetActionFilter}" CommandParameter="Salvage"
+                                  Background="#a35c15" Foreground="White" Padding="8,2" Margin="0,0,3,3"/>
+                    <ToggleButton Content="Sell"
+                                  IsChecked="{Binding IsActionFilterSell}"
+                                  Command="{Binding SetActionFilter}" CommandParameter="Sell"
+                                  Background="#7a1f1f" Foreground="White" Padding="8,2" Margin="0,0,3,3"/>
+                    <ToggleButton Content="Read"
+                                  IsChecked="{Binding IsActionFilterRead}"
+                                  Command="{Binding SetActionFilter}" CommandParameter="Read"
+                                  Background="#1f497d" Foreground="White" Padding="8,2" Margin="0,0,3,3"/>
+                </WrapPanel>
+
                 <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4">
-                    <TextBlock Text="Rules"
+                    <TextBlock Text="{Binding RuleCountLabel}"
                                Foreground="{StaticResource FgMuted}"
                                VerticalAlignment="Center"/>
-                    <StackPanel Orientation="Horizontal"
-                                HorizontalAlignment="Right"
-                                Spacing="3">
-                        <Button Content="+" Width="24" Padding="0"
-                                Command="{Binding RuleAdd}"    ToolTip.Tip="Add rule"/>
-                        <Button Content="−" Width="24" Padding="0"
-                                Command="{Binding RuleDelete}" ToolTip.Tip="Delete rule"/>
-                        <Button Content="↑" Width="24" Padding="0"
-                                Command="{Binding RuleMoveUp}" ToolTip.Tip="Move up"/>
-                        <Button Content="↓" Width="24" Padding="0"
-                                Command="{Binding RuleMoveDown}" ToolTip.Tip="Move down"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="3">
+                        <Button Content="+"  Width="24" Padding="0" Command="{Binding RuleAdd}"        ToolTip.Tip="New rule (Ctrl+R)"/>
+                        <Button Content="⎘"  Width="24" Padding="0" Command="{Binding RuleDuplicate}"  ToolTip.Tip="Duplicate (Ctrl+D)"/>
+                        <Button Content="−"  Width="24" Padding="0" Command="{Binding RuleDelete}"     ToolTip.Tip="Delete (Del)"/>
+                        <Button Content="↑"  Width="24" Padding="0" Command="{Binding RuleMoveUp}"     ToolTip.Tip="Move up (Alt+↑)"/>
+                        <Button Content="↓"  Width="24" Padding="0" Command="{Binding RuleMoveDown}"   ToolTip.Tip="Move down (Alt+↓)"/>
                     </StackPanel>
                 </DockPanel>
 
@@ -72,38 +119,72 @@
                          SelectedItem="{Binding SelectedRule}">
                     <ListBox.ItemTemplate>
                         <DataTemplate>
-                            <Grid>
-                                <TextBlock Text="{Binding Name}" VerticalAlignment="Center"
-                                           TextDecorations="Strikethrough" Opacity="0.45"
+                            <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,1">
+                                <!-- Action badge -->
+                                <Border Grid.Column="0"
+                                        Background="{Binding ActionBadgeBrush}"
+                                        CornerRadius="3"
+                                        Padding="6,1"
+                                        VerticalAlignment="Center"
+                                        Margin="0,0,6,0">
+                                    <TextBlock Text="{Binding ActionLabel}"
+                                               Foreground="{Binding ActionBadgeForeground}"
+                                               FontSize="10"
+                                               FontWeight="Bold"/>
+                                </Border>
+                                <!-- Name -->
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding Name}"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis"/>
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding Name}"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis"
+                                           TextDecorations="Strikethrough"
+                                           Opacity="0.45"
                                            IsVisible="{Binding !Enabled}"/>
-                                <TextBlock Text="{Binding Name}" VerticalAlignment="Center"
-                                           IsVisible="{Binding Enabled}"/>
+                                <!-- Condition count -->
+                                <TextBlock Grid.Column="2"
+                                           Text="{Binding ConditionCountLabel}"
+                                           Foreground="{StaticResource FgMuted}"
+                                           FontSize="10"
+                                           VerticalAlignment="Center"
+                                           Margin="6,0,0,0"/>
                             </Grid>
                         </DataTemplate>
                     </ListBox.ItemTemplate>
+                    <ListBox.KeyBindings>
+                        <KeyBinding Gesture="Delete" Command="{Binding RuleDelete}"/>
+                    </ListBox.KeyBindings>
                 </ListBox>
             </DockPanel>
+            </Border>
 
-            <GridSplitter Grid.Column="1" Width="5" ResizeDirection="Columns"/>
+            <GridSplitter Grid.Column="1" Width="6" ResizeDirection="Columns"
+                          Background="#26303A"/>
 
-            <!-- Right: Rule editor -->
-            <DockPanel Grid.Column="2" Margin="6,6,6,6"
-                       IsEnabled="{Binding RuleEditorEnabled}">
-
-                <!-- Rule header -->
+            <!-- ── Pane 2 — Rule meta ─────────────────────────────────── -->
+            <Border Grid.Column="2" Margin="0,6,0,6"
+                    Background="#10161D"
+                    BorderBrush="#26303A"
+                    BorderThickness="1"
+                    CornerRadius="4"
+                    Padding="10"
+                    IsEnabled="{Binding RuleEditorEnabled}">
+            <DockPanel>
                 <TextBlock DockPanel.Dock="Top"
                            Text="Rule"
                            Foreground="{StaticResource FgAccent}"
                            FontSize="13"
-                           Margin="0,0,0,6"/>
+                           FontWeight="SemiBold"
+                           Margin="0,0,0,8"/>
 
-                <!-- Rule properties -->
-                <Grid DockPanel.Dock="Top" Margin="0,0,0,8">
+                <Grid DockPanel.Dock="Top">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="80"/>
                         <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="70"/>
+                        <ColumnDefinition Width="60"/>
                     </Grid.ColumnDefinitions>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -111,80 +192,181 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="6"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="6"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="6"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
-                    <TextBlock Grid.Row="0" Grid.Column="0"
-                               Text="Name"
-                               VerticalAlignment="Center"
-                               Foreground="{StaticResource FgMuted}"/>
-                    <TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="3"
-                             Text="{Binding SelectedRuleName}"
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Name"
+                               VerticalAlignment="Center" Foreground="{StaticResource FgMuted}"/>
+                    <TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2"
+                             Text="{Binding SelectedRule.Name, Mode=TwoWay}"
                              Watermark="Rule name…"/>
 
-                    <TextBlock Grid.Row="2" Grid.Column="0"
-                               Text="Action"
-                               VerticalAlignment="Center"
-                               Foreground="{StaticResource FgMuted}"/>
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Action"
+                               VerticalAlignment="Center" Foreground="{StaticResource FgMuted}"/>
                     <ComboBox Grid.Row="2" Grid.Column="1"
-                              ItemsSource="{Binding LootActions}"
-                              SelectedItem="{Binding SelectedRule.Action}"
+                              ItemsSource="{Binding Actions}"
+                              SelectedItem="{Binding SelectedRule.Action, Mode=TwoWay}"
                               HorizontalAlignment="Stretch"/>
-                    <TextBlock Grid.Row="2" Grid.Column="2"
-                               Text="Keep count"
-                               VerticalAlignment="Center"
-                               Foreground="{StaticResource FgMuted}"
-                               Margin="8,0,4,0"
-                               IsVisible="{Binding ShowKeepCount}"/>
-                    <TextBox Grid.Row="2" Grid.Column="3"
-                             Text="{Binding KeepCountText}"
-                             IsVisible="{Binding ShowKeepCount}"/>
+                    <TextBox Grid.Row="2" Grid.Column="2"
+                             Text="{Binding SelectedRule.KeepCount, Mode=TwoWay}"
+                             IsVisible="{Binding KeepCountVisible}"
+                             Margin="4,0,0,0"
+                             ToolTip.Tip="Keep count (KeepUpTo)"/>
 
-                    <CheckBox Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="4"
+                    <TextBlock Grid.Row="4" Grid.Column="0" Text="Custom Expr"
+                               VerticalAlignment="Top" Foreground="{StaticResource FgMuted}"
+                               Margin="0,4,0,0"/>
+                    <TextBox Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2"
+                             Text="{Binding SelectedRule.CustomExpression, Mode=TwoWay}"
+                             Watermark="(VTank's custom-key expression — leave blank if unused)"
+                             AcceptsReturn="False"/>
+
+                    <CheckBox Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="3"
                               Content="Enabled"
-                              IsChecked="{Binding SelectedRule.Enabled}"/>
+                              IsChecked="{Binding SelectedRule.Enabled, Mode=TwoWay}"/>
+
+                    <Border Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="3"
+                            Background="#0A0E13"
+                            BorderBrush="#26303A"
+                            BorderThickness="1"
+                            CornerRadius="3"
+                            Padding="8"
+                            Margin="0,2,0,0">
+                        <StackPanel>
+                            <TextBlock Text="Plain English"
+                                       Foreground="{StaticResource FgMuted}"
+                                       FontSize="10"/>
+                            <TextBlock Text="{Binding SelectedRule.Summary}"
+                                       TextWrapping="Wrap"
+                                       Margin="0,2,0,0"/>
+                        </StackPanel>
+                    </Border>
                 </Grid>
+            </DockPanel>
+            </Border>
 
-                <Separator DockPanel.Dock="Top" Margin="0,0,0,8"/>
+            <GridSplitter Grid.Column="3" Width="6" ResizeDirection="Columns"
+                          Background="#26303A"/>
 
-                <!-- Conditions header + toolbar -->
-                <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4">
+            <!-- ── Pane 3 — Conditions list + editor ──────────────────── -->
+            <Border Grid.Column="4" Margin="0,6,6,6"
+                    Background="#10161D"
+                    BorderBrush="#26303A"
+                    BorderThickness="1"
+                    CornerRadius="4"
+                    Padding="10"
+                    IsEnabled="{Binding RuleEditorEnabled}">
+            <DockPanel>
+
+                <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6">
                     <TextBlock Text="Conditions"
                                Foreground="{StaticResource FgAccent}"
                                FontSize="13"
+                               FontWeight="SemiBold"
                                VerticalAlignment="Center"/>
-                    <StackPanel Orientation="Horizontal"
-                                HorizontalAlignment="Right"
-                                Spacing="3">
-                        <Button Content="+" Width="24" Padding="0"
-                                Command="{Binding CondAdd}"      ToolTip.Tip="Add condition"/>
-                        <Button Content="−" Width="24" Padding="0"
-                                Command="{Binding CondDelete}"   ToolTip.Tip="Delete condition"/>
-                        <Button Content="↑" Width="24" Padding="0"
-                                Command="{Binding CondMoveUp}"   ToolTip.Tip="Move up"/>
-                        <Button Content="↓" Width="24" Padding="0"
-                                Command="{Binding CondMoveDown}" ToolTip.Tip="Move down"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="3">
+                        <Button Content="+" Width="24" Padding="0" Command="{Binding CondAdd}"      ToolTip.Tip="Add condition"/>
+                        <Button Content="−" Width="24" Padding="0" Command="{Binding CondDelete}"   ToolTip.Tip="Delete"/>
+                        <Button Content="↑" Width="24" Padding="0" Command="{Binding CondMoveUp}"   ToolTip.Tip="Move up"/>
+                        <Button Content="↓" Width="24" Padding="0" Command="{Binding CondMoveDown}" ToolTip.Tip="Move down"/>
                     </StackPanel>
                 </DockPanel>
 
-                <!-- Conditions list -->
                 <ListBox DockPanel.Dock="Top"
-                         Height="140"
+                         Height="160"
                          ItemsSource="{Binding Conditions}"
                          SelectedItem="{Binding SelectedCondition}"
-                         Margin="0,0,0,8"/>
+                         Margin="0,0,0,8">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding DisplayName}" VerticalAlignment="Center"/>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
 
-                <!-- Condition editor panel -->
-                <Border Background="{StaticResource BgPanel}"
-                        BorderBrush="{StaticResource Border}"
+                <Border Background="#0A0E13"
+                        BorderBrush="#26303A"
                         BorderThickness="1"
                         CornerRadius="3"
-                        Padding="8"
+                        Padding="10"
                         MinHeight="80">
-                    <ContentControl Content="{Binding ConditionEditor}"/>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                        <ContentControl Content="{Binding ConditionEditor}"/>
+                    </ScrollViewer>
                 </Border>
-
             </DockPanel>
-
+            </Border>
         </Grid>
+        </TabItem>
+
+        <!-- ─── Salvage Combine tab ───────────────────────────────────────── -->
+        <TabItem Header="Salvage Combine">
+            <DockPanel Margin="10">
+                <Grid DockPanel.Dock="Top" Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="120"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <CheckBox Grid.Column="0"
+                              Content="Enable workmanship-band combining"
+                              IsChecked="{Binding SalvageEnabled}"
+                              VerticalAlignment="Center"
+                              Margin="0,0,16,0"/>
+                    <TextBlock Grid.Column="1" Text="Default bands"
+                               VerticalAlignment="Center" Foreground="{StaticResource FgMuted}"
+                               Margin="0,0,4,0"/>
+                    <TextBox Grid.Column="2"
+                             Text="{Binding SalvageDefaultBands}"
+                             Watermark="e.g. 1-6, 7-8, 9, 10"/>
+                    <Button Grid.Column="3"
+                            Content="Import from .utl…"
+                            Command="{Binding SalvageImportUtl}"
+                            Margin="8,0,0,0"
+                            ToolTip.Tip="Read SalvageCombine block from a LootSnob/VTank .utl file."/>
+                </Grid>
+
+                <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4">
+                    <TextBlock Text="Per-material overrides"
+                               Foreground="{StaticResource FgAccent}"
+                               FontSize="13"
+                               VerticalAlignment="Center"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="3">
+                        <Button Content="+" Width="24" Padding="0" Command="{Binding SalvageRowAdd}"    ToolTip.Tip="Add material override"/>
+                        <Button Content="−" Width="24" Padding="0" Command="{Binding SalvageRowDelete}" ToolTip.Tip="Remove selected"/>
+                    </StackPanel>
+                </DockPanel>
+
+                <DataGrid ItemsSource="{Binding PerMaterialRows}"
+                          SelectedItem="{Binding SelectedSalvageRow}"
+                          AutoGenerateColumns="False"
+                          GridLinesVisibility="Horizontal"
+                          IsReadOnly="False"
+                          CanUserResizeColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTemplateColumn Header="Material" Width="240">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <ComboBox ItemsSource="{Binding $parent[DataGrid].DataContext.MaterialOptions}"
+                                              DisplayMemberBinding="{Binding Display}"
+                                              SelectedValueBinding="{Binding Id}"
+                                              SelectedValue="{Binding MaterialId, Mode=TwoWay}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Header="Bands"
+                                            Binding="{Binding BandsText}"
+                                            Width="*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </DockPanel>
+        </TabItem>
+
+        </TabControl>
     </DockPanel>
 </Window>
