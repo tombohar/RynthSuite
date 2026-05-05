@@ -2080,3 +2080,37 @@ Check if player name matches a pattern:
 
 Nested iif for a three-way branch:
     iif[getcharintprop[1] < 20, critical, iif[getcharintprop[1] < 50, low, ok]]
+
+
+────────────────────────────────────────────────────────────────────────────
+Creature profile lookups (persistent store)
+────────────────────────────────────────────────────────────────────────────
+
+Captured passively from successful Assess Creature responses; persists across
+sessions and characters in C:\Games\RynthSuite\RynthAi\CreatureData\creatures.json.
+The "target" argument may be either a wobject handle or a creature name string.
+
+creaturehasprofile[target]
+    Returns "1" if a profile exists for this creature, "0" otherwise.
+    Example: creaturehasprofile[wobjectgetselection[]]
+
+creaturegetmaxhealth[target]
+    Returns the highest observed MaxHealth, or "0" if no profile.
+    Example: creaturegetmaxhealth[wobjectgetselection[]]
+    Example: creaturegetmaxhealth[Tusker Guard]
+
+creaturegetresist[target, type]
+    Returns the elemental resistance multiplier (1.0 = neutral, <1 = weak, >1 = strong).
+    type may be: slash, pierce, bludgeon, fire, cold, acid, electric (or short forms
+    sl/pi/bl/fi/co/ac/el; "lightning" aliases electric).
+    Example: creaturegetresist[wobjectgetselection[], pierce]
+
+creaturegetweakest[target]
+    Returns the name of the damage type with the lowest observed resist
+    (one of: slash, pierce, bludgeon, fire, cold, acid, electric).
+    Returns "" if no profile exists.
+    Example: iif[creaturegetweakest[wobjectgetselection[]] == fire, fire, slash]
+
+creaturegetarmor[target]
+    Returns the observed ArmorLevel, or "0" if no profile.
+    Example: creaturegetarmor[wobjectgetselection[]]

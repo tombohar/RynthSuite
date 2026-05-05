@@ -19,6 +19,10 @@ internal sealed class LegacyAdvancedSettingsUi
 
     public void SetMissileCraftingManager(MissileCraftingManager mgr) => _missileCraftingManager = mgr;
 
+    public string MissileCraftingState  => _missileCraftingManager?.State.ToString() ?? string.Empty;
+    public bool   MissileCraftingActive => _missileCraftingManager?.IsCrafting ?? false;
+    public string MissileCraftingStatus => _missileCraftingManager?.StatusMessage ?? string.Empty;
+
     public void Render()
     {
         if (!_settings.ShowAdvancedWindow)
@@ -169,6 +173,12 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.SliderInt("Blacklist Timeout (sec)", ref _settings.BlacklistTimeoutSec, 5, 120);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("How long a blacklisted mob is ignored before re-trying.");
+                ImGui.SetNextItemWidth(150);
+                ImGui.SliderInt("No Progress Timeout (sec)", ref _settings.TargetNoProgressTimeoutSec, 0, 300);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "Blacklist a target after being engaged this many seconds without dealing damage.\n" +
+                        "0 = disabled. Default 60s. Useful for targets stuck in geometry or unreachable.");
 
                 ImGui.Separator();
                 ImGui.Spacing();

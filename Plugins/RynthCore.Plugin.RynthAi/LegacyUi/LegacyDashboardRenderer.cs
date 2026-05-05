@@ -38,6 +38,7 @@ internal sealed class LegacyDashboardRenderer
     private readonly LegacyWeaponsUi _weaponsUi;
     private readonly LegacyMetaUi _metaUi;
     private readonly LegacyMonstersUi _monstersUi;
+    public LegacyMonstersUi MonstersUi => _monstersUi;
     private readonly DungeonMapUi _dungeonMapUi;
     private readonly RynthRadarUi _rynthRadarUi;
     private readonly RynthChatUi _rynthChatUi;
@@ -248,6 +249,9 @@ internal sealed class LegacyDashboardRenderer
         // and migrate existing rules to that file if it doesn't exist yet.
         MigrateMonstersToFile();
         LoadMonstersFromFile();
+        // Always re-insert the catch-all "Default" rule at index 0; without it the
+        // combat system has no fallback weapon/damage selection for unmatched mobs.
+        _settings.EnsureDefaultRule();
         SetupMonsterWatcher();
     }
 
@@ -436,6 +440,422 @@ internal sealed class LegacyDashboardRenderer
         catch { }
     }
 
+    // ── Radar bridge (used by the engine-side Avalonia radar panel) ─────────
+    /// <summary>
+    /// Builds a JSON snapshot for the Avalonia radar. Pass the engine's
+    /// currently-cached MapVersion (0 on first call); when it matches the live
+    /// landblock, walls/fills are omitted to keep the payload small.
+    /// </summary>
+    public string BuildRadarJson(uint engineKnownMapVersion)
+        => _rynthRadarUi.BuildSnapshotJson(engineKnownMapVersion);
+
+    // ── Monsters bridge (used by the engine-side Avalonia MonstersPanel) ────
+    /// <summary>
+    /// Builds a JSON payload describing the current MonsterRules + ItemRules
+    /// (for weapon/offhand picker) + currently-selected target name (for the
+    /// "Add Selected" button). Polled by the Avalonia panel.
+    /// </summary>
+    public string BuildMonstersJson()
+    {
+        try
+        {
+            var payload = new MonstersBridgePayload
+            {
+                Rules = _settings.MonsterRules ?? new List<MonsterRule>(),
+                Items = (_settings.ItemRules ?? new List<ItemRule>())
+                    .Select(r => new MonsterBridgeItem { Id = r.Id, Name = r.Name }).ToList(),
+                CurrentTargetName = _currentTargetId != 0 ? (_targetLabel ?? string.Empty) : string.Empty,
+            };
+
+            // Annotate each rule with captured creature data when available.
+            var store = CreatureLookupForRules;
+            if (store != null && payload.Rules.Count > 0)
+            {
+                foreach (var rule in payload.Rules)
+                {
+                    if (string.IsNullOrEmpty(rule.Name)) continue;
+                    var profile = store(rule.Name);
+                    if (profile == null) continue;
+                    var (weakType, weakVal) = CreatureData.CreatureProfileStore.GetWeakest(profile);
+                    payload.Captured[rule.Name] = new MonsterCapturedInfo
+                    {
+                        MaxHealth   = profile.MaxHealth,
+                        ArmorLevel  = profile.ArmorLevel,
+                        WeakestType = weakType,
+                        WeakestValue = weakVal,
+                        Samples     = profile.Samples,
+                    };
+                }
+            }
+            return JsonSerializer.Serialize(payload, RynthAiJsonContext.Default.MonstersBridgePayload);
+        }
+        catch
+        {
+            return "{\"rules\":[],\"items\":[],\"currentTargetName\":\"\",\"captured\":{}}";
+        }
+    }
+
+    /// <summary>Set by RynthAiPlugin so the snapshot can decorate rules with captured profile data.</summary>
+    public Func<string, CreatureData.CreatureProfile?>? CreatureLookupForRules { get; set; }
+
+    /// <summary>
+    /// Replaces the in-memory MonsterRules from JSON sent by the Avalonia panel
+    /// and saves to monsters.json. JSON shape: { "rules": [ MonsterRule, ... ] }.
+    /// Default rule (Name="Default") is always preserved at index 0 — if absent,
+    /// the existing one is kept; if present, it overrides.
+    /// </summary>
+    public void ApplyMonstersJson(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return;
+        try
+        {
+            var payload = JsonSerializer.Deserialize(json, RynthAiJsonContext.Default.MonstersBridgePayload);
+            if (payload?.Rules == null) return;
+
+            // Make sure a Default rule survives — every other code path assumes
+            // it exists (CombatManager fallback at LegacyUiSettings:322).
+            var incoming = payload.Rules;
+            bool hasDefault = incoming.Any(r => r.Name.Equals("Default", StringComparison.OrdinalIgnoreCase));
+            if (!hasDefault)
+            {
+                var existingDefault = _settings.MonsterRules
+                    .FirstOrDefault(r => r.Name.Equals("Default", StringComparison.OrdinalIgnoreCase));
+                if (existingDefault != null) incoming.Insert(0, existingDefault);
+            }
+
+            _settings.MonsterRules = incoming;
+            SaveMonstersFile();
+        }
+        catch { }
+    }
+
+    // ── Settings bridge (engine-side Avalonia SettingsPanel) ─────────────────
+
+    public string BuildSettingsJson()
+    {
+        try
+        {
+            var s = _settings;
+            var payload = new SettingsBridgePayload
+            {
+                // Display
+                ShowTargetStaminaMana      = s.ShowTargetStaminaMana,
+                // UI
+                SuppressRetailRadar        = s.SuppressRetailRadar,
+                ShowRynthRadar             = s.ShowRynthRadar,
+                RadarClickThrough          = s.RadarClickThrough,
+                SuppressRetailChat         = s.SuppressRetailChat,
+                ShowRynthChat              = s.ShowRynthChat,
+                ChatClickThrough           = s.ChatClickThrough,
+                SuppressRetailPowerbar     = s.SuppressRetailPowerbar,
+                // Misc
+                EnableFPSLimit             = s.EnableFPSLimit,
+                TargetFPSFocused           = s.TargetFPSFocused,
+                TargetFPSBackground        = s.TargetFPSBackground,
+                EnableAutocram             = s.EnableAutocram,
+                PeaceModeWhenIdle          = s.PeaceModeWhenIdle,
+                StartMacroOnLogin          = s.StartMacroOnLogin,
+                EnableRaycasting           = s.EnableRaycasting,
+                UseArcs                    = s.UseArcs,
+                BowArcVelocity             = s.BowArcVelocity,
+                CrossbowArcVelocity        = s.CrossbowArcVelocity,
+                AtlatlArcVelocity          = s.AtlatlArcVelocity,
+                MagicArcVelocity           = s.MagicArcVelocity,
+                BlacklistAttempts          = s.BlacklistAttempts,
+                BlacklistTimeoutSec        = s.BlacklistTimeoutSec,
+                TargetNoProgressTimeoutSec = s.TargetNoProgressTimeoutSec,
+                GiveQueueIntervalMs        = s.GiveQueueIntervalMs,
+                // Recharge
+                HealAt                     = s.HealAt,
+                RestamAt                   = s.RestamAt,
+                GetManaAt                  = s.GetManaAt,
+                TopOffHP                   = s.TopOffHP,
+                TopOffStam                 = s.TopOffStam,
+                TopOffMana                 = s.TopOffMana,
+                HealOthersAt               = s.HealOthersAt,
+                RestamOthersAt             = s.RestamOthersAt,
+                InfuseOthersAt             = s.InfuseOthersAt,
+                // Melee Combat
+                UseRecklessness            = s.UseRecklessness,
+                MeleeAttackPower           = s.MeleeAttackPower,
+                MeleeAttackHeight          = s.MeleeAttackHeight,
+                MissileAttackPower         = s.MissileAttackPower,
+                MissileAttackHeight        = s.MissileAttackHeight,
+                UseNativeAttack            = s.UseNativeAttack,
+                SummonPets                 = s.SummonPets,
+                PetMinMonsters             = s.PetMinMonsters,
+                // Spell Combat
+                SpellCastIntervalMs        = s.SpellCastIntervalMs,
+                CastDispelSelf             = s.CastDispelSelf,
+                MinRingTargets             = s.MinRingTargets,
+                MinSkillLevelTier1         = s.MinSkillLevelTier1,
+                MinSkillLevelTier2         = s.MinSkillLevelTier2,
+                MinSkillLevelTier3         = s.MinSkillLevelTier3,
+                MinSkillLevelTier4         = s.MinSkillLevelTier4,
+                MinSkillLevelTier5         = s.MinSkillLevelTier5,
+                MinSkillLevelTier6         = s.MinSkillLevelTier6,
+                MinSkillLevelTier7         = s.MinSkillLevelTier7,
+                MinSkillLevelTier8         = s.MinSkillLevelTier8,
+                // Ranges
+                MonsterRange               = s.MonsterRange,
+                RingRange                  = s.RingRange,
+                ApproachRange              = s.ApproachRange,
+                CorpseApproachRangeMax     = s.CorpseApproachRangeMax,
+                CorpseApproachRangeMin     = s.CorpseApproachRangeMin,
+                // Navigation
+                BoostNavPriority           = s.BoostNavPriority,
+                FollowNavMin               = s.FollowNavMin,
+                NavRingThickness           = s.NavRingThickness,
+                NavLineThickness           = s.NavLineThickness,
+                NavHeightOffset            = s.NavHeightOffset,
+                ShowTerrainPassability     = s.ShowTerrainPassability,
+                OpenDoors                  = s.OpenDoors,
+                OpenDoorRange              = s.OpenDoorRange,
+                AutoUnlockDoors            = s.AutoUnlockDoors,
+                MovementMode               = s.MovementMode,
+                NavStopTurnAngle           = s.NavStopTurnAngle,
+                NavResumeTurnAngle         = s.NavResumeTurnAngle,
+                NavDeadZone                = s.NavDeadZone,
+                NavSweepMult               = s.NavSweepMult,
+                PostPortalDelaySec         = s.PostPortalDelaySec,
+                T2Speed                    = s.T2Speed,
+                T2WalkWithinYd             = s.T2WalkWithinYd,
+                T2DistanceTo               = s.T2DistanceTo,
+                T2ReissueMs                = s.T2ReissueMs,
+                T2MaxRangeYd               = s.T2MaxRangeYd,
+                T2MaxLandblocks            = s.T2MaxLandblocks,
+                // Buffing
+                EnableBuffing              = s.EnableBuffing,
+                RebuffWhenIdle             = s.RebuffWhenIdle,
+                RebuffSecondsRemaining     = s.RebuffSecondsRemaining,
+                BuffMinSkillLevelTier1     = s.BuffMinSkillLevelTier1,
+                BuffMinSkillLevelTier2     = s.BuffMinSkillLevelTier2,
+                BuffMinSkillLevelTier3     = s.BuffMinSkillLevelTier3,
+                BuffMinSkillLevelTier4     = s.BuffMinSkillLevelTier4,
+                BuffMinSkillLevelTier5     = s.BuffMinSkillLevelTier5,
+                BuffMinSkillLevelTier6     = s.BuffMinSkillLevelTier6,
+                BuffMinSkillLevelTier7     = s.BuffMinSkillLevelTier7,
+                BuffMinSkillLevelTier8     = s.BuffMinSkillLevelTier8,
+                // Crafting
+                EnableMissileCrafting      = s.EnableMissileCrafting,
+                MissileCraftingState       = _advancedSettingsUi.MissileCraftingState,
+                MissileCraftingActive      = _advancedSettingsUi.MissileCraftingActive,
+                MissileCraftingStatus      = _advancedSettingsUi.MissileCraftingStatus,
+                // Looting
+                EnableLooting              = s.EnableLooting,
+                BoostLootPriority          = s.BoostLootPriority,
+                LootOnlyRareCorpses        = s.LootOnlyRareCorpses,
+                LootJumpEnabled            = s.LootJumpEnabled,
+                LootJumpHeight             = s.LootJumpHeight,
+                LootOwnership              = s.LootOwnership,
+                EnableAutostack            = s.EnableAutostack,
+                EnableCombineSalvage       = s.EnableCombineSalvage,
+                CombineBagsDuringSalvage   = s.CombineBagsDuringSalvage,
+                LootInterItemDelayMs       = s.LootInterItemDelayMs,
+                LootContentSettleMs        = s.LootContentSettleMs,
+                LootEmptyCorpseMs          = s.LootEmptyCorpseMs,
+                LootClosingDelayMs         = s.LootClosingDelayMs,
+                LootAssessWindowMs         = s.LootAssessWindowMs,
+                LootRetryTimeoutMs         = s.LootRetryTimeoutMs,
+                LootOpenRetryMs            = s.LootOpenRetryMs,
+                LootCorpseTimeoutMs        = s.LootCorpseTimeoutMs,
+                SalvageOpenDelayFirstMs    = s.SalvageOpenDelayFirstMs,
+                SalvageOpenDelayFastMs     = s.SalvageOpenDelayFastMs,
+                SalvageAddDelayFirstMs     = s.SalvageAddDelayFirstMs,
+                SalvageAddDelayFastMs      = s.SalvageAddDelayFastMs,
+                SalvageSalvageDelayMs      = s.SalvageSalvageDelayMs,
+                SalvageResultDelayFirstMs  = s.SalvageResultDelayFirstMs,
+                SalvageResultDelayFastMs   = s.SalvageResultDelayFastMs,
+            };
+            return JsonSerializer.Serialize(payload, RynthAiJsonContext.Default.SettingsBridgePayload);
+        }
+        catch
+        {
+            return "{}";
+        }
+    }
+
+    public void ApplySettingsJson(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return;
+        try
+        {
+            var p = JsonSerializer.Deserialize(json, RynthAiJsonContext.Default.SettingsBridgePayload);
+            if (p == null) return;
+            var s = _settings;
+            // Display
+            s.ShowTargetStaminaMana      = p.ShowTargetStaminaMana;
+            // UI
+            s.SuppressRetailRadar        = p.SuppressRetailRadar;
+            s.ShowRynthRadar             = p.ShowRynthRadar;
+            s.RadarClickThrough          = p.RadarClickThrough;
+            s.SuppressRetailChat         = p.SuppressRetailChat;
+            s.ShowRynthChat              = p.ShowRynthChat;
+            s.ChatClickThrough           = p.ChatClickThrough;
+            s.SuppressRetailPowerbar     = p.SuppressRetailPowerbar;
+            // Misc
+            s.EnableFPSLimit             = p.EnableFPSLimit;
+            s.TargetFPSFocused           = p.TargetFPSFocused;
+            s.TargetFPSBackground        = p.TargetFPSBackground;
+            s.EnableAutocram             = p.EnableAutocram;
+            s.PeaceModeWhenIdle          = p.PeaceModeWhenIdle;
+            s.StartMacroOnLogin          = p.StartMacroOnLogin;
+            s.EnableRaycasting           = p.EnableRaycasting;
+            s.UseArcs                    = p.UseArcs;
+            s.BowArcVelocity             = p.BowArcVelocity;
+            s.CrossbowArcVelocity        = p.CrossbowArcVelocity;
+            s.AtlatlArcVelocity          = p.AtlatlArcVelocity;
+            s.MagicArcVelocity           = p.MagicArcVelocity;
+            s.BlacklistAttempts          = p.BlacklistAttempts;
+            s.BlacklistTimeoutSec        = p.BlacklistTimeoutSec;
+            s.TargetNoProgressTimeoutSec = p.TargetNoProgressTimeoutSec;
+            s.GiveQueueIntervalMs        = p.GiveQueueIntervalMs;
+            // Recharge
+            s.HealAt                     = p.HealAt;
+            s.RestamAt                   = p.RestamAt;
+            s.GetManaAt                  = p.GetManaAt;
+            s.TopOffHP                   = p.TopOffHP;
+            s.TopOffStam                 = p.TopOffStam;
+            s.TopOffMana                 = p.TopOffMana;
+            s.HealOthersAt               = p.HealOthersAt;
+            s.RestamOthersAt             = p.RestamOthersAt;
+            s.InfuseOthersAt             = p.InfuseOthersAt;
+            // Melee Combat
+            s.UseRecklessness            = p.UseRecklessness;
+            s.MeleeAttackPower           = p.MeleeAttackPower;
+            s.MeleeAttackHeight          = p.MeleeAttackHeight;
+            s.MissileAttackPower         = p.MissileAttackPower;
+            s.MissileAttackHeight        = p.MissileAttackHeight;
+            s.UseNativeAttack            = p.UseNativeAttack;
+            s.SummonPets                 = p.SummonPets;
+            s.PetMinMonsters             = p.PetMinMonsters;
+            // Spell Combat
+            s.SpellCastIntervalMs        = p.SpellCastIntervalMs;
+            s.CastDispelSelf             = p.CastDispelSelf;
+            s.MinRingTargets             = p.MinRingTargets;
+            s.MinSkillLevelTier1         = p.MinSkillLevelTier1;
+            s.MinSkillLevelTier2         = p.MinSkillLevelTier2;
+            s.MinSkillLevelTier3         = p.MinSkillLevelTier3;
+            s.MinSkillLevelTier4         = p.MinSkillLevelTier4;
+            s.MinSkillLevelTier5         = p.MinSkillLevelTier5;
+            s.MinSkillLevelTier6         = p.MinSkillLevelTier6;
+            s.MinSkillLevelTier7         = p.MinSkillLevelTier7;
+            s.MinSkillLevelTier8         = p.MinSkillLevelTier8;
+            // Ranges
+            s.MonsterRange               = p.MonsterRange;
+            s.RingRange                  = p.RingRange;
+            s.ApproachRange              = p.ApproachRange;
+            s.CorpseApproachRangeMax     = p.CorpseApproachRangeMax;
+            s.CorpseApproachRangeMin     = p.CorpseApproachRangeMin;
+            // Navigation
+            s.BoostNavPriority           = p.BoostNavPriority;
+            s.FollowNavMin               = p.FollowNavMin;
+            s.NavRingThickness           = p.NavRingThickness;
+            s.NavLineThickness           = p.NavLineThickness;
+            s.NavHeightOffset            = p.NavHeightOffset;
+            s.ShowTerrainPassability     = p.ShowTerrainPassability;
+            s.OpenDoors                  = p.OpenDoors;
+            s.OpenDoorRange              = p.OpenDoorRange;
+            s.AutoUnlockDoors            = p.AutoUnlockDoors;
+            s.MovementMode               = p.MovementMode;
+            s.NavStopTurnAngle           = p.NavStopTurnAngle;
+            s.NavResumeTurnAngle         = p.NavResumeTurnAngle;
+            s.NavDeadZone                = p.NavDeadZone;
+            s.NavSweepMult               = p.NavSweepMult;
+            s.PostPortalDelaySec         = p.PostPortalDelaySec;
+            s.T2Speed                    = p.T2Speed;
+            s.T2WalkWithinYd             = p.T2WalkWithinYd;
+            s.T2DistanceTo               = p.T2DistanceTo;
+            s.T2ReissueMs                = p.T2ReissueMs;
+            s.T2MaxRangeYd               = p.T2MaxRangeYd;
+            s.T2MaxLandblocks            = p.T2MaxLandblocks;
+            // Buffing
+            s.EnableBuffing              = p.EnableBuffing;
+            s.RebuffWhenIdle             = p.RebuffWhenIdle;
+            s.RebuffSecondsRemaining     = p.RebuffSecondsRemaining;
+            s.BuffMinSkillLevelTier1     = p.BuffMinSkillLevelTier1;
+            s.BuffMinSkillLevelTier2     = p.BuffMinSkillLevelTier2;
+            s.BuffMinSkillLevelTier3     = p.BuffMinSkillLevelTier3;
+            s.BuffMinSkillLevelTier4     = p.BuffMinSkillLevelTier4;
+            s.BuffMinSkillLevelTier5     = p.BuffMinSkillLevelTier5;
+            s.BuffMinSkillLevelTier6     = p.BuffMinSkillLevelTier6;
+            s.BuffMinSkillLevelTier7     = p.BuffMinSkillLevelTier7;
+            s.BuffMinSkillLevelTier8     = p.BuffMinSkillLevelTier8;
+            // Crafting (EnableMissileCrafting is writable; state fields are read-only)
+            s.EnableMissileCrafting      = p.EnableMissileCrafting;
+            // Looting
+            s.EnableLooting              = p.EnableLooting;
+            s.BoostLootPriority          = p.BoostLootPriority;
+            s.LootOnlyRareCorpses        = p.LootOnlyRareCorpses;
+            s.LootJumpEnabled            = p.LootJumpEnabled;
+            s.LootJumpHeight             = p.LootJumpHeight;
+            s.LootOwnership              = p.LootOwnership;
+            s.EnableAutostack            = p.EnableAutostack;
+            s.EnableCombineSalvage       = p.EnableCombineSalvage;
+            s.CombineBagsDuringSalvage   = p.CombineBagsDuringSalvage;
+            s.LootInterItemDelayMs       = p.LootInterItemDelayMs;
+            s.LootContentSettleMs        = p.LootContentSettleMs;
+            s.LootEmptyCorpseMs          = p.LootEmptyCorpseMs;
+            s.LootClosingDelayMs         = p.LootClosingDelayMs;
+            s.LootAssessWindowMs         = p.LootAssessWindowMs;
+            s.LootRetryTimeoutMs         = p.LootRetryTimeoutMs;
+            s.LootOpenRetryMs            = p.LootOpenRetryMs;
+            s.LootCorpseTimeoutMs        = p.LootCorpseTimeoutMs;
+            s.SalvageOpenDelayFirstMs    = p.SalvageOpenDelayFirstMs;
+            s.SalvageOpenDelayFastMs     = p.SalvageOpenDelayFastMs;
+            s.SalvageAddDelayFirstMs     = p.SalvageAddDelayFirstMs;
+            s.SalvageAddDelayFastMs      = p.SalvageAddDelayFastMs;
+            s.SalvageSalvageDelayMs      = p.SalvageSalvageDelayMs;
+            s.SalvageResultDelayFirstMs  = p.SalvageResultDelayFirstMs;
+            s.SalvageResultDelayFastMs   = p.SalvageResultDelayFastMs;
+            SaveSettings();
+        }
+        catch { }
+    }
+
+    // ── Items bridge (engine-side Avalonia ItemsPanel) ────────────────────────
+
+    public string BuildItemsJson()
+    {
+        try
+        {
+            var payload = new ItemsBridgePayload
+            {
+                Weapons           = _settings.ItemRules ?? new List<ItemRule>(),
+                Consumables       = _settings.ConsumableRules ?? new List<ConsumableRule>(),
+                EnableManaTapping = _settings.EnableManaTapping,
+                ManaTapMinMana    = _settings.ManaTapMinMana,
+                ManaStoneKeepCount = _settings.ManaStoneKeepCount,
+                CurrentTargetName = _currentTargetId != 0 ? (_targetLabel ?? string.Empty) : string.Empty,
+            };
+            return JsonSerializer.Serialize(payload, RynthAiJsonContext.Default.ItemsBridgePayload);
+        }
+        catch
+        {
+            return "{}";
+        }
+    }
+
+    public void ApplyItemsJson(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return;
+        try
+        {
+            var p = JsonSerializer.Deserialize(json, RynthAiJsonContext.Default.ItemsBridgePayload);
+            if (p == null) return;
+            _settings.ItemRules          = p.Weapons;
+            _settings.ConsumableRules    = p.Consumables;
+            _settings.EnableManaTapping  = p.EnableManaTapping;
+            _settings.ManaTapMinMana     = p.ManaTapMinMana;
+            _settings.ManaStoneKeepCount = p.ManaStoneKeepCount;
+            SaveSettings();
+        }
+        catch { }
+    }
+
+    public void AddSelectedWeapon()     { _weaponsUi.AddSelectedWeapon();     SaveSettings(); }
+    public void AddSelectedConsumable() { _weaponsUi.AddSelectedConsumable(); SaveSettings(); }
+
     private (uint Id, string Name)? GetCurrentTargetForMonsterAdd()
     {
         if (_currentTargetId == 0) return null;
@@ -508,7 +928,7 @@ internal sealed class LegacyDashboardRenderer
         DashWindows.ShowNavigation  = _settings.DashShowNavigation;
         DashWindows.ShowMacroRules  = _settings.DashShowMacroRules;
         DashWindows.ShowMonsters    = _settings.DashShowMonsters;
-        DashWindows.ShowDungeonMap  = _settings.DashShowDungeonMap;
+        DashWindows.ShowDungeonMap = _settings.DashShowDungeonMap;
     }
 
     private string GetProfileFilePath(string profileName)
@@ -669,6 +1089,8 @@ internal sealed class LegacyDashboardRenderer
         dst.LootRetryTimeoutMs       = tmp.LootRetryTimeoutMs;
         dst.LootOpenRetryMs          = tmp.LootOpenRetryMs;
         dst.LootCorpseTimeoutMs      = tmp.LootCorpseTimeoutMs;
+        dst.LootJumpEnabled          = tmp.LootJumpEnabled;
+        dst.LootJumpHeight           = tmp.LootJumpHeight;
         dst.SalvageOpenDelayFirstMs  = tmp.SalvageOpenDelayFirstMs;
         dst.SalvageOpenDelayFastMs   = tmp.SalvageOpenDelayFastMs;
         dst.SalvageAddDelayFirstMs   = tmp.SalvageAddDelayFirstMs;
@@ -716,14 +1138,20 @@ internal sealed class LegacyDashboardRenderer
         dst.PeaceModeWhenIdle        = tmp.PeaceModeWhenIdle;
         dst.RebuffWhenIdle           = tmp.RebuffWhenIdle;
         dst.RebuffSecondsRemaining   = tmp.RebuffSecondsRemaining;
-        dst.BlacklistAttempts        = tmp.BlacklistAttempts;
-        dst.BlacklistTimeoutSec      = tmp.BlacklistTimeoutSec;
+        dst.BlacklistAttempts             = tmp.BlacklistAttempts;
+        dst.BlacklistTimeoutSec           = tmp.BlacklistTimeoutSec;
+        dst.TargetNoProgressTimeoutSec    = tmp.TargetNoProgressTimeoutSec;
         dst.MeleeAttackPower         = tmp.MeleeAttackPower;
         dst.MissileAttackPower       = tmp.MissileAttackPower;
         dst.UseRecklessness          = tmp.UseRecklessness;
         dst.UseNativeAttack          = tmp.UseNativeAttack;
         dst.MeleeAttackHeight        = tmp.MeleeAttackHeight;
         dst.MissileAttackHeight      = tmp.MissileAttackHeight;
+        dst.UseArcs                  = tmp.UseArcs;
+        dst.BowArcVelocity           = tmp.BowArcVelocity;
+        dst.CrossbowArcVelocity      = tmp.CrossbowArcVelocity;
+        dst.AtlatlArcVelocity        = tmp.AtlatlArcVelocity;
+        dst.MagicArcVelocity         = tmp.MagicArcVelocity;
         dst.EnableFPSLimit           = tmp.EnableFPSLimit;
         dst.TargetFPSFocused         = tmp.TargetFPSFocused;
         dst.TargetFPSBackground      = tmp.TargetFPSBackground;
@@ -756,6 +1184,9 @@ internal sealed class LegacyDashboardRenderer
         dst.MapShowCreatures         = tmp.MapShowCreatures;
         dst.MapShowToolbar           = tmp.MapShowToolbar;
         dst.MapBgOpacity             = tmp.MapBgOpacity;
+        dst.MapRotateWithPlayer      = tmp.MapRotateWithPlayer;
+        dst.ShowRadarWalls           = tmp.ShowRadarWalls;
+        dst.RadarWallWorldRange      = tmp.RadarWallWorldRange;
         dst.MinSkillLevelTier1       = tmp.MinSkillLevelTier1;
         dst.MinSkillLevelTier2       = tmp.MinSkillLevelTier2;
         dst.MinSkillLevelTier3       = tmp.MinSkillLevelTier3;
@@ -764,6 +1195,14 @@ internal sealed class LegacyDashboardRenderer
         dst.MinSkillLevelTier6       = tmp.MinSkillLevelTier6;
         dst.MinSkillLevelTier7       = tmp.MinSkillLevelTier7;
         dst.MinSkillLevelTier8       = tmp.MinSkillLevelTier8;
+        dst.BuffMinSkillLevelTier1   = tmp.BuffMinSkillLevelTier1;
+        dst.BuffMinSkillLevelTier2   = tmp.BuffMinSkillLevelTier2;
+        dst.BuffMinSkillLevelTier3   = tmp.BuffMinSkillLevelTier3;
+        dst.BuffMinSkillLevelTier4   = tmp.BuffMinSkillLevelTier4;
+        dst.BuffMinSkillLevelTier5   = tmp.BuffMinSkillLevelTier5;
+        dst.BuffMinSkillLevelTier6   = tmp.BuffMinSkillLevelTier6;
+        dst.BuffMinSkillLevelTier7   = tmp.BuffMinSkillLevelTier7;
+        dst.BuffMinSkillLevelTier8   = tmp.BuffMinSkillLevelTier8;
         dst.EnableManaTapping        = tmp.EnableManaTapping;
         dst.ManaTapMinMana           = tmp.ManaTapMinMana;
         dst.ManaStoneKeepCount       = tmp.ManaStoneKeepCount;
@@ -840,7 +1279,28 @@ internal sealed class LegacyDashboardRenderer
         }
         else
         {
-            _targetHealthDisplay = $"{(int)(_targetHealthPercent * 100)}%";
+            // Try to resolve absolute health from previously identified creature data.
+            uint storedMax = 0;
+            var lookup = CreatureLookupForRules;
+            if (lookup != null && !string.IsNullOrEmpty(_targetLabel))
+            {
+                var profile = lookup(_targetLabel);
+                if (profile != null && profile.MaxHealth > 0)
+                    storedMax = profile.MaxHealth;
+            }
+
+            if (storedMax > 0)
+            {
+                _targetMaxHealth = storedMax;
+                _targetHealth = (uint)Math.Round(_targetHealthPercent * storedMax);
+                _targetHealthDisplay = $"{_targetHealth}/{storedMax}";
+            }
+            else
+            {
+                _targetHealth = 0;
+                _targetMaxHealth = 0;
+                _targetHealthDisplay = $"{(int)(_targetHealthPercent * 100)}%";
+            }
         }
 
         // Refresh stamina/mana from the creature vitals cache
@@ -931,14 +1391,29 @@ internal sealed class LegacyDashboardRenderer
         ImGuiWindowFlags flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoCollapse;
         if (_isMinimized) { flags |= ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoResize; _wasMinimized = true; }
         else if (_isLocked) flags |= ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove;
-        // Restore saved window position on first render after login
-        if (!_windowPosRestored && _settings.WindowPosX >= 0 && _settings.WindowPosY >= 0)
+        // Restore saved window position on first render after login. Sanity-
+        // check it against the current main viewport size — if the dashboard
+        // was dragged partly off-screen on a previous session, or the AC
+        // client window shrank since, the saved coords would render the
+        // dashboard somewhere invisible. Snap back to (50, 50) in that case.
+        if (!_windowPosRestored)
         {
-            ImGui.SetNextWindowPos(new Vector2(_settings.WindowPosX, _settings.WindowPosY), ImGuiCond.Always);
-            _windowPosRestored = true;
-        }
-        else
-        {
+            Vector2 vpSize = ImGui.GetMainViewport().Size;
+            float maxX = vpSize.X > 0 ? vpSize.X - 100 : 8000;
+            float maxY = vpSize.Y > 0 ? vpSize.Y - 100 : 6000;
+            float posX = _settings.WindowPosX;
+            float posY = _settings.WindowPosY;
+            bool inBounds =
+                posX >= 0 && posX <= maxX &&
+                posY >= 0 && posY <= maxY;
+            if (!inBounds)
+            {
+                posX = 50;
+                posY = 50;
+                _settings.WindowPosX = posX;
+                _settings.WindowPosY = posY;
+            }
+            ImGui.SetNextWindowPos(new Vector2(posX, posY), ImGuiCond.Always);
             _windowPosRestored = true;
         }
 
@@ -1105,6 +1580,7 @@ internal sealed class LegacyDashboardRenderer
                 {
                     _settings.LootProfileIdx = i;
                     _settings.CurrentLootPath = i == 0 ? string.Empty : Path.Combine(_lootFolder, _lootFiles[i]);
+                    SaveSettings();
                 }
             ImGui.EndCombo();
         }
@@ -1318,6 +1794,7 @@ internal sealed class LegacyDashboardRenderer
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Lua Scripts", "code", ref DashWindows.ShowLua);
         ImGui.TableNextRow();
         ImGui.TableNextColumn(); LegacyDashboardDrawing.GridBtn("Dungeon Map", "map", ref DashWindows.ShowDungeonMap);
+        ImGui.TableNextColumn();
         ImGui.EndTable();
     }
 
@@ -1418,7 +1895,14 @@ internal sealed class LegacyDashboardRenderer
     {
         if (_selectedNavIdx < 0 || _selectedNavIdx >= _navFiles.Count) return;
         string selection = _navFiles[_selectedNavIdx];
-        if (selection == "None") { _settings.CurrentNavPath = string.Empty; _settings.CurrentRoute.Points.Clear(); _settings.ActiveNavIndex = 0; return; }
+        if (selection == "None")
+        {
+            _settings.CurrentNavPath = string.Empty;
+            _settings.CurrentRoute.Points.Clear();
+            _settings.ActiveNavIndex = 0;
+            SaveSettings();
+            return;
+        }
         string filePath = Path.Combine(_navFolder, selection + ".nav");
         _settings.CurrentNavPath = filePath;
         _settings.CurrentRoute = NavRouteParser.Load(filePath);
@@ -1429,6 +1913,154 @@ internal sealed class LegacyDashboardRenderer
              _settings.CurrentRoute.RouteType == NavRouteType.Once)
                 ? 0
                 : FindNearestWaypoint(_settings.CurrentRoute);
+        SaveSettings();
+    }
+
+    // ── Nav bridge (engine-side Avalonia NavPanel) ────────────────────────────
+
+    public string BuildNavJson()
+    {
+        try
+        {
+            var points = new List<NavBridgePoint>(_settings.CurrentRoute.Points.Count);
+            for (int i = 0; i < _settings.CurrentRoute.Points.Count; i++)
+            {
+                var p = _settings.CurrentRoute.Points[i];
+                points.Add(new NavBridgePoint
+                {
+                    Idx  = i,
+                    Type = p.Type.ToString(),
+                    Desc = p.ToString(),
+                    NS   = p.NS,
+                    EW   = p.EW,
+                    Z    = p.Z,
+                });
+            }
+
+            int routeTypeInt = _settings.CurrentRoute.RouteType switch
+            {
+                NavRouteType.Circular => 1,
+                NavRouteType.Linear   => 2,
+                NavRouteType.Follow   => 3,
+                _                     => 4,  // Once
+            };
+
+            var payload = new NavBridgePayload
+            {
+                ActiveNavName     = string.IsNullOrEmpty(_settings.CurrentNavPath)
+                                        ? "None (Unsaved)"
+                                        : Path.GetFileName(_settings.CurrentNavPath),
+                NavStatusLine     = _settings.NavStatusLine ?? string.Empty,
+                NavIsStuck        = _settings.NavIsStuck,
+                MacroRunning      = _settings.IsMacroRunning,
+                NavigationEnabled = _settings.EnableNavigation,
+                RouteType         = routeTypeInt,
+                ActiveNavIndex    = _settings.ActiveNavIndex,
+                NavFiles          = new List<string>(_navFiles),
+                Points            = points,
+            };
+            return JsonSerializer.Serialize(payload, RynthAiJsonContext.Default.NavBridgePayload);
+        }
+        catch { return "{}"; }
+    }
+
+    public void HandleNavCommand(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return;
+        try
+        {
+            var cmd = JsonSerializer.Deserialize(json, RynthAiJsonContext.Default.NavCommand);
+            if (cmd == null) return;
+
+            switch (cmd.Cmd)
+            {
+                case "startNav":
+                    _settings.IsMacroRunning  = true;
+                    _settings.EnableNavigation = true;
+                    if (_settings.BotAction != "Navigating")
+                        _settings.BotAction = "Default";
+                    SaveSettings();
+                    break;
+
+                case "stopNav":
+                    _settings.EnableNavigation = false;
+                    SaveSettings();
+                    break;
+
+                case "addWaypoint":
+                    _host.SetMotion(0x6500000D, false); // stop TurnRight
+                    _host.SetMotion(0x6500000E, false); // stop TurnLeft
+                    if (_host.HasGetPlayerPose &&
+                        _host.TryGetPlayerPose(out _, out float wx, out float wy, out float wz, out _, out _, out _, out _) &&
+                        NavCoordinateHelper.TryGetNavCoords(_host, out double wNS, out double wEW))
+                    {
+                        InsertNavPoint(new NavPoint { NS = wNS, EW = wEW, Z = wz }, cmd.AddMode, cmd.InsertAt);
+                    }
+                    break;
+
+                case "addRecall":
+                    if (_host.HasGetPlayerPose &&
+                        _host.TryGetPlayerPose(out _, out float rx, out float ry, out float rz, out _, out _, out _, out _) &&
+                        NavCoordinateHelper.TryGetNavCoords(_host, out double rNS, out double rEW))
+                    {
+                        InsertNavPoint(new NavPoint { Type = NavPointType.Recall, NS = rNS, EW = rEW, Z = rz, SpellId = cmd.SpellId }, cmd.AddMode, cmd.InsertAt);
+                    }
+                    break;
+
+                case "deletePoint":
+                    int di = cmd.Index;
+                    if (di >= 0 && di < _settings.CurrentRoute.Points.Count)
+                    {
+                        _settings.CurrentRoute.Points.RemoveAt(di);
+                        if (_settings.ActiveNavIndex == di) _settings.ActiveNavIndex = 0;
+                        else if (_settings.ActiveNavIndex > di) _settings.ActiveNavIndex--;
+                        _navigationUi.TryAutoSaveNav();
+                    }
+                    break;
+
+                case "clearRoute":
+                    _settings.CurrentRoute.Points.Clear();
+                    _settings.ActiveNavIndex = 0;
+                    _navigationUi.TryAutoSaveNav();
+                    break;
+
+                case "saveRoute":
+                    if (!string.IsNullOrEmpty(_settings.CurrentNavPath))
+                    {
+                        try { _settings.CurrentRoute.Save(_settings.CurrentNavPath); } catch { }
+                    }
+                    break;
+
+                case "setRouteType":
+                    _settings.CurrentRoute.RouteType = cmd.RouteType switch
+                    {
+                        1 => NavRouteType.Circular,
+                        2 => NavRouteType.Linear,
+                        3 => NavRouteType.Follow,
+                        _ => NavRouteType.Once,
+                    };
+                    _navigationUi.TryAutoSaveNav();
+                    break;
+
+                case "loadNav":
+                    int ni = _navFiles.IndexOf(cmd.NavName);
+                    if (ni >= 0) { _selectedNavIdx = ni; LoadSelectedNav(); SaveSettings(); }
+                    break;
+            }
+        }
+        catch { }
+    }
+
+    private void InsertNavPoint(NavPoint pt, int addMode, int insertAt)
+    {
+        if (addMode == 0 || _settings.CurrentRoute.Points.Count == 0 || insertAt < 0)
+            _settings.CurrentRoute.Points.Add(pt);
+        else if (addMode == 1)
+            _settings.CurrentRoute.Points.Insert(insertAt, pt);
+        else
+            _settings.CurrentRoute.Points.Insert(Math.Min(insertAt + 1, _settings.CurrentRoute.Points.Count), pt);
+
+        _navigationUi.TryAutoSaveNav();
     }
 
     private int FindNearestWaypoint(NavRouteParser route)
@@ -1446,4 +2078,410 @@ internal sealed class LegacyDashboardRenderer
         return best;
     }
     private static string TruncateName(string? value, int max) => string.IsNullOrEmpty(value) ? string.Empty : value.Length > max ? value[..(max - 1)] + "..." : value;
+
+    // ── Snapshot bridge (read by the engine-side Avalonia RynthAi panel) ────
+    // The Avalonia panel mirrors this dashboard. It pulls a JSON snapshot via
+    // RynthPluginGetSnapshotJson every ~250ms and renders the same fields.
+
+    public string BuildSnapshotJson()
+    {
+        // Pull a fresh read every snapshot poll. If the cache is cold (right
+        // after hot reload), the host's TryGetPlayerVitals will still have
+        // returned zero — but the next OnUpdateHealth event or live qualities
+        // read will fix that within a tick or two.
+        RefreshPlayerVitals();
+
+        var sb = new System.Text.StringBuilder(2048);
+        sb.Append('{');
+        AppendBool(sb, "macroRunning", _settings.IsMacroRunning); sb.Append(',');
+        AppendString(sb, "currentState", _settings.CurrentState ?? string.Empty); sb.Append(',');
+        AppendString(sb, "botAction", _settings.BotAction ?? "Default"); sb.Append(',');
+        AppendString(sb, "selectedProfile", _settings.SelectedProfile ?? "Default"); sb.Append(',');
+        AppendStringArray(sb, "profiles", _profiles); sb.Append(',');
+        AppendStringArray(sb, "navProfiles", _navFiles); sb.Append(',');
+        AppendStringArray(sb, "lootProfiles", _lootFiles); sb.Append(',');
+        AppendStringArray(sb, "metaProfiles", _metaFiles); sb.Append(',');
+        AppendString(sb, "currentNavName",
+            string.IsNullOrEmpty(_settings.CurrentNavPath) ? "None" : Path.GetFileNameWithoutExtension(_settings.CurrentNavPath)); sb.Append(',');
+        AppendString(sb, "currentLootName",
+            string.IsNullOrEmpty(_settings.CurrentLootPath) ? "None" : Path.GetFileNameWithoutExtension(_settings.CurrentLootPath)); sb.Append(',');
+        AppendString(sb, "currentMetaName",
+            string.IsNullOrEmpty(_settings.CurrentMetaPath) ? "None" : Path.GetFileNameWithoutExtension(_settings.CurrentMetaPath)); sb.Append(',');
+        AppendInt(sb, "selectedNavIdx", _selectedNavIdx); sb.Append(',');
+        AppendInt(sb, "selectedLootIdx", _settings.LootProfileIdx); sb.Append(',');
+        AppendInt(sb, "selectedMetaIdx", _settings.MetaProfileIdx); sb.Append(',');
+        AppendInt(sb, "selectedProfileIdx", Math.Max(0, _profiles.IndexOf(_settings.SelectedProfile ?? string.Empty))); sb.Append(',');
+        AppendBool(sb, "combatEnabled", _settings.EnableCombat); sb.Append(',');
+        AppendBool(sb, "buffingEnabled", _settings.EnableBuffing); sb.Append(',');
+        AppendBool(sb, "navigationEnabled", _settings.EnableNavigation); sb.Append(',');
+        AppendBool(sb, "lootingEnabled", _settings.EnableLooting); sb.Append(',');
+        AppendBool(sb, "metaEnabled", _settings.EnableMeta); sb.Append(',');
+        AppendUInt(sb, "currentTargetId", _currentTargetId); sb.Append(',');
+        AppendString(sb, "targetLabel", _targetLabel ?? "NO TARGET"); sb.Append(',');
+        AppendFloat(sb, "targetHealthPercent", _targetHealthPercent); sb.Append(',');
+        AppendString(sb, "targetHealthDisplay", _targetHealthDisplay ?? "0"); sb.Append(',');
+        AppendUInt(sb, "targetHealth", _targetHealth); sb.Append(',');
+        AppendUInt(sb, "targetMaxHealth", _targetMaxHealth); sb.Append(',');
+        AppendUInt(sb, "targetStamina", _targetStamina); sb.Append(',');
+        AppendUInt(sb, "targetMaxStamina", _targetMaxStamina); sb.Append(',');
+        AppendUInt(sb, "targetMana", _targetMana); sb.Append(',');
+        AppendUInt(sb, "targetMaxMana", _targetMaxMana); sb.Append(',');
+        AppendUInt(sb, "playerHealth", _playerHealth); sb.Append(',');
+        AppendUInt(sb, "playerMaxHealth", _playerMaxHealth); sb.Append(',');
+        AppendUInt(sb, "playerStamina", _playerStamina); sb.Append(',');
+        AppendUInt(sb, "playerMaxStamina", _playerMaxStamina); sb.Append(',');
+        AppendUInt(sb, "playerMana", _playerMana); sb.Append(',');
+        AppendUInt(sb, "playerMaxMana", _playerMaxMana); sb.Append(',');
+        AppendBool(sb, "showTargetStaminaMana", _settings.ShowTargetStaminaMana); sb.Append(',');
+        AppendBool(sb, "isLocked", _isLocked); sb.Append(',');
+        AppendBool(sb, "isMinimized", _isMinimized); sb.Append(',');
+        AppendFloat(sb, "bgOpacity", _bgOpacity);
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    public void TogglePanelMacro() => _settings.IsMacroRunning = !_settings.IsMacroRunning;
+
+    public void SetSubsystemEnabled(int id, bool enabled)
+    {
+        switch (id)
+        {
+            case 0: _settings.EnableCombat = enabled; break;
+            case 1: _settings.EnableBuffing = enabled; break;
+            case 2: _settings.EnableNavigation = enabled; break;
+            case 3: _settings.EnableLooting = enabled; break;
+            case 4: _settings.EnableMeta = enabled; break;
+        }
+        SaveSettings();
+    }
+
+    /// <summary>
+    /// Profile kinds: 0 = nav, 1 = loot, 2 = meta, 3 = settings profile.
+    /// Index is into the matching list returned in BuildSnapshotJson.
+    /// </summary>
+    public void SelectProfileAtIndex(int kind, int index)
+    {
+        switch (kind)
+        {
+            case 0:
+                if (index >= 0 && index < _navFiles.Count) { _selectedNavIdx = index; LoadSelectedNav(); }
+                break;
+            case 1:
+                if (index >= 0 && index < _lootFiles.Count)
+                {
+                    _settings.LootProfileIdx = index;
+                    _settings.CurrentLootPath = index == 0 ? string.Empty : Path.Combine(_lootFolder, _lootFiles[index]);
+                    SaveSettings();
+                }
+                break;
+            case 2:
+                if (index >= 0 && index < _metaFiles.Count)
+                {
+                    _settings.MetaProfileIdx = index;
+                    string path = index == 0 ? string.Empty : Path.Combine(_metaFolder, _metaFiles[index]);
+                    _metaUi.LoadMacroFile(path);
+                    SaveSettings();
+                }
+                break;
+            case 3:
+                if (index >= 0 && index < _profiles.Count) SwitchProfile(_profiles[index]);
+                break;
+        }
+    }
+
+    public void RequestForceRebuff() => OnForceRebuffRequested?.Invoke();
+    public void RequestCancelForceRebuff() => OnCancelForceRebuffRequested?.Invoke();
+    public void AdjustOpacity(float delta) => _bgOpacity = Math.Clamp(_bgOpacity + delta, 0.1f, 1f);
+    public void TogglePanelLock() => _isLocked = !_isLocked;
+    public void TogglePanelMinimize() { _isMinimized = !_isMinimized; SaveSettings(); }
+    public bool IsPanelLocked => _isLocked;
+    public bool IsPanelMinimized => _isMinimized;
+
+    private static void AppendString(System.Text.StringBuilder sb, string key, string value)
+    {
+        sb.Append('"').Append(key).Append("\":\"");
+        AppendEscaped(sb, value);
+        sb.Append('"');
+    }
+
+    private static void AppendBool(System.Text.StringBuilder sb, string key, bool value)
+        => sb.Append('"').Append(key).Append("\":").Append(value ? "true" : "false");
+
+    private static void AppendInt(System.Text.StringBuilder sb, string key, int value)
+        => sb.Append('"').Append(key).Append("\":").Append(value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    private static void AppendUInt(System.Text.StringBuilder sb, string key, uint value)
+        => sb.Append('"').Append(key).Append("\":").Append(value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    private static void AppendFloat(System.Text.StringBuilder sb, string key, float value)
+    {
+        if (float.IsNaN(value) || float.IsInfinity(value)) value = 0f;
+        sb.Append('"').Append(key).Append("\":").Append(value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    private static void AppendStringArray(System.Text.StringBuilder sb, string key, IEnumerable<string> values)
+    {
+        sb.Append('"').Append(key).Append("\":[");
+        bool first = true;
+        foreach (string v in values)
+        {
+            if (!first) sb.Append(',');
+            first = false;
+            sb.Append('"');
+            AppendEscaped(sb, v ?? string.Empty);
+            sb.Append('"');
+        }
+        sb.Append(']');
+    }
+
+    private static void AppendEscaped(System.Text.StringBuilder sb, string value)
+    {
+        foreach (char c in value)
+        {
+            switch (c)
+            {
+                case '"':  sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\b': sb.Append("\\b"); break;
+                case '\f': sb.Append("\\f"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                default:
+                    if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("X4"));
+                    else sb.Append(c);
+                    break;
+            }
+        }
+    }
+
+    // ── Meta bridge ───────────────────────────────────────────────────────────
+
+    private static readonly string MetaFolder = @"C:\Games\RynthSuite\RynthAi\MetaFiles";
+
+    public string BuildMetaJson()
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append('{');
+        AppendBool(sb, "enableMeta", _settings.EnableMeta); sb.Append(',');
+        AppendBool(sb, "metaDebug", _settings.MetaDebug); sb.Append(',');
+        AppendString(sb, "currentState", _settings.CurrentState ?? "Default"); sb.Append(',');
+        AppendString(sb, "currentMetaPath", _settings.CurrentMetaPath ?? ""); sb.Append(',');
+
+        sb.Append("\"rules\":");
+        AppendMetaRuleArray(sb, _settings.MetaRules);
+        sb.Append(',');
+
+        var files = BuildMetaFileList();
+        sb.Append("\"files\":[");
+        for (int i = 0; i < files.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append("{\"path\":\""); AppendEscaped(sb, files[i].Item1); sb.Append("\",\"display\":\""); AppendEscaped(sb, files[i].Item2); sb.Append("\"}");
+        }
+        sb.Append("],");
+
+        var states = _settings.MetaRules.Select(r => r.State).Distinct().ToList();
+        if (!states.Contains("Default")) states.Insert(0, "Default");
+        AppendStringArray(sb, "states", states); sb.Append(',');
+
+        AppendStringArray(sb, "navFiles", _navFiles); sb.Append(',');
+        AppendStringArray(sb, "embeddedNavKeys", _settings.EmbeddedNavs.Keys); sb.Append(',');
+
+        string sourceText = "";
+        try { sourceText = AfFileWriter.SaveToString(_settings.MetaRules, _settings.EmbeddedNavs); } catch { }
+        AppendString(sb, "sourceText", sourceText);
+
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    private List<(string, string)> BuildMetaFileList()
+    {
+        var result = new List<(string, string)>();
+        result.Add(("", "-- None --"));
+        try
+        {
+            System.IO.Directory.CreateDirectory(MetaFolder);
+            var entries = new List<(string, string)>();
+            foreach (string f in System.IO.Directory.GetFiles(MetaFolder, "*.met"))
+            {
+                string name = System.IO.Path.GetFileName(f);
+                if (!name.StartsWith("--")) entries.Add((f, $"[met] {name}"));
+            }
+            foreach (string f in System.IO.Directory.GetFiles(MetaFolder, "*.af"))
+                entries.Add((f, $"[af]  {System.IO.Path.GetFileName(f)}"));
+            entries.Sort((a, b) => string.Compare(a.Item2, b.Item2, System.StringComparison.OrdinalIgnoreCase));
+            result.AddRange(entries);
+        }
+        catch { }
+        return result;
+    }
+
+    private static void AppendMetaRuleArray(System.Text.StringBuilder sb, List<MetaRule> rules)
+    {
+        sb.Append('[');
+        for (int i = 0; i < rules.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            AppendMetaRule(sb, rules[i]);
+        }
+        sb.Append(']');
+    }
+
+    private static void AppendMetaRule(System.Text.StringBuilder sb, MetaRule r)
+    {
+        sb.Append('{');
+        sb.Append("\"state\":\""); AppendEscaped(sb, r.State ?? "Default"); sb.Append("\",");
+        sb.Append("\"condition\":").Append((int)r.Condition).Append(',');
+        sb.Append("\"conditionData\":\""); AppendEscaped(sb, r.ConditionData ?? ""); sb.Append("\",");
+        sb.Append("\"action\":").Append((int)r.Action).Append(',');
+        sb.Append("\"actionData\":\""); AppendEscaped(sb, r.ActionData ?? ""); sb.Append("\",");
+        sb.Append("\"children\":"); AppendMetaRuleArray(sb, r.Children ?? new List<MetaRule>()); sb.Append(',');
+        sb.Append("\"actionChildren\":"); AppendMetaRuleArray(sb, r.ActionChildren ?? new List<MetaRule>()); sb.Append(',');
+        long ms = r.LastFiredAt == DateTime.MinValue ? 99999L : (long)(DateTime.Now - r.LastFiredAt).TotalMilliseconds;
+        sb.Append("\"lastFiredMs\":").Append(ms.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        sb.Append('}');
+    }
+
+    public void HandleMetaCommand(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return;
+        try
+        {
+            var cmd = JsonSerializer.Deserialize(json, RynthAiJsonContext.Default.MetaCommand);
+            if (cmd == null) return;
+
+            switch (cmd.Op)
+            {
+                case "set_enabled":
+                    _settings.EnableMeta = string.Equals(cmd.Value, "true", System.StringComparison.OrdinalIgnoreCase);
+                    SaveSettings();
+                    break;
+
+                case "set_debug":
+                    _settings.MetaDebug = string.Equals(cmd.Value, "true", System.StringComparison.OrdinalIgnoreCase);
+                    SaveSettings();
+                    break;
+
+                case "set_state":
+                    if (!string.IsNullOrEmpty(cmd.Value))
+                    {
+                        _settings.CurrentState = cmd.Value;
+                        _settings.ForceStateReset = true;
+                    }
+                    break;
+
+                case "load_file":
+                    _metaUi.LoadMacroFile(cmd.Path ?? "");
+                    break;
+
+                case "save_file":
+                    if (!string.IsNullOrEmpty(cmd.Path))
+                    {
+                        AfFileWriter.Save(cmd.Path, _settings.MetaRules, _settings.EmbeddedNavs);
+                        _settings.CurrentMetaPath = cmd.Path;
+                        SaveSettings();
+                    }
+                    break;
+
+                case "set_source":
+                    if (!string.IsNullOrEmpty(cmd.Text))
+                    {
+                        try
+                        {
+                            var loaded = AfFileParser.LoadFromText(cmd.Text);
+                            if (loaded.Rules.Count > 0)
+                            {
+                                _settings.MetaRules = loaded.Rules;
+                                _settings.EmbeddedNavs.Clear();
+                                foreach (var kvp in loaded.EmbeddedNavs) _settings.EmbeddedNavs[kvp.Key] = kvp.Value;
+                                _settings.ForceStateReset = true;
+                                TryAutoSaveMetaCmd();
+                            }
+                        }
+                        catch { }
+                    }
+                    break;
+
+                case "add_rule":
+                    if (cmd.Rule != null)
+                    {
+                        _settings.MetaRules.Add(DtoToMetaRule(cmd.Rule));
+                        TryAutoSaveMetaCmd();
+                    }
+                    break;
+
+                case "update_rule":
+                    if (cmd.Rule != null && cmd.Index >= 0 && cmd.Index < _settings.MetaRules.Count)
+                    {
+                        _settings.MetaRules[cmd.Index] = DtoToMetaRule(cmd.Rule);
+                        TryAutoSaveMetaCmd();
+                    }
+                    break;
+
+                case "delete_rule":
+                    if (cmd.Index >= 0 && cmd.Index < _settings.MetaRules.Count)
+                    {
+                        _settings.MetaRules.RemoveAt(cmd.Index);
+                        TryAutoSaveMetaCmd();
+                    }
+                    break;
+
+                case "move_up":
+                    if (cmd.Index > 0 && cmd.Index < _settings.MetaRules.Count)
+                    {
+                        var tmp = _settings.MetaRules[cmd.Index - 1];
+                        _settings.MetaRules[cmd.Index - 1] = _settings.MetaRules[cmd.Index];
+                        _settings.MetaRules[cmd.Index] = tmp;
+                        TryAutoSaveMetaCmd();
+                    }
+                    break;
+
+                case "move_down":
+                    if (cmd.Index >= 0 && cmd.Index < _settings.MetaRules.Count - 1)
+                    {
+                        var tmp = _settings.MetaRules[cmd.Index + 1];
+                        _settings.MetaRules[cmd.Index + 1] = _settings.MetaRules[cmd.Index];
+                        _settings.MetaRules[cmd.Index] = tmp;
+                        TryAutoSaveMetaCmd();
+                    }
+                    break;
+            }
+        }
+        catch { }
+    }
+
+    private void TryAutoSaveMetaCmd()
+    {
+        if (string.IsNullOrEmpty(_settings.CurrentMetaPath)) return;
+        try
+        {
+            string path = _settings.CurrentMetaPath;
+            if (System.IO.Path.GetExtension(path).Equals(".met", System.StringComparison.OrdinalIgnoreCase))
+            {
+                path = System.IO.Path.ChangeExtension(path, ".af");
+                _settings.CurrentMetaPath = path;
+            }
+            AfFileWriter.Save(path, _settings.MetaRules, _settings.EmbeddedNavs);
+        }
+        catch { }
+    }
+
+    private static MetaRule DtoToMetaRule(MetaRuleDto dto)
+    {
+        var r = new MetaRule
+        {
+            State         = dto.State ?? "Default",
+            Condition     = (MetaConditionType)dto.Condition,
+            ConditionData = dto.ConditionData ?? "",
+            Action        = (MetaActionType)dto.Action,
+            ActionData    = dto.ActionData ?? "",
+        };
+        foreach (var c in dto.Children ?? new List<MetaRuleDto>())
+            r.Children.Add(DtoToMetaRule(c));
+        foreach (var a in dto.ActionChildren ?? new List<MetaRuleDto>())
+            r.ActionChildren.Add(DtoToMetaRule(a));
+        return r;
+    }
 }

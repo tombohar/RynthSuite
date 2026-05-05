@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using ImGuiNET;
+using RynthCore.Plugin.RynthAi.Maps;
 using RynthCore.Plugin.RynthAi.Raycasting;
 using RynthCore.PluginSdk;
 
@@ -29,6 +30,9 @@ internal sealed class RynthRadarUi
     private const float GridCell = 0.5f;
     private readonly System.Collections.Generic.HashSet<(int gx, int gy)> _visitedCells = new();
     private uint _visitedLandblock;
+    // Visited cells merged into strips — rebuilt only when _visitedCells grows.
+    private System.Collections.Generic.Dictionary<float, System.Collections.Generic.List<(float x0, float y0, float x1, float y1)>>? _visitedFillStrips;
+    private int _lastVisitedCount = -1;
 
     // Colours
     private static readonly uint ColFrameOuter  = ImGui.ColorConvertFloat4ToU32(new Vector4(0.04f, 0.05f, 0.08f, 1.00f));
@@ -44,8 +48,11 @@ internal sealed class RynthRadarUi
     private static readonly uint ColWallUnseen   = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 1.00f, 1.00f, 1.00f));
     private static readonly uint ColWallVisited  = ImGui.ColorConvertFloat4ToU32(new Vector4(0.25f, 0.60f, 1.00f, 1.00f));
 
-    // Floor fill — kept subtle under the walls.
-    private static readonly uint ColFloorFill    = ImGui.ColorConvertFloat4ToU32(new Vector4(0.12f, 0.18f, 0.28f, 0.55f));
+    // Floor fill colours.
+    private static readonly uint ColFloorFlatUnvisited = ImGui.ColorConvertFloat4ToU32(new Vector4(0.18f, 0.55f, 0.22f, 0.55f)); // green — unvisited flat
+    private static readonly uint ColFloorFill          = ImGui.ColorConvertFloat4ToU32(new Vector4(0.12f, 0.18f, 0.28f, 0.55f)); // dim blue — slopes / non-flat
+    // Visited flat floor overlay — slate blue matching the UI accent family.
+    private static readonly uint ColFloorVisited       = ImGui.ColorConvertFloat4ToU32(new Vector4(0.30f, 0.42f, 0.58f, 0.65f));
 
     // Marker colours — all distinct so they read at a glance.
     private static readonly uint ColPlayer       = ImGui.ColorConvertFloat4ToU32(new Vector4(0.20f, 1.00f, 0.40f, 1.00f)); // green
@@ -190,6 +197,8 @@ internal sealed class RynthRadarUi
         {
             _visitedLandblock = landblock;
             _visitedCells.Clear();
+            _visitedFillStrips = null;
+            _lastVisitedCount = -1;
         }
 
         // Mark the player's current grid cell as visited (plus a user-tunable
@@ -202,6 +211,13 @@ internal sealed class RynthRadarUi
             for (int oy = -r; oy <= r; oy++)
                 for (int ox = -r; ox <= r; ox++)
                     _visitedCells.Add((pgx + ox, pgy + oy));
+        }
+
+        // Rebuild visited strips only when new cells were added.
+        if (_visitedCells.Count != _lastVisitedCount && _mapData != null)
+        {
+            _lastVisitedCount = _visitedCells.Count;
+            RebuildRadarVisitedStrips();
         }
 
         // ── Floor fill + outer edges (indoor, from shared big-map cache) ─
@@ -228,64 +244,154 @@ internal sealed class RynthRadarUi
                     float a      = order[li].alpha;
                     bool current = order[li].isCurrent;
 
-                    uint fillCol    = SetAlpha(ColFloorFill,   a * 0.55f);
-                    uint wallUnseen = SetAlpha(ColWallUnseen,  a);
-                    uint wallSeen   = SetAlpha(ColWallVisited, a);
-
-                    // Floor fill
-                    if (_mapData._fillStrips != null &&
-                        _mapData._fillStrips.TryGetValue(layerZ, out var strips))
+                    // ── Floor texture (fill + edges baked) or fallback strips ──
+                    if (_mapData._layerTextures != null &&
+                        _mapData._layerTextures.TryGetValue(layerZ, out var floorTex) &&
+                        floorTex.TexId != IntPtr.Zero)
                     {
-                        foreach (var (x0, y0, x1, y1, _) in strips)
+                        uint tint = ((uint)(a * 255f) << 24) | 0x00FFFFFFu;
+
+                        // World view: player ± innerRadius/zoom. We always render to the
+                        // full circle / square bounding box and bake the world-view extent
+                        // into the UVs. Earlier code clamped vx*/vy* to the texture's own
+                        // world bounds, which shrank the screen rect when the texture
+                        // didn't reach the full radar view, producing a "square inside
+                        // the circle" at moderate zoom. Sampler clamp at texture edges
+                        // is acceptable; ImGui's DX9 backend uses CLAMP, so UVs outside
+                        // [0,1] sample the edge pixels (transparent for our atlas).
+                        float worldR = innerRadius / zoom;
+                        float vx0 = playerWX - worldR;
+                        float vx1 = playerWX + worldR;
+                        float vy0 = playerWY - worldR;
+                        float vy1 = playerWY + worldR;
+
+                        float texW = floorTex.WorldX1 - floorTex.WorldX0;
+                        float texH = floorTex.WorldY1 - floorTex.WorldY0;
+                        float uvX0 = (vx0 - floorTex.WorldX0) / texW;
+                        float uvX1 = (vx1 - floorTex.WorldX0) / texW;
+                        float uvY0 = (floorTex.WorldY1 - vy1) / texH; // row 0 = north
+                        float uvY1 = (floorTex.WorldY1 - vy0) / texH;
+
+                        if (!rotate && circular)
                         {
-                            var p0 = ProjectWorld(x0, y0, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
-                            var p1 = ProjectWorld(x1, y1, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
-                            var min = new Vector2(MathF.Min(p0.X, p1.X), MathF.Min(p0.Y, p1.Y));
-                            var max = new Vector2(MathF.Max(p0.X, p1.X), MathF.Max(p0.Y, p1.Y));
+                            // Non-rotating circular radar: rect is the full circle bbox so
+                            // AddImageRounded(rounding=innerRadius) clips to a true circle.
+                            var sNW = new Vector2(centre.X - innerRadius, centre.Y - innerRadius);
+                            var sSE = new Vector2(centre.X + innerRadius, centre.Y + innerRadius);
+                            dl.AddImageRounded(floorTex.TexId, sNW, sSE,
+                                new Vector2(uvX0, uvY0), new Vector2(uvX1, uvY1),
+                                tint, innerRadius, ImDrawFlags.RoundCornersAll);
+                        }
+                        else if (!rotate)
+                        {
+                            // Square non-rotating radar: full square bbox, sampler-clamped UVs.
+                            var sNW = new Vector2(centre.X - innerRadius, centre.Y - innerRadius);
+                            var sSE = new Vector2(centre.X + innerRadius, centre.Y + innerRadius);
+                            dl.AddImage(floorTex.TexId, sNW, sSE,
+                                new Vector2(uvX0, uvY0), new Vector2(uvX1, uvY1), tint);
+                        }
+                        else
+                        {
+                            // Rotating radar: project 4 corners of the world view rect.
+                            // Circular clipping is not applied here — the rotated quad
+                            // can poke out of the circle. (Acceptable: rotate mode is
+                            // tightly bound to the radar canvas anyway.)
+                            var pNW = ProjectWorld(vx0, vy1, playerWX, playerWY, centre, zoom, true, sinH, cosH);
+                            var pNE = ProjectWorld(vx1, vy1, playerWX, playerWY, centre, zoom, true, sinH, cosH);
+                            var pSE = ProjectWorld(vx1, vy0, playerWX, playerWY, centre, zoom, true, sinH, cosH);
+                            var pSW = ProjectWorld(vx0, vy0, playerWX, playerWY, centre, zoom, true, sinH, cosH);
+                            dl.AddImageQuad(floorTex.TexId, pNW, pNE, pSE, pSW,
+                                new Vector2(uvX0, uvY0), new Vector2(uvX1, uvY0),
+                                new Vector2(uvX1, uvY1), new Vector2(uvX0, uvY1), tint);
+                        }
+                    }
+                    else if (_mapData._fillStrips != null &&
+                             _mapData._fillStrips.TryGetValue(layerZ, out var strips))
+                    {
+                        // Fallback fill strips
+                        foreach (var (x0, y0, x1, y1, stripType) in strips)
+                        {
+                            var p00 = ProjectWorld(x0, y0, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
+                            var p10 = ProjectWorld(x1, y0, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
+                            var p11 = ProjectWorld(x1, y1, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
+                            var p01 = ProjectWorld(x0, y1, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
+                            float sxMin = MathF.Min(p00.X, MathF.Min(p10.X, MathF.Min(p11.X, p01.X)));
+                            float sxMax = MathF.Max(p00.X, MathF.Max(p10.X, MathF.Max(p11.X, p01.X)));
+                            float syMin = MathF.Min(p00.Y, MathF.Min(p10.Y, MathF.Min(p11.Y, p01.Y)));
+                            float syMax = MathF.Max(p00.Y, MathF.Max(p10.Y, MathF.Max(p11.Y, p01.Y)));
+                            var min = new Vector2(sxMin, syMin);
+                            var max = new Vector2(sxMax, syMax);
                             if (max.X < clipMin.X || min.X > clipMax.X ||
                                 max.Y < clipMin.Y || min.Y > clipMax.Y) continue;
-                            // In circle mode, drop fill rects with any corner outside the circle
-                            // so the floor doesn't poke past the round frame.
-                            if (circular)
+                            // Disc is convex — all four corners inside ⇒ whole strip inside.
+                            if (circular &&
+                                (!InsideShape(p00) || !InsideShape(p10) ||
+                                 !InsideShape(p11) || !InsideShape(p01))) continue;
+
+                            uint stripFill = SetAlpha(
+                                stripType == DungeonMapUi.CellType.Flat ? ColFloorFlatUnvisited : ColFloorFill,
+                                a * 0.55f);
+                            if (rotate) dl.AddQuadFilled(p00, p10, p11, p01, stripFill);
+                            else        dl.AddRectFilled(min, max, stripFill);
+                        }
+
+                        // Fallback walls
+                        uint wallUnseen = SetAlpha(ColWallUnseen,  a);
+                        uint wallSeen   = SetAlpha(ColWallVisited, a);
+                        if (_mapData._outerEdgesRaw != null &&
+                            _mapData._outerEdgesRaw.TryGetValue(layerZ, out var rawEdges))
+                        {
+                            foreach (var (ax, ay, bx, by, _, cellGx, cellGy) in rawEdges)
                             {
-                                if (!InsideShape(new Vector2(min.X, min.Y)) ||
-                                    !InsideShape(new Vector2(max.X, min.Y)) ||
-                                    !InsideShape(new Vector2(min.X, max.Y)) ||
-                                    !InsideShape(new Vector2(max.X, max.Y))) continue;
+                                var p0 = ProjectWorld(ax, ay, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
+                                var p1 = ProjectWorld(bx, by, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
+                                if (MathF.Max(p0.X, p1.X) < clipMin.X || MathF.Min(p0.X, p1.X) > clipMax.X ||
+                                    MathF.Max(p0.Y, p1.Y) < clipMin.Y || MathF.Min(p0.Y, p1.Y) > clipMax.Y) continue;
+                                if (!InsideShape(p0) || !InsideShape(p1)) continue;
+                                uint col = (current && _visitedCells.Contains((cellGx, cellGy)))
+                                    ? wallSeen : wallUnseen;
+                                dl.AddLine(p0, p1, col, current ? 1.5f : 1.0f);
                             }
+                        }
+                    }
+
+                    // Visited flat floor overlay — drawn as pre-merged strips (current floor only).
+                    if (current && _visitedFillStrips != null &&
+                        _visitedFillStrips.TryGetValue(layerZ, out var vStrips))
+                    {
+                        uint visitedFillCol = SetAlpha(ColFloorVisited, a);
+                        foreach (var (wx0, wy0, wx1, wy1) in vStrips)
+                        {
+                            // Project all four corners of the world rect. We need them
+                            // anyway for the rotate path, and using all four for the
+                            // circle-cull keeps the visited overlay from bleeding past
+                            // the radar boundary when zoomed (which the old centre-only
+                            // check allowed). The disc is convex, so all-corners-inside
+                            // implies the whole strip is inside.
+                            var sp0 = ProjectWorld(wx0, wy0, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
+                            var sp1 = ProjectWorld(wx1, wy1, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
+                            var sp2 = ProjectWorld(wx1, wy0, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
+                            var sp3 = ProjectWorld(wx0, wy1, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
+
+                            float sxMin = MathF.Min(MathF.Min(sp0.X, sp1.X), MathF.Min(sp2.X, sp3.X));
+                            float sxMax = MathF.Max(MathF.Max(sp0.X, sp1.X), MathF.Max(sp2.X, sp3.X));
+                            float syMin = MathF.Min(MathF.Min(sp0.Y, sp1.Y), MathF.Min(sp2.Y, sp3.Y));
+                            float syMax = MathF.Max(MathF.Max(sp0.Y, sp1.Y), MathF.Max(sp2.Y, sp3.Y));
+
+                            if (sxMax < clipMin.X || sxMin > clipMax.X ||
+                                syMax < clipMin.Y || syMin > clipMax.Y) continue;
+                            if (circular &&
+                                (!InsideShape(sp0) || !InsideShape(sp1) ||
+                                 !InsideShape(sp2) || !InsideShape(sp3)))
+                                continue;
 
                             if (rotate)
-                            {
-                                var p2 = ProjectWorld(x1, y0, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
-                                var p3 = ProjectWorld(x0, y1, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
-                                dl.AddQuadFilled(p0, p2, p1, p3, fillCol);
-                            }
+                                dl.AddQuadFilled(sp0, sp2, sp1, sp3, visitedFillCol);
                             else
-                            {
-                                dl.AddRectFilled(min, max, fillCol);
-                            }
+                                dl.AddRectFilled(new Vector2(sxMin, syMin), new Vector2(sxMax, syMax), visitedFillCol);
                         }
                     }
 
-                    // Walls — per-cell raw edges so each segment can colour by visit state.
-                    // Visited-blue only applies to the current floor; adjacent floors stay
-                    // plain (dim) white so the current floor remains the focal point.
-                    if (_mapData._outerEdgesRaw != null &&
-                        _mapData._outerEdgesRaw.TryGetValue(layerZ, out var rawEdges))
-                    {
-                        foreach (var (ax, ay, bx, by, _, cellGx, cellGy) in rawEdges)
-                        {
-                            var p0 = ProjectWorld(ax, ay, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
-                            var p1 = ProjectWorld(bx, by, playerWX, playerWY, centre, zoom, rotate, sinH, cosH);
-                            if (MathF.Max(p0.X, p1.X) < clipMin.X || MathF.Min(p0.X, p1.X) > clipMax.X ||
-                                MathF.Max(p0.Y, p1.Y) < clipMin.Y || MathF.Min(p0.Y, p1.Y) > clipMax.Y) continue;
-                            if (!InsideShape(p0) || !InsideShape(p1)) continue;
-
-                            uint col = (current && _visitedCells.Contains((cellGx, cellGy)))
-                                ? wallSeen : wallUnseen;
-                            dl.AddLine(p0, p1, col, current ? 1.5f : 1.0f);
-                        }
-                    }
                 }
             }
         }
@@ -389,7 +495,25 @@ internal sealed class RynthRadarUi
             dl.AddLine(centre, new Vector2(centre.X + ax, centre.Y + ay), ColPlayer, 2f);
         }
 
+        // In rotate+circular mode, mask any texture bleed outside the circle boundary
+        // by overdrawing the 4 corner areas (inside clip rect, outside circle) with the
+        // canvas background colour. Without this, AddImageQuad corners poke past the ring.
+        if (circular && rotate)
+        {
+            uint maskCol = SetAlpha(ColCanvasBg, Math.Clamp(_settings.RadarOpacity, 0f, 1f));
+            DrawCircleCornerMasks(dl, centre, innerRadius, clipMin, clipMax, maskCol);
+        }
+
         dl.PopClipRect();
+
+        // Re-draw the circle outline rings after content so they always appear on top,
+        // covering any residual bleed right at the circle edge.
+        if (circular)
+        {
+            float ringR = sq * 0.5f - 2f;
+            dl.AddCircle(centre, ringR,     ColFrameOuter, 64, 2f);
+            dl.AddCircle(centre, ringR - 3, ColFrameInner, 64, 1f);
+        }
 
         // Cardinals — ride the inner edge of the frame (square or circular).
         DrawCardinals(dl, centre, sq * 0.5f - 10f, rotate ? (hRad - MathF.PI * 0.5f) : 0f, circular);
@@ -489,8 +613,7 @@ internal sealed class RynthRadarUi
             const int seg = 64;
 
             dl.AddCircleFilled(c, r, bg, seg);
-            dl.AddCircle(c, r,     ColFrameOuter, seg, 2f);
-            dl.AddCircle(c, r - 3, ColFrameInner, seg, 1f);
+            // Ring outlines are drawn AFTER content (see Render) so they always appear on top.
 
             // Four compass tick marks just inside the rim (N/E/S/W) in the accent colour.
             float ti = r - 8f;
@@ -615,7 +738,22 @@ internal sealed class RynthRadarUi
 
     private void RenderSettingsPopup()
     {
-        if (!ImGui.BeginPopup("##rradar_settings")) return;
+        // Push RynthAi dark-navy palette so the popup matches the rest of the UI
+        ImGui.PushStyleColor(ImGuiCol.PopupBg,          new Vector4(0.08f, 0.10f, 0.16f, 0.97f));
+        ImGui.PushStyleColor(ImGuiCol.Text,             new Vector4(0.90f, 0.92f, 0.96f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.FrameBg,          new Vector4(0.14f, 0.18f, 0.28f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.FrameBgHovered,   new Vector4(0.20f, 0.27f, 0.40f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.FrameBgActive,    new Vector4(0.17f, 0.23f, 0.35f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.CheckMark,        new Vector4(0.90f, 0.78f, 0.40f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.SliderGrab,       new Vector4(0.62f, 0.52f, 0.24f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.SliderGrabActive, new Vector4(0.90f, 0.78f, 0.40f, 1.00f));
+        ImGui.PushStyleColor(ImGuiCol.Separator,        new Vector4(0.25f, 0.35f, 0.52f, 1.00f));
+
+        if (!ImGui.BeginPopup("##rradar_settings"))
+        {
+            ImGui.PopStyleColor(9);
+            return;
+        }
 
         ImGui.Text("Radar Settings");
         ImGui.Separator();
@@ -649,6 +787,32 @@ internal sealed class RynthRadarUi
         ImGui.Checkbox("Doors##rradar",    ref _settings.RadarShowDoors);
 
         ImGui.EndPopup();
+        ImGui.PopStyleColor(9);
+    }
+
+    // ── Visited strip cache ─────────────────────────────────────────────
+
+    private void RebuildRadarVisitedStrips()
+    {
+        if (_mapData?._floorCells is null || _visitedCells.Count == 0 || _mapData._zLayers is null)
+        {
+            _visitedFillStrips = null;
+            return;
+        }
+
+        var result = new System.Collections.Generic.Dictionary<float, System.Collections.Generic.List<(float, float, float, float)>>(
+            _mapData._zLayers.Count);
+        foreach (var (layerZ, cells) in _mapData._floorCells)
+        {
+            var flatVisited = new System.Collections.Generic.List<(int, int)>();
+            foreach (var ((gx, gy), ctype) in cells)
+                if (ctype == DungeonMapUi.CellType.Flat && _visitedCells.Contains((gx, gy)))
+                    flatVisited.Add((gx, gy));
+            if (flatVisited.Count == 0) continue;
+            var strips = DungeonMapUi.BuildVisitedStripsFrom(flatVisited);
+            if (strips.Count > 0) result[layerZ] = strips;
+        }
+        _visitedFillStrips = result.Count > 0 ? result : null;
     }
 
     // ── Projection ──────────────────────────────────────────────────────
@@ -783,5 +947,249 @@ internal sealed class RynthRadarUi
             || name.Contains("Portcullis", StringComparison.OrdinalIgnoreCase)
             || name.Contains("Hatch",      StringComparison.OrdinalIgnoreCase)
             || name.Contains("Trapdoor",   StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ── Circular-clip helpers ───────────────────────────────────────────
+
+    /// <summary>
+    /// Covers the 4 corner areas (inside clipMin/clipMax square but outside the circle)
+    /// with <paramref name="color"/> via triangle fans, masking any content that bled
+    /// outside the circle boundary (e.g. AddImageQuad corners in rotate mode).
+    /// Angle convention: (cos a, sin a) in screen coords where +Y is down.
+    ///   NW arc: PI → 3PI/2   (left→top, through upper-left)
+    ///   NE arc: -PI/2 → 0    (top→right, through upper-right)
+    ///   SE arc: 0 → PI/2     (right→bottom, through lower-right)
+    ///   SW arc: PI/2 → PI    (bottom→left, through lower-left)
+    /// </summary>
+    private static void DrawCircleCornerMasks(ImDrawListPtr dl, Vector2 centre,
+        float radius, Vector2 clipMin, Vector2 clipMax, uint color)
+    {
+        MaskCornerFan(dl, new Vector2(clipMin.X, clipMin.Y), centre, radius,  MathF.PI,         MathF.PI * 1.5f, color);
+        MaskCornerFan(dl, new Vector2(clipMax.X, clipMin.Y), centre, radius, -MathF.PI * 0.5f,  0f,             color);
+        MaskCornerFan(dl, new Vector2(clipMax.X, clipMax.Y), centre, radius,  0f,               MathF.PI * 0.5f, color);
+        MaskCornerFan(dl, new Vector2(clipMin.X, clipMax.Y), centre, radius,  MathF.PI * 0.5f,  MathF.PI,       color);
+    }
+
+    private static void MaskCornerFan(ImDrawListPtr dl, Vector2 corner, Vector2 centre,
+        float radius, float startAngle, float endAngle, uint color)
+    {
+        const int Segs = 8;
+        var prev = new Vector2(centre.X + MathF.Cos(startAngle) * radius,
+                               centre.Y + MathF.Sin(startAngle) * radius);
+        for (int i = 1; i <= Segs; i++)
+        {
+            float a = startAngle + (endAngle - startAngle) * i / Segs;
+            var cur = new Vector2(centre.X + MathF.Cos(a) * radius,
+                                  centre.Y + MathF.Sin(a) * radius);
+            dl.AddTriangleFilled(corner, prev, cur, color);
+            prev = cur;
+        }
+    }
+
+    // ── Snapshot bridge for the engine-side Avalonia radar panel ────────────
+    // Mirrors the data Render() consumes, but never touches ImGui — safe to
+    // call whether or not the ImGui radar is showing. Visited-cell tracking
+    // advances here too, so the visited overlay populates even when the user
+    // has the ImGui radar hidden in favour of the Avalonia panel.
+
+    /// <summary>
+    /// Build a JSON snapshot for the Avalonia radar. <paramref name="engineKnownMapVersion"/>
+    /// is the MapVersion the engine currently has cached; pass 0 on first call.
+    /// When it matches the live landblock, walls/fills are omitted to keep the
+    /// payload small.
+    /// </summary>
+    internal string BuildSnapshotJson(uint engineKnownMapVersion)
+    {
+        try
+        {
+            var payload = BuildSnapshotPayload(engineKnownMapVersion);
+            return System.Text.Json.JsonSerializer.Serialize(
+                payload, RadarSnapshotJsonContext.Default.RadarSnapshotPayload);
+        }
+        catch
+        {
+            return "{}";
+        }
+    }
+
+    private RadarSnapshotPayload BuildSnapshotPayload(uint engineKnownMapVersion)
+    {
+        var payload = new RadarSnapshotPayload();
+        if (!_host.HasGetPlayerPose) return payload;
+        if (!_host.TryGetPlayerPose(out uint cellId, out float px, out float py, out float pz,
+                out _, out _, out _, out _))
+            return payload;
+
+        uint landblock = cellId >> 16;
+        bool isIndoor = (cellId & 0xFFFF) >= 0x100 && landblock != 0;
+        float gxLB = ((landblock >> 8) & 0xFF) * 192f;
+        float gyLB = (landblock & 0xFF) * 192f;
+        float playerWX = px + gxLB;
+        float playerWY = py + gyLB;
+
+        // Reset visited state on landblock change — matches Render() exactly.
+        if (landblock != _visitedLandblock)
+        {
+            _visitedLandblock = landblock;
+            _visitedCells.Clear();
+            _visitedFillStrips = null;
+            _lastVisitedCount = -1;
+        }
+
+        if (isIndoor)
+        {
+            int pgx = (int)MathF.Floor(playerWX / GridCell);
+            int pgy = (int)MathF.Floor(playerWY / GridCell);
+            int r = Math.Clamp(_settings.RadarWallPaintRadius, 0, 40);
+            for (int oy = -r; oy <= r; oy++)
+                for (int ox = -r; ox <= r; ox++)
+                    _visitedCells.Add((pgx + ox, pgy + oy));
+        }
+
+        if (_visitedCells.Count != _lastVisitedCount && _mapData != null)
+        {
+            _lastVisitedCount = _visitedCells.Count;
+            RebuildRadarVisitedStrips();
+        }
+
+        _host.TryGetPlayerHeading(out float heading);
+
+        // Outdoor landblocks share geometry-less snapshots — MapVersion=landblock
+        // still works, but GeometryIncluded stays false because there's no wall data.
+        bool sameVersion = engineKnownMapVersion != 0 && engineKnownMapVersion == landblock;
+
+        payload.MapVersion = landblock;
+        payload.GeometryIncluded = !sameVersion && isIndoor;
+        payload.IsIndoor = isIndoor;
+        payload.Player = new RadarPlayer
+        {
+            CellId = cellId,
+            Landblock = landblock,
+            X = px, Y = py, Z = pz,
+            WorldX = playerWX, WorldY = playerWY,
+            Heading = heading,
+        };
+
+        // NS/EW only meaningful outdoors; we send always so the panel can
+        // decide whether to display them. NaN signals "unavailable".
+        if (NavCoordinateHelper.TryGetNavCoords(_host, out double ns, out double ew))
+        {
+            payload.Ns = ns;
+            payload.Ew = ew;
+        }
+
+        if (isIndoor && _mapData != null)
+        {
+            _mapData.EnsureCache(landblock);
+            var zLayers = _mapData._zLayers;
+            if (zLayers is { Count: > 0 })
+            {
+                payload.LayerZs.Capacity = zLayers.Count;
+                foreach (var z in zLayers) payload.LayerZs.Add(z);
+                int curIdx = _mapData.BestLayerIdxFor(pz);
+                payload.CurrentLayerZ = zLayers[curIdx];
+
+                if (payload.GeometryIncluded)
+                {
+                    if (_mapData._outerEdgesRaw != null)
+                    {
+                        foreach (var kv in _mapData._outerEdgesRaw)
+                        {
+                            var edges = kv.Value;
+                            var arr = new float[edges.Count * 6];
+                            for (int i = 0; i < edges.Count; i++)
+                            {
+                                var (ax, ay, bx, by, _, gx, gy) = edges[i];
+                                int o = i * 6;
+                                arr[o] = ax; arr[o + 1] = ay;
+                                arr[o + 2] = bx; arr[o + 3] = by;
+                                arr[o + 4] = gx; arr[o + 5] = gy;
+                            }
+                            payload.Walls.Add(new RadarWallLayer { Z = kv.Key, Segments = arr });
+                        }
+                    }
+                    if (_mapData._fillStrips != null)
+                    {
+                        foreach (var kv in _mapData._fillStrips)
+                        {
+                            var strips = kv.Value;
+                            var arr = new float[strips.Count * 5];
+                            for (int i = 0; i < strips.Count; i++)
+                            {
+                                var (x0, y0, x1, y1, type) = strips[i];
+                                int o = i * 5;
+                                arr[o] = x0; arr[o + 1] = y0;
+                                arr[o + 2] = x1; arr[o + 3] = y1;
+                                arr[o + 4] = (float)(int)type;
+                            }
+                            payload.Fills.Add(new RadarFillLayer { Z = kv.Key, Strips = arr });
+                        }
+                    }
+                }
+
+                if (_visitedFillStrips != null)
+                {
+                    foreach (var kv in _visitedFillStrips)
+                    {
+                        var strips = kv.Value;
+                        var arr = new float[strips.Count * 4];
+                        for (int i = 0; i < strips.Count; i++)
+                        {
+                            var (x0, y0, x1, y1) = strips[i];
+                            int o = i * 4;
+                            arr[o] = x0; arr[o + 1] = y0;
+                            arr[o + 2] = x1; arr[o + 3] = y1;
+                        }
+                        payload.Visited.Add(new RadarVisitedLayer { Z = kv.Key, Strips = arr });
+                    }
+                }
+            }
+        }
+
+        if (_objectCache != null && _host.HasGetObjectPosition && landblock != 0)
+        {
+            const uint STypeCreatureType = 2u;
+            const int CreatureTypeNpc = 14;
+            const uint TypePortal = 0x10000u;
+
+            foreach (var wo in _objectCache.GetLandscape())
+            {
+                if (!_host.TryGetObjectPosition((uint)wo.Id, out uint cCellId,
+                        out float cox, out float coy, out float coz)) continue;
+                if ((cCellId >> 16) != landblock) continue;
+
+                bool isNpc = _host.HasGetObjectIntProperty
+                          && _host.TryGetObjectIntProperty((uint)wo.Id, STypeCreatureType, out int ct)
+                          && ct == CreatureTypeNpc;
+                payload.Markers.Add(new RadarMarker
+                {
+                    Kind = isNpc ? (byte)1 : (byte)0,
+                    X = cox + gxLB, Y = coy + gyLB, Z = coz,
+                });
+            }
+
+            foreach (var wo in _objectCache.GetLandscapeObjects())
+            {
+                if ((uint)wo.Id >= 0x80000000u) continue;
+                if (!_host.TryGetObjectPosition((uint)wo.Id, out uint oCellId,
+                        out float oox, out float ooy, out float ooz)) continue;
+                if ((oCellId >> 16) != landblock) continue;
+
+                bool isPortal = _host.HasGetItemType
+                             && _host.TryGetItemType((uint)wo.Id, out uint typeFlags)
+                             && (typeFlags & TypePortal) != 0;
+                bool isDoor = !isPortal && IsDoorName(wo.Name);
+                if (!isPortal && !isDoor) continue;
+
+                payload.Markers.Add(new RadarMarker
+                {
+                    Kind = isPortal ? (byte)2 : (byte)3,
+                    X = oox + gxLB, Y = ooy + gyLB, Z = ooz,
+                    Label = isPortal ? GetPortalLabel(wo) : null,
+                });
+            }
+        }
+
+        return payload;
     }
 }

@@ -4,6 +4,7 @@ using System.Linq;
 using System.Numerics;
 using ImGuiNET;
 using RynthCore.PluginSdk;
+using RynthCore.Plugin.RynthAi.CreatureData;
 
 namespace RynthCore.Plugin.RynthAi.LegacyUi;
 
@@ -14,6 +15,9 @@ internal sealed class LegacyMonstersUi
     private readonly Action _onMonstersChanged;
     private readonly Action _onLaunchExternalEditor;
     private readonly Func<(uint Id, string Name)?> _getCurrentTarget;
+
+    /// <summary>Set by the dashboard so we can show captured stats per monster row.</summary>
+    public Func<string, CreatureProfile?>? CreatureLookup { get; set; }
 
     private string _newMonsterName = string.Empty;
     private string _newMonsterCategory = string.Empty;
@@ -216,8 +220,12 @@ internal sealed class LegacyMonstersUi
             { rule.UseStreak = !rule.UseStreak; _onMonstersChanged(); }
 
             ImGui.TableNextColumn();
+            CreatureProfile? profile = CreatureLookup?.Invoke(rule.Name);
             if (isDefault) ImGui.TextColored(new Vector4(1, 1, 0, 1), rule.Name);
+            else if (profile != null) ImGui.TextColored(new Vector4(0.55f, 0.95f, 0.65f, 1f), rule.Name);
             else ImGui.TextUnformatted(rule.Name);
+            if (profile != null && ImGui.IsItemHovered())
+                ImGui.SetTooltip(BuildProfileTooltip(profile));
 
             ImGui.TableNextColumn();
             ImGui.SetNextItemWidth(-1);
@@ -398,6 +406,42 @@ internal sealed class LegacyMonstersUi
         });
         _newMonsterName = string.Empty;
         _onMonstersChanged();
+    }
+
+    private static string BuildProfileTooltip(CreatureProfile p)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("Captured: ").Append(p.Name);
+        if (p.Wcid != 0) sb.Append(" (wcid ").Append(p.Wcid).Append(')');
+        sb.Append('\n');
+
+        if (p.MaxHealth > 0) sb.Append("HP: ").Append(p.MaxHealth).Append('\n');
+        if (p.MaxStamina > 0) sb.Append("Stam: ").Append(p.MaxStamina).Append('\n');
+        if (p.MaxMana > 0) sb.Append("Mana: ").Append(p.MaxMana).Append('\n');
+        if (p.ArmorLevel > 0) sb.Append("Armor: ").Append(p.ArmorLevel).Append('\n');
+
+        var (weakType, weakVal) = CreatureProfileStore.GetWeakest(p);
+        if (weakVal < 1.0)
+            sb.Append("Weak: ").Append(weakType).Append(" (").Append(weakVal.ToString("0.00")).Append(")\n");
+
+        sb.Append("Resists: ")
+          .Append("Sl ").Append(p.ResistSlash.ToString("0.00")).Append("  ")
+          .Append("Pi ").Append(p.ResistPierce.ToString("0.00")).Append("  ")
+          .Append("Bl ").Append(p.ResistBludgeon.ToString("0.00")).Append('\n')
+          .Append("         ")
+          .Append("Fi ").Append(p.ResistFire.ToString("0.00")).Append("  ")
+          .Append("Co ").Append(p.ResistCold.ToString("0.00")).Append("  ")
+          .Append("Ac ").Append(p.ResistAcid.ToString("0.00")).Append("  ")
+          .Append("El ").Append(p.ResistElectric.ToString("0.00")).Append('\n');
+
+        if (p.KnownSpellIds.Count > 0)
+            sb.Append("Spells observed: ").Append(p.KnownSpellIds.Count).Append('\n');
+
+        sb.Append("Samples: ").Append(p.Samples);
+        if (!string.IsNullOrEmpty(p.LastSeen))
+            sb.Append("  (last: ").Append(p.LastSeen).Append(')');
+
+        return sb.ToString();
     }
 
     private static bool DrawToggleLight(string id, bool isOn, uint onColor, uint offColor, string? tooltip = null)

@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using RynthCore.PluginSdk;
+using RynthCore.Plugin.RynthAi.CreatureData;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.Plugin.RynthAi.Loot;
 using RynthCore.Loot.VTank;
@@ -115,6 +116,9 @@ internal sealed class ExpressionEngine
     public void SetFellowshipTracker(FellowshipTracker? tracker) => _fellowshipTracker = tracker;
     public void SetQuestTracker(QuestTracker? tracker) => _questTracker = tracker;
     public void SetSettings(LegacyUiSettings settings) { _settings = settings; _settingsMap = null; }
+
+    private CreatureProfileStore? _creatureStore;
+    public void SetCreatureStore(CreatureProfileStore? store) => _creatureStore = store;
 
     // ── Backward-compat shim ──────────────────────────────────────────────────
 
@@ -329,6 +333,11 @@ internal sealed class ExpressionEngine
             "wobjectlastidtime"      => EvalWobjectLastIdTime(A(0)),
             "wobjectisvalid"         => EvalWobjectIsValid(A(0)),
             "wobjectgethealth"         => EvalWobjectGetHealth(A(0)),
+            "creaturegetmaxhealth"     => EvalCreatureGetMaxHealth(A(0)),
+            "creaturegetresist"        => EvalCreatureGetResist(A(0), A(1)),
+            "creaturegetweakest"       => EvalCreatureGetWeakest(A(0)),
+            "creaturegetarmor"         => EvalCreatureGetArmor(A(0)),
+            "creaturehasprofile"       => EvalCreatureHasProfile(A(0)),
             "wobjectgetspellids"       => EvalWobjectGetSpellIds(A(0)),
             "wobjectgetactivespellids"     => EvalWobjectGetActiveSpellIds(A(0)),
             "wobjectgetactivespelldurations" => EvalWobjectGetActiveSpellDurations(A(0)),
@@ -2024,6 +2033,70 @@ internal sealed class ExpressionEngine
         if (uid == 0) return "-1";
         float ratio = _worldObjectCache.GetHealthRatio((int)uid);
         return ratio.ToString("G", CultureInfo.InvariantCulture);
+    }
+
+    // ── Creature profile lookups (persistent store) ───────────────────────────
+    // Resolves a creature handle or raw name to a CreatureProfile.
+    private CreatureProfile? ResolveCreatureProfile(string arg)
+    {
+        if (_creatureStore == null) return null;
+        string? name = null;
+        if (TryParseWobjectHandle(arg, out uint uid, out _) && uid != 0
+            && _host.HasGetObjectName && _host.TryGetObjectName(uid, out string n))
+        {
+            name = n;
+        }
+        if (string.IsNullOrEmpty(name)) name = arg;
+        if (string.IsNullOrEmpty(name)) return null;
+        return _creatureStore.TryGetByName(name, out var p) ? p : null;
+    }
+
+    private string EvalCreatureGetMaxHealth(string arg)
+    {
+        var p = ResolveCreatureProfile(arg);
+        return (p != null && p.MaxHealth > 0)
+            ? p.MaxHealth.ToString(CultureInfo.InvariantCulture)
+            : "0";
+    }
+
+    private string EvalCreatureGetResist(string arg, string typeArg)
+    {
+        var p = ResolveCreatureProfile(arg);
+        if (p == null) return "1";
+        string t = (typeArg ?? "").Trim().ToLowerInvariant();
+        double v = t switch
+        {
+            "slash" or "sl"           => p.ResistSlash,
+            "pierce" or "pi"          => p.ResistPierce,
+            "bludgeon" or "bl" or "b" => p.ResistBludgeon,
+            "fire" or "fi" or "f"     => p.ResistFire,
+            "cold" or "co" or "c"     => p.ResistCold,
+            "acid" or "ac" or "a"     => p.ResistAcid,
+            "electric" or "lightning" or "el" or "li" => p.ResistElectric,
+            _ => 1.0,
+        };
+        return v.ToString("G", CultureInfo.InvariantCulture);
+    }
+
+    private string EvalCreatureGetWeakest(string arg)
+    {
+        var p = ResolveCreatureProfile(arg);
+        if (p == null) return "";
+        var (type, _) = CreatureProfileStore.GetWeakest(p);
+        return type;
+    }
+
+    private string EvalCreatureGetArmor(string arg)
+    {
+        var p = ResolveCreatureProfile(arg);
+        return (p != null && p.ArmorLevel > 0)
+            ? p.ArmorLevel.ToString(CultureInfo.InvariantCulture)
+            : "0";
+    }
+
+    private string EvalCreatureHasProfile(string arg)
+    {
+        return ResolveCreatureProfile(arg) != null ? "1" : "0";
     }
 
     private string EvalWobjectGetSpellIds(string objArg)

@@ -210,16 +210,18 @@ public sealed class SalvageManager
             return;
         }
 
-        // Combine-during-salvage: if there's an under-full salvage bag of the
-        // same material as the item being salvaged, add it to the panel too.
-        // The salvage operation will merge the new salvage into the existing
-        // bag instead of creating a fresh one each time.
+        // Combine-during-salvage: add ALL under-full bags of the same material
+        // (and workmanship band, if configured) alongside the new item so the
+        // server merges everything in one operation.
+        int extraBags = 0;
         if (_settings.CombineBagsDuringSalvage)
-            TryAddMatchingUnderFullBag(_currentItemId);
+            extraBags = AddAllMatchingUnderFullBags(_currentItemId);
 
         bool wasFirstOpen = !_panelEverOpened;
         _panelEverOpened = true;
-        int addDelay = wasFirstOpen ? _settings.SalvageAddDelayFirstMs : _settings.SalvageAddDelayFastMs;
+        // Allow 50 ms per extra bag so AC can register each add before Execute fires.
+        int addDelay = (wasFirstOpen ? _settings.SalvageAddDelayFirstMs : _settings.SalvageAddDelayFastMs)
+                       + extraBags * _settings.SalvageAddDelayFastMs;
         _phaseReadyAt = now + addDelay;
         _phase = Phase.AddingItem;
     }
@@ -233,34 +235,31 @@ public sealed class SalvageManager
     private const uint StypeMaterialType    = 131;
 
     /// <summary>
-    /// If the item being salvaged exposes a MaterialType, scan the player's
-    /// inventory for a salvage bag with the same material whose Structure is
-    /// less than MaxStructure (under-full) and add the first match to the
-    /// salvage panel. The Salvage operation then tops the bag up rather than
-    /// spawning a brand-new partial bag.
+    /// Scans inventory for every under-full salvage bag whose material (and
+    /// workmanship band, if configured) matches <paramref name="itemId"/>, adds
+    /// each one to the open salvage panel, and returns how many were added.
+    /// Adding them all at once lets the server merge everything in one Salvage
+    /// operation instead of leaving partial bags for the periodic sweep.
     /// </summary>
-    private void TryAddMatchingUnderFullBag(uint itemId)
+    private int AddAllMatchingUnderFullBags(uint itemId)
     {
-        if (_cache == null) return;
+        if (_cache == null) return 0;
         if (!_host.TryGetObjectIntProperty(itemId, StypeMaterialType, out int itemMat) || itemMat == 0)
-            return;
+            return 0;
 
         RynthCore.Loot.SalvageCombineSettings? cfg = CombineConfigProvider?.Invoke();
         bool useBands = cfg != null && cfg.Enabled;
 
-        // If we're enforcing bands, the item's own workmanship determines which
-        // band the resulting salvage will land in. Only add bags that share both
-        // the material and the band — preserves high-WM bags from being diluted
-        // by lower-WM items.
         string? itemBand = null;
         if (useBands)
         {
             if (!_host.TryGetObjectIntProperty(itemId, StypeItemWorkmanship, out int itemWm) || itemWm <= 0)
-                return;
+                return 0;
             itemBand = cfg!.GetBandKey(itemMat, itemWm);
-            if (itemBand == null) return;
+            if (itemBand == null) return 0;
         }
 
+        int added = 0;
         foreach (WorldObject bag in _cache.GetDirectInventory(forceRefresh: false))
         {
             uint bagId = unchecked((uint)bag.Id);
@@ -278,9 +277,13 @@ public sealed class SalvageManager
             }
 
             if (_host.SalvagePanelAddItem(bagId))
-                Log($"[Salvage] Combine-during-salvage: added bag {bag.Name} 0x{bagId:X8}.");
-            return;
+            {
+                Log($"[Salvage] Combine-during-salvage: added bag {bag.Name} 0x{bagId:X8} ({added + 1}).");
+                added++;
+            }
         }
+
+        return added;
     }
 
     private void BeginSalvaging(long now)

@@ -36,6 +36,9 @@ public class WorldObjectCache
     private readonly Dictionary<uint, int> _classifyRetry = new();
     private const int MaxClassifyRetries = 8;
 
+    // Objects deleted while still pending classification — skip to avoid stale-pointer AV
+    private readonly HashSet<uint> _deletedWhilePending = new();
+
     // Periodic reclassification — rescues Unknown landscape objects that become recognisable later
     private DateTime _lastReclassifyTime = DateTime.MinValue;
     private const double ReclassifyIntervalSec = 2.0;
@@ -81,6 +84,7 @@ public class WorldObjectCache
     {
         _playerId = playerId;
         _loginTime = DateTime.Now;
+        _deletedWhilePending.Clear();
         // Remove self if mistakenly added as creature before login completed
         if (playerId == 0) return;
         int sid = (int)playerId;
@@ -93,6 +97,10 @@ public class WorldObjectCache
 
     public void OnCreateObject(uint id)
     {
+        // AC recycles dynamic GUIDs after delete. A fresh create on a previously-deleted
+        // id means the new object should classify normally — drop any stale delete mark
+        // before re-queueing so TryClassify doesn't skip it.
+        _deletedWhilePending.Remove(id);
         _pending.Enqueue(id);
     }
 
@@ -100,11 +108,18 @@ public class WorldObjectCache
     {
         int sid = (int)id;
         bool wasInventory = _inventory.Remove(sid);
-        _byId.Remove(sid);
+        bool wasClassified = _byId.Remove(sid);
         _creatures.Remove(sid);
         _landscape.Remove(sid);
         _healthRatios.Remove(sid);
         _classifyRetry.Remove(id);
+        // Only mark as "deleted while pending" when the object was never classified —
+        // i.e. it might still be sitting in _pending and TryClassify must skip it to
+        // avoid touching freed AC memory. For already-classified objects the cache
+        // entries above are gone cleanly and no protection is needed; marking them
+        // would leak forever (TryClassify is never called for them again).
+        if (!wasClassified)
+            _deletedWhilePending.Add(id);
         if (wasInventory)
             _inventoryDirty = true;
     }
@@ -178,7 +193,7 @@ public class WorldObjectCache
         if (processed > 0 && _tickDiagCount < 3)
         {
             _tickDiagCount++;
-            _host.Log($"[RynthAi] Cache.Tick classified {processed} from {pending0} pending, total now {_byId.Count}");
+            _host.Log($"[RynthAi] Cache.Tick classified {processed} from {pending0} pending, total now {_byId.Count}, landscape={_landscape.Count}, creatures={_creatures.Count}");
         }
 
         // Periodically re-check Unknown landscape objects — dynamic creatures whose weenie
@@ -220,6 +235,14 @@ public class WorldObjectCache
 
     private void TryClassify(uint uid)
     {
+        // Skip objects that were deleted after being enqueued — accessing their AC memory
+        // would touch stale pointers and cause an AccessViolationException.
+        if (_deletedWhilePending.Contains(uid))
+        {
+            _deletedWhilePending.Remove(uid);
+            return;
+        }
+
         // Never classify the player's own object — after portal/zone changes
         // OnCreateObject fires for the player and would re-add them to _creatures.
         if (_playerId != 0 && uid == _playerId) return;

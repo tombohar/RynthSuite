@@ -4,6 +4,7 @@ using System.IO;
 using System.Numerics;
 using System.Text.RegularExpressions;
 using RynthCore.Plugin.RynthAi;
+using RynthCore.Plugin.RynthAi.CreatureData;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.PluginSdk;
 
@@ -94,6 +95,13 @@ internal sealed class MetaManager
 
     public void SetBuffManager(BuffManager buffManager) => _buffManager = buffManager;
 
+    private CreatureProfileStore? _creatureStore;
+    public void SetCreatureStore(CreatureProfileStore? store)
+    {
+        _creatureStore = store;
+        _expressions?.SetCreatureStore(store);
+    }
+
     public void SetPlayerId(uint id)
     {
         _playerId = id;
@@ -149,6 +157,7 @@ internal sealed class MetaManager
         engine.SetFellowshipTracker(_fellowshipTracker);
         engine.SetQuestTracker(_questTracker);
         engine.SetSettings(_settings);
+        engine.SetCreatureStore(_creatureStore);
         return engine;
     }
 

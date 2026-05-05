@@ -36,10 +36,10 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw "git clone RynthCore failed" }
 
     # ── Toolchain ─────────────────────────────────────────────────────────────
-    - name: Setup .NET 9
+    - name: Setup .NET 10
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: '9.0.x'
+        dotnet-version: '10.0.x'
 
     # ── Determine version ──────────────────────────────────────────────────────
     - name: Resolve version
@@ -112,7 +112,7 @@ jobs:
         files: |
           RynthCore.LootEditor.zip
           RynthCore.MonsterEditor.zip
-          Plugins/RynthCore.Plugin.RynthAi/bin/Release/net9.0-windows/win-x86/publish/RynthCore.Plugin.RynthAi.dll
+          Plugins/RynthCore.Plugin.RynthAi/bin/Release/net10.0-windows/win-x86/publish/RynthCore.Plugin.RynthAi.dll
         body: |
           ## Downloads
 

@@ -1053,18 +1053,21 @@ public class BuffManager : IDisposable
             return false;
         }
 
-        // Check whether the wand is already wielded by the player (matches
-        // CombatManager.EquipWeaponAndSetStance — PublicWeenieDesc._wielderID).
+        // Primary check: CurrentWieldedLocation (stype=10) — works even before the
+        // phys-obj offset probe fires, mirrors CombatManager.EquipWeaponAndSetStance.
         bool alreadyWielded = false;
-        if (_host.HasGetObjectWielderInfo)
+        var wandObj = _worldObjectCache?[wandId];
+        if (wandObj != null)
+            alreadyWielded = wandObj.Values(LongValueKey.CurrentWieldedLocation, 0) > 0;
+
+        // Secondary check via API if primary didn't confirm
+        if (!alreadyWielded && _host.HasGetObjectWielderInfo)
         {
             uint playerId = _host.GetPlayerId();
             if (playerId != 0 &&
                 _host.TryGetObjectWielderInfo((uint)wandId, out uint wielder, out _) &&
                 wielder == playerId)
-            {
                 alreadyWielded = true;
-            }
         }
 
         if (!alreadyWielded)
@@ -1089,21 +1092,34 @@ public class BuffManager : IDisposable
     {
         if (_worldObjectCache == null) return 0;
 
-        // Prefer an explicitly configured wand from item rules
+        // Prefer explicitly configured wand from item rules
         foreach (var rule in _settings.ItemRules)
         {
             var wo = _worldObjectCache[rule.Id];
-            if (wo != null && wo.ObjectClass == AcObjectClass.WandStaffOrb)
-                return rule.Id;
+            if (wo != null && IsWandObject(wo)) return rule.Id;
         }
 
-        // Fall back to inventory cache scan
+        // Inventory cache scan — ObjectClass first, name fallback for unclassified items
         foreach (var wo in _worldObjectCache.GetInventory())
         {
-            if (wo.ObjectClass == AcObjectClass.WandStaffOrb)
-                return wo.Id;
+            if (IsWandObject(wo)) return wo.Id;
         }
 
         return 0;
+    }
+
+    private static bool IsWandObject(WorldObject wo) =>
+        wo.ObjectClass == AcObjectClass.WandStaffOrb || IsWandName(wo.Name);
+
+    private static bool IsWandName(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        return name.IndexOf("Orb",      StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("Staff",    StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("Wand",     StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("Scepter",  StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("Sceptre",  StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("Baton",    StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("Crozier",  StringComparison.OrdinalIgnoreCase) >= 0;
     }
 }

@@ -45,6 +45,10 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         private readonly Dictionary<uint, List<MapCell>> _mapCellCache =
             new Dictionary<uint, List<MapCell>>();
 
+        // Cache: landblock → physics floor polygons (upward-facing, for DungeonMapUiV2)
+        private readonly Dictionary<uint, List<MapPolygon>> _floorPolyCache =
+            new Dictionary<uint, List<MapPolygon>>();
+
         private const int MAX_ENV_CACHE = 50;
         private const int MAX_WALL_CACHE = 20;
 
@@ -58,6 +62,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             public Vector3[] Vertices;
             public float CellX, CellY, CellZ; // world-space cell centre
             public bool IsPortal;
+            public bool IsFloor; // physics floor polygon — upward-facing, used by DungeonMapUiV2
             public uint CellId; // full landcell id (0xXXYYNNNN) — for per-cell "explored" tracking
         }
 
@@ -137,6 +142,75 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             }
             _mapCellCache[landblockKey] = cells;
             return cells;
+        }
+
+        /// <summary>
+        /// Returns physics floor polygons (upward-facing normals) for the landblock.
+        /// Used by DungeonMapUiV2 to rasterise exact walkable coverage.
+        /// Falls back to render polygons if physics BSP skip failed for a cell.
+        /// </summary>
+        public List<MapPolygon> GetDungeonMapFloorPolygons(uint landblockKey)
+        {
+            if (_floorPolyCache.TryGetValue(landblockKey, out var cached)) return cached;
+            var polys = LoadDungeonMapFloorPolygons(landblockKey);
+            if (_floorPolyCache.Count >= MAX_WALL_CACHE)
+            {
+                foreach (var k in _floorPolyCache.Keys) { _floorPolyCache.Remove(k); break; }
+            }
+            _floorPolyCache[landblockKey] = polys;
+            return polys;
+        }
+
+        private List<MapPolygon> LoadDungeonMapFloorPolygons(uint landblockKey)
+        {
+            var result = new List<MapPolygon>();
+            if (_cellDat == null || _portalDat == null) return result;
+
+            float gx = ((landblockKey >> 8) & 0xFF) * 192.0f;
+            float gy =  (landblockKey        & 0xFF) * 192.0f;
+
+            var cellIds = _cellDat.GetLandblockCellIds(landblockKey);
+
+            foreach (uint cellId in cellIds)
+            {
+                byte[] cellData = _cellDat.GetFileData(cellId);
+                if (cellData == null || cellData.Length < 20) continue;
+                try
+                {
+                    var envCell = ParseEnvCellHeader(cellData);
+                    if (envCell == null) continue;
+
+                    float cx = envCell.PosX + gx;
+                    float cy = envCell.PosY + gy;
+                    float cz = envCell.PosZ;
+
+                    var cellGeo = GetCellGeometry(envCell.EnvironmentId, envCell.CellStructureIndex);
+                    if (cellGeo == null || cellGeo.Polygons.Count == 0) continue;
+
+                    foreach (var poly in cellGeo.Polygons)
+                    {
+                        if (poly.Vertices.Count < 3) continue;
+                        var worldVerts = new Vector3[poly.Vertices.Count];
+                        for (int i = 0; i < poly.Vertices.Count; i++)
+                            worldVerts[i] = TransformVertex(poly.Vertices[i], envCell, gx, gy);
+                        float nx = 0, ny = 0, nz = 0;
+                        int n = worldVerts.Length;
+                        for (int i = 0; i < n; i++)
+                        {
+                            Vector3 a = worldVerts[i], b = worldVerts[(i + 1) % n];
+                            nx += (a.Y - b.Y) * (a.Z + b.Z);
+                            ny += (a.Z - b.Z) * (a.X + b.X);
+                            nz += (a.X - b.X) * (a.Y + b.Y);
+                        }
+                        float len = MathF.Sqrt(nx * nx + ny * ny + nz * nz);
+                        if (len < 0.0001f || MathF.Abs(nz) / len < 0.4f) continue;
+                        result.Add(new MapPolygon { Vertices = worldVerts, CellX = cx, CellY = cy, CellZ = cz, IsPortal = false, IsFloor = true, CellId = cellId });
+                    }
+                }
+                catch { }
+            }
+
+            return result;
         }
 
         private List<MapCell> LoadDungeonMapCells(uint landblockKey)
@@ -530,8 +604,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                             result[key] = geo;
                         else
                         {
-                            Log($"Environment 0x{id:X8}: failed parsing CellStruct {i} (key={key}), stopping");
-                            break; // Stream position unknown — can't continue
+                            break; // CellStruct parse failed — stream position unknown, can't continue
                         }
                     }
                 }
@@ -683,6 +756,9 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         private const uint BSP_BpnN = 0x42706E4E;
         private const uint BSP_BPIN = 0x4250494E;
         private const uint BSP_BPnN = 0x42506E4E;
+        private const uint BSP_BPFL = 0x4250464C; // internal node: plane + 0 children (ACE default case)
+        private const uint BSP_BPOL = 0x42504F4C; // Drawing leaf: plane + sphere + inpolys, no children (ACE default)
+        private const uint BSP_BpIn = 0x4270496E; // Drawing leaf: plane + sphere + inpolys, no children (BpIn ≠ BpIN which has NegNode)
 
         private bool SkipBSPTree(BinaryReader reader, MemoryStream ms, BSPTreeType treeType)
         {
@@ -728,8 +804,18 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     if (!SkipBSPNode(reader, ms, treeType)) return false;
                     if (!SkipBSPNode(reader, ms, treeType)) return false;
                     break;
+                case BSP_BPFL:
+                    // Cell BSP leaf: plane already read, no children (ACE default)
+                    break;
+                case BSP_BPOL:
+                case BSP_BpIn:
+                    // Drawing BSP leaf: plane already read, no children (ACE default).
+                    // Code below reads sphere + inpolys for Drawing BSP.
+                    break;
                 default:
-                    return false; // Unknown type
+                {
+                    return false;
+                }
             }
 
             // Cell BSP internal nodes have NO sphere — done
@@ -924,6 +1010,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             _wallCache.Clear();
             _mapCache.Clear();
             _mapCellCache.Clear();
+            _floorPolyCache.Clear();
             _envCache.Clear();
             _renderEnvCache.Clear();
         }
@@ -932,5 +1019,6 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         {
             System.Diagnostics.Debug.WriteLine($"[DungeonLOS] {msg}");
         }
+
     }
 }

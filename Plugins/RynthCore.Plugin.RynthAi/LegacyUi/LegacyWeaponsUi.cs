@@ -204,7 +204,7 @@ internal sealed class LegacyWeaponsUi
         ImGui.End();
     }
 
-    private void AddSelectedWeapon()
+    public void AddSelectedWeapon()
     {
         uint selId = _host.GetSelectedItemId();
         if (selId == 0)
@@ -235,7 +235,7 @@ internal sealed class LegacyWeaponsUi
         }
     }
 
-    private void AddSelectedConsumable()
+    public void AddSelectedConsumable()
     {
         uint selId = _host.GetSelectedItemId();
         if (selId == 0)

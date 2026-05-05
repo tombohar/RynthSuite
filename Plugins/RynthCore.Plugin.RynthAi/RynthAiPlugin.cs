@@ -19,6 +19,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     internal static readonly IntPtr VersionPointer = Marshal.StringToHGlobalAnsi("0.5.0-legacy-ui");
 
     private LegacyDashboardRenderer? _dashboard;
+
+    /// <summary>Snapshot bridge accessor for engine-side panels.</summary>
+    internal LegacyDashboardRenderer? DashboardRenderer => _dashboard;
     private NavigationEngine? _navigationEngine;
     private NavMarkerRenderer? _navMarkerRenderer;
     private RadarWallRenderer? _radarWallRenderer;
@@ -43,6 +46,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private bool _initialized;
     private bool _loginComplete;
     private bool _windowVisible;
+    private int _tickDiag;
     private int _currentCombatMode = 1; // 1=noncombat
     private uint _currentTargetId;
     private VTankLootProfile? _loadedLootProfile;
@@ -57,6 +61,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private DateTime _nativeLootProfileTime = DateTime.MinValue;
     private static bool _imguiResolverConfigured;
 
+    private CreatureData.CreatureProfileStore? _creatureStore;
+    internal CreatureData.CreatureProfileStore? CreatureStore => _creatureStore;
+    private int _creatureSaveTickCounter;
+
     public override int Initialize()
     {
         if (Host.ImGuiContext == IntPtr.Zero)
@@ -66,6 +74,15 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         ComponentDatabase.SetLog(msg => Log(msg));
         _dashboard = new LegacyDashboardRenderer(Host);
         _objectCache = new WorldObjectCache(Host); // must exist before CreateObject events fire during login
+        _creatureStore = new CreatureData.CreatureProfileStore();
+        try { _creatureStore.Load(); } catch { }
+        Func<string, CreatureData.CreatureProfile?> lookup = ruleName =>
+        {
+            if (_creatureStore == null || string.IsNullOrEmpty(ruleName)) return null;
+            return _creatureStore.TryGetByName(ruleName, out var p) ? p : null;
+        };
+        _dashboard.MonstersUi.CreatureLookup = lookup;
+        _dashboard.CreatureLookupForRules = lookup;
         _initialized = true;
         _loginComplete = false;
         _windowVisible = false;
@@ -76,6 +93,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     public override void Shutdown()
     {
         TeardownSession();
+        try { _creatureStore?.SaveIfDirty(); } catch { }
+        _creatureStore = null;
         _objectCache = null;
         _initialized = false;
         _dashboard = null;
@@ -244,6 +263,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _metaManager.SetFellowshipTracker(_fellowshipTracker);
         _metaManager.SetQuestTracker(_questTracker);
         if (_buffManager != null) _metaManager.SetBuffManager(_buffManager);
+        _metaManager.SetCreatureStore(_creatureStore);
 
         if (_objectCache != null)
         {
@@ -275,15 +295,28 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
     public override void OnTick()
     {
+        bool diag = ++_tickDiag <= 3;
         try
         {
             _objectCache?.Tick();
+            if (diag) Host.Log("[RynthAi] OnTick: after cache tick");
+
+            // Periodically flush the creature profile store (~ every 5 seconds at 60Hz).
+            if (++_creatureSaveTickCounter >= 300)
+            {
+                _creatureSaveTickCounter = 0;
+                _creatureStore?.SaveIfDirty();
+            }
             _questTracker?.Tick();
+            if (diag) Host.Log("[RynthAi] OnTick: after quest tracker");
             DrainGiveQueue();
+            if (diag) Host.Log("[RynthAi] OnTick: after drain give queue");
             _jumper?.Tick();
+            if (diag) Host.Log("[RynthAi] OnTick: after jumper tick");
 
             if (_loginComplete)
             {
+                if (diag) Host.Log("[RynthAi] OnTick: entering loginComplete block");
                 if (++_vitalsTickCounter >= 30)
                 {
                     _vitalsTickCounter = 0;
@@ -299,12 +332,16 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     }
                 }
 
+                if (diag) Host.Log("[RynthAi] OnTick: before CheckBusyTimeout");
                 CheckBusyTimeout();
+                if (diag) Host.Log("[RynthAi] OnTick: before buffManager");
                 _buffManager?.OnHeartbeat();
+                if (diag) Host.Log("[RynthAi] OnTick: after buffManager");
 
                 var settings = _dashboard?.Settings;
                 if (settings == null)
                     return;
+                if (diag) Host.Log($"[RynthAi] OnTick: settings ok, macro={settings.IsMacroRunning} action={settings.BotAction}");
 
                 // Gap-fill: BuffManager sets BotAction = "Buffing" while casting, but
                 // resets it to "Default" between casts. If buffs are still needed,
@@ -352,7 +389,13 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     _inventoryManager.OnHeartbeat(_busyCount);
                 }
 
-                _salvageManager?.OnTick(_busyCount);
+                if (diag) Host.Log("[RynthAi] OnTick: before salvageManager");
+                // Same settle gate as InventoryManager: BeginCombineSalvage walks
+                // GetDirectInventory which races with cache classification during
+                // the post-login / hot-reload CreateObject burst.
+                if (inventorySettled)
+                    _salvageManager?.OnTick(_busyCount);
+                if (diag) Host.Log("[RynthAi] OnTick: before manaStoneManager");
 
                 // Salvage-priority gap-fill: while a container is open for active
                 // looting OR while the salvage queue has items waiting, hold
@@ -377,6 +420,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
                 // Mana stone tapping — runs after salvage, independent of looting state.
                 _manaStoneManager?.OnHeartbeat(_busyCount);
+                if (diag) Host.Log("[RynthAi] OnTick: before combatManager");
 
                 // Missile crafting runs before combat — blocks everything while active.
                 // Gated on the same settle window as InventoryManager: ProcessCrafting
@@ -418,11 +462,16 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 else
                 {
                     _combatManager?.OnHeartbeat();
+                    if (diag) Host.Log("[RynthAi] OnTick: after combatManager.OnHeartbeat");
                     TickCorpseOpening();
                 }
+                if (diag) Host.Log("[RynthAi] OnTick: before nav");
+                // Use HasNearbyMonsters (not just HasTargets) so LOS-blocked monsters
+                // in adjacent rooms still stop navigation — prevents the bot walking
+                // through a portal into a room before combat has LOS to engage.
                 bool combatBlocking = settings.EnableCombat
                                    && _combatManager != null
-                                   && _combatManager.HasTargets;
+                                   && _combatManager.HasNearbyMonsters;
                 bool corpseBlocking = IsCorpseNavigationClaimActive(settings);
 
                 // Track when combat stops blocking so we can hold nav
@@ -588,6 +637,81 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         // so the blacklist doesn't trigger on valid in-combat targets.
         if (targetId != _playerId)
             _combatManager?.ReportDamageOnTarget((int)targetId);
+
+        // Capture observed creature data into the persistent store. maxHealth>0 means
+        // we just got a successful CreatureProfile (Assess succeeded) — the only time
+        // we have authoritative max vitals + resists.
+        if (targetId != _playerId && maxHealth > 0)
+            CaptureCreatureSample(targetId, maxHealth);
+    }
+
+    // Stable: PropertyInt indices used by the AC client appraisal table.
+    private const uint PROP_INT_CREATURE_TYPE = 2;
+    private const uint PROP_INT_ARMOR_LEVEL   = 28;
+
+    // PropertyFloat indices for elemental resistance multipliers (1.0 = neutral).
+    private const uint PROP_FLOAT_RESIST_SLASH    = 168;
+    private const uint PROP_FLOAT_RESIST_PIERCE   = 169;
+    private const uint PROP_FLOAT_RESIST_BLUDGEON = 170;
+    private const uint PROP_FLOAT_RESIST_FIRE     = 171;
+    private const uint PROP_FLOAT_RESIST_COLD     = 172;
+    private const uint PROP_FLOAT_RESIST_ACID     = 173;
+    private const uint PROP_FLOAT_RESIST_ELECTRIC = 174;
+
+    private void CaptureCreatureSample(uint targetId, uint maxHealth)
+    {
+        if (_creatureStore == null) return;
+        try
+        {
+            string name = string.Empty;
+            if (Host.HasGetObjectName) Host.TryGetObjectName(targetId, out name);
+            if (string.IsNullOrEmpty(name)) return;
+
+            uint wcid = 0;
+            if (Host.HasGetObjectWcid) Host.TryGetObjectWcid(targetId, out wcid);
+
+            var sample = new CreatureData.CreatureProfile
+            {
+                Name = name,
+                Wcid = wcid,
+                MaxHealth = maxHealth,
+            };
+
+            if (Host.TryGetTargetVitals(targetId, out _, out _, out _, out uint maxStam, out _, out uint maxMana))
+            {
+                sample.MaxStamina = maxStam;
+                sample.MaxMana = maxMana;
+            }
+
+            if (Host.TryGetObjectIntProperty(targetId, PROP_INT_CREATURE_TYPE, out int ctype))
+                sample.CreatureType = ctype;
+            if (Host.TryGetObjectIntProperty(targetId, PROP_INT_ARMOR_LEVEL, out int armor))
+                sample.ArmorLevel = armor;
+
+            if (Host.TryGetObjectDoubleProperty(targetId, PROP_FLOAT_RESIST_SLASH, out double rs))    sample.ResistSlash = rs;
+            if (Host.TryGetObjectDoubleProperty(targetId, PROP_FLOAT_RESIST_PIERCE, out double rp))   sample.ResistPierce = rp;
+            if (Host.TryGetObjectDoubleProperty(targetId, PROP_FLOAT_RESIST_BLUDGEON, out double rb)) sample.ResistBludgeon = rb;
+            if (Host.TryGetObjectDoubleProperty(targetId, PROP_FLOAT_RESIST_FIRE, out double rf))     sample.ResistFire = rf;
+            if (Host.TryGetObjectDoubleProperty(targetId, PROP_FLOAT_RESIST_COLD, out double rc))     sample.ResistCold = rc;
+            if (Host.TryGetObjectDoubleProperty(targetId, PROP_FLOAT_RESIST_ACID, out double ra))     sample.ResistAcid = ra;
+            if (Host.TryGetObjectDoubleProperty(targetId, PROP_FLOAT_RESIST_ELECTRIC, out double re)) sample.ResistElectric = re;
+
+            if (Host.HasGetObjectSpellIds)
+            {
+                var buf = new uint[64];
+                int n = Host.GetObjectSpellIds(targetId, buf, buf.Length);
+                for (int i = 0; i < n && i < buf.Length; i++)
+                {
+                    if (buf[i] != 0) sample.KnownSpellIds.Add(buf[i]);
+                }
+            }
+
+            _creatureStore.Upsert(sample);
+        }
+        catch (Exception ex)
+        {
+            Host.Log($"[RynthAi] CaptureCreatureSample exception: {ex.Message}");
+        }
     }
 
     public override void OnEnchantmentAdded(uint spellId, double durationSeconds)
@@ -744,6 +868,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "buildinfo":    HandleBuildInfoCommand(); break;
             case "navdebug":     HandleNavDebugCommand(); break;
             case "addnavpt":     HandleAddNavPointCommand(); break;
+            case "dunnav":        HandleDungeonNavCommand(parts); break;
+            case "dunnav-patrol": HandleDungeonNavPatrolCommand(parts); break;
             case "lootparse":    HandleLootParseCommand(trimmed); break;
             case "lootcheckinv": HandleLootCheckInventoryCommand(trimmed); break;
             case "lootcheck":    HandleLootCheckSelectedCommand(parts); break;

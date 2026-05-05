@@ -53,6 +53,8 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra buildinfo     — nearby geometry info");
         ChatLine("[RynthAi] /ra navdebug      — show nav coordinate/debug info");
         ChatLine("[RynthAi] /ra addnavpt      — append a waypoint at current location to loaded nav");
+        ChatLine("[RynthAi] /ra dunnav <NS> <EW>  — navigate to NS/EW coords through dungeon (no nav file needed)");
+        ChatLine("[RynthAi] /ra dunnav-patrol      — circular hunt patrol through the whole dungeon (no nav file needed)");
         ChatLine("[RynthAi] /ra jump[swzxc] [heading] [holdtime] — jump with optional face/direction (s=run w=fwd x=back z=strafeL c=strafeR)");
         ChatLine("[RynthAi] /ra corpseinfo    — show corpse range/open diagnostics");
         ChatLine("[RynthAi] /ra corpsecheck   — explain whether a corpse would be looted");
@@ -1873,5 +1875,123 @@ public sealed partial class RynthAiPlugin
         ChatLine(queued > 0
             ? $"[RynthAi] Queued {queued} stack(s) from profile '{System.IO.Path.GetFileName(profilePath)}' → {target.Name}"
             : $"[RynthAi] No items in inventory matched profile '{System.IO.Path.GetFileName(profilePath)}'");
+    }
+
+    /// <summary>
+    /// /ra dunnav &lt;NS&gt; &lt;EW&gt;
+    /// Builds a dungeon cell graph for the player's current landblock, runs A* to
+    /// the nearest cell to the given destination, and wires the resulting route into
+    /// NavigationEngine (Once type). Works in any dungeon without a pre-recorded nav file.
+    /// </summary>
+    private void HandleDungeonNavCommand(string[] parts)
+    {
+        var settings = _dashboard?.Settings;
+        if (settings == null) { ChatLine("[RynthAi] Settings not ready."); return; }
+
+        if (parts.Length < 4 ||
+            !double.TryParse(parts[2], System.Globalization.NumberStyles.Float,
+                             System.Globalization.CultureInfo.InvariantCulture, out double destNS) ||
+            !double.TryParse(parts[3], System.Globalization.NumberStyles.Float,
+                             System.Globalization.CultureInfo.InvariantCulture, out double destEW))
+        {
+            ChatLine("[RynthAi] Usage: /ra dunnav <NS> <EW>  (e.g. /ra dunnav 12.5 -34.2)");
+            return;
+        }
+
+        if (!Host.TryGetPlayerPose(out uint playerCell, out _, out _, out float playerWZ, out _, out _, out _, out _))
+        {
+            ChatLine("[RynthAi] Cannot get player position."); return;
+        }
+
+        uint landblockKey = playerCell >> 16;
+        bool isDungeon    = (playerCell & 0xFFFF) >= 0x0100;
+        if (!isDungeon)
+        {
+            ChatLine("[RynthAi] dunnav requires you to be inside a dungeon (cell >= 0x0100).");
+            return;
+        }
+
+        var cellDat = _raycast?.GeometryLoader.CellDat;
+        if (cellDat == null || !cellDat.IsLoaded)
+        {
+            ChatLine("[RynthAi] Cell dat not loaded — raycast system must be initialized first."); return;
+        }
+
+        if (!NavCoordinateHelper.TryGetNavCoords(Host, out double playerNS, out double playerEW))
+        {
+            ChatLine("[RynthAi] Cannot get player nav coordinates."); return;
+        }
+
+        ChatLine($"[RynthAi] DunNav: building graph for landblock 0x{landblockKey:X4}...");
+
+        var route = DungeonPathfinder.NavigateTo(
+            landblockKey, cellDat,
+            playerNS, playerEW, playerWZ,
+            destNS,   destEW,
+            out int nodeCount, out int pathLength);
+
+        if (route == null)
+        {
+            ChatLine($"[RynthAi] DunNav: no walkable path found — destination may only be reachable via a drop (graph={nodeCount} nodes, dest={destNS:F2}N/{destEW:F2}E).");
+            return;
+        }
+
+        settings.IsMacroRunning   = true;
+        settings.CurrentRoute     = route;
+        settings.ActiveNavIndex   = 0;
+        settings.EnableNavigation = true;
+
+        ChatLine($"[RynthAi] DunNav: {nodeCount} cells, path={pathLength} steps → navigating to {destNS:F2}N/{destEW:F2}E");
+    }
+
+    private void HandleDungeonNavPatrolCommand(string[] parts) => HandleDungeonNavPatrol();
+
+    /// <summary>
+    /// Builds a Circular hunt patrol covering every cell in the current dungeon landblock.
+    /// Called from both /ra dunnav-patrol and the NavPanel "Dungeon Patrol" button.
+    /// </summary>
+    public void HandleDungeonNavPatrol()
+    {
+        var settings = _dashboard?.Settings;
+        if (settings == null) { ChatLine("[RynthAi] Settings not ready."); return; }
+
+        if (!Host.TryGetPlayerPose(out uint playerCell, out _, out _, out float patrolWZ, out _, out _, out _, out _))
+        {
+            ChatLine("[RynthAi] Cannot get player position."); return;
+        }
+
+        uint landblockKey = playerCell >> 16;
+        bool isDungeon    = (playerCell & 0xFFFF) >= 0x0100;
+        if (!isDungeon)
+        {
+            ChatLine("[RynthAi] dunnav-patrol requires you to be inside a dungeon (cell >= 0x0100)."); return;
+        }
+
+        var cellDat = _raycast?.GeometryLoader.CellDat;
+        if (cellDat == null || !cellDat.IsLoaded)
+        {
+            ChatLine("[RynthAi] Cell dat not loaded — raycast system must be initialized first."); return;
+        }
+
+        if (!NavCoordinateHelper.TryGetNavCoords(Host, out double playerNS, out double playerEW))
+        {
+            ChatLine("[RynthAi] Cannot get player nav coordinates."); return;
+        }
+
+        var graph = DungeonPathfinder.GetGraph(landblockKey, cellDat);
+        if (graph.Count == 0) { ChatLine("[RynthAi] DunNav-Patrol: dungeon graph is empty."); return; }
+
+        uint startCell = DungeonPathfinder.NearestCell(graph, playerNS, playerEW, patrolWZ);
+        if (startCell == 0) { ChatLine("[RynthAi] DunNav-Patrol: cannot find starting cell."); return; }
+
+        var route = DungeonPathfinder.BuildPatrolRoute(graph, startCell);
+
+        settings.IsMacroRunning   = true;
+        settings.CurrentNavPath   = string.Empty;
+        settings.CurrentRoute     = route;
+        settings.ActiveNavIndex   = 0;
+        settings.EnableNavigation = true;
+
+        ChatLine($"[RynthAi] DunNav-Patrol: {graph.Count} cells, {route.Points.Count} waypoints → circular patrol started");
     }
 }

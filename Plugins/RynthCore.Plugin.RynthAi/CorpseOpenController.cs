@@ -98,21 +98,34 @@ public sealed partial class RynthAiPlugin
 
     /// <summary>Safety valve: if busy count has been continuously positive for too long,
     /// force-reset it. Uses the "first went positive" timestamp so that a stream of
-    /// new increments cannot keep refreshing the window indefinitely.</summary>
+    /// new increments cannot keep refreshing the window indefinitely.
+    /// When combat has live targets, drops to a much shorter threshold — stale busy
+    /// from salvage retries shouldn't lock the bot out of fighting for 10s.</summary>
+    private const long BUSY_TIMEOUT_COMBAT_URGENT_MS = 2_000;
     private void CheckBusyTimeout()
     {
-        if (_busyCount > 0 && _busyCountBecamePositiveAt != 0
-            && CorpseNowMs - _busyCountBecamePositiveAt > BUSY_TIMEOUT_MS)
+        if (_busyCount > 0 && _busyCountBecamePositiveAt != 0)
         {
-            Log($"[RynthAi] Busy count stuck at {_busyCount} for >{BUSY_TIMEOUT_MS}ms — force-clearing.");
-            _busyCount = 0;
-            _busyCountLastIncrementAt = 0;
-            _busyCountBecamePositiveAt = 0;
-            if (_combatManager != null) _combatManager.BusyCount = 0;
-            if (_buffManager != null) _buffManager.BusyCount = 0;
-            // Also reset the engine's native count so accumulated increments don't
-            // prevent the next action from being processed.
-            if (Host.HasForceResetBusyCount) Host.ForceResetBusyCount();
+            long elapsed = CorpseNowMs - _busyCountBecamePositiveAt;
+            bool combatUrgent = _combatManager?.HasTargets == true;
+            long threshold = combatUrgent ? BUSY_TIMEOUT_COMBAT_URGENT_MS : BUSY_TIMEOUT_MS;
+
+            if (elapsed > threshold)
+            {
+                Log($"[RynthAi] Busy count stuck at {_busyCount} for >{elapsed}ms (combatUrgent={combatUrgent}) — force-clearing.");
+                // Reset pending loot item BEFORE zeroing AC's m_cBusy. If we have an
+                // in-flight UseObject, ForceResetBusyCount zeros m_cBusy under it; the
+                // retry in TickPendingCorpsePickup would then hit a freed AC object and crash.
+                ResetCurrentLootItem();
+                _corpseIdsRequested = false;
+                _lastLootActionAt = CorpseNowMs;
+                _busyCount = 0;
+                _busyCountLastIncrementAt = 0;
+                _busyCountBecamePositiveAt = 0;
+                if (_combatManager != null) _combatManager.BusyCount = 0;
+                if (_buffManager != null) _buffManager.BusyCount = 0;
+                if (Host.HasForceResetBusyCount) Host.ForceResetBusyCount();
+            }
         }
 
         PruneCorpseCollections();
@@ -128,11 +141,18 @@ public sealed partial class RynthAiPlugin
         if (now - _lastCorpsePruneAt < CorpsePruneIntervalMs) return;
         _lastCorpsePruneAt = now;
 
-        // _completedCorpses — keep last CorpseSetCap entries (oldest irrelevant; corpses despawn)
+        // _completedCorpses — only prune entries for corpses that have already despawned.
+        // Never clear the whole set: completed corpses that are still present in the world
+        // must stay marked so the bot doesn't re-open them.
         if (_completedCorpses.Count > CorpseSetCap)
         {
-            _completedCorpses.Clear();
-            Log($"[RynthAi] Pruned _completedCorpses (was >{CorpseSetCap})");
+            var presentIds = new HashSet<int>();
+            if (_objectCache != null)
+                foreach (var wo in _objectCache.GetLandscapeObjects())
+                    presentIds.Add(wo.Id);
+            int before = _completedCorpses.Count;
+            _completedCorpses.RemoveWhere(id => !presentIds.Contains(id));
+            Log($"[RynthAi] Pruned _completedCorpses: {before} → {_completedCorpses.Count}");
         }
 
         // _ownershipSkipLogged / _corpseIdRequested — pure spam-prevention, safe to wipe periodically
@@ -865,6 +885,8 @@ public sealed partial class RynthAiPlugin
             // RequestId responses still in flight. After the window, items without
             // data are already being skipped — items we're picking up here have their
             // own ID response back (and their busy-count contribution already decremented).
+            // If busy gets genuinely stuck, CheckBusyTimeout / ForceResetBusyCount handles
+            // it; don't add a second gate here that fights the first.
             if (_busyCount > 0 && !assessTimedOut)
                 return;
 
@@ -1618,7 +1640,10 @@ public sealed partial class RynthAiPlugin
     private void HandleCorpseObjectDeleted(uint objectId)
     {
         int sid = unchecked((int)objectId);
-        _completedCorpses.Remove(sid);
+        // Do NOT remove from _completedCorpses here. In AC, DeleteObject fires when a corpse
+        // leaves render range as well as when it actually despawns — both look identical.
+        // If we removed it here, the bot would re-open the same corpse when it circles back
+        // into range. PruneCorpseCollections handles eventual cleanup of truly-gone entries.
         _processedCorpseItems.Remove(sid);
         _corpseItemAttempts.Remove(sid);
         _corpseCooldownUntil.Remove(sid);

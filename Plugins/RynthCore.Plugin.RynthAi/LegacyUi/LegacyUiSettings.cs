@@ -138,6 +138,11 @@ public sealed class LegacyUiSettings
 
     public int BlacklistAttempts = 3;
     public int BlacklistTimeoutSec = 30;
+    /// <summary>
+    /// Blacklist a target after being engaged with it for this many seconds without
+    /// dealing any damage. 0 = disabled. Default 60s.
+    /// </summary>
+    public int TargetNoProgressTimeoutSec = 0; // 0 = disabled; set to e.g. 120 to blacklist stuck targets
 
     public int GiveQueueIntervalMs = 150;
 
@@ -175,18 +180,15 @@ public sealed class LegacyUiSettings
     public int MinSkillLevelTier8 = 435;
 
     // Minimum buffed skill level required to cast self-buffs of each tier.
-    // Buffing is more forgiving than combat — a fizzle just retries on the next
-    // heartbeat with no monster pressure — so defaults here are tighter to AC's
-    // hard minimums than combat thresholds. In particular Tier 8 defaults to 385,
-    // so a 390-buffed character actually gets Incantation buffs.
-    public int BuffMinSkillLevelTier1 = 25;
-    public int BuffMinSkillLevelTier2 = 65;
-    public int BuffMinSkillLevelTier3 = 115;
-    public int BuffMinSkillLevelTier4 = 165;
-    public int BuffMinSkillLevelTier5 = 215;
-    public int BuffMinSkillLevelTier6 = 265;
-    public int BuffMinSkillLevelTier7 = 315;
-    public int BuffMinSkillLevelTier8 = 385;
+    // Defaults match the spell combat thresholds so new installs work consistently.
+    public int BuffMinSkillLevelTier1 = 35;
+    public int BuffMinSkillLevelTier2 = 85;
+    public int BuffMinSkillLevelTier3 = 135;
+    public int BuffMinSkillLevelTier4 = 185;
+    public int BuffMinSkillLevelTier5 = 235;
+    public int BuffMinSkillLevelTier6 = 285;
+    public int BuffMinSkillLevelTier7 = 335;
+    public int BuffMinSkillLevelTier8 = 435;
 
     public bool EnableManaTapping   = false;
     public int  ManaTapMinMana      = 2500;
@@ -240,10 +242,11 @@ public sealed class LegacyUiSettings
     public bool DashShowMacroRules;
     public bool DashShowMonsters;
     public bool DashShowDungeonMap;
-    public bool  MapShowDoors     = true;
-    public bool  MapShowCreatures = true;
-    public bool  MapShowToolbar   = true;
-    public float MapBgOpacity     = 1.0f;
+    public bool  MapShowDoors         = true;
+    public bool  MapShowCreatures     = true;
+    public bool  MapShowToolbar       = true;
+    public float MapBgOpacity         = 1.0f;
+    public bool  MapRotateWithPlayer  = false;
 
     // Radar dungeon-wall overlay
     public bool  ShowRadarWalls        = false; // WIP — renders as black box, disabled by default
@@ -359,11 +362,227 @@ public sealed class ItemRule
     public bool KeepBuffed { get; set; } = true;
 }
 
+/// <summary>JSON wire-format types used by the engine-side Avalonia MonstersPanel.</summary>
+public sealed class MonstersBridgePayload
+{
+    public List<MonsterRule> Rules { get; set; } = new();
+    public List<MonsterBridgeItem> Items { get; set; } = new();
+    public string CurrentTargetName { get; set; } = string.Empty;
+    /// <summary>Captured creature data per rule name (uppercased), filled by the plugin.</summary>
+    public Dictionary<string, MonsterCapturedInfo> Captured { get; set; } = new();
+}
+
+public sealed class MonsterBridgeItem
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+}
+
+public sealed class MonsterCapturedInfo
+{
+    public uint MaxHealth { get; set; }
+    public int  ArmorLevel { get; set; }
+    public string WeakestType { get; set; } = string.Empty;
+    public double WeakestValue { get; set; } = 1.0;
+    public int Samples { get; set; }
+}
+
 public sealed class ConsumableRule
 {
     public int Id { get; set; }
     public string Name { get; set; } = string.Empty;
     public string Type { get; set; } = "General";
+}
+
+/// <summary>Bridge payload for the engine-side Avalonia ItemsPanel.</summary>
+public sealed class ItemsBridgePayload
+{
+    public List<ItemRule>       Weapons           { get; set; } = new();
+    public List<ConsumableRule> Consumables       { get; set; } = new();
+    public bool                 EnableManaTapping { get; set; }
+    public int                  ManaTapMinMana    { get; set; }
+    public int                  ManaStoneKeepCount { get; set; }
+    public string               CurrentTargetName { get; set; } = string.Empty;
+}
+
+// ── Nav bridge types ─────────────────────────────────────────────────────────
+
+public sealed class NavBridgePoint
+{
+    public int    Idx    { get; set; }
+    public string Type   { get; set; } = string.Empty;  // "Point", "Recall", "Pause", "Chat", "PortalNPC"
+    public string Desc   { get; set; } = string.Empty;  // NavPoint.ToString()
+    public double NS     { get; set; }
+    public double EW     { get; set; }
+    public double Z      { get; set; }
+}
+
+public sealed class NavBridgePayload
+{
+    public string            ActiveNavName    { get; set; } = string.Empty;
+    public string            NavStatusLine    { get; set; } = string.Empty;
+    public bool              NavIsStuck       { get; set; }
+    public bool              MacroRunning     { get; set; }
+    public bool              NavigationEnabled{ get; set; }
+    public int               RouteType        { get; set; }  // 1=Circular,2=Linear,3=Follow,4=Once
+    public int               ActiveNavIndex   { get; set; }
+    public List<string>      NavFiles         { get; set; } = new();
+    public List<NavBridgePoint> Points        { get; set; } = new();
+}
+
+/// <summary>One-shot command sent from the Avalonia NavPanel to the plugin.</summary>
+public sealed class NavCommand
+{
+    public string Cmd       { get; set; } = string.Empty;
+    public int    SpellId   { get; set; }
+    public int    Index     { get; set; }
+    public int    RouteType { get; set; }
+    public int    AddMode   { get; set; }   // 0=End, 1=Above, 2=Below
+    public int    InsertAt  { get; set; } = -1;
+    public string NavName   { get; set; } = string.Empty;
+}
+
+/// <summary>Bridge payload for the engine-side Avalonia SettingsPanel.</summary>
+public sealed class SettingsBridgePayload
+{
+    // Display
+    public bool ShowTargetStaminaMana { get; set; }
+
+    // UI
+    public bool SuppressRetailRadar { get; set; }
+    public bool ShowRynthRadar { get; set; }
+    public bool RadarClickThrough { get; set; }
+    public bool SuppressRetailChat { get; set; }
+    public bool ShowRynthChat { get; set; }
+    public bool ChatClickThrough { get; set; }
+    public bool SuppressRetailPowerbar { get; set; }
+
+    // Misc
+    public bool EnableFPSLimit { get; set; }
+    public int TargetFPSFocused { get; set; }
+    public int TargetFPSBackground { get; set; }
+    public bool EnableAutocram { get; set; }
+    public bool PeaceModeWhenIdle { get; set; }
+    public bool StartMacroOnLogin { get; set; }
+    public bool EnableRaycasting { get; set; }
+    public bool UseArcs { get; set; }
+    public float BowArcVelocity { get; set; }
+    public float CrossbowArcVelocity { get; set; }
+    public float AtlatlArcVelocity { get; set; }
+    public float MagicArcVelocity { get; set; }
+    public int BlacklistAttempts { get; set; }
+    public int BlacklistTimeoutSec { get; set; }
+    public int TargetNoProgressTimeoutSec { get; set; }
+    public int GiveQueueIntervalMs { get; set; }
+
+    // Recharge
+    public int HealAt { get; set; }
+    public int RestamAt { get; set; }
+    public int GetManaAt { get; set; }
+    public int TopOffHP { get; set; }
+    public int TopOffStam { get; set; }
+    public int TopOffMana { get; set; }
+    public int HealOthersAt { get; set; }
+    public int RestamOthersAt { get; set; }
+    public int InfuseOthersAt { get; set; }
+
+    // Melee Combat
+    public bool UseRecklessness { get; set; }
+    public int MeleeAttackPower { get; set; }
+    public int MeleeAttackHeight { get; set; }
+    public int MissileAttackPower { get; set; }
+    public int MissileAttackHeight { get; set; }
+    public bool UseNativeAttack { get; set; }
+    public bool SummonPets { get; set; }
+    public int PetMinMonsters { get; set; }
+
+    // Spell Combat
+    public int SpellCastIntervalMs { get; set; }
+    public bool CastDispelSelf { get; set; }
+    public int MinRingTargets { get; set; }
+    public int MinSkillLevelTier1 { get; set; }
+    public int MinSkillLevelTier2 { get; set; }
+    public int MinSkillLevelTier3 { get; set; }
+    public int MinSkillLevelTier4 { get; set; }
+    public int MinSkillLevelTier5 { get; set; }
+    public int MinSkillLevelTier6 { get; set; }
+    public int MinSkillLevelTier7 { get; set; }
+    public int MinSkillLevelTier8 { get; set; }
+
+    // Ranges
+    public int MonsterRange { get; set; }
+    public int RingRange { get; set; }
+    public int ApproachRange { get; set; }
+    public double CorpseApproachRangeMax { get; set; }
+    public double CorpseApproachRangeMin { get; set; }
+
+    // Navigation
+    public bool BoostNavPriority { get; set; }
+    public float FollowNavMin { get; set; }
+    public float NavRingThickness { get; set; }
+    public float NavLineThickness { get; set; }
+    public float NavHeightOffset { get; set; }
+    public bool ShowTerrainPassability { get; set; }
+    public bool OpenDoors { get; set; }
+    public float OpenDoorRange { get; set; }
+    public bool AutoUnlockDoors { get; set; }
+    public int MovementMode { get; set; }
+    public float NavStopTurnAngle { get; set; }
+    public float NavResumeTurnAngle { get; set; }
+    public float NavDeadZone { get; set; }
+    public float NavSweepMult { get; set; }
+    public float PostPortalDelaySec { get; set; }
+    public float T2Speed { get; set; }
+    public float T2WalkWithinYd { get; set; }
+    public float T2DistanceTo { get; set; }
+    public float T2ReissueMs { get; set; }
+    public float T2MaxRangeYd { get; set; }
+    public int T2MaxLandblocks { get; set; }
+
+    // Buffing
+    public bool EnableBuffing { get; set; }
+    public bool RebuffWhenIdle { get; set; }
+    public int RebuffSecondsRemaining { get; set; }
+    public int BuffMinSkillLevelTier1 { get; set; }
+    public int BuffMinSkillLevelTier2 { get; set; }
+    public int BuffMinSkillLevelTier3 { get; set; }
+    public int BuffMinSkillLevelTier4 { get; set; }
+    public int BuffMinSkillLevelTier5 { get; set; }
+    public int BuffMinSkillLevelTier6 { get; set; }
+    public int BuffMinSkillLevelTier7 { get; set; }
+    public int BuffMinSkillLevelTier8 { get; set; }
+
+    // Crafting (read-only state)
+    public bool EnableMissileCrafting { get; set; }
+    public string MissileCraftingState { get; set; } = string.Empty;
+    public bool MissileCraftingActive { get; set; }
+    public string MissileCraftingStatus { get; set; } = string.Empty;
+
+    // Looting
+    public bool EnableLooting { get; set; }
+    public bool BoostLootPriority { get; set; }
+    public bool LootOnlyRareCorpses { get; set; }
+    public bool LootJumpEnabled { get; set; }
+    public int LootJumpHeight { get; set; }
+    public int LootOwnership { get; set; }
+    public bool EnableAutostack { get; set; }
+    public bool EnableCombineSalvage { get; set; }
+    public bool CombineBagsDuringSalvage { get; set; }
+    public int LootInterItemDelayMs { get; set; }
+    public int LootContentSettleMs { get; set; }
+    public int LootEmptyCorpseMs { get; set; }
+    public int LootClosingDelayMs { get; set; }
+    public int LootAssessWindowMs { get; set; }
+    public int LootRetryTimeoutMs { get; set; }
+    public int LootOpenRetryMs { get; set; }
+    public int LootCorpseTimeoutMs { get; set; }
+    public int SalvageOpenDelayFirstMs { get; set; }
+    public int SalvageOpenDelayFastMs { get; set; }
+    public int SalvageAddDelayFirstMs { get; set; }
+    public int SalvageAddDelayFastMs { get; set; }
+    public int SalvageSalvageDelayMs { get; set; }
+    public int SalvageResultDelayFirstMs { get; set; }
+    public int SalvageResultDelayFastMs { get; set; }
 }
 
 public enum MetaConditionType
