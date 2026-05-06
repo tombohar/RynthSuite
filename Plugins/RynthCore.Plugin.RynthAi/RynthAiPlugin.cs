@@ -67,10 +67,19 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
     public override int Initialize()
     {
-        if (Host.ImGuiContext == IntPtr.Zero)
-            return 11;
+        // ImGuiContext is null when the engine is in Decal coexistence mode
+        // (no EndScene hook, no ImGui). The legacy ImGui dashboard's
+        // constructor is pure object setup — it doesn't call any ImGui
+        // APIs. Only Render() does, and the render-side guard already
+        // checks Host.ImGuiContext != IntPtr.Zero. So it's safe to build
+        // the dashboard regardless: settings storage, sub-UI managers,
+        // and all the downstream wiring (Settings, callbacks, etc.) work
+        // identically; only on-screen ImGui rendering is skipped.
+        bool hasImGui = Host.ImGuiContext != IntPtr.Zero;
 
-        EnsureImGuiResolver();
+        if (hasImGui)
+            EnsureImGuiResolver();
+
         ComponentDatabase.SetLog(msg => Log(msg));
         _dashboard = new LegacyDashboardRenderer(Host);
         _objectCache = new WorldObjectCache(Host); // must exist before CreateObject events fire during login
@@ -86,7 +95,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _initialized = true;
         _loginComplete = false;
         _windowVisible = false;
-        Log("RynthAi: legacy ImGui dashboard initialized.");
+        Log(hasImGui
+            ? "RynthAi: legacy ImGui dashboard initialized."
+            : "RynthAi: initialized in Decal coexistence mode (ImGui rendering disabled, Avalonia panels remain).");
         return 0;
     }
 
