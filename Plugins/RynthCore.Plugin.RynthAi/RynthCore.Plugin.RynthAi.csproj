@@ -35,37 +35,17 @@
     <ProjectReference Include="..\..\Shared\RynthCore.LootSdk\RynthCore.LootSdk.csproj" />
   </ItemGroup>
 
-  <Target Name="CopyPublishedPluginToEngineOutputs" AfterTargets="Publish" Condition="'$(PublishDir)' != ''">
-    <ItemGroup>
-      <_EnginePluginDir Include="$(MSBuildThisFileDirectory)..\..\..\RynthCore\src\RynthCore.Engine\bin\$(Configuration)\net10.0-windows\win-x86\Plugins\" />
-      <_EnginePluginDir Include="$(MSBuildThisFileDirectory)..\..\..\RynthCore\src\RynthCore.Engine\bin\$(PlatformTarget)\$(Configuration)\net10.0-windows\win-x86\Plugins\" />
-      <_EnginePluginPublishDir Include="$(MSBuildThisFileDirectory)..\..\..\RynthCore\src\RynthCore.Engine\bin\$(Configuration)\net10.0-windows\win-x86\publish\Plugins\" />
-      <_EnginePluginPublishDir Include="$(MSBuildThisFileDirectory)..\..\..\RynthCore\src\RynthCore.Engine\bin\$(PlatformTarget)\$(Configuration)\net10.0-windows\win-x86\publish\Plugins\" />
-    </ItemGroup>
+  <!--
+    Historically this target auto-copied the published plugin DLL into the
+    RynthCore engine's bin\Plugins\ folder so a fresh engine build would pick
+    up the plugin without manual intervention. That behaviour conflicts with
+    the launcher's plugin-discovery model (users opt-in via "Add Plugin DLL"
+    in the launcher UI, persisted to %APPDATA%\RynthCore\engine.json).
+    Auto-copy removed intentionally — deploy plugin DLLs to their canonical
+    home (e.g. C:\Games\RynthSuite\RynthAi\) and add the path in the launcher.
+  -->
 
-    <MakeDir Directories="@(_EnginePluginDir)" />
-    <MakeDir Directories="@(_EnginePluginPublishDir)" />
-    <Copy
-      SourceFiles="$(PublishDir)$(AssemblyName).dll"
-      DestinationFolder="%(_EnginePluginDir.Identity)"
-      SkipUnchangedFiles="true"
-      Condition="Exists('$(PublishDir)$(AssemblyName).dll')" />
-    <Copy
-      SourceFiles="$(PublishDir)$(AssemblyName).pdb"
-      DestinationFolder="%(_EnginePluginDir.Identity)"
-      SkipUnchangedFiles="true"
-      Condition="Exists('$(PublishDir)$(AssemblyName).pdb')" />
-    <Copy
-      SourceFiles="$(PublishDir)$(AssemblyName).dll"
-      DestinationFolder="%(_EnginePluginPublishDir.Identity)"
-      SkipUnchangedFiles="true"
-      Condition="Exists('$(PublishDir)$(AssemblyName).dll')" />
-    <Copy
-      SourceFiles="$(PublishDir)$(AssemblyName).pdb"
-      DestinationFolder="%(_EnginePluginPublishDir.Identity)"
-      SkipUnchangedFiles="true"
-      Condition="Exists('$(PublishDir)$(AssemblyName).pdb')" />
-  </Target>
+
 
   <Target Name="RemoveBundledImGuiNativeFromBuild" AfterTargets="Build">
     <Delete Files="$(OutputPath)cimgui.dll" Condition="Exists('$(OutputPath)cimgui.dll')" />
