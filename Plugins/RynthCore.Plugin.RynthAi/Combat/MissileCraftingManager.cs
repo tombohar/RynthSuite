@@ -25,7 +25,9 @@ public class MissileCraftingManager
     private CharacterSkills? _charSkills;
 
     public bool IsBusy { get; set; } = false;
-    public int CurrentCombatMode { get; set; } = 1; // 1=peace, 2=melee, 4=missile, 8=magic
+    /// <summary>Live combat mode — read from AC each access (1=peace, 2=melee, 4=missile, 8=magic).</summary>
+    public int CurrentCombatMode =>
+        _host.HasGetCurrentCombatMode ? _host.GetCurrentCombatMode() : CombatMode.NonCombat;
 
     public void SetObjectCache(WorldObjectCache cache) => _objectCache = cache;
     public void SetCharacterSkills(CharacterSkills skills) => _charSkills = skills;

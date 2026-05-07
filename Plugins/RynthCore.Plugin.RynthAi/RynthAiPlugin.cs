@@ -250,14 +250,11 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _combatManager = new CombatManager(Host, _dashboard.Settings, _objectCache!, _spellManager);
         _combatManager.SetCharacterSkills(_charSkills);
         _combatManager.SetPlayerId(_playerId);
-        _combatManager.CurrentCombatMode = _currentCombatMode;
-        _buffManager.CurrentCombatMode = _currentCombatMode;
         _navigationEngine?.SetCombatManager(_combatManager);
 
         _missileCraftingManager = new MissileCraftingManager(Host, _dashboard.Settings);
         _missileCraftingManager.SetObjectCache(_objectCache!);
         _missileCraftingManager.SetCharacterSkills(_charSkills);
-        _missileCraftingManager.CurrentCombatMode = _currentCombatMode;
         _dashboard.SetMissileCraftingManager(_missileCraftingManager);
 
         _fellowshipTracker?.Dispose();
@@ -595,9 +592,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     public override void OnCombatModeChange(int currentCombatMode, int previousCombatMode)
     {
         _currentCombatMode = currentCombatMode;
-        if (_buffManager is not null) _buffManager.CurrentCombatMode = currentCombatMode;
-        if (_combatManager is not null) _combatManager.CurrentCombatMode = currentCombatMode;
-        if (_missileCraftingManager is not null) _missileCraftingManager.CurrentCombatMode = currentCombatMode;
+        // BuffManager and MissileCraftingManager read CurrentCombatMode live from AC,
+        // so no push is needed — they always see the truth, hot-reload-safe and event-loss-safe.
     }
 
     public override void OnChatWindowText(string? text, int chatType, ref int eat)
@@ -896,6 +892,20 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "clearbusy":    HandleClearBusyCommand(); break;
             case "forcebuff":        HandleForceBuff(); break;
             case "cancelforcebuff":  HandleCancelForceBuff(); break;
+            case "bufftest":
+                if (_buffManager == null) { ChatLine("[RynthAi] BuffManager not ready (not logged in yet)."); break; }
+                _buffManager.EnableCastRegistryDiagnostic = !_buffManager.EnableCastRegistryDiagnostic;
+                if (_buffManager.EnableCastRegistryDiagnostic)
+                {
+                    ChatLine("[RynthAi] BuffTest ON — fires on next item-spell cast.");
+                    ChatLine("[RynthAi]   Cast an Impen/Bane (via macro or manually). Diff logs to RynthCore.log with [BuffTest] tag.");
+                    ChatLine("[RynthAi]   Auto-disables after one cast/diff.");
+                }
+                else
+                {
+                    ChatLine("[RynthAi] BuffTest OFF.");
+                }
+                break;
             case "settings":     HandleSettingsCommand(parts); break;
             case "busyinfo":     HandleBusyInfoCommand(); break;
             // give variants — first-match (with optional count prefix)

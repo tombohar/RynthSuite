@@ -1228,7 +1228,6 @@ public sealed partial class RynthAiPlugin
                     _corpseItemsMatched++;
                     return true;
                 }
-                LootDiag($"[RynthAi] Corpse loot: no loot rule matched 0x{(uint)item.Id:X8} '{item.Name}'.");
                 return false;
             }
             _corpseItemsMatched++;
@@ -1263,7 +1262,6 @@ public sealed partial class RynthAiPlugin
                 _corpseItemsMatched++;
                 return true;
             }
-            LootDiag($"[RynthAi] Corpse loot: no loot rule matched 0x{(uint)item.Id:X8} '{item.Name}'.");
             return false;
         }
 

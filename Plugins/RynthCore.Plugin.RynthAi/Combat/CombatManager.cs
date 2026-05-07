@@ -61,8 +61,9 @@ public class CombatManager : IDisposable
     private bool _returnToPhysicalCombat = false;
     private int _savedWeaponId = 0;
 
-    /// <summary>Current combat mode — updated from OnCombatModeChange in RynthAiPlugin.</summary>
-    public int CurrentCombatMode { get; set; } = CombatMode.NonCombat;
+    /// <summary>Current combat mode — read live from AC client each access to avoid event-drop drift.</summary>
+    public int CurrentCombatMode =>
+        _host.HasGetCurrentCombatMode ? _host.GetCurrentCombatMode() : CombatMode.NonCombat;
 
     /// <summary>Client busy count — set by plugin from OnBusyCountIncremented/Decremented.
     /// When > 0, combat must not send any game actions (SelectItem, attack, cast).</summary>
@@ -84,8 +85,6 @@ public class CombatManager : IDisposable
         { "Bludgeon",  new[] { "Bludgeoning Vulnerability Other" } },
     };
 
-    private readonly Dictionary<int, BlacklistedTarget> blacklistedTargets = new();
-
     private readonly BlacklistManager _blacklistManager = new();
     private int _lastAttackedTargetId = 0;
     private int _consecutiveMisses = 0;
@@ -100,7 +99,6 @@ public class CombatManager : IDisposable
     // Combat picks from this list — no SelectItem needed until attack time.
     private readonly List<ScannedTarget> _scannedTargets = new();
     private DateTime _lastScanTime = DateTime.MinValue;
-    private DateTime _lastScanDiagAt = DateTime.MinValue;
     private const int SCAN_INTERVAL_MS = 50;
 
     // Utility-AI target switching: every candidate is scored each tick.
@@ -277,49 +275,21 @@ public class CombatManager : IDisposable
         if (RaycastInitialized && _raycastSystem?.TargetingFSM != null)
             attackType = _raycastSystem.GetAttackType(CurrentCombatMode, "");
 
-        int monstersSeen = 0, exBlacklist = 0, exNotAttackable = 0, exDead = 0, exRange = 0, exLos = 0;
-        List<string>? excludedSamples = null;
-
         foreach (var wo in _worldFilter.GetLandscape())
         {
             if (wo.Id == playerId) continue;
             if ((int)wo.ObjectClass != (int)AcObjectClass.Monster) continue;
-            monstersSeen++;
 
             double dist = _worldFilter.Distance(playerId, wo.Id);
 
-            if (blacklistedTargets.ContainsKey(wo.Id) || _blacklistManager.IsBlacklisted(wo.Id))
-            {
-                exBlacklist++;
-                if (excludedSamples == null) excludedSamples = new List<string>(3);
-                if (excludedSamples.Count < 3) excludedSamples.Add($"'{wo.Name}'(bl @ {dist:F1}yd)");
-                continue;
-            }
+            if (_blacklistManager.IsBlacklisted(wo.Id)) continue;
 
-            if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable((uint)wo.Id))
-            {
-                exNotAttackable++;
-                if (excludedSamples == null) excludedSamples = new List<string>(3);
-                if (excludedSamples.Count < 3) excludedSamples.Add($"'{wo.Name}'(!atk @ {dist:F1}yd)");
-                continue;
-            }
+            if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable((uint)wo.Id)) continue;
 
             // Dead but not yet reclassified as corpse — skip
-            if (_worldFilter.GetHealthRatio(wo.Id) == 0f)
-            {
-                exDead++;
-                if (excludedSamples == null) excludedSamples = new List<string>(3);
-                if (excludedSamples.Count < 3) excludedSamples.Add($"'{wo.Name}'(dead @ {dist:F1}yd)");
-                continue;
-            }
+            if (_worldFilter.GetHealthRatio(wo.Id) == 0f) continue;
 
-            if (dist > maxDist)
-            {
-                exRange++;
-                if (excludedSamples == null) excludedSamples = new List<string>(3);
-                if (excludedSamples.Count < 3) excludedSamples.Add($"'{wo.Name}'(range @ {dist:F1}yd)");
-                continue;
-            }
+            if (dist > maxDist) continue;
 
             bool losBlocked = false;
             if (_settings.EnableRaycasting && RaycastInitialized && _raycastSystem != null)
@@ -336,10 +306,7 @@ public class CombatManager : IDisposable
             // Blacklisting only happens when an active target fails LOS during attack.
             if (losBlocked)
             {
-                exLos++;
                 _nearbyNoLos++; // in range + attackable but wall-blocked — still stops nav
-                if (excludedSamples == null) excludedSamples = new List<string>(3);
-                if (excludedSamples.Count < 3) excludedSamples.Add($"'{wo.Name}'(los @ {dist:F1}yd)");
                 continue;
             }
 
@@ -356,22 +323,6 @@ public class CombatManager : IDisposable
             _scannedTargets.Add(new ScannedTarget { Id = wo.Id, Distance = dist, Angle = angle, Name = wo.Name });
         }
 
-        // Scan diagnostic — fires every 1s when something's being skipped
-        // (accepted < monstersSeen), every 5s otherwise. Samples up to 3
-        // excluded mobs by name + reason + distance so we can diagnose fast.
-        bool anySkipped = monstersSeen > _scannedTargets.Count;
-        double diagInterval = anySkipped ? 1.0 : 5.0;
-        if (monstersSeen > 0 && (DateTime.Now - _lastScanDiagAt).TotalSeconds >= diagInterval)
-        {
-            _lastScanDiagAt = DateTime.Now;
-            string samples = excludedSamples != null && excludedSamples.Count > 0
-                ? " — excluded: " + string.Join(", ", excludedSamples)
-                : "";
-            _host.Log($"[RynthAi] scan: monsters={monstersSeen} accepted={_scannedTargets.Count} " +
-                      $"bl={exBlacklist} !atk={exNotAttackable} dead={exDead} range={exRange} los={exLos} " +
-                      $"(maxDist={maxDist:F1}, raycast={_settings.EnableRaycasting}){samples}");
-        }
-
         // Primary: closest first. Tiebreaker within 0.5yd: smallest facing angle first.
         _scannedTargets.Sort((a, b) =>
         {
@@ -379,18 +330,6 @@ public class CombatManager : IDisposable
             if (Math.Abs(dd) > 0.5) return dd < 0 ? -1 : 1;
             return a.Angle.CompareTo(b.Angle);
         });
-    }
-
-    private class BlacklistedTarget
-    {
-        public int TargetId { get; set; }
-        public DateTime BlacklistedTime { get; set; }
-        public bool IsLosBlocked { get; set; }
-        public bool IsExpired()
-        {
-            double duration = IsLosBlocked ? 5000 : 20000;
-            return (DateTime.Now - BlacklistedTime).TotalMilliseconds > duration;
-        }
     }
 
     public CombatManager(RynthCoreHost host, LegacyUiSettings settings, WorldObjectCache worldFilter, SpellManager? spellManager = null)
@@ -485,7 +424,9 @@ public class CombatManager : IDisposable
     {
         if (!_waitingForDebuffResult || string.IsNullOrEmpty(text)) return;
 
-        if (text.StartsWith("You cast ", StringComparison.OrdinalIgnoreCase))
+        // AC strips the leading 'Y' from cast-confirmation chat — text arrives as
+        // "ou cast …". IndexOf matches both "You cast" and "ou cast".
+        if (text.IndexOf("ou cast ", StringComparison.OrdinalIgnoreCase) >= 0)
         {
             string key = $"{_pendingDebuffTargetId}_{_pendingDebuffKey}";
             _confirmedDebuffs.Add(key);
@@ -538,10 +479,23 @@ public class CombatManager : IDisposable
             {
                 _host.WriteToChat($"[RynthAi] No damage feedback after {_consecutiveMisses} attacks — blacklisting 0x{(uint)targetId:X8}", 2);
                 _consecutiveMisses = 0;
-                activeTargetId = 0;
-                _lockedTargetId = 0;
+                DropTarget($"blacklisted after {_settings.BlacklistAttempts} no-damage attacks");
             }
         }
+    }
+
+    private void DropTarget(string reason)
+    {
+        if (activeTargetId != 0)
+            _host.Log($"[RynthAi] DropTarget 0x{activeTargetId:X8}: {reason}");
+        activeTargetId = 0;
+        _lockedTargetId = 0;
+        _facingTarget = false;
+        _returnToPhysicalCombat = false;
+        _targetLockedAt    = DateTime.MinValue;
+        _lastDamageDealtAt = DateTime.MinValue;
+        _targetLostScanTime = DateTime.MinValue;
+        ClearCombatTurnMotions();
     }
 
     public bool Think()
@@ -549,8 +503,9 @@ public class CombatManager : IDisposable
         if (!_settings.EnableCombat) return false;
 
         double acDistanceLimit = _settings.MonsterRange;
-        try { CleanupExpiredBlacklist(); } catch (Exception ex) { _host.Log($"[RynthAi] CleanupExpiredBlacklist crashed: {ex.Message}"); }
-
+        // Note: _blacklistManager self-expires entries on read (IsBlacklisted), so no
+        // explicit cleanup pass is needed. The old vestigial `blacklistedTargets` dict
+        // and its CleanupExpiredBlacklist helper were removed — they were never populated.
         _blacklistManager.AttemptThreshold = 1; // one report = blacklist; count is controlled by TrackAttackAttempt
         _blacklistManager.TimeoutSeconds   = _settings.BlacklistTimeoutSec;
 
@@ -576,55 +531,17 @@ public class CombatManager : IDisposable
         if (activeTargetId != 0)
         {
             var target = _worldFilter[activeTargetId];
-            bool blacklisted = blacklistedTargets.ContainsKey(activeTargetId) || _blacklistManager.IsBlacklisted(activeTargetId);
+            bool blacklisted = _blacklistManager.IsBlacklisted(activeTargetId);
 
             if (blacklisted)
-            {
-                // Hard drop — mob is on the blacklist.
-                activeTargetId = 0;
-                _lockedTargetId = 0;
-                _facingTarget = false;
-                _returnToPhysicalCombat = false;
-                _targetLockedAt    = DateTime.MinValue;
-                _lastDamageDealtAt = DateTime.MinValue;
-                ClearCombatTurnMotions();
-            }
+                DropTarget("blacklisted");
             else if (target != null && (int)target.ObjectClass != (int)AcObjectClass.Monster)
-            {
-                // Confirmed no longer a creature (became a corpse, etc.) — release lock.
-                activeTargetId = 0;
-                _lockedTargetId = 0;
-                _facingTarget = false;
-                _returnToPhysicalCombat = false;
-                _targetLockedAt    = DateTime.MinValue;
-                _lastDamageDealtAt = DateTime.MinValue;
-                ClearCombatTurnMotions();
-            }
+                DropTarget("became corpse");
             else if (_worldFilter.GetHealthRatio(activeTargetId) == 0f)
-            {
-                // Health hit zero — dead, move on immediately instead of waiting
-                // for the object class to change to corpse.
-                activeTargetId = 0;
-                _lockedTargetId = 0;
-                _facingTarget = false;
-                _returnToPhysicalCombat = false;
-                _targetLockedAt    = DateTime.MinValue;
-                _lastDamageDealtAt = DateTime.MinValue;
-                ClearCombatTurnMotions();
-            }
+                DropTarget("hp=0");
             else if (target != null &&
                      _worldFilter.Distance(_host.GetPlayerId() == 0 ? 0 : (int)_host.GetPlayerId(), activeTargetId) > acDistanceLimit)
-            {
-                // Out of configured range — release lock immediately.
-                // Previous 1.5× buffer caused the bot to run toward distant mobs.
-                activeTargetId = 0;
-                _lockedTargetId = 0;
-                _facingTarget = false;
-                _returnToPhysicalCombat = false;
-                _targetLockedAt    = DateTime.MinValue;
-                _lastDamageDealtAt = DateTime.MinValue;
-                ClearCombatTurnMotions();
-            }
+                DropTarget("out of range");
             // If target == null here it's a transient world-filter miss — keep the lock,
             // the stillScanned grace period below will handle a truly dead/vanished mob.
         }
@@ -664,17 +581,7 @@ public class CombatManager : IDisposable
                 _targetLostScanTime = DateTime.Now;
 
             if ((DateTime.Now - _targetLostScanTime).TotalMilliseconds > TARGET_SCAN_GRACE_MS)
-            {
-                // Still not in scan after grace period — truly gone (died, moved away, permLOS)
-                activeTargetId = 0;
-                _lockedTargetId = 0;
-                _facingTarget = false;
-                _returnToPhysicalCombat = false;
-                _targetLockedAt    = DateTime.MinValue;
-                _lastDamageDealtAt = DateTime.MinValue;
-                ClearCombatTurnMotions();
-                _targetLostScanTime = DateTime.MinValue;
-            }
+                DropTarget("scan grace expired");
             return true;
         }
         _targetLostScanTime = DateTime.MinValue; // back in scan — reset grace timer
@@ -694,13 +601,7 @@ public class CombatManager : IDisposable
                 _host.WriteToChat($"[RynthAi] No progress on {targetObj.Name} after {noProgressTimeoutSec}s — blacklisting", 2);
                 _blacklistManager.TimeoutSeconds = _settings.BlacklistTimeoutSec;
                 _blacklistManager.ReportFailure(activeTargetId);
-                activeTargetId = 0;
-                _lockedTargetId = 0;
-                _facingTarget = false;
-                _returnToPhysicalCombat = false;
-                _targetLockedAt    = DateTime.MinValue;
-                _lastDamageDealtAt = DateTime.MinValue;
-                ClearCombatTurnMotions();
+                DropTarget("no-progress timeout");
                 return true;
             }
         }
@@ -933,7 +834,20 @@ public class CombatManager : IDisposable
         double hpScore     = (1.0 - Math.Clamp(hpRatio, 0f, 1f)) * 50.0;
         double threatScore = c.Distance < 3.0 ? 30.0 : 0.0;
         double facingScore = (1.0 - Math.Min(1.0, c.Angle / 180.0)) * 10.0;
-        return distScore + hpScore + threatScore + facingScore;
+
+        // Monster-rule priority: default scoring already prefers "fastest to attack"
+        // (close/low-hp/in-melee/in-front), which is right for normal grind dungeons.
+        // The user uses MonsterRules.Priority to elevate threats they want focused
+        // first — so only apply a bonus when Priority is *above* the default of 1.
+        // Priority 10 → +45 (about half a max-distance score, enough to switch
+        // targets unless the alternative is much closer/lower-HP).
+        string targetName = c.Name;
+        var rule = _settings.MonsterRules.FirstOrDefault(
+            r => !r.Name.Equals("Default", StringComparison.OrdinalIgnoreCase) &&
+                 targetName.IndexOf(r.Name, StringComparison.OrdinalIgnoreCase) >= 0);
+        double priorityScore = rule != null ? Math.Max(0, rule.Priority - 1) * 5.0 : 0;
+
+        return distScore + hpScore + threatScore + facingScore + priorityScore;
     }
 
     private DateTime _lastEquipTime = DateTime.MinValue;
@@ -1691,13 +1605,6 @@ public class CombatManager : IDisposable
         5 => "V", 6 => "VI", 7 => "VII", 8 => "VIII",
         _ => "I"
     };
-
-    private void CleanupExpiredBlacklist()
-    {
-        var expired = new List<int>();
-        foreach (var kvp in blacklistedTargets) if (kvp.Value.IsExpired()) expired.Add(kvp.Key);
-        foreach (var id in expired) blacklistedTargets.Remove(id);
-    }
 
     public void Dispose() => _raycastSystem?.Dispose();
 }

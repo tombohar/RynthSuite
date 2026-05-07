@@ -57,12 +57,46 @@ public class BuffManager : IDisposable
     private readonly Dictionary<int, ItemSpellRecord> _itemSpellTimers = new();
     private string _buffTimerPath = "";
 
+    // === Item-enchantment duration experiment (BuffManager_Review.md §headline #3) ===
+    // Toggled via `/ra bufftest`. Stays ON until toggled OFF — captures every cast.
+    public bool EnableCastRegistryDiagnostic = false;
+    private readonly Queue<CastDiagnostic> _pendingDiagnostics = new();
+
+    // Force Rebuff cycle tracking — when set, IsBuffActive consults this instead
+    // of the live timer dicts so FR re-casts every spell to align all timers.
+    private readonly HashSet<int> _forceRebuffCastFamilies = new();
+
+    // Per-family diagnostic throttle — last reason string we logged. Suppresses
+    // dup spam when IsBuffActive is polled every tick by NeedsAnyBuff + CheckAndCastSelfBuffs.
+    private readonly Dictionary<int, string> _lastArmorRecastReason = new();
+
+    private sealed class RegistrySnapshot
+    {
+        public uint OwnerId;
+        public string OwnerName = "";
+        public bool IsPlayer;
+        public uint[] SpellIds = Array.Empty<uint>();
+        public double[] ExpiryTimes = Array.Empty<double>();
+        public int Count;
+        public double ServerTime;
+    }
+
+    private sealed class CastDiagnostic
+    {
+        public DateTime CastedAt;
+        public string SpellName = "";
+        public int SpellId;
+        public int SpellFamily;
+        public List<RegistrySnapshot> PreSnapshots = new();
+    }
+
     private bool _isRechargingMana = false;
     private bool _isRechargingStamina = false;
     private bool _isHealingSelf = false;
 
-    /// <summary>Current combat mode — updated from OnCombatModeChange.</summary>
-    public int CurrentCombatMode { get; set; } = CombatMode.NonCombat;
+    /// <summary>Live combat mode read from AC each access — never drifts if OnCombatModeChange is missed.</summary>
+    public int CurrentCombatMode =>
+        _host.HasGetCurrentCombatMode ? _host.GetCurrentCombatMode() : CombatMode.NonCombat;
 
     /// <summary>Client busy count — when > 0, don't send any game actions.</summary>
     public int BusyCount { get; set; }
@@ -208,10 +242,17 @@ public class BuffManager : IDisposable
     public void ForceFullRebuff()
     {
         _isForceRebuffing = true;
+        _forceRebuffCastFamilies.Clear();
         _ramBuffTimers.Clear();
         _itemSpellTimers.Clear();
+        _pendingSpellId = 0;
+        _lastCastAttempt = DateTime.MinValue;
         SaveBuffTimers();
         _host.WriteToChat("[RynthAi] Starting Force Rebuff...", 5);
+
+        var list = BuildDynamicBuffList();
+        _host.Log($"[FR] buff list ({list.Count}): {string.Join(", ", list)}");
+        _host.Log($"[FR] macroRunning={_settings.IsMacroRunning} liveRefreshed={_liveBuffsRefreshed}");
     }
 
     public void CancelBuffing()
@@ -263,6 +304,16 @@ public class BuffManager : IDisposable
 
     public void OnHeartbeat()
     {
+        // Post-cast diffs for the bufftest experiment run unconditionally — even if the
+        // user toggled the macro off mid-experiment, we still want to capture and log them.
+        // Drain any pending diagnostics whose 2s post-cast window has elapsed.
+        while (_pendingDiagnostics.Count > 0 &&
+               (DateTime.Now - _pendingDiagnostics.Peek().CastedAt).TotalSeconds >= 2.0)
+        {
+            var diag = _pendingDiagnostics.Dequeue();
+            LogPostCastDiff(diag);
+        }
+
         if (!_settings.IsMacroRunning) return;
 
         // RefreshFromLiveMemory at OnLoginComplete fails when the server-time
@@ -287,11 +338,22 @@ public class BuffManager : IDisposable
             return;
         }
 
-        // Safety: if a cast has been pending for too long without confirmation
-        // (lost chat, disconnected mid-cast, etc.), clear the flag so we don't
-        // lock BotAction to "Buffing" forever.
-        if (_pendingSpellId != 0 && (DateTime.Now - _lastCastAttempt).TotalSeconds > 10)
-            _pendingSpellId = 0;
+        // Hold the cycle for item enchantments (banes/Impen/Brogard's) until the
+        // previous cast resolves via chat. Player self-buffs cast at full speed
+        // and use SpellCastIntervalMs alone — the bane/Impen path is the one
+        // that silently rejects when fired faster than server cast time
+        // (bufftest measured 0/10 land rate without this gate). OnChatWindowText
+        // clears _pendingSpellId on "ou cast X" / fizzle / fail / component /
+        // lack the mana. No time-based fallback: chat is authoritative.
+        if (_pendingSpellId != 0)
+        {
+            var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
+            if (pendingSpell != null && IsArmorEnchantment(pendingSpell.Name))
+            {
+                _settings.BotAction = "Buffing";
+                return;
+            }
+        }
 
         if ((DateTime.Now - _lastCastAttempt).TotalMilliseconds < _settings.SpellCastIntervalMs)
         {
@@ -325,6 +387,8 @@ public class BuffManager : IDisposable
             if (_isForceRebuffing)
             {
                 _isForceRebuffing = false;
+                _host.Log($"[FR] complete — cast {_forceRebuffCastFamilies.Count} spell families");
+                _forceRebuffCastFamilies.Clear();
                 _host.WriteToChat("[RynthAi] Force Rebuff Complete.", 1);
             }
         }
@@ -418,36 +482,59 @@ public class BuffManager : IDisposable
     private bool CheckAndCastSelfBuffs()
     {
         List<string> desiredBuffs = BuildDynamicBuffList();
+        bool diagnose = _isForceRebuffing;
 
         foreach (string buffBaseName in desiredBuffs)
         {
             AcSkillType castSkill = SkillForBuff(buffBaseName);
-            if (!IsSkillUsable(castSkill)) continue;
+            if (!IsSkillUsable(castSkill))
+            {
+                if (diagnose) _host.Log($"[FR] skip '{buffBaseName}' — skill {castSkill} not usable");
+                continue;
+            }
 
             int spellId = FindBestSpellId(buffBaseName, castSkill);
-            if (spellId == 0) continue;
-
-            if (!IsBuffActive(spellId))
+            if (spellId == 0)
             {
-                if (!EnsureMagicMode()) return true;
-
-                _pendingSpellId = spellId;
-
-                var spellInfo = SpellTableStub.GetById(spellId);
-                if (spellInfo != null)
-                {
-                    _host.WriteToChat($"[RynthAi] Casting: {spellInfo.Name}", 5);
-
-                    // Record item spell timers immediately on cast — don't rely on chat parsing
-                    // or enchantment hooks (item enchantments fire on the item, not the player).
-                    if (IsArmorEnchantment(spellInfo.Name))
-                        RecordItemSpellCast(spellInfo);
-                }
-
-                _host.CastSpell((uint)_host.GetPlayerId(), spellId);
-                _lastCastAttempt = DateTime.Now;
-                return true;
+                if (diagnose) _host.Log($"[FR] skip '{buffBaseName}' — FindBestSpellId returned 0");
+                continue;
             }
+
+            if (IsBuffActive(spellId))
+            {
+                if (diagnose) _host.Log($"[FR] skip '{buffBaseName}' (id={spellId}) — already active");
+                continue;
+            }
+
+            if (!EnsureMagicMode()) return true;
+
+            _pendingSpellId = spellId;
+
+            var spellInfo = SpellTableStub.GetById(spellId);
+            if (spellInfo != null)
+            {
+                _host.WriteToChat($"[RynthAi] Casting: {spellInfo.Name}", 5);
+
+                // Record item spell timers immediately on cast — don't rely on chat parsing
+                // or enchantment hooks (item enchantments fire on the item, not the player).
+                if (IsArmorEnchantment(spellInfo.Name))
+                    RecordItemSpellCast(spellInfo);
+            }
+
+            if (diagnose) _host.Log($"[FR] CAST '{buffBaseName}' resolvedSpellId={spellId} (pending now set)");
+            bool castOk = _host.CastSpell((uint)_host.GetPlayerId(), spellId);
+            _lastCastAttempt = DateTime.Now;
+            if (!castOk)
+            {
+                // Local CastSpell rejected — packet never went out, so no chat
+                // will ever arrive. Clear the gate immediately so the cycle
+                // doesn't hang on this spell.
+                _pendingSpellId = 0;
+                if (spellInfo != null && IsArmorEnchantment(spellInfo.Name))
+                    _itemSpellTimers.Remove(spellInfo.Family);
+                if (diagnose) _host.Log($"[FR] cast '{buffBaseName}' returned false — pending cleared");
+            }
+            return true;
         }
         return false;
     }
@@ -474,22 +561,182 @@ public class BuffManager : IDisposable
     /// </summary>
     private void RecordItemSpellCast(SpellInfo spellInfo)
     {
-        double duration = GetCustomSpellDuration(GetSpellLevel(spellInfo));
+        int level = GetSpellLevel(spellInfo);
+        double duration = GetCustomSpellDuration(level);
         var now = DateTime.Now;
         _itemSpellTimers[spellInfo.Family] = new ItemSpellRecord
         {
             CastAt    = now,
             ExpiresAt = now.AddSeconds(duration),
             SpellName = spellInfo.Name,
-            SpellLevel = GetSpellLevel(spellInfo),
+            SpellLevel = level,
         };
+        // Pair with [BuffDiag] armor-recast logs so we can match record vs lookup.
+        _lastArmorRecastReason.Remove(spellInfo.Family); // allow next recast to re-log
+        _host.Log($"[BuffDiag] RECORD '{spellInfo.Name}' (id={spellInfo.Id}, fam={spellInfo.Family}, lvl={level}, durSec={duration:F0}, expiresAt={now.AddSeconds(duration):HH:mm:ss})");
         SaveBuffTimers();
+
+        if (EnableCastRegistryDiagnostic)
+            CapturePreCastDiagnostic(spellInfo);
+    }
+
+    private void CapturePreCastDiagnostic(SpellInfo spellInfo)
+    {
+        try
+        {
+            var diag = new CastDiagnostic
+            {
+                CastedAt    = DateTime.Now,
+                SpellName   = spellInfo.Name,
+                SpellId     = spellInfo.Id,
+                SpellFamily = spellInfo.Family,
+                PreSnapshots = SnapshotRegistries(),
+            };
+            _pendingDiagnostics.Enqueue(diag);
+            _host.Log($"[BuffTest] PRE-CAST '{spellInfo.Name}' (id={spellInfo.Id}, fam={spellInfo.Family}) " +
+                      $"snapshots={diag.PreSnapshots.Count} queued={_pendingDiagnostics.Count}");
+        }
+        catch (Exception ex)
+        {
+            _host.Log($"[BuffTest] Pre-cast snapshot failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private List<RegistrySnapshot> SnapshotRegistries()
+    {
+        var snaps = new List<RegistrySnapshot>();
+        double serverNow = _host.HasGetServerTime ? _host.GetServerTime() : 0;
+
+        // Player registry — known-safe path.
+        if (_host.HasReadPlayerEnchantments)
+        {
+            const int Max = 256;
+            var sids = new uint[Max];
+            var exp  = new double[Max];
+            int n = _host.ReadPlayerEnchantments(sids, exp, Max);
+            snaps.Add(new RegistrySnapshot
+            {
+                OwnerId     = (uint)_host.GetPlayerId(),
+                OwnerName   = "Player",
+                IsPlayer    = true,
+                SpellIds    = sids,
+                ExpiryTimes = exp,
+                Count       = Math.Max(0, n),
+                ServerTime  = serverNow,
+            });
+        }
+
+        // Equipped-item registries — opt-in via the diagnostic flag.
+        // Equipped items are stable in the cache (filter avoids the freshly-arrived
+        // inventory items that triggered the AV in earlier RefreshEquippedItemEnchantments runs).
+        if (_worldObjectCache != null && _host.HasReadObjectEnchantments)
+        {
+            var equipped = new List<WorldObject>();
+            foreach (var item in _worldObjectCache.GetDirectInventory())
+            {
+                if (item.WieldedLocation == 0) continue;
+                equipped.Add(item);
+            }
+
+            const int Max = 64;
+            foreach (var item in equipped)
+            {
+                uint oid = unchecked((uint)item.Id);
+                var sids = new uint[Max];
+                var exp  = new double[Max];
+                int n;
+                try
+                {
+                    n = _host.ReadObjectEnchantments(oid, sids, exp, Max);
+                }
+                catch
+                {
+                    continue;
+                }
+                snaps.Add(new RegistrySnapshot
+                {
+                    OwnerId     = oid,
+                    OwnerName   = item.Name,
+                    IsPlayer    = false,
+                    SpellIds    = sids,
+                    ExpiryTimes = exp,
+                    Count       = Math.Max(0, n),
+                    ServerTime  = serverNow,
+                });
+            }
+        }
+
+        return snaps;
+    }
+
+    private void LogPostCastDiff(CastDiagnostic diag)
+    {
+        try
+        {
+            var post = SnapshotRegistries();
+            _host.Log($"[BuffTest] === POST-CAST DIFF for '{diag.SpellName}' (id={diag.SpellId}, fam={diag.SpellFamily}) ===");
+            _host.WriteToChat($"[BuffTest] Post-cast diff captured for '{diag.SpellName}' — see RynthCore.log", 1);
+
+            foreach (var pre in diag.PreSnapshots)
+            {
+                RegistrySnapshot? match = null;
+                foreach (var p in post)
+                    if (p.OwnerId == pre.OwnerId) { match = p; break; }
+
+                if (match == null)
+                {
+                    _host.Log($"[BuffTest]   {pre.OwnerName} (0x{pre.OwnerId:X8}): post-snapshot missing");
+                    continue;
+                }
+
+                var preIds = new HashSet<uint>();
+                for (int i = 0; i < pre.Count; i++) preIds.Add(pre.SpellIds[i]);
+
+                int newCount = 0;
+                int matchedTargetSpell = -1;
+                _host.Log($"[BuffTest]   {match.OwnerName} (0x{match.OwnerId:X8}): pre={pre.Count} post={match.Count} serverNow={match.ServerTime:F1}");
+
+                for (int i = 0; i < match.Count; i++)
+                {
+                    uint sid = match.SpellIds[i];
+                    if (preIds.Contains(sid)) continue;
+                    newCount++;
+                    var sp = SpellTableStub.GetById((int)sid);
+                    string nm = sp?.Name ?? "?";
+                    int fam = sp?.Family ?? -1;
+                    double remaining = match.ExpiryTimes[i] - match.ServerTime;
+                    _host.Log($"[BuffTest]     +new spell={sid} ('{nm}') fam={fam} expiry={match.ExpiryTimes[i]:F1} remaining={remaining:F1}s");
+                    if (sid == (uint)diag.SpellId || fam == diag.SpellFamily) matchedTargetSpell = i;
+                }
+
+                if (newCount == 0)
+                    _host.Log($"[BuffTest]     (no new entries)");
+                else if (matchedTargetSpell >= 0)
+                {
+                    double remaining = match.ExpiryTimes[matchedTargetSpell] - match.ServerTime;
+                    bool hasDuration = remaining > 0.5 && remaining < (86400 * 365);
+                    _host.Log($"[BuffTest]     >>> TARGET SPELL MATCHED: remaining={remaining:F1}s hasRealDuration={hasDuration}");
+                }
+            }
+
+            _host.Log("[BuffTest] === END DIFF ===");
+        }
+        catch (Exception ex)
+        {
+            _host.Log($"[BuffTest] Post-cast diff failed: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private bool IsBuffActive(int spellId)
     {
         var targetSpell = SpellTableStub.GetById(spellId);
         if (targetSpell == null) return false;
+
+        // Force Rebuff: ignore live timers entirely — only spells we've already
+        // cast THIS rebuff cycle count as "active". The whole point of FR is to
+        // recast every spell so all timers align to the same start time.
+        if (_isForceRebuffing)
+            return _forceRebuffCastFamilies.Contains(targetSpell.Family);
 
         int targetLevel = GetSpellLevel(targetSpell);
         // Recast when remaining duration drops below this many seconds.
@@ -509,9 +756,21 @@ public class BuffManager : IDisposable
             if (_itemSpellTimers.TryGetValue(targetSpell.Family, out ItemSpellRecord? itemTimer))
             {
                 if (itemTimer.SpellLevel < targetLevel)
+                {
+                    LogArmorRecast(targetSpell, $"tier-upgrade recordedLvl={itemTimer.SpellLevel} < targetLvl={targetLevel} (recorded='{itemTimer.SpellName}')");
                     return false;
+                }
                 if (DateTime.Now < itemTimer.ExpiresAt.AddSeconds(-rebufferSec))
+                {
+                    _lastArmorRecastReason.Remove(targetSpell.Family); // clear so next recast re-logs
                     return true;
+                }
+                double remainSec = (itemTimer.ExpiresAt - DateTime.Now).TotalSeconds;
+                LogArmorRecast(targetSpell, $"expiry-window remainSec={remainSec:F0} threshold={rebufferSec} (recorded='{itemTimer.SpellName}' lvl={itemTimer.SpellLevel} expiresAt={itemTimer.ExpiresAt:HH:mm:ss})");
+            }
+            else
+            {
+                LogArmorRecast(targetSpell, $"NO timer entry for family={targetSpell.Family} (targetLvl={targetLevel}, _itemSpellTimers.Count={_itemSpellTimers.Count})");
             }
             return false;
         }
@@ -528,6 +787,16 @@ public class BuffManager : IDisposable
         if (_isForceRebuffing) return false;
 
         return false;
+    }
+
+    private void LogArmorRecast(SpellInfo targetSpell, string reason)
+    {
+        // Throttle: only log when reason changes for this family — IsBuffActive
+        // is polled every tick, so unconditional logging would flood RynthCore.log.
+        if (_lastArmorRecastReason.TryGetValue(targetSpell.Family, out string? prev) && prev == reason)
+            return;
+        _lastArmorRecastReason[targetSpell.Family] = reason;
+        _host.Log($"[BuffDiag] armor-recast '{targetSpell.Name}' (id={targetSpell.Id}, fam={targetSpell.Family}): {reason}");
     }
 
     private static int GetSpellLevel(SpellInfo spell)
@@ -954,10 +1223,24 @@ public class BuffManager : IDisposable
     {
         string lower = text.ToLowerInvariant();
 
-        if (lower.Contains("fizzle") || lower.Contains("fail") ||
-            lower.Contains("component") || lower.Contains("lack the mana"))
+        // Diagnostic: log every chat seen while waiting on a cast confirmation,
+        // so we can see what AC is actually emitting and adjust our matchers.
+        if (_pendingSpellId != 0)
+            _host.Log($"[BuffChat] pending={_pendingSpellId} type={chatType} text='{text}'");
+
+        // Real failure phrases. Note: bare "component" was removed — it false-matches
+        // the "consumed the following components" line, which fires for both success
+        // AND fizzle, so it's NOT a reliable signal either direction. Ignore it
+        // entirely; wait for the explicit "ou cast" success or "fizzle" failure.
+        if (lower.Contains("fizzle") ||
+            lower.Contains("your spell failed") ||
+            lower.Contains("lack the mana") ||
+            lower.Contains("missing some required") ||
+            lower.Contains("you do not have the") ||
+            lower.Contains("you're too busy") ||
+            lower.Contains("you are too busy") ||
+            lower.Contains("you must specify"))
         {
-            // If we optimistically recorded an item spell timer, roll it back on failure
             if (_pendingSpellId != 0)
             {
                 var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
@@ -966,6 +1249,7 @@ public class BuffManager : IDisposable
                     _itemSpellTimers.Remove(pendingSpell.Family);
                     SaveBuffTimers();
                 }
+                _host.Log($"[BuffChat] CLEARED pending={_pendingSpellId} via failure pattern in '{text}'");
             }
             _lastCastAttempt = DateTime.MinValue;
             _pendingSpellId = 0;
@@ -974,11 +1258,13 @@ public class BuffManager : IDisposable
 
         // "You cast Incantation of Flame Bane on Gelidite Robe, refreshing ..."
         // "You cast Strength Self VIII"
-        if (!lower.StartsWith("you cast "))
-            return;
+        // The leading 'Y' is stripped by AC's chat-glyph layer before our handler
+        // sees it — text actually arrives as "ou cast …". IndexOf works for both.
+        int castIdx = lower.IndexOf("ou cast ", StringComparison.Ordinal);
+        if (castIdx < 0) return;
 
-        // Extract spell name: everything after "You cast " up to " on " or ","
-        string afterCast = text.Substring(9); // skip "You cast "
+        // Extract spell name: everything after "ou cast " up to " on " or ","
+        string afterCast = text.Substring(castIdx + 8); // skip "ou cast "
         int onIdx = afterCast.IndexOf(" on ", StringComparison.OrdinalIgnoreCase);
         int commaIdx = afterCast.IndexOf(',');
         int endIdx = afterCast.Length;
@@ -997,6 +1283,15 @@ public class BuffManager : IDisposable
         if (spellInfo != null)
             RecordSpellTimer(spellInfo);
 
+        if (_pendingSpellId != 0)
+        {
+            if (_isForceRebuffing)
+            {
+                var ps = SpellTableStub.GetById(_pendingSpellId);
+                if (ps != null) _forceRebuffCastFamilies.Add(ps.Family);
+            }
+            _host.Log($"[BuffChat] CLEARED pending={_pendingSpellId} via ou-cast match name='{spellName}' resolvedId={spellId}");
+        }
         _pendingSpellId = 0;
     }
 

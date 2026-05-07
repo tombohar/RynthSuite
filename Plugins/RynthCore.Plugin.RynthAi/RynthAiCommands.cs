@@ -68,6 +68,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra clearbusy     — force-clear busy state (hourglass cursor)");
         ChatLine("[RynthAi] /ra forcebuff          — force-recast all buffs immediately");
         ChatLine("[RynthAi] /ra cancelforcebuff    — cancel an in-progress force rebuff");
+        ChatLine("[RynthAi] /ra bufftest           — one-shot: snapshot enchant registries pre/post next item-spell cast (logs to RynthCore.log)");
         ChatLine("[RynthAi] /ra settings savechar <name> — save current settings to named profile (create if new)");
         ChatLine("[RynthAi] /ra settings loadchar <name> — load named settings profile (create from current if new)");
     }

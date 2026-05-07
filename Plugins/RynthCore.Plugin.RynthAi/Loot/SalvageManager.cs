@@ -48,6 +48,25 @@ public sealed class SalvageManager
     private CombinePhase _combinePhase = CombinePhase.None;
     private long _combinePhaseReadyAt;
 
+    // Verification — snapshot of the bag ids submitted for the current group's
+    // Execute. After the result delay, we count how many of these are still in
+    // the cache to decide whether the server actually merged them.
+    private List<uint>? _combineGroupSnapshot;
+
+    // Polling deadline for verification. The salvage delete event from the
+    // server can arrive 500ms-1s after Execute on busy servers; we keep
+    // checking inventory until either the items are gone OR this deadline
+    // passes. Without this, fast result delays (~300ms) produce false-negative
+    // re-queues and prevent _pendingCombineScan from ever firing.
+    private long _waitingResultDeadline;
+    private const long ResultMaxWaitMs = 2000;
+
+    // Session-level combine metrics. Logged per-group so the user can see
+    // running totals without needing a separate diagnostic surface.
+    private int _combineGroupsSucceeded;
+    private int _combineGroupsFailed;
+    private int _bagsMergedThisSession;
+
     // Per-item retry counter so a failed salvage gets re-queued a few times
     // before we give up. AC sometimes drops a Salvage execute when the bot is
     // busy with other actions; the item stays in the pack and we want to try
@@ -121,8 +140,17 @@ public sealed class SalvageManager
                 break;
 
             case Phase.WaitingForResult:
-                if (now >= _phaseReadyAt)
-                    OnResultReady(now);
+                if (now < _phaseReadyAt) break;
+                // Poll: if the item is still in inventory and we're under the
+                // deadline, wait for the next tick. Server delete events for
+                // salvage-consumed items can lag the result delay by 500ms+.
+                if (_currentItemId != 0
+                    && now < _waitingResultDeadline
+                    && IsItemInDirectInventory(_currentItemId))
+                {
+                    break;
+                }
+                OnResultReady(now);
                 break;
 
             case Phase.CombiningSalvage:
@@ -260,12 +288,12 @@ public sealed class SalvageManager
         }
 
         int added = 0;
-        foreach (WorldObject bag in _cache.GetDirectInventory(forceRefresh: false))
+        foreach (WorldObject bag in _cache.GetDirectInventory(forceRefresh: true))
         {
             uint bagId = unchecked((uint)bag.Id);
             if (bagId == itemId) continue;
             if (!IsSalvageBag(bag.Name)) continue;
-            if (!_host.TryGetObjectIntProperty(bagId, StypeMaterialType, out int bagMat) || bagMat != itemMat)
+            if (!TryGetSalvageBagMaterial(bagId, bag.Name, out int bagMat) || bagMat != itemMat)
                 continue;
             if (!IsBagUnderFull(bagId, bag.Name)) continue;
 
@@ -308,18 +336,23 @@ public sealed class SalvageManager
             : _settings.SalvageResultDelayFastMs;
         _firstResultCycle = false;
         _phaseReadyAt = now + resultDelay;
+        _waitingResultDeadline = now + resultDelay + ResultMaxWaitMs;
         _phase = Phase.WaitingForResult;
     }
 
     private void OnResultReady(long now)
     {
-        // If the item we tried to salvage is STILL in the cache after the
-        // result delay, the salvage didn't actually consume it (the panel
-        // may have closed mid-execute, the bot got busy, AC dropped the
-        // request, etc.). Re-queue so we try again instead of leaving the
-        // item dangling in the player's pack with mana value still on it.
+        // If the item we tried to salvage is STILL in the player's actual
+        // inventory after the result delay, the salvage didn't consume it
+        // (panel closed mid-execute, bot got busy, AC dropped the request,
+        // etc.). Re-queue so we try again.
+        //
+        // We use GetDirectInventory(forceRefresh: true) — a live walk of the
+        // player's containers — instead of _cache[id] because salvage-consumed
+        // items don't reliably trigger OnDeleteObject in the cache, leading to
+        // false positives where successfully-salvaged items get re-queued.
         uint itemId = _currentItemId;
-        bool itemStillPresent = itemId != 0 && _cache != null && _cache[unchecked((int)itemId)] != null;
+        bool itemStillPresent = itemId != 0 && IsItemInDirectInventory(itemId);
 
         _currentItemId = 0;
         _phase = Phase.Idle;
@@ -328,14 +361,17 @@ public sealed class SalvageManager
         {
             Log($"[Salvage] Item 0x{itemId:X8} still in inventory after salvage cycle — re-queuing.");
             RequeueOrDrop(itemId, "item still present after result");
-            return;
+        }
+        else
+        {
+            // Successful salvage — clear retry counter for this id.
+            _itemRetryCount.Remove(itemId);
         }
 
-        // Successful salvage — clear retry counter for this id (defensive; the
-        // server has destroyed it anyway, but the dict shouldn't leak entries).
-        _itemRetryCount.Remove(itemId);
-
-        // If queue is now empty, trigger a combine scan on the next idle tick.
+        // Always trigger a combine scan on the next idle tick when the queue
+        // drains — both to consolidate any newly-merged bags and so combine
+        // doesn't depend on the busyCount==0 gate of the periodic timer (which
+        // an active combat macro rarely satisfies).
         if (_queue.Count == 0)
             _pendingCombineScan = true;
     }
@@ -355,6 +391,8 @@ public sealed class SalvageManager
         {
             _itemRetryCount.Remove(itemId);
             Log($"[Salvage] Giving up on 0x{itemId:X8} after {MaxItemRetries} attempts ({reason}).");
+            // Trigger a combine scan if dropping this item left the queue empty.
+            if (_queue.Count == 0) _pendingCombineScan = true;
             return;
         }
         _itemRetryCount[itemId] = next;
@@ -374,13 +412,22 @@ public sealed class SalvageManager
         // Group under-full bags by MaterialType (and Workmanship band, if a
         // SalvageCombine config is loaded and enabled). Bags at 100/100 are
         // skipped (already full); singleton groups are skipped (nothing to merge).
+        // forceRefresh: true — startup combines work because the engine's replay
+        // freshly populates the cache, but during a session the snapshot drifts
+        // and forceRefresh:false returns yesterday's inventory. Always walk live.
         var byKey = new Dictionary<string, List<uint>>(StringComparer.Ordinal);
-        foreach (WorldObject item in _cache.GetDirectInventory(forceRefresh: false))
+        var inv = _cache.GetDirectInventory(forceRefresh: true);
+        int scannedItems = inv.Count;
+        int salvageBagCount = 0;
+        int underFullCount = 0;
+        foreach (WorldObject item in inv)
         {
             if (!IsSalvageBag(item.Name)) continue;
+            salvageBagCount++;
             uint id = unchecked((uint)item.Id);
             if (!IsBagUnderFull(id, item.Name)) continue;
-            if (!_host.TryGetObjectIntProperty(id, StypeMaterialType, out int mat) || mat == 0) continue;
+            underFullCount++;
+            if (!TryGetSalvageBagMaterial(id, item.Name, out int mat)) continue;
 
             string key;
             if (useBands)
@@ -400,22 +447,27 @@ public sealed class SalvageManager
         }
 
         _combineGroups = new List<List<uint>>();
+        int eligibleBags = 0;
         foreach (var kv in byKey)
+        {
+            eligibleBags += kv.Value.Count;
             if (kv.Value.Count >= 2)
                 _combineGroups.Add(kv.Value);
+        }
 
         if (_combineGroups.Count == 0)
         {
             _combineGroups = null;
+            Log($"[Salvage] Combine sweep: scanned {scannedItems} inv items, {salvageBagCount} salvage bag(s), {underFullCount} under-full, {eligibleBags} mat-eligible, 0 mergeable groups.");
             return;
         }
+        Log($"[Salvage] Combine sweep: scanned {scannedItems} inv items, {salvageBagCount} salvage bag(s), {underFullCount} under-full → {_combineGroups.Count} mergeable group(s).");
 
         _combineGroupIdx = 0;
         _combineAddIdx = 0;
         _combinePhase = CombinePhase.None;
         _combinePhaseReadyAt = now;
         _phase = Phase.CombiningSalvage;
-        Log($"[Salvage] Combine: {_combineGroups.Count} group(s) of under-full bags to merge ({(useBands ? "by mat+band" : "by mat")}).");
     }
 
     private void TickCombiningSalvage(long now)
@@ -485,14 +537,30 @@ public sealed class SalvageManager
             }
             case CombinePhase.Salvaging:
             {
+                // Snapshot the bag IDs we expect the server to merge so the
+                // verification pass in WaitingForResult can count survivors.
+                _combineGroupSnapshot = new List<uint>(group);
+
                 if (!_host.SalvagePanelExecute())
-                    Log("[Salvage] Combine: SalvagePanelExecute failed.");
+                    Log($"[Salvage] Combine group {_combineGroupIdx + 1}/{_combineGroups!.Count}: SalvagePanelExecute returned false (group of {group.Count} bag(s)) — verifying server-side outcome anyway.");
+
                 _combinePhase = CombinePhase.WaitingForResult;
                 _combinePhaseReadyAt = now + _settings.SalvageSalvageDelayMs + _settings.SalvageResultDelayFastMs;
+                _waitingResultDeadline = _combinePhaseReadyAt + ResultMaxWaitMs;
                 break;
             }
             case CombinePhase.WaitingForResult:
             {
+                // Poll: if any snapshot bag is still in inventory and we're
+                // under the deadline, wait. Server delete events for merged
+                // bags arrive after the result delay on busy servers.
+                if (now < _waitingResultDeadline
+                    && _combineGroupSnapshot != null
+                    && AnySnapshotBagStillInInventory(_combineGroupSnapshot))
+                {
+                    break;
+                }
+                VerifyCombineGroupResult();
                 _combineGroupIdx++;
                 _combineAddIdx = 0;
                 _combinePhase = CombinePhase.None;
@@ -503,20 +571,156 @@ public sealed class SalvageManager
     }
 
     /// <summary>
+    /// Compares the surviving bag ids against the snapshot taken before
+    /// SalvagePanelExecute. Uses GetDirectInventory(forceRefresh: true) for
+    /// ground truth — _cache[id] is unreliable for salvage-consumed bags
+    /// because OnDeleteObject doesn't always fire on the merge path.
+    ///
+    /// Outcomes (M = input bags, S = survivors):
+    ///   S == M       → no merge happened (server ignored Execute / panel was empty / etc.)
+    ///   S == 1       → clean merge into a single bag
+    ///   1 &lt; S &lt; M     → partial merge (overflow / mixed-band / next sweep can finish it)
+    /// </summary>
+    private void VerifyCombineGroupResult()
+    {
+        var snapshot = _combineGroupSnapshot;
+        _combineGroupSnapshot = null;
+        if (snapshot == null || snapshot.Count == 0 || _cache == null) return;
+
+        var liveIds = SnapshotDirectInventoryIds();
+        int survivors = 0;
+        foreach (uint id in snapshot)
+        {
+            if (liveIds.Contains(id))
+                survivors++;
+        }
+
+        int merged = snapshot.Count - survivors;
+        int groupNum = _combineGroupIdx + 1;
+        int totalGroups = _combineGroups?.Count ?? 0;
+
+        if (survivors == snapshot.Count)
+        {
+            _combineGroupsFailed++;
+            string ids = string.Join(", ", snapshot.ConvertAll(id => $"0x{id:X8}"));
+            Log($"[Salvage] Combine group {groupNum}/{totalGroups}: NO MERGE — all {snapshot.Count} bag(s) still in inventory. Surviving ids: {ids}. Session: {_combineGroupsSucceeded} ok / {_combineGroupsFailed} failed, {_bagsMergedThisSession} bag(s) merged.");
+            return;
+        }
+
+        _combineGroupsSucceeded++;
+        _bagsMergedThisSession += merged;
+
+        if (survivors <= 1)
+        {
+            Log($"[Salvage] Combine group {groupNum}/{totalGroups}: merged {snapshot.Count} bag(s) → {survivors} survivor (+{merged} consumed). Session: {_combineGroupsSucceeded} ok / {_combineGroupsFailed} failed, {_bagsMergedThisSession} bag(s) merged.");
+        }
+        else
+        {
+            Log($"[Salvage] Combine group {groupNum}/{totalGroups}: PARTIAL merge — {snapshot.Count} bag(s) → {survivors} survivors (+{merged} consumed). Remaining bag(s) will be picked up by next sweep. Session: {_combineGroupsSucceeded} ok / {_combineGroupsFailed} failed, {_bagsMergedThisSession} bag(s) merged.");
+        }
+    }
+
+    /// <summary>
     /// Returns true when a salvage bag has structure < max (i.e. not full).
-    /// Prefers the trailing "(NN)" name suffix; falls back to the Structure /
-    /// MaxStructure properties.
+    /// Two name formats observed:
+    ///   "Iron Salvage (91)" — emulator style, trailing number IS fullness
+    ///   "Salvage (11)"      — retail/this-server style, trailing number is the
+    ///                          MATERIAL ID, not fullness — must not be misread.
+    /// For the second format we have to trust the property reads. Defaults to
+    /// true on read failure: assume under-full and let the server reject a
+    /// truly-full merge, vs. treating it as full and never combining (review §6).
     /// </summary>
     private bool IsBagUnderFull(uint bagId, string? name)
     {
-        if (TryParseTrailingNumber(name, out int pct))
+        if (HasPrefixBeforeSalvage(name) && TryParseTrailingNumber(name, out int pct))
             return pct < 100;
-        if (!_host.TryGetObjectIntProperty(bagId, StypeStructure, out int cur)) return false;
-        if (!_host.TryGetObjectIntProperty(bagId, StypeMaxStructure, out int max)) return false;
-        return max > 0 && cur < max;
+        if (!_host.TryGetObjectIntProperty(bagId, StypeStructure, out int cur)) return true;
+        if (!_host.TryGetObjectIntProperty(bagId, StypeMaxStructure, out int max)) return true;
+        return max <= 0 || cur < max;
+    }
+
+    /// <summary>
+    /// True if the bag name starts with something other than "Salvage" — i.e.
+    /// "Iron Salvage (91)" returns true, "Salvage (11)" returns false. Used to
+    /// disambiguate the two known bag-name formats so the trailing number is
+    /// only interpreted as fullness when it's actually fullness.
+    /// </summary>
+    private static bool HasPrefixBeforeSalvage(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        ReadOnlySpan<char> s = name.AsSpan().TrimStart();
+        return !s.StartsWith("Salvage".AsSpan(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Resolves a salvage bag's material id. Tries the property read first;
+    /// when that fails (AC's property cache is flaky for non-active bags),
+    /// falls back to parsing the trailing number from "Salvage (X)" names
+    /// where X is the material id on this server's naming convention.
+    /// </summary>
+    private bool TryGetSalvageBagMaterial(uint bagId, string? name, out int material)
+    {
+        if (_host.TryGetObjectIntProperty(bagId, StypeMaterialType, out int mat) && mat > 0)
+        {
+            material = mat;
+            return true;
+        }
+        if (!HasPrefixBeforeSalvage(name)
+            && TryParseTrailingNumber(name, out int parsedMat)
+            && parsedMat > 0 && parsedMat < 256)
+        {
+            material = parsedMat;
+            return true;
+        }
+        material = 0;
+        return false;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// True if <paramref name="id"/> appears in a fresh walk of the player's
+    /// inventory containers. Ground truth for "did the server actually destroy
+    /// this item" — the cache's _byId can hold stale entries for salvage-
+    /// consumed items because OnDeleteObject doesn't fire on every merge path.
+    /// </summary>
+    private bool IsItemInDirectInventory(uint id)
+    {
+        if (_cache == null) return false;
+        var inv = _cache.GetDirectInventory(forceRefresh: true);
+        foreach (var item in inv)
+        {
+            if (unchecked((uint)item.Id) == id) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Snapshots the ids currently in the player's direct inventory as a
+    /// HashSet for O(1) survivor counting.
+    /// </summary>
+    private HashSet<uint> SnapshotDirectInventoryIds()
+    {
+        var set = new HashSet<uint>();
+        if (_cache == null) return set;
+        foreach (var item in _cache.GetDirectInventory(forceRefresh: true))
+            set.Add(unchecked((uint)item.Id));
+        return set;
+    }
+
+    /// <summary>
+    /// True if any of <paramref name="snapshot"/>'s ids are still in the
+    /// player's direct inventory. Used by combine WaitingForResult polling.
+    /// </summary>
+    private bool AnySnapshotBagStillInInventory(List<uint> snapshot)
+    {
+        var liveIds = SnapshotDirectInventoryIds();
+        foreach (uint id in snapshot)
+        {
+            if (liveIds.Contains(id)) return true;
+        }
+        return false;
+    }
 
     // Canonical UST weenie class id. Same for every UST instance on every
     // character and every server (the WCID is part of the weenie definition,
