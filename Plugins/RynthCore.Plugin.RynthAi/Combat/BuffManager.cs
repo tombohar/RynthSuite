@@ -70,6 +70,15 @@ public class BuffManager : IDisposable
     // dup spam when IsBuffActive is polled every tick by NeedsAnyBuff + CheckAndCastSelfBuffs.
     private readonly Dictionary<int, string> _lastArmorRecastReason = new();
 
+    // Per-family failure cooldown. A buff the server deterministically rejects
+    // (no components, must specify a target, etc.) must NOT be re-picked every
+    // buff cycle — sustained re-cast → sustained AC AddTextToScroll re-entry →
+    // AC access-violation (the same AV class the cast-gate work targeted).
+    // Hard rejections park that family for BuffFailCooldownSec; soft random
+    // fizzles are NOT cooled (they should retry promptly).
+    private readonly Dictionary<int, DateTime> _buffFailCooldownUntil = new();
+    private const double BuffFailCooldownSec = 120.0;
+
     private sealed class RegistrySnapshot
     {
         public uint OwnerId;
@@ -243,6 +252,7 @@ public class BuffManager : IDisposable
     {
         _isForceRebuffing = true;
         _forceRebuffCastFamilies.Clear();
+        _buffFailCooldownUntil.Clear(); // explicit recast-all must not be blocked by stale cooldowns
         _ramBuffTimers.Clear();
         _itemSpellTimers.Clear();
         _pendingSpellId = 0;
@@ -361,10 +371,19 @@ public class BuffManager : IDisposable
             return;
         }
 
-        // Client is busy — don't queue CastSpell/UseObject or we'll cause hourglass hang.
-        // Keep BotAction pinned to "Buffing" while our cast is in flight so CombatManager
-        // can't sneak in a peace-mode switch mid-cast.
-        if (BusyCount > 0)
+        // Don't issue a cast while the previous cast GESTURE is still animating.
+        // CanCastNow is the engine's CMotionInterp gesture gate (the REAL cast
+        // gate). AC refuses a cast issued mid-gesture with a server-driven
+        // "You're too busy!" notice; the old code gated on BusyCount (the
+        // ClientUISystem hourglass) which reads 0 during a cast, so it never
+        // blocked the retry → tight refusal loop → AddTextToScroll re-entry AV
+        // at 0x00460D1D. On an engine without the gate, CanCastNow defaults to
+        // true and the SpellCastIntervalMs throttle + parked-pending still bound
+        // retries. BusyCount stays as a secondary guard so we also don't queue
+        // casts/UseObject while the hourglass action is mid-flight.
+        // Keep BotAction pinned to "Buffing" while our cast is in flight so
+        // CombatManager can't sneak in a peace-mode switch mid-cast.
+        if (!_host.CanCastNow || BusyCount > 0)
         {
             if (_pendingSpellId != 0) _settings.BotAction = "Buffing";
             return;
@@ -503,6 +522,18 @@ public class BuffManager : IDisposable
             if (IsBuffActive(spellId))
             {
                 if (diagnose) _host.Log($"[FR] skip '{buffBaseName}' (id={spellId}) — already active");
+                continue;
+            }
+
+            // Skip a family the server just hard-rejected (no components, etc.)
+            // so an uncastable buff isn't re-cast every cycle (→ AC AV). Auto-
+            // recovers when the cooldown expires or a cast of it later confirms.
+            int buffFamily = SpellTableStub.GetById(spellId)?.Family ?? 0;
+            if (buffFamily != 0
+                && _buffFailCooldownUntil.TryGetValue(buffFamily, out DateTime coolUntil)
+                && DateTime.Now < coolUntil)
+            {
+                if (diagnose) _host.Log($"[FR] skip '{buffBaseName}' (id={spellId}) — hard-fail cooldown {(coolUntil - DateTime.Now).TotalSeconds:0}s");
                 continue;
             }
 
@@ -1232,14 +1263,19 @@ public class BuffManager : IDisposable
         // the "consumed the following components" line, which fires for both success
         // AND fizzle, so it's NOT a reliable signal either direction. Ignore it
         // entirely; wait for the explicit "ou cast" success or "fizzle" failure.
-        if (lower.Contains("fizzle") ||
-            lower.Contains("your spell failed") ||
-            lower.Contains("lack the mana") ||
-            lower.Contains("missing some required") ||
-            lower.Contains("you do not have the") ||
-            lower.Contains("you're too busy") ||
-            lower.Contains("you are too busy") ||
-            lower.Contains("you must specify"))
+        // "You're too busy!" is NOT a cast failure — it's AC refusing because
+        // the previous cast gesture is still animating. The old code lumped it
+        // into the fizzle/fail block below, which set _lastCastAttempt =
+        // DateTime.MinValue (defeating the SpellCastIntervalMs throttle) AND
+        // cleared _pendingSpellId, so the same cast was re-issued on the very
+        // next ~90ms tick → ~11 refusals/sec → AC's AddTextToScroll re-entry
+        // AV at 0x00460D1D. Handle it separately: roll back the optimistic
+        // item-spell timer (the bane genuinely didn't land) and clear pending
+        // so the buff loop re-evaluates — but DO NOT zero _lastCastAttempt, so
+        // the interval throttle stays active. The CanCastNow gesture gate is
+        // the primary bound; the throttle is the backstop. No tight loop by
+        // construction → 0x00460D1D killed regardless of gate precision.
+        if (lower.Contains("you're too busy") || lower.Contains("you are too busy"))
         {
             if (_pendingSpellId != 0)
             {
@@ -1249,7 +1285,60 @@ public class BuffManager : IDisposable
                     _itemSpellTimers.Remove(pendingSpell.Family);
                     SaveBuffTimers();
                 }
-                _host.Log($"[BuffChat] CLEARED pending={_pendingSpellId} via failure pattern in '{text}'");
+                _host.Log($"[BuffChat] PARKED pending={_pendingSpellId} — AC too busy (cast gesture in progress); throttle kept, re-issue when cast gate reopens.");
+            }
+            _pendingSpellId = 0;
+            return;
+        }
+
+        // HARD rejection: the server can't cast this at all and the next
+        // attempt fails identically (missing components, no target, etc.).
+        // Clear pending AND park the spell's family on a cooldown so the buff
+        // loop stops re-picking it every cycle. Without this an uncastable buff
+        // (e.g. "Battlemage's Blessing" with no components) re-casts every tick
+        // → sustained AC AddTextToScroll re-entry → AC access-violation.
+        // "have all the components for this spell" is matched specifically so
+        // it does NOT collide with the success line "consumed the following
+        // components".
+        if (lower.Contains("missing some required") ||
+            lower.Contains("you do not have the") ||
+            lower.Contains("you must specify") ||
+            lower.Contains("have all the components for this spell"))
+        {
+            if (_pendingSpellId != 0)
+            {
+                var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
+                if (pendingSpell != null)
+                {
+                    if (IsArmorEnchantment(pendingSpell.Name))
+                    {
+                        _itemSpellTimers.Remove(pendingSpell.Family);
+                        SaveBuffTimers();
+                    }
+                    _buffFailCooldownUntil[pendingSpell.Family] =
+                        DateTime.Now.AddSeconds(BuffFailCooldownSec);
+                }
+                _host.Log($"[BuffChat] CLEARED+COOLED pending={_pendingSpellId} ({BuffFailCooldownSec:0}s) — hard rejection in '{text}'");
+            }
+            _pendingSpellId = 0;
+            return;
+        }
+
+        // SOFT failure: random fizzle or transient (out of mana). Clear pending
+        // and allow a prompt retry — do NOT cooldown the family.
+        if (lower.Contains("fizzle") ||
+            lower.Contains("your spell failed") ||
+            lower.Contains("lack the mana"))
+        {
+            if (_pendingSpellId != 0)
+            {
+                var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
+                if (pendingSpell != null && IsArmorEnchantment(pendingSpell.Name))
+                {
+                    _itemSpellTimers.Remove(pendingSpell.Family);
+                    SaveBuffTimers();
+                }
+                _host.Log($"[BuffChat] CLEARED pending={_pendingSpellId} via soft-fail in '{text}'");
             }
             _lastCastAttempt = DateTime.MinValue;
             _pendingSpellId = 0;
@@ -1281,7 +1370,10 @@ public class BuffManager : IDisposable
             spellInfo = SpellTableStub.GetById(_pendingSpellId);
 
         if (spellInfo != null)
+        {
+            _buffFailCooldownUntil.Remove(spellInfo.Family); // it cast — clear any stale hard-fail cooldown
             RecordSpellTimer(spellInfo);
+        }
 
         if (_pendingSpellId != 0)
         {

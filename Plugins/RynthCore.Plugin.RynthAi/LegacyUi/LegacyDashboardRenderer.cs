@@ -32,6 +32,15 @@ internal sealed class LegacyDashboardRenderer
     private readonly RynthCoreHost _host;
     private readonly LegacyUiSettings _settings = new();
     public LegacyUiSettings Settings => _settings;
+
+    /// <summary>Set by the plugin so the meta bridge JSON can carry a live
+    /// MetaManager snapshot for the panel's debug surface (§3.4).</summary>
+    internal Func<RynthCore.Plugin.RynthAi.Meta.MetaSnapshot?>? MetaSnapshotProvider;
+
+    // Meta commands arrive on the Avalonia dispatcher thread; applied on the
+    // plugin-tick thread (DrainMetaCommands) so mutation is serialised with
+    // MetaManager.Think instead of racing it.
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _metaCmdQueue = new();
     private readonly LegacyAdvancedSettingsUi _advancedSettingsUi;
     private readonly LegacyNavigationUi _navigationUi;
     private readonly LegacyLuaUi _luaUi;
@@ -2261,6 +2270,10 @@ internal sealed class LegacyDashboardRenderer
 
     public string BuildMetaJson()
     {
+        // Avalonia dispatcher thread — MetaManager.Think enumerates MetaRules on
+        // the plugin-tick thread. Snapshot under the shared lock.
+        lock (_settings.MetaRulesLock)
+        {
         var sb = new System.Text.StringBuilder();
         sb.Append('{');
         AppendBool(sb, "enableMeta", _settings.EnableMeta); sb.Append(',');
@@ -2292,8 +2305,33 @@ internal sealed class LegacyDashboardRenderer
         try { sourceText = AfFileWriter.SaveToString(_settings.MetaRules, _settings.EmbeddedNavs); } catch { }
         AppendString(sb, "sourceText", sourceText);
 
+        var snap = MetaSnapshotProvider?.Invoke();
+        if (snap != null)
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            sb.Append(",\"snapshot\":{");
+            AppendBool(sb, "macroRunning", snap.MacroRunning); sb.Append(',');
+            AppendBool(sb, "metaEnabled", snap.MetaEnabled); sb.Append(',');
+            AppendString(sb, "currentState", snap.CurrentState); sb.Append(',');
+            sb.Append("\"secondsInState\":").Append(snap.SecondsInState.ToString("F1", inv)).Append(',');
+            sb.Append("\"stackDepth\":").Append(snap.StackDepth).Append(',');
+            sb.Append("\"ruleCount\":").Append(snap.RuleCount).Append(',');
+            sb.Append("\"stateCount\":").Append(snap.StateCount).Append(',');
+            AppendBool(sb, "watchdogActive", snap.WatchdogActive); sb.Append(',');
+            AppendString(sb, "watchdogState", snap.WatchdogState); sb.Append(',');
+            sb.Append("\"watchdogSecondsRemaining\":").Append(snap.WatchdogSecondsRemaining.ToString("F1", inv)).Append(',');
+            AppendString(sb, "lastFiredState", snap.LastFiredState); sb.Append(',');
+            AppendString(sb, "lastFiredCondition", snap.LastFiredCondition); sb.Append(',');
+            AppendString(sb, "lastFiredAction", snap.LastFiredAction); sb.Append(',');
+            sb.Append("\"lastFiredSecondsAgo\":").Append(snap.LastFiredSecondsAgo.ToString("F1", inv)).Append(',');
+            AppendString(sb, "lastExprError", snap.LastExprError); sb.Append(',');
+            sb.Append("\"lastExprErrorSecondsAgo\":").Append(snap.LastExprErrorSecondsAgo.ToString("F1", inv));
+            sb.Append('}');
+        }
+
         sb.Append('}');
         return sb.ToString();
+        }
     }
 
     private List<(string, string)> BuildMetaFileList()
@@ -2313,8 +2351,12 @@ internal sealed class LegacyDashboardRenderer
                 entries.Add((f, $"[af]  {System.IO.Path.GetFileName(f)}"));
             entries.Sort((a, b) => string.Compare(a.Item2, b.Item2, System.StringComparison.OrdinalIgnoreCase));
             result.AddRange(entries);
+            _host.Log($"[Meta] BuildMetaFileList: {entries.Count} file(s) in '{MetaFolder}' (exists={System.IO.Directory.Exists(MetaFolder)})");
         }
-        catch { }
+        catch (System.Exception ex)
+        {
+            _host.Log($"[Meta] BuildMetaFileList FAILED for '{MetaFolder}': {ex.GetType().Name}: {ex.Message}");
+        }
         return result;
     }
 
@@ -2344,7 +2386,23 @@ internal sealed class LegacyDashboardRenderer
         sb.Append('}');
     }
 
+    /// <summary>Called from the Avalonia dispatcher (RynthPluginSendMetaCommand).
+    /// Queue only — applied on the plugin-tick thread via DrainMetaCommands so
+    /// the mutation is serialised with MetaManager.Think rather than racing it.
+    /// (Index-vs-id snapshot staleness still needs an engine-side schema change;
+    /// deferred while the engine is in release-hold soak.)</summary>
     public void HandleMetaCommand(string json)
+    {
+        if (!string.IsNullOrWhiteSpace(json)) _metaCmdQueue.Enqueue(json);
+    }
+
+    /// <summary>Drains queued meta commands on the plugin-tick thread.</summary>
+    public void DrainMetaCommands()
+    {
+        while (_metaCmdQueue.TryDequeue(out var j)) ApplyMetaCommand(j);
+    }
+
+    private void ApplyMetaCommand(string json)
     {
         if (string.IsNullOrWhiteSpace(json)) return;
         try
@@ -2352,6 +2410,9 @@ internal sealed class LegacyDashboardRenderer
             var cmd = JsonSerializer.Deserialize(json, RynthAiJsonContext.Default.MetaCommand);
             if (cmd == null) return;
 
+            // Avalonia dispatcher thread — every mutating case races
+            // MetaManager.Think on the plugin-tick thread.
+            lock (_settings.MetaRulesLock)
             switch (cmd.Op)
             {
                 case "set_enabled":
@@ -2374,6 +2435,12 @@ internal sealed class LegacyDashboardRenderer
 
                 case "load_file":
                     _metaUi.LoadMacroFile(cmd.Path ?? "");
+                    {
+                        var w = _metaUi.LastLoadWarnings;
+                        _host.WriteToChat(
+                            $"[RynthAi] Meta load: {_settings.MetaRules.Count} rules from {System.IO.Path.GetFileName(cmd.Path ?? "")}"
+                            + (w.Count > 0 ? $" — {w.Count} warning(s): {w[0]}" : ""), 1);
+                    }
                     break;
 
                 case "save_file":
@@ -2391,6 +2458,8 @@ internal sealed class LegacyDashboardRenderer
                         try
                         {
                             var loaded = AfFileParser.LoadFromText(cmd.Text);
+                            string w = loaded.Warnings.Count > 0
+                                ? $" — {loaded.Warnings.Count} warning(s): {loaded.Warnings[0]}" : "";
                             if (loaded.Rules.Count > 0)
                             {
                                 _settings.MetaRules = loaded.Rules;
@@ -2398,9 +2467,17 @@ internal sealed class LegacyDashboardRenderer
                                 foreach (var kvp in loaded.EmbeddedNavs) _settings.EmbeddedNavs[kvp.Key] = kvp.Value;
                                 _settings.ForceStateReset = true;
                                 TryAutoSaveMetaCmd();
+                                _host.WriteToChat($"[RynthAi] Applied source: {loaded.Rules.Count} rules{w}", 1);
+                            }
+                            else
+                            {
+                                _host.WriteToChat($"[RynthAi] Source not applied: 0 rules parsed{(w.Length > 0 ? w : " — check syntax")}", 1);
                             }
                         }
-                        catch { }
+                        catch (System.Exception ex)
+                        {
+                            _host.WriteToChat($"[RynthAi] Source apply error: {ex.Message}", 1);
+                        }
                     }
                     break;
 
@@ -2454,6 +2531,7 @@ internal sealed class LegacyDashboardRenderer
 
     private void TryAutoSaveMetaCmd()
     {
+        _settings.MetaRulesStructuralVersion++;   // editor mutation → rebuild meta index
         if (string.IsNullOrEmpty(_settings.CurrentMetaPath)) return;
         try
         {
@@ -2462,8 +2540,10 @@ internal sealed class LegacyDashboardRenderer
             {
                 path = System.IO.Path.ChangeExtension(path, ".af");
                 _settings.CurrentMetaPath = path;
+                _host.WriteToChat($"[RynthAi] Converted .met → {System.IO.Path.GetFileName(path)} for editing (original .met left untouched).", 1);
             }
-            AfFileWriter.Save(path, _settings.MetaRules, _settings.EmbeddedNavs);
+            lock (_settings.MetaRulesLock)
+                AfFileWriter.Save(path, _settings.MetaRules, _settings.EmbeddedNavs);
         }
         catch { }
     }

@@ -15,4 +15,11 @@ internal sealed class LoadedMeta
 
     public Dictionary<string, List<string>> EmbeddedNavs { get; } =
         new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Non-fatal parse problems (unknown keywords, parse exception). Surfaced
+    /// to the user on load so a typo'd / unsupported meta is visible instead of
+    /// silently producing zero or partial rules.
+    /// </summary>
+    public List<string> Warnings { get; } = new();
 }

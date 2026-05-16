@@ -172,10 +172,11 @@ internal static class MetFileParser
         {
             result.Rules = ParseMetFile(reader, result.EmbeddedNavs, ref navCounter);
         }
-        catch
+        catch (Exception ex)
         {
             result.Rules = new List<MetaRule>();
             result.EmbeddedNavs.Clear();
+            result.Warnings.Add($".met parse failed: {ex.GetType().Name}: {ex.Message}");
         }
 
         return result;

@@ -284,6 +284,14 @@ public class CharacterSkills
     private readonly RynthCore.PluginSdk.RynthCoreHost _host;
     private uint _playerId;
 
+    // Last successful (training, buffed) read per skill. The host call can
+    // transiently fail before the engine seeds the player qualities ptr; a
+    // failed read is NOT the same as "skill untrained" and must not be
+    // reported as (0,0) (that pins ComputeTier to tier 1 and trips
+    // IsSkillUsable false → bot casts level-1 spells and runs unbuffed).
+    private readonly Dictionary<AcSkillType, CharacterSkillInfo> _lastGood = new();
+    private bool _loggedReadFailure;
+
     public CharacterSkills(RynthCore.PluginSdk.RynthCoreHost host)
     {
         _host = host;
@@ -303,9 +311,25 @@ public class CharacterSkills
                 return new CharacterSkillInfo(2, 250);
 
             if (_host.TryGetObjectSkill(_playerId, stype, out int buffed, out int training))
-                return new CharacterSkillInfo(training, buffed);
+            {
+                var info = new CharacterSkillInfo(training, buffed);
+                _lastGood[skill] = info;
+                return info;
+            }
 
-            return new CharacterSkillInfo(0, 0);
+            // Host read failed. Prefer the last good read; if we never had
+            // one, fall back to the same "assume capable" stub the other
+            // unknown-state branches use so the bot stays functional rather
+            // than silently dropping to tier-1/unbuffed. Surface it once.
+            if (_lastGood.TryGetValue(skill, out var cached))
+                return cached;
+
+            if (!_loggedReadFailure)
+            {
+                _loggedReadFailure = true;
+                _host.Log($"[RynthAi] CharacterSkills: host skill read failed (player=0x{_playerId:X8}, skill={skill}, stype={stype}) — engine player-qualities ptr likely not seeded. Using capable-stub fallback until a real read lands.");
+            }
+            return new CharacterSkillInfo(2, 250);
         }
     }
 

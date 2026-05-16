@@ -33,6 +33,22 @@ internal sealed class MetaManager
     private DateTime _stateStartTime = DateTime.Now;
     private bool _lastMacroRunning;
 
+    // Observability (GetStateSnapshot / §3.4). Written on the plugin-tick thread
+    // inside the locked rule-eval pass; read by the bridge under the same lock.
+    private string _lastFiredState = "", _lastFiredCond = "", _lastFiredAct = "";
+    private DateTime _lastFiredAt = DateTime.MinValue;
+    private string _lastExprError = "";
+    private DateTime _lastExprErrorAt = DateTime.MinValue;
+
+    // Per-state rule index (§4). Rebuilt when the list ref/count or the
+    // structural version (in-place rule edits) changes. Buckets are built in
+    // list order so rule priority (first match wins) is unchanged.
+    private readonly Dictionary<string, List<MetaRule>> _stateIndex = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly List<MetaRule> _emptyRules = new();
+    private List<MetaRule>? _idxList;
+    private int _idxCount = -1;
+    private int _idxVersion = -1;
+
     // ── Chat tracking ────────────────────────────────────────────────────────
     private string _lastChatText = "";
     private DateTime _lastChatTime = DateTime.MinValue;
@@ -182,8 +198,17 @@ internal sealed class MetaManager
 
     public void Think()
     {
+        // Drain delayexec on the plugin-tick thread (was a threadpool Timer).
+        // Fires on tick cadence regardless of meta-enabled state, matching VTank.
+        _expressions?.PumpDelayedExecs();
+        _expressions?.FlushVars();   // throttled; no-op when nothing dirty
+
+        try
+        {
         if (!_settings.IsMacroRunning || !_settings.EnableMeta || _settings.MetaRules == null)
         {
+            if (_lastMacroRunning && !_settings.IsMacroRunning)
+                _expressions?.FlushVars(force: true);   // persist pending vars on stop
             _lastMacroRunning = _settings.IsMacroRunning;
             return;
         }
@@ -206,7 +231,8 @@ internal sealed class MetaManager
             _stateStartTime = DateTime.Now;
             _watchdogActive = false;
             _settings.ForceStateReset = false;
-            foreach (var r in _settings.MetaRules) r.HasFired = false;
+            lock (_settings.MetaRulesLock)
+                foreach (var r in _settings.MetaRules) r.HasFired = false;
         }
         _lastState = _settings.CurrentState;
 
@@ -248,16 +274,30 @@ internal sealed class MetaManager
         }
 
         // ── Rule evaluation ───────────────────────────────────────────────────
-        foreach (var rule in _settings.MetaRules)
+        // Lock for the whole pass: this thread (plugin tick) races the Avalonia
+        // dispatcher (MetaPanel poll / command handler) for _settings.MetaRules.
+        // Monitor is reentrant, so an ExecuteAction that reassigns MetaRules
+        // (e.g. /vt meta load) on this thread is safe.
+        lock (_settings.MetaRulesLock)
         {
-            if (!string.Equals(rule.State, _settings.CurrentState, StringComparison.OrdinalIgnoreCase))
-                continue;
+            if (!ReferenceEquals(_idxList, _settings.MetaRules)
+                || _idxCount != _settings.MetaRules.Count
+                || _idxVersion != _settings.MetaRulesStructuralVersion)
+                RebuildStateIndex();
+
+            _stateIndex.TryGetValue(_settings.CurrentState ?? "", out var bucket);
+            foreach (var rule in bucket ?? _emptyRules)
+            {
             if (rule.HasFired) continue;
 
             if (EvaluateCondition(rule, secondsInState))
             {
                 rule.HasFired = true;
                 rule.LastFiredAt = DateTime.Now;
+                _lastFiredState = rule.State;
+                _lastFiredCond  = DescribeCondition(rule);
+                _lastFiredAct   = DescribeAction(rule);
+                _lastFiredAt    = rule.LastFiredAt;
 
                 if (_settings.MetaDebug)
                     _host.WriteToChat($"[Meta] {rule.State} | {DescribeCondition(rule)} → {DescribeAction(rule)}", 1);
@@ -268,6 +308,20 @@ internal sealed class MetaManager
                 if (_settings.CurrentState != _lastState || _settings.ForceStateReset)
                     break;
             }
+        }
+        }
+        }
+        catch (Exception ex)
+        {
+            // A condition/action threw. Localise it to this tick instead of
+            // letting partial state (half-applied SetState, pushed call stack)
+            // persist. ForceStateReset recomputes HasFired cleanly next tick.
+            _host.Log($"[Meta] Think crashed in '{_settings.CurrentState}': {ex.GetType().Name}: {ex.Message}");
+            if (_settings.MetaDebug)
+                _host.WriteToChat($"[Meta] Think exception: {ex.Message}", 1);
+            _lastExprError   = $"Think: {ex.GetType().Name}: {Truncate(ex.Message, 100)}";
+            _lastExprErrorAt = DateTime.Now;
+            _settings.ForceStateReset = true;
         }
     }
 
@@ -344,17 +398,13 @@ internal sealed class MetaManager
             {
                 if (string.IsNullOrEmpty(rule.ConditionData)) return false;
                 if ((DateTime.Now - _lastChatTime).TotalSeconds > 1.0) return false;
-                try
+                var match = RegexCache.Match(_lastChatText, rule.ConditionData);
+                if (match.Success)
                 {
-                    var match = Regex.Match(_lastChatText, rule.ConditionData);
-                    if (match.Success)
-                    {
-                        if (rule.Condition == MetaConditionType.ChatMessageCapture)
-                            _lastChatMatch = match;
-                        return true;
-                    }
+                    if (rule.Condition == MetaConditionType.ChatMessageCapture)
+                        _lastChatMatch = match;
+                    return true;
                 }
-                catch { }
                 return false;
             }
 
@@ -425,7 +475,8 @@ internal sealed class MetaManager
                     !int.TryParse(parts[2], out int minCount)) return false;
                 try
                 {
-                    var rx = new Regex(parts[0], RegexOptions.IgnoreCase);
+                    var rx = RegexCache.Get(parts[0], RegexOptions.IgnoreCase);
+                    if (rx == null) return false;
                     int matchCount = 0;
                     int pid = unchecked((int)_playerId);
                     foreach (var obj in _objectCache.GetLandscape())
@@ -506,8 +557,23 @@ internal sealed class MetaManager
                 return _vendorClosedThisTick;
 
             case MetaConditionType.Expression:
-                return !string.IsNullOrEmpty(rule.ConditionData) &&
-                       ExpressionEngine.ToBool(Expressions.Evaluate(rule.ConditionData));
+            {
+                if (string.IsNullOrEmpty(rule.ConditionData)) return false;
+                string v = Expressions.Evaluate(rule.ConditionData);
+                // Fail CLOSED on evaluation error. Evaluate() turns any
+                // exception (and the recursion-depth guard) into an "ERR:…"
+                // string; treating that as a fired condition silently inverts
+                // safety gates ("flee if HP<20%" → "always flee").
+                if (v.StartsWith("ERR:", StringComparison.Ordinal))
+                {
+                    _lastExprError   = $"{rule.State}: {Truncate(v, 120)}";
+                    _lastExprErrorAt = DateTime.Now;
+                    if (_settings.MetaDebug)
+                        _host.WriteToChat($"[Meta] expr error in '{rule.State}': {Truncate(v, 80)}", 1);
+                    return false;
+                }
+                return ExpressionEngine.ToBool(v);
+            }
 
             // ── Burden percentage ─────────────────────────────────────────────
             case MetaConditionType.BurdenPercentage_GE:
@@ -556,12 +622,8 @@ internal sealed class MetaManager
                     foreach (var mr in _settings.MonsterRules)
                     {
                         if (mr.Name.Equals("Default", StringComparison.OrdinalIgnoreCase)) continue;
-                        try
-                        {
-                            if (Regex.IsMatch(obj.Name, mr.Name, RegexOptions.IgnoreCase))
-                            { matchCount++; break; }
-                        }
-                        catch { }
+                        if (RegexCache.IsMatch(obj.Name, mr.Name, RegexOptions.IgnoreCase))
+                        { matchCount++; break; }
                     }
                 }
                 return matchCount >= minCount;
@@ -852,7 +914,15 @@ internal sealed class MetaManager
                         _settings.CurrentState = loaded.Rules[0].State;
                         _settings.ForceStateReset = true;
                         _settings.CurrentMetaPath = loadPath;
-                        _host.WriteToChat($"[RynthAi] Loaded meta: {name}", 1);
+                        _host.WriteToChat(
+                            $"[RynthAi] Loaded meta '{name}': {loaded.Rules.Count} rules, {loaded.EmbeddedNavs.Count} navs"
+                            + (loaded.Warnings.Count > 0 ? $" — {loaded.Warnings.Count} warning(s): {loaded.Warnings[0]}" : ""), 1);
+                    }
+                    else
+                    {
+                        _host.WriteToChat(
+                            $"[RynthAi] Meta '{name}' parsed 0 rules"
+                            + (loaded.Warnings.Count > 0 ? $" — {loaded.Warnings[0]}" : " (profile/empty?)"), 1);
                     }
                 }
                 catch { }
@@ -966,4 +1036,85 @@ internal sealed class MetaManager
     private static string Truncate(string s, int max)
         => s.Length <= max ? s : s[..max] + "…";
 
+    // ── Per-state rule index (§4) ─────────────────────────────────────────────
+
+    /// <summary>Rebuilds the state→rules buckets. Caller MUST hold MetaRulesLock.</summary>
+    private void RebuildStateIndex()
+    {
+        _stateIndex.Clear();
+        var list = _settings.MetaRules;
+        foreach (var r in list)
+        {
+            string st = r.State ?? "";
+            if (!_stateIndex.TryGetValue(st, out var b))
+                _stateIndex[st] = b = new List<MetaRule>();
+            b.Add(r);
+        }
+        _idxList = list;
+        _idxCount = list.Count;
+        _idxVersion = _settings.MetaRulesStructuralVersion;
+    }
+
+    // ── Observability snapshot (§3.4) ─────────────────────────────────────────
+
+    /// <summary>
+    /// Point-in-time view of the meta state machine for the diag/UI surface.
+    /// MetaRules counts are read under the shared lock; the scalar timing
+    /// fields are best-effort cross-thread reads (worst case: a momentarily
+    /// stale SecondsInState in the UI — never affects bot behaviour).
+    /// </summary>
+    public MetaSnapshot GetStateSnapshot()
+    {
+        var s = new MetaSnapshot
+        {
+            MacroRunning   = _settings.IsMacroRunning,
+            MetaEnabled    = _settings.EnableMeta,
+            CurrentState   = _settings.CurrentState ?? "",
+            SecondsInState = (DateTime.Now - _stateStartTime).TotalSeconds,
+            StackDepth     = _stateStack.Count,
+            WatchdogActive = _watchdogActive,
+            WatchdogState  = _watchdogState ?? "",
+            WatchdogSecondsRemaining = _watchdogActive
+                ? Math.Max(0, (_watchdogExpiration - DateTime.Now).TotalSeconds) : 0,
+            LastFiredState     = _lastFiredState,
+            LastFiredCondition = _lastFiredCond,
+            LastFiredAction    = _lastFiredAct,
+            LastFiredSecondsAgo = _lastFiredAt == DateTime.MinValue
+                ? -1 : (DateTime.Now - _lastFiredAt).TotalSeconds,
+            LastExprError = _lastExprError,
+            LastExprErrorSecondsAgo = _lastExprErrorAt == DateTime.MinValue
+                ? -1 : (DateTime.Now - _lastExprErrorAt).TotalSeconds,
+        };
+        if (_settings.MetaRules != null)
+            lock (_settings.MetaRulesLock)
+            {
+                s.RuleCount = _settings.MetaRules.Count;
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var r in _settings.MetaRules) seen.Add(r.State ?? "");
+                s.StateCount = seen.Count;
+            }
+        return s;
+    }
+
+}
+
+/// <summary>Plain DTO — serialized into the meta bridge JSON for the panel.</summary>
+internal sealed class MetaSnapshot
+{
+    public bool   MacroRunning;
+    public bool   MetaEnabled;
+    public string CurrentState = "";
+    public double SecondsInState;
+    public int    StackDepth;
+    public int    RuleCount;
+    public int    StateCount;
+    public bool   WatchdogActive;
+    public string WatchdogState = "";
+    public double WatchdogSecondsRemaining;
+    public string LastFiredState = "";
+    public string LastFiredCondition = "";
+    public string LastFiredAction = "";
+    public double LastFiredSecondsAgo = -1;
+    public string LastExprError = "";
+    public double LastExprErrorSecondsAgo = -1;
 }

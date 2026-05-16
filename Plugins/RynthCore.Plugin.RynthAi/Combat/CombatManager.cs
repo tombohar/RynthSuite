@@ -17,6 +17,12 @@ public class CombatManager : IDisposable
     private MainLogic? _raycastSystem;
     public bool RaycastInitialized { get; private set; }
 
+    // Set on the raycast-init bg thread when RaycastInitialized flips
+    // false→true; consumed once on the next main-thread ScanNearbyTargets to
+    // clear warmup-era blacklist/timer penalties (the bg thread must not touch
+    // combat state directly).
+    private volatile bool _raycastReadyResetPending;
+
     public int activeTargetId
     {
         get => _activeTargetId;
@@ -271,6 +277,22 @@ public class CombatManager : IDisposable
             return;
         _lastScanTime = DateTime.Now;
 
+        // Raycast just became ready (warmup→ready edge, flagged on the bg
+        // thread): one-time clean slate. Whatever got blacklisted or had its
+        // miss/no-progress timers run up while targeting was degraded is
+        // forgiven, so mobs that were present at login are re-evaluated with
+        // real LOS/attack-type instead of being sidelined for 5 minutes.
+        if (_raycastReadyResetPending)
+        {
+            _raycastReadyResetPending = false;
+            _blacklistManager.ClearAll();
+            _consecutiveMisses = 0;
+            _lastAttackedTargetId = 0;
+            _targetLockedAt = DateTime.MinValue;
+            _lastDamageDealtAt = DateTime.MinValue;
+            _host.Log("[RynthAi] Raycast ready — combat clean slate (blacklist cleared, target timers reset).");
+        }
+
         _scannedTargets.Clear();
         _nearbyNoLos = 0;
         int playerId = (int)_playerId;
@@ -354,6 +376,9 @@ public class CombatManager : IDisposable
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _worldFilter = worldFilter ?? throw new ArgumentNullException(nameof(worldFilter));
         _spellManager = spellManager;
+        // Diagnostic: surface every blacklist (any path) with id + reason so a
+        // single login test is conclusive instead of another guess.
+        _blacklistManager.Log = m => _host.Log($"[Blacklist] {m}");
     }
 
     public void SetSpellManager(SpellManager spellManager) => _spellManager = spellManager;
@@ -365,8 +390,16 @@ public class CombatManager : IDisposable
     }
     public void SetRaycastSystem(MainLogic raycast)
     {
+        bool wasReady = RaycastInitialized;
         _raycastSystem = raycast;
         RaycastInitialized = raycast?.IsInitialized ?? false;
+
+        // Warmup→ready edge. This runs on the raycast-init bg thread, so do
+        // NOT mutate combat state here — defer the clean slate to the next
+        // main-thread scan. Anything sidelined while targeting was degraded
+        // (no LOS, Linear attack-type) gets re-evaluated now it's real.
+        if (!wasReady && RaycastInitialized)
+            _raycastReadyResetPending = true;
     }
 
     private uint _playerId;
@@ -477,6 +510,16 @@ public class CombatManager : IDisposable
             _lastDamageDealtAt = DateTime.Now;
     }
 
+    /// <summary>
+    /// True during the post-login window where raycasting is enabled but the
+    /// DAT parse hasn't finished, so combat targeting runs degraded (no LOS,
+    /// Linear attack-type fallback). Attacks miss for reasons unrelated to the
+    /// target — blacklist accrual must be suppressed here, otherwise the first
+    /// mobs after login get sidelined for BlacklistTimeoutSec (default 300s)
+    /// and nav runs the bot straight past them.
+    /// </summary>
+    private bool RaycastWarmingUp => _settings.EnableRaycasting && !RaycastInitialized;
+
     private void TrackAttackAttempt(int targetId)
     {
         if (_lastAttackedTargetId != targetId)
@@ -486,6 +529,11 @@ public class CombatManager : IDisposable
             _consecutiveMisses = 0;
             return;
         }
+
+        // Raycast not ready yet — don't count these as the target's fault.
+        // Misses here are our own degraded targeting; resume accrual once up.
+        if (RaycastWarmingUp)
+            return;
 
         _consecutiveMisses++;
         if (_consecutiveMisses >= _settings.BlacklistAttempts)
@@ -608,8 +656,12 @@ public class CombatManager : IDisposable
         // Time-based blacklist: if we've been engaged with this target for longer than
         // TargetNoProgressTimeoutSec without dealing any damage, give up and blacklist it.
         // Uses last-damage time when available; falls back to lock time.
+        // Skip the no-progress blacklist while raycast is warming up — the bot
+        // can't deal damage with degraded targeting, so this timer would
+        // otherwise sideline a perfectly good target through no fault of its
+        // own. Warmup is sub-second to ~2s, far under TargetNoProgressTimeoutSec.
         int noProgressTimeoutSec = _settings.TargetNoProgressTimeoutSec;
-        if (noProgressTimeoutSec > 0 && _targetLockedAt != DateTime.MinValue)
+        if (noProgressTimeoutSec > 0 && _targetLockedAt != DateTime.MinValue && !RaycastWarmingUp)
         {
             DateTime refTime = _lastDamageDealtAt != DateTime.MinValue ? _lastDamageDealtAt : _targetLockedAt;
             if ((DateTime.Now - refTime).TotalSeconds > noProgressTimeoutSec)
@@ -683,6 +735,19 @@ public class CombatManager : IDisposable
 
             if (CurrentCombatMode == CombatMode.Magic && _spellManager != null)
             {
+                // Don't issue a combat spell while the previous cast GESTURE is
+                // still animating. AC refuses a mid-gesture cast with the
+                // server-driven "You're too busy!" notice; sustained refusals
+                // re-enter AC's AddTextToScroll → 0x00460D1D AV. CanCastNow is
+                // the engine's CMotionInterp gesture gate (the SAME gate
+                // BuffManager uses). It degrades to true on an engine without
+                // the gate, where the SpellCastIntervalMs attack throttle still
+                // bounds retries. Melee/missile (AttackTarget, below) is
+                // deliberately NOT gated on this — a weapon swing isn't a spell
+                // cast and AC paces the swing animation itself.
+                if (!_host.CanCastNow)
+                    return true;
+
                 AttackWithMagic(targetObj);
 
                 if (_returnToPhysicalCombat)

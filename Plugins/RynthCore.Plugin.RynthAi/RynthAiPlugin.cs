@@ -184,8 +184,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         {
             try
             {
+                long rayT0 = Environment.TickCount64;
                 bool rayOk = raycastRef.Initialize(@"C:\Games\RynthCore\AcClient");
-                Log($"RynthAi: raycast init={rayOk} status={raycastRef.StatusMessage}");
+                long rayMs = Environment.TickCount64 - rayT0;
+                Log($"RynthAi: raycast init={rayOk} in {rayMs}ms status={raycastRef.StatusMessage}");
                 if (rayOk)
                 {
                     _combatManager?.SetRaycastSystem(raycastRef);
@@ -273,6 +275,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _metaManager.SetQuestTracker(_questTracker);
         if (_buffManager != null) _metaManager.SetBuffManager(_buffManager);
         _metaManager.SetCreatureStore(_creatureStore);
+        if (_dashboard != null)
+            _dashboard.MetaSnapshotProvider = () => _metaManager?.GetStateSnapshot();
 
         if (_objectCache != null)
         {
@@ -307,6 +311,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         bool diag = ++_tickDiag <= 3;
         try
         {
+            _dashboard?.DrainMetaCommands();   // apply queued meta edits on this (plugin-tick) thread
+
             // ── Push settings to engine each tick ──────────────────────
             // OnRender only runs when the engine has an active ImGui pipeline
             // (PluginManager.RenderAll is called from ImGuiController only).
@@ -449,31 +455,46 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 }
 
                 if (diag) Host.Log("[RynthAi] OnTick: before salvageManager");
+
+                // Combat preempts salvage when a mob is engageable. The old
+                // design deliberately let salvage hold BotAction over Combat
+                // (finish the queue), but that strands the bot doing inventory
+                // combine-sweeps next to a mob attacking it: the legacy
+                // 'Salvaging' string blocks CombatManager.canRun and the
+                // arbiter doesn't override it (Salvaging isn't arbiter-
+                // authoritative yet). HasEngageableTarget = actively engaged OR
+                // a scanned mob within MonsterRange — the same predicate the
+                // arbiter uses for Combat-vs-Nav (pure, no side effects;
+                // reflects last tick's scan, which is fine to yield on).
+                bool combatThreat = _combatManager?.HasEngageableTarget == true;
+
                 // Same settle gate as InventoryManager: BeginCombineSalvage walks
                 // GetDirectInventory which races with cache classification during
-                // the post-login / hot-reload CreateObject burst.
-                if (inventorySettled)
+                // the post-login / hot-reload CreateObject burst. Also pause the
+                // combine work while a threat is up so it doesn't contend with
+                // combat over SelectItem; it resumes the moment the threat clears.
+                if (inventorySettled && !combatThreat)
                     _salvageManager?.OnTick(_busyCount);
                 if (diag) Host.Log("[RynthAi] OnTick: before manaStoneManager");
 
-                // Salvage-priority gap-fill: while a container is open for active
-                // looting OR while the salvage queue has items waiting, hold
-                // BotAction at "Salvaging" so CombatManager.Think() won't fire
-                // and pull the bot away mid-session. We DO override "Combat"
-                // here — finishing the salvage queue takes priority over
-                // engaging a new monster, otherwise items meant for salvage
-                // pile up in inventory after combat resumes navigation.
-                // "Buffing" still wins (buffs dropping = death).
+                // Salvage-priority gap-fill: hold BotAction at "Salvaging" while
+                // a container is open OR the salvage queue has items — UNLESS a
+                // mob is engageable, in which case combat must win (don't stand
+                // there getting hit). "Buffing" still wins (buffs = survival).
                 if (settings.IsMacroRunning
                     && settings.BotAction != "Buffing"
+                    && !combatThreat
                     && (_openedContainerId != 0 || _salvageManager?.IsBusy == true))
                 {
                     settings.BotAction = "Salvaging";
                 }
                 else if (settings.BotAction == "Salvaging"
-                         && _openedContainerId == 0
-                         && _salvageManager?.IsBusy != true)
+                         && (combatThreat
+                             || (_openedContainerId == 0 && _salvageManager?.IsBusy != true)))
                 {
+                    // Release the legacy 'Salvaging' lock so CombatManager.canRun
+                    // is true and the arbiter can take Combat. Salvage re-grabs
+                    // it next tick once the threat is gone.
                     settings.BotAction = "Default";
                 }
 
@@ -495,7 +516,18 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     }
                 }
 
-                if (settings.BoostNavPriority)
+                // BoostNavPriority must only suppress combat/loot when there is
+                // actually navigation to prioritise. With nav disabled or no
+                // route points there is nothing to boost, so an unconditional
+                // return here just starves combat and the bot stands among mobs
+                // without hunting. Same "nav active" predicate the arbiter uses
+                // for wantNav (~line 404): IsMacroRunning && EnableNavigation &&
+                // route-has-points.
+                bool navActiveForBoost = settings.IsMacroRunning
+                                      && settings.EnableNavigation
+                                      && settings.CurrentRoute != null
+                                      && settings.CurrentRoute.Points.Count > 0;
+                if (settings.BoostNavPriority && navActiveForBoost)
                 {
                     if (string.Equals(settings.BotAction, "Combat", StringComparison.OrdinalIgnoreCase)
                         || string.Equals(settings.BotAction, "Looting", StringComparison.OrdinalIgnoreCase))

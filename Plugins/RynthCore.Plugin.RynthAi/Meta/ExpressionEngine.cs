@@ -40,6 +40,15 @@ internal sealed class ExpressionEngine
     private int _nextDictId;
     private int _evalDepth;
 
+    // Hard recursion caps. A .NET StackOverflowException is uncatchable and
+    // instantly kills acclient.exe, so a self-referential meta expression
+    // (exec[$x] loop, listmap template, nested funcs) or a pathological paren
+    // nest MUST be bounded before it reaches the runtime. 64/256 are far above
+    // any legitimate meta and well under an 8 MB stack.
+    private const int MaxEvalDepth = 64;
+    private const int MaxParenDepth = 256;
+    private int _parenDepth;
+
     // Plugin options store: name → value (case-insensitive keys).
     // Populated by the plugin via RegisterOption / SetOption.
     private readonly Dictionary<string, string> _options = new(StringComparer.OrdinalIgnoreCase);
@@ -69,10 +78,13 @@ internal sealed class ExpressionEngine
     };
     private readonly Dictionary<string, bool> _wantedMotion = new(StringComparer.OrdinalIgnoreCase);
 
-    // Keeps delayexec timers rooted so the GC doesn't collect them before they fire.
-    private static readonly List<(System.Threading.Timer Timer, DateTime AddedAt)> _activeTimers = new();
-    private static readonly object _timerLock = new();
-    private static readonly TimeSpan TimerMaxAge = TimeSpan.FromMinutes(10);
+    // delayexec queue. Drained on the game/plugin-tick thread via
+    // PumpDelayedExecs() — NOT a threadpool Timer (which executed expressions
+    // against AC native memory off-thread and, being static, survived plugin
+    // hot-reload to fire into a freed engine). Instance-scoped so a hot-reload
+    // discards pending execs. Single-threaded access (Evaluate and the pump
+    // both run on the plugin-tick thread) → no lock needed.
+    private readonly List<(long DueMs, string Expr)> _delayedExecs = new();
 
     private uint _playerId;
     private LegacyUiSettings? _settings;
@@ -80,6 +92,14 @@ internal sealed class ExpressionEngine
     // Persistent / global variable storage (lazy-loaded from disk)
     private Dictionary<string, string>? _pvars;
     private Dictionary<string, string>? _gvars;
+    // set/clear/touch mark dirty; FlushVars() writes at most every
+    // VarFlushIntervalMs (from the plugin-tick pump) instead of a synchronous
+    // full-file write on every call. A bot setting a pvar each tick was doing a
+    // disk write per tick on the game thread.
+    private bool _pvarsDirty, _gvarsDirty;
+    private long _lastVarFlushMs;
+    private string? _pvarPathCached;
+    private const long VarFlushIntervalMs = 2000;
     private static readonly string PvarsDir  = Path.Combine(@"C:\Games\RynthSuite\RynthAi", "pvars");
     private static readonly string GvarsPath = Path.Combine(@"C:\Games\RynthSuite\RynthAi", "gvars.txt");
     private Dictionary<string, (Func<string> Get, Action<string> Set)>? _settingsMap;
@@ -111,7 +131,16 @@ internal sealed class ExpressionEngine
 
     private QuestTracker? _questTracker;
 
-    public void SetPlayerId(uint id) { if (id != _playerId) _pvars = null; _playerId = id; }
+    public void SetPlayerId(uint id)
+    {
+        if (id != _playerId)
+        {
+            FlushVars(force: true);   // persist the old char's pending pvars first
+            _pvars = null;
+            _pvarPathCached = null;
+        }
+        _playerId = id;
+    }
     public void SetObjectCache(WorldObjectCache? cache) => _worldObjectCache = cache;
     public void SetFellowshipTracker(FellowshipTracker? tracker) => _fellowshipTracker = tracker;
     public void SetQuestTracker(QuestTracker? tracker) => _questTracker = tracker;
@@ -138,7 +167,8 @@ internal sealed class ExpressionEngine
     {
         string expr = expression?.Trim() ?? "";
         if (expr.Length == 0) return "";
-        if (_evalDepth == 0) { _dicts.Clear(); _nextDictId = 0; }
+        if (_evalDepth >= MaxEvalDepth) return "ERR:Depth:max recursion exceeded";
+        if (_evalDepth == 0) { _dicts.Clear(); _nextDictId = 0; _parenDepth = 0; }
         _evalDepth++;
         try   { return new Parser(this, expr).Run(); }
         catch (Exception ex) { return $"ERR:{ex.GetType().Name}:{ex.Message}"; }
@@ -518,18 +548,21 @@ internal sealed class ExpressionEngine
 
     private string GetPvarPath()
     {
+        if (_pvarPathCached != null) return _pvarPathCached;
         string charName = "unknown";
         if (_playerId != 0 && _host.HasGetObjectName)
             _host.TryGetObjectName(_playerId, out charName);
         charName = SanitizeFileName(charName ?? "unknown");
-        return Path.Combine(PvarsDir, $"{charName}.txt");
+        string p = Path.Combine(PvarsDir, $"{charName}.txt");
+        if (charName != "unknown") _pvarPathCached = p;   // only cache a resolved name
+        return p;
     }
 
     private string EvalSetPvar(string key, string value)
     {
         if (string.IsNullOrEmpty(key)) return value;
         GetPvars()[key] = value;
-        SaveVarFile(GetPvarPath(), _pvars!);
+        _pvarsDirty = true;
         return value;
     }
 
@@ -538,7 +571,7 @@ internal sealed class ExpressionEngine
         var pvars = GetPvars();
         if (pvars.ContainsKey(key)) return "1";
         pvars[key] = "0";
-        SaveVarFile(GetPvarPath(), pvars);
+        _pvarsDirty = true;
         return "0";
     }
 
@@ -546,14 +579,14 @@ internal sealed class ExpressionEngine
     {
         var pvars = GetPvars();
         if (!pvars.Remove(key)) return "0";
-        SaveVarFile(GetPvarPath(), pvars);
+        _pvarsDirty = true;
         return "1";
     }
 
     private string EvalClearAllPvars()
     {
         GetPvars().Clear();
-        SaveVarFile(GetPvarPath(), _pvars!);
+        _pvarsDirty = true;
         return "1";
     }
 
@@ -566,7 +599,7 @@ internal sealed class ExpressionEngine
     {
         if (string.IsNullOrEmpty(key)) return value;
         GetGvars()[key] = value;
-        SaveVarFile(GvarsPath, _gvars!);
+        _gvarsDirty = true;
         return value;
     }
 
@@ -575,7 +608,7 @@ internal sealed class ExpressionEngine
         var gvars = GetGvars();
         if (gvars.ContainsKey(key)) return "1";
         gvars[key] = "0";
-        SaveVarFile(GvarsPath, gvars);
+        _gvarsDirty = true;
         return "0";
     }
 
@@ -583,15 +616,31 @@ internal sealed class ExpressionEngine
     {
         var gvars = GetGvars();
         if (!gvars.Remove(key)) return "0";
-        SaveVarFile(GvarsPath, gvars);
+        _gvarsDirty = true;
         return "1";
     }
 
     private string EvalClearAllGvars()
     {
         GetGvars().Clear();
-        SaveVarFile(GvarsPath, _gvars!);
+        _gvarsDirty = true;
         return "1";
+    }
+
+    /// <summary>
+    /// Writes dirty pvar/gvar files. Called from the plugin-tick pump; throttled
+    /// to <see cref="VarFlushIntervalMs"/> unless <paramref name="force"/>
+    /// (char switch / macro stop / shutdown) to bound data loss to ~2 s without
+    /// a per-tick synchronous disk write on the game thread.
+    /// </summary>
+    public void FlushVars(bool force = false)
+    {
+        if (!_pvarsDirty && !_gvarsDirty) return;
+        long now = Environment.TickCount64;
+        if (!force && now - _lastVarFlushMs < VarFlushIntervalMs) return;
+        if (_pvarsDirty && _pvars != null) { SaveVarFile(GetPvarPath(), _pvars); _pvarsDirty = false; }
+        if (_gvarsDirty && _gvars != null) { SaveVarFile(GvarsPath, _gvars);     _gvarsDirty = false; }
+        _lastVarFlushMs = now;
     }
 
     // ── Var file helpers ──────────────────────────────────────────────────────
@@ -2898,36 +2947,37 @@ internal sealed class ExpressionEngine
         if (!double.TryParse(delayArg, NumberStyles.Float | NumberStyles.AllowLeadingSign,
                 CultureInfo.InvariantCulture, out double delayMs))
             delayMs = 0;
-        int ms = (int)Math.Max(0, delayMs);
-        var engine = this;
-        string expr = exprArg;
-
-        var addedAt = DateTime.UtcNow;
-        System.Threading.Timer? t = null;
-
-        t = new System.Threading.Timer(_ =>
-        {
-            try { engine.Evaluate(expr); }
-            catch { }
-            lock (_timerLock)
-            {
-                for (int i = _activeTimers.Count - 1; i >= 0; i--)
-                    if (ReferenceEquals(_activeTimers[i].Timer, t)) { _activeTimers.RemoveAt(i); break; }
-
-                // Also prune any entries older than TimerMaxAge (stuck timers from prior errors)
-                var cutoff = DateTime.UtcNow - TimerMaxAge;
-                for (int i = _activeTimers.Count - 1; i >= 0; i--)
-                    if (_activeTimers[i].AddedAt < cutoff)
-                    {
-                        _activeTimers[i].Timer.Dispose();
-                        _activeTimers.RemoveAt(i);
-                    }
-            }
-        }, null, ms, System.Threading.Timeout.Infinite);
-
-        lock (_timerLock)
-            _activeTimers.Add((t, addedAt));
+        long ms = (long)Math.Max(0, delayMs);
+        _delayedExecs.Add((Environment.TickCount64 + ms, exprArg));
         return "1";
+    }
+
+    /// <summary>
+    /// Fires delayexec entries whose delay has elapsed. MUST be called on the
+    /// game/plugin-tick thread (it Evaluates expressions that touch AC native
+    /// state). Resolution is the tick rate (~30 Hz), fine for meta timing. A
+    /// delayexec re-scheduled by a fired expression runs no earlier than the
+    /// next pump (snapshot-then-fire, so it can't loop within one pump).
+    /// </summary>
+    public void PumpDelayedExecs()
+    {
+        if (_delayedExecs.Count == 0) return;
+        long now = Environment.TickCount64;
+        List<string>? due = null;
+        for (int i = _delayedExecs.Count - 1; i >= 0; i--)
+        {
+            if (_delayedExecs[i].DueMs <= now)
+            {
+                (due ??= new()).Add(_delayedExecs[i].Expr);
+                _delayedExecs.RemoveAt(i);
+            }
+        }
+        if (due == null) return;
+        // Collected back-to-front; fire in original scheduled order.
+        for (int i = due.Count - 1; i >= 0; i--)
+        {
+            try { Evaluate(due[i]); } catch { }
+        }
     }
 
     // ── String function implementations ───────────────────────────────────────
@@ -3039,7 +3089,11 @@ internal sealed class ExpressionEngine
 
     /// <summary>"0" and "" are false; everything else is true.</summary>
     internal static bool ToBool(string s)
-        => s.Length > 0 && s != "0" && !string.Equals(s, "false", StringComparison.OrdinalIgnoreCase);
+        => s.Length > 0 && s != "0"
+           && !string.Equals(s, "false", StringComparison.OrdinalIgnoreCase)
+           // An evaluation error / depth-guard sentinel is never "true" — keeps
+           // if[]/iif[]/&&/|| on a broken sub-expression failing closed too.
+           && !s.StartsWith("ERR:", StringComparison.Ordinal);
 
     private static double ToDouble(string s)
         => double.TryParse(s, NumberStyles.Float | NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out double d) ? d : 0.0;
@@ -3291,8 +3345,7 @@ internal sealed class ExpressionEngine
             while (Try("#"))
             {
                 var pattern = ParseUnary();
-                try { l = Regex.IsMatch(l, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) ? "1" : "0"; }
-                catch { l = "0"; }
+                l = RegexCache.IsMatch(l, pattern, RegexOptions.IgnoreCase) ? "1" : "0";
                 Ws();
             }
             return l;
@@ -3318,10 +3371,13 @@ internal sealed class ExpressionEngine
             Ws();
             if (_p < _s.Length && _s[_p] == '(')
             {
+                if (_eng._parenDepth >= MaxParenDepth) { _p = _s.Length; return "ERR:Depth:paren nesting"; }
+                _eng._parenDepth++;
                 _p++; // consume '('
                 var inner = ParseOr();
                 Ws();
                 if (_p < _s.Length && _s[_p] == ')') _p++;
+                _eng._parenDepth--;
                 return inner;
             }
             return ParseAtom();

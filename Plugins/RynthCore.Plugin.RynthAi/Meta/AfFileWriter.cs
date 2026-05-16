@@ -39,7 +39,7 @@ internal static class AfFileWriter
         [MetaConditionType.Not]                              = "Not",
         [MetaConditionType.SecondsInStateP_GE]               = "PSecsInStateGE",
         [MetaConditionType.TimeLeftOnSpell_GE]               = "SecsOnSpellGE",
-        [MetaConditionType.TimeLeftOnSpell_LE]               = "SecsOnSpellGE",
+        [MetaConditionType.TimeLeftOnSpell_LE]               = "SecsOnSpellLE",
         [MetaConditionType.BurdenPercentage_GE]              = "BuPercentGE",
         [MetaConditionType.DistAnyRoutePT_GE]                = "DistToRteGE",
         [MetaConditionType.Expression]                       = "Expr",

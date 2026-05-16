@@ -103,11 +103,25 @@ public sealed class SalvageManager
     /// <summary>Enqueue an item to be salvaged. Called by CorpseOpenController after pickup.</summary>
     public void EnqueueItem(uint itemId)
     {
-        if (itemId != 0)
+        if (itemId == 0)
+            return;
+
+        // A salvage bag is ALREADY salvage. Feeding one into the single-item
+        // flow opens the panel on a lone bag, Executes a no-op, fails the
+        // "still present" check, and retry-storms — this is the user-reported
+        // "keeps salvaging bags by themselves" behaviour. Bags are consolidated
+        // by the combine sweep (grouped, never solo); they must never enter the
+        // single-item queue.
+        string? name = _cache?[unchecked((int)itemId)]?.Name;
+        if (IsSalvageBag(name))
         {
-            _queue.Enqueue(itemId);
-            _pendingCombineScan = false; // reset; will be set again when queue drains
+            Log($"[Salvage] Ignoring enqueue of salvage bag 0x{itemId:X8} ({name}) — bags are combined by the sweep, not salvaged solo.");
+            if (_settings.EnableCombineSalvage) _pendingCombineScan = true;
+            return;
         }
+
+        _queue.Enqueue(itemId);
+        _pendingCombineScan = false; // reset; will be set again when queue drains
     }
 
     /// <summary>Called every game tick from RynthAiPlugin.OnTick.</summary>
@@ -195,6 +209,17 @@ public sealed class SalvageManager
         if (itemId == 0)
             return;
 
+        // Backstop for the EnqueueItem guard: the item's name may not have been
+        // cached at enqueue time. Never run the single-item salvage flow on a
+        // bag — it's already salvage; the combine sweep consolidates it.
+        string? dqName = _cache?[unchecked((int)itemId)]?.Name;
+        if (IsSalvageBag(dqName))
+        {
+            Log($"[Salvage] Dequeued a salvage bag 0x{itemId:X8} ({dqName}) — skipping solo salvage; combine sweep will consolidate it.");
+            if (_settings.EnableCombineSalvage) _pendingCombineScan = true;
+            return;
+        }
+
         uint ustId = FindUst();
         if (ustId == 0)
         {
@@ -257,10 +282,14 @@ public sealed class SalvageManager
     // STypes (canonical values from Chorizite STypes.cs — verified against
     // the live binary; the PropertyNames.IntNames index in this codebase is
     // off-by-some-rows so do NOT use it as the source of truth).
-    private const uint StypeMaxStructure    = 91;
-    private const uint StypeStructure       = 92;
-    private const uint StypeItemWorkmanship = 105;
-    private const uint StypeMaterialType    = 131;
+    private const uint StypeMaxStructure       = 91;
+    private const uint StypeStructure          = 92;
+    private const uint StypeItemWorkmanship    = 105;
+    private const uint StypeMaterialType       = 131;
+    // On a salvage BAG, ItemWorkmanship(#105) is a cumulative SUM, not a 1-10
+    // value (ACE Player_Crafting.TryAddSalvage). The per-bag average workmanship
+    // used for band grouping is #105 / NumItemsInMaterial(#170).
+    private const uint StypeNumItemsInMaterial = 170;
 
     /// <summary>
     /// Scans inventory for every under-full salvage bag whose material (and
@@ -278,13 +307,21 @@ public sealed class SalvageManager
         RynthCore.Loot.SalvageCombineSettings? cfg = CombineConfigProvider?.Invoke();
         bool useBands = cfg != null && cfg.Enabled;
 
-        string? itemBand = null;
+        // The freshly-looted ITEM carries a true 1-10 ItemWorkmanship(#105) —
+        // unlike a bag, whose #105 is a cumulative sum. So the item's band is
+        // read directly here; bag keys come from TryGetBagCombineKey (average).
+        string itemKey;
         if (useBands)
         {
             if (!_host.TryGetObjectIntProperty(itemId, StypeItemWorkmanship, out int itemWm) || itemWm <= 0)
                 return 0;
-            itemBand = cfg!.GetBandKey(itemMat, itemWm);
+            string? itemBand = cfg!.GetBandKey(itemMat, itemWm);
             if (itemBand == null) return 0;
+            itemKey = $"{itemMat}|{itemBand}";
+        }
+        else
+        {
+            itemKey = itemMat.ToString();
         }
 
         int added = 0;
@@ -293,16 +330,9 @@ public sealed class SalvageManager
             uint bagId = unchecked((uint)bag.Id);
             if (bagId == itemId) continue;
             if (!IsSalvageBag(bag.Name)) continue;
-            if (!TryGetSalvageBagMaterial(bagId, bag.Name, out int bagMat) || bagMat != itemMat)
-                continue;
             if (!IsBagUnderFull(bagId, bag.Name)) continue;
-
-            if (useBands)
-            {
-                if (!_host.TryGetObjectIntProperty(bagId, StypeItemWorkmanship, out int bagWm) || bagWm <= 0) continue;
-                string? bagBand = cfg!.GetBandKey(bagMat, bagWm);
-                if (bagBand != itemBand) continue;
-            }
+            if (!TryGetBagCombineKey(bagId, bag.Name, cfg, useBands, out string bagKey, out _)) continue;
+            if (bagKey != itemKey) continue;
 
             if (_host.SalvagePanelAddItem(bagId))
             {
@@ -420,6 +450,8 @@ public sealed class SalvageManager
         int scannedItems = inv.Count;
         int salvageBagCount = 0;
         int underFullCount = 0;
+        int rejMaterialUnknown = 0;
+        int rejWmUnread = 0;
         foreach (WorldObject item in inv)
         {
             if (!IsSalvageBag(item.Name)) continue;
@@ -427,20 +459,13 @@ public sealed class SalvageManager
             uint id = unchecked((uint)item.Id);
             if (!IsBagUnderFull(id, item.Name)) continue;
             underFullCount++;
-            if (!TryGetSalvageBagMaterial(id, item.Name, out int mat)) continue;
 
-            string key;
-            if (useBands)
+            if (!TryGetBagCombineKey(id, item.Name, cfg, useBands, out string key, out string diag))
             {
-                if (!_host.TryGetObjectIntProperty(id, StypeItemWorkmanship, out int wm) || wm <= 0) continue;
-                string? band = cfg!.GetBandKey(mat, wm);
-                if (band == null) continue; // workmanship outside any defined band — keep separate
-                key = $"{mat}|{band}";
+                rejMaterialUnknown++;
+                continue;
             }
-            else
-            {
-                key = mat.ToString();
-            }
+            if (diag == "workmanship-unread") rejWmUnread++;
 
             if (!byKey.TryGetValue(key, out var list)) { list = new List<uint>(); byKey[key] = list; }
             list.Add(id);
@@ -458,10 +483,10 @@ public sealed class SalvageManager
         if (_combineGroups.Count == 0)
         {
             _combineGroups = null;
-            Log($"[Salvage] Combine sweep: scanned {scannedItems} inv items, {salvageBagCount} salvage bag(s), {underFullCount} under-full, {eligibleBags} mat-eligible, 0 mergeable groups.");
+            Log($"[Salvage] Combine sweep: scanned {scannedItems} inv items, {salvageBagCount} salvage bag(s), {underFullCount} under-full, {eligibleBags} mat-eligible, rej(mat?={rejMaterialUnknown},wm?={rejWmUnread}), 0 mergeable groups.");
             return;
         }
-        Log($"[Salvage] Combine sweep: scanned {scannedItems} inv items, {salvageBagCount} salvage bag(s), {underFullCount} under-full → {_combineGroups.Count} mergeable group(s).");
+        Log($"[Salvage] Combine sweep: scanned {scannedItems} inv items, {salvageBagCount} salvage bag(s), {underFullCount} under-full, rej(mat?={rejMaterialUnknown},wm?={rejWmUnread}) → {_combineGroups.Count} mergeable group(s).");
 
         _combineGroupIdx = 0;
         _combineAddIdx = 0;
@@ -634,8 +659,16 @@ public sealed class SalvageManager
     {
         if (HasPrefixBeforeSalvage(name) && TryParseTrailingNumber(name, out int pct))
             return pct < 100;
-        if (!_host.TryGetObjectIntProperty(bagId, StypeStructure, out int cur)) return true;
-        if (!_host.TryGetObjectIntProperty(bagId, StypeMaxStructure, out int max)) return true;
+        if (!_host.TryGetObjectIntProperty(bagId, StypeStructure, out int cur))
+        {
+            Log($"[Salvage] IsBagUnderFull: Structure(#92) unreadable for 0x{bagId:X8} ({name}) — assuming under-full.");
+            return true;
+        }
+        if (!_host.TryGetObjectIntProperty(bagId, StypeMaxStructure, out int max))
+        {
+            Log($"[Salvage] IsBagUnderFull: MaxStructure(#91) unreadable for 0x{bagId:X8} ({name}) — assuming under-full.");
+            return true;
+        }
         return max <= 0 || cur < max;
     }
 
@@ -653,27 +686,100 @@ public sealed class SalvageManager
     }
 
     /// <summary>
-    /// Resolves a salvage bag's material id. Tries the property read first;
-    /// when that fails (AC's property cache is flaky for non-active bags),
-    /// falls back to parsing the trailing number from "Salvage (X)" names
-    /// where X is the material id on this server's naming convention.
+    /// Resolves a salvage bag's material id from MaterialType(#131) — the only
+    /// reliable source. The previous "parse trailing (NN) as material" fallback
+    /// was WRONG on ACE: ACE names bags "Salvage ({Structure})"
+    /// (Player_Crafting.cs ~line 281) — the number is the bag's FILL LEVEL, not
+    /// its material — so the fallback scattered same-material bags across
+    /// different bogus keys and they never combined. When the property can't be
+    /// read we skip the bag for this sweep; the next sweep picks it up once the
+    /// client has the bag's material cached.
     /// </summary>
     private bool TryGetSalvageBagMaterial(uint bagId, string? name, out int material)
     {
+        material = 0;
         if (_host.TryGetObjectIntProperty(bagId, StypeMaterialType, out int mat) && mat > 0)
         {
             material = mat;
             return true;
         }
-        if (!HasPrefixBeforeSalvage(name)
-            && TryParseTrailingNumber(name, out int parsedMat)
-            && parsedMat > 0 && parsedMat < 256)
+        return false;
+    }
+
+    /// <summary>
+    /// Resolves the combine grouping key for a salvage BAG.
+    ///
+    /// ACE's server merges bags by MaterialType + under-full only
+    /// (Player_Crafting.GetSalvageBag) — workmanship is never a server-side
+    /// merge criterion. Banding is a client-side user preference to keep
+    /// different-workmanship salvage in separate bags. A bag's int
+    /// ItemWorkmanship(#105) is a cumulative SUM (TryAddSalvage), so the band
+    /// must be derived from the AVERAGE: #105 / NumItemsInMaterial(#170).
+    ///
+    /// When workmanship can't be read we fall back to a "{mat}|?" key instead
+    /// of excluding the bag — excluding every bag is exactly the original
+    /// "never combines" bug. Same-material unknown-band bags then still merge
+    /// with each other, which is server-safe (the server ignores workmanship).
+    /// Returns false only when the MATERIAL itself is unknown (can't group at
+    /// all); <paramref name="diag"/> carries a short reason for logging.
+    /// </summary>
+    private bool TryGetBagCombineKey(uint bagId, string? name,
+        RynthCore.Loot.SalvageCombineSettings? cfg, bool useBands,
+        out string key, out string diag)
+    {
+        key = string.Empty;
+        diag = string.Empty;
+
+        if (!TryGetSalvageBagMaterial(bagId, name, out int mat))
         {
-            material = parsedMat;
+            diag = "material-unknown";
+            return false;
+        }
+
+        if (!useBands)
+        {
+            key = mat.ToString();
             return true;
         }
-        material = 0;
-        return false;
+
+        if (TryGetBagAvgWorkmanship(bagId, out int avgWm))
+        {
+            string? band = cfg!.GetBandKey(mat, avgWm);
+            if (band != null)
+            {
+                key = $"{mat}|{band}";
+                return true;
+            }
+            // avg falls in a gap between configured bands — keep it separate by
+            // exact average so identical-average bags still merge together.
+            diag = $"avgWm {avgWm} outside bands";
+            key = $"{mat}|wm{avgWm}";
+            return true;
+        }
+
+        diag = "workmanship-unread";
+        key = $"{mat}|?";
+        return true;
+    }
+
+    /// <summary>
+    /// Average workmanship of a salvage bag = ItemWorkmanship(#105, a cumulative
+    /// sum) / NumItemsInMaterial(#170). Integer floor — band ranges are integer,
+    /// so flooring is exact for grouping (bags with the same average land in the
+    /// same band). Returns false if either property is unreadable or the bag is
+    /// empty/fresh (#170 == 0), in which case the caller treats the band as
+    /// unknown rather than excluding the bag.
+    /// </summary>
+    private bool TryGetBagAvgWorkmanship(uint bagId, out int avgWm)
+    {
+        avgWm = 0;
+        if (!_host.TryGetObjectIntProperty(bagId, StypeItemWorkmanship, out int sum) || sum <= 0)
+            return false;
+        if (!_host.TryGetObjectIntProperty(bagId, StypeNumItemsInMaterial, out int n) || n <= 0)
+            return false;
+        avgWm = sum / n;
+        if (avgWm < 1) avgWm = 1;
+        return true;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

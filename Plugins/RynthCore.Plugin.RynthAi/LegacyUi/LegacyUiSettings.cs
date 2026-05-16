@@ -200,6 +200,25 @@ public sealed class LegacyUiSettings
     public List<BuffRule> BuffRules { get; set; } = new();
     public List<MetaRule> MetaRules { get; set; } = new();
 
+    /// <summary>
+    /// Guards every read/enumerate/mutate of <see cref="MetaRules"/>. The list
+    /// is touched from the plugin-tick thread (MetaManager.Think) AND the
+    /// Avalonia dispatcher thread (MetaPanel poll → BuildMetaJson /
+    /// HandleMetaCommand). List&lt;T&gt; is not thread-safe; concurrent
+    /// enumerate+mutate corrupts the heap. Hold this lock for the full duration
+    /// of any MetaRules access.
+    /// </summary>
+    [JsonIgnore]
+    public object MetaRulesLock { get; } = new();
+
+    /// <summary>
+    /// Bumped on an *in-place* rule edit (a slot replaced, possibly changing a
+    /// rule's State) so MetaManager's per-state index rebuilds. Add/delete/load
+    /// change the list ref or count and are detected without this.
+    /// </summary>
+    [JsonIgnore]
+    public int MetaRulesStructuralVersion;
+
     private Dictionary<string, List<string>> _embeddedNavs =
         new(StringComparer.OrdinalIgnoreCase);
 

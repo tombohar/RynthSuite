@@ -138,6 +138,12 @@ public class WorldObjectCache
         if (!_creatures.Add(sid))
             return; // creature already known — ratio updated above, nothing more to do
 
+        // DIAG: a creature first learned via server health update (the
+        // "aggressive mob self-rescues" path) — NOT via TryClassify. Lets us
+        // correlate a manually-selected mob's id to how/when it entered
+        // _creatures vs. why classification missed it earlier.
+        TraceClassify(id, true, true, false, 0u, $"healthAdd->creature hr={healthRatio:0.00}");
+
         // If the object was already classified as a Corpse, don't promote it back to Monster.
         // AC fires health=0 events during the creature→corpse transition; if TryClassify already
         // reclassified it and removed it from _creatures, the Add above would re-admit it incorrectly.
@@ -233,6 +239,21 @@ public class WorldObjectCache
         }
     }
 
+    // Read-only classify trace (no AC probes added — reuses the caller's
+    // already-computed hasName/hasPos/TryGetItemType). Bounded so one login is
+    // conclusive without flooding. Dynamic (0x8000+) only — that's the
+    // creature/NPC/equipped range the login-mob bug lives in.
+    private int _classifyTrace;
+    private void TraceClassify(uint uid, bool hasName, bool hasPos, bool gotType, uint flags, string note)
+    {
+        if (_classifyTrace >= 500 || uid < 0x80000000u) return;
+        _classifyTrace++;
+        int atk = -1;
+        try { if (_host.HasObjectIsAttackable) atk = _host.ObjectIsAttackable(uid) ? 1 : 0; }
+        catch { atk = -2; }
+        _host.Log($"[ClassifyTrace] 0x{uid:X8} name={(hasName ? 1 : 0)} pos={(hasPos ? 1 : 0)} gotType={(gotType ? 1 : 0)} flags=0x{flags:X8} creature={((flags & ItemTypeCreature) != 0 ? 1 : 0)} atk={atk} {note}");
+    }
+
     private void TryClassify(uint uid)
     {
         // Skip objects that were deleted after being enqueued — accessing their AC memory
@@ -265,6 +286,7 @@ public class WorldObjectCache
         // Object not accessible yet — retry for any dynamic object (weenie may not be ready)
         if (!hasName && !hasPos)
         {
+            TraceClassify(uid, hasName, hasPos, false, 0u, "noNamePos");
             if (uid >= 0x80000000u)
             {
                 int retries = _classifyRetry.TryGetValue(uid, out int r) ? r : 0;
@@ -299,18 +321,21 @@ public class WorldObjectCache
                 {
                     // It's a creature with no position yet.
                     // Add to _creatures so future health update or retry classifies it
+                    TraceClassify(uid, hasName, hasPos, true, typeFlags, "nopos-creature");
                     _creatures.Add(id);
                     _landscape.Add(id);
                     _byId[id] = Make(id, name, AcObjectClass.Monster);
                     return;
                 }
 
+                TraceClassify(uid, hasName, hasPos, true, typeFlags, "nopos-item");
                 cls = ClassifyByItemType(typeFlags);
             }
             else
             {
                 // No weenie/item-type accessible yet — retry for a few ticks
                 int retries = _classifyRetry.TryGetValue(uid, out int r) ? r : 0;
+                TraceClassify(uid, hasName, hasPos, false, 0u, retries < MaxClassifyRetries ? $"nopos-retry r={retries}" : "nopos-giveup");
                 if (retries < MaxClassifyRetries)
                 {
                     _classifyRetry[uid] = retries + 1;
@@ -347,7 +372,9 @@ public class WorldObjectCache
             }
 
             // Has a position — check if it's actually a creature type (equipped items have 0x8000 GUIDs with positions)
-            if (_host.TryGetItemType(uid, out uint typeFlags))
+            bool gotType = _host.TryGetItemType(uid, out uint typeFlags);
+            TraceClassify(uid, hasName, hasPos, gotType, gotType ? typeFlags : 0u, "pos");
+            if (gotType)
             {
                 if ((typeFlags & ItemTypeCreature) != 0)
                 {
@@ -383,6 +410,29 @@ public class WorldObjectCache
                 _classifyRetry.Remove(uid);
             }
 
+            // Immediate creature rescue. The qualities/appraisal ItemType that
+            // TryGetItemType resolves lags ~30s post-login (reports flags=0),
+            // so a login mob would sit here as Unknown and never be scanned —
+            // the "bot ignores mobs after login" bug. AC's native combat check
+            // (ClientCombatSystem::ObjectIsAttackable) is available the instant
+            // the weenie object exists (it's how the game shows the health bar
+            // immediately) and does NOT depend on qualities/appraisal. A
+            // positioned dynamic (0x8000) object the game itself says is
+            // attackable IS a creature; NPCs / equipped gear are not attackable
+            // so they are not mis-promoted. ItemType refines it later if needed.
+            if (uid >= 0x80000000u
+                && _host.HasObjectIsAttackable
+                && _host.ObjectIsAttackable(uid))
+            {
+                _classifyRetry.Remove(uid);
+                _inventory.Remove(id);
+                _creatures.Add(id);
+                _landscape.Add(id);
+                _byId[id] = Make(id, name, AcObjectClass.Monster);
+                TraceClassify(uid, hasName, hasPos, gotType, gotType ? typeFlags : 0u, "attackable->creature");
+                return;
+            }
+
             cls = AcObjectClass.Unknown; // landscape non-creature (static object, portal, etc.)
             _landscape.Add(id);
         }
@@ -405,8 +455,19 @@ public class WorldObjectCache
             uint uid = unchecked((uint)id);
             if (uid < 0x80000000u) continue; // static objects never become creatures
             if (!_byId.TryGetValue(id, out var wo) || wo.ObjectClass != AcObjectClass.Unknown) continue;
-            if (!_host.TryGetItemType(uid, out uint typeFlags)) continue;
-            if ((typeFlags & ItemTypeCreature) == 0) continue;
+
+            // Promote if EITHER the (laggy) qualities ItemType now reports
+            // creature, OR AC's native combat check says it's attackable (the
+            // immediate signal that doesn't wait on qualities/appraisal). This
+            // second path is what rescues a login mob within 2s if it slipped
+            // to Unknown before its weenie/combat-state was readable.
+            bool isCreature = _host.TryGetItemType(uid, out uint typeFlags)
+                              && (typeFlags & ItemTypeCreature) != 0;
+            if (!isCreature
+                && _host.HasObjectIsAttackable
+                && _host.ObjectIsAttackable(uid))
+                isCreature = true;
+            if (!isCreature) continue;
 
             toPromote ??= new List<int>();
             toPromote.Add(id);

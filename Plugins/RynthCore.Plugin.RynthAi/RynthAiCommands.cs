@@ -680,7 +680,7 @@ public sealed partial class RynthAiPlugin
             {
                 if (Host.TryGetObjectIntProperty(playerId, i, out int v))
                 {
-                    string name = PropertyNames.GetIntName(i);
+                    string? name = PropertyNames.GetIntName(i);
                     ChatLine(name != null
                         ? $"[RynthAi]   IntProp[{i}] = {v} ({name})"
                         : $"[RynthAi]   IntProp[{i}] = {v}");
@@ -700,7 +700,7 @@ public sealed partial class RynthAiPlugin
             {
                 if (Host.TryGetObjectBoolProperty(playerId, i, out bool v))
                 {
-                    string name = PropertyNames.GetBoolName(i);
+                    string? name = PropertyNames.GetBoolName(i);
                     ChatLine(name != null
                         ? $"[RynthAi]   BoolProp[{i}] = {(v ? "1" : "0")} ({name})"
                         : $"[RynthAi]   BoolProp[{i}] = {(v ? "1" : "0")}");
@@ -720,7 +720,7 @@ public sealed partial class RynthAiPlugin
             {
                 if (Host.TryGetObjectStringProperty(playerId, i, out string v))
                 {
-                    string name = PropertyNames.GetStringName(i);
+                    string? name = PropertyNames.GetStringName(i);
                     ChatLine(name != null
                         ? $"[RynthAi]   StringProp[{i}] = {v} ({name})"
                         : $"[RynthAi]   StringProp[{i}] = {v}");

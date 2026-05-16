@@ -40,6 +40,7 @@ internal static class AfFileParser
         ["Not"]                = MetaConditionType.Not,
         ["PSecsInStateGE"]     = MetaConditionType.SecondsInStateP_GE,
         ["SecsOnSpellGE"]      = MetaConditionType.TimeLeftOnSpell_GE,
+        ["SecsOnSpellLE"]      = MetaConditionType.TimeLeftOnSpell_LE,
         ["BuPercentGE"]        = MetaConditionType.BurdenPercentage_GE,
         ["DistToRteGE"]        = MetaConditionType.DistAnyRoutePT_GE,
         ["Expr"]               = MetaConditionType.Expression,
@@ -67,6 +68,11 @@ internal static class AfFileParser
         ["DestroyAllViews"]    = MetaActionType.DestroyAllViews,
     };
 
+    // Per-parse warning sink (ThreadStatic: parsing is synchronous, but two
+    // threads could load different metas at once). Points at the active
+    // LoadedMeta.Warnings for the duration of ParseLines.
+    [ThreadStatic] private static List<string>? _warn;
+
     // ── Public API ──────────────────────────────────────────────────────────
 
     public static LoadedMeta Load(string filePath)
@@ -75,10 +81,7 @@ internal static class AfFileParser
         if (!File.Exists(filePath)) return result;
 
         string[] lines = File.ReadAllLines(filePath);
-        string dbgLog = @"C:\Users\tboha\Desktop\AfParser.log";
-        try { File.AppendAllText(dbgLog, $"\n=== {DateTime.Now:HH:mm:ss} Load {filePath} ({lines.Length} lines) ===\n"); } catch { }
-
-        ParseLines(lines, result, dbgLog);
+        ParseLines(lines, result);
         return result;
     }
 
@@ -87,16 +90,16 @@ internal static class AfFileParser
         var result = new LoadedMeta();
         // Normalize line endings then split
         string[] lines = text.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
-        ParseLines(lines, result, null);
+        ParseLines(lines, result);
         return result;
     }
 
-    private static void ParseLines(string[] lines, LoadedMeta result, string? dbgLog)
+    private static void ParseLines(string[] lines, LoadedMeta result)
     {
+        _warn = result.Warnings;
         try
         {
             int idx = 0;
-            int navSectionsSeen = 0;
             while (idx < lines.Length)
             {
                 string line = lines[idx];
@@ -115,12 +118,7 @@ internal static class AfFileParser
                 }
                 else if (trimmed.StartsWith("NAV:"))
                 {
-                    navSectionsSeen++;
-                    int before = result.EmbeddedNavs.Count;
                     ParseNavSection(lines, ref idx, result.EmbeddedNavs);
-                    int added = result.EmbeddedNavs.Count - before;
-                    if (dbgLog != null)
-                        try { File.AppendAllText(dbgLog, $"  NAV: section #{navSectionsSeen} added {added} (total {result.EmbeddedNavs.Count})\n"); } catch { }
                 }
                 else
                 {
@@ -128,18 +126,16 @@ internal static class AfFileParser
                 }
             }
 
-            if (dbgLog != null)
-                try { File.AppendAllText(dbgLog, $"  Before prune: {result.EmbeddedNavs.Count} navs, keys=[{string.Join(",", result.EmbeddedNavs.Keys)}]\n"); } catch { }
             // Drop empty routes (header only, 0 points) and clear dead EmbedNav refs
             PruneEmbeddedNavs(result.Rules, result.EmbeddedNavs);
-            if (dbgLog != null)
-                try { File.AppendAllText(dbgLog, $"  After prune: {result.EmbeddedNavs.Count} navs, keys=[{string.Join(",", result.EmbeddedNavs.Keys)}]\n"); } catch { }
         }
         catch (Exception ex)
         {
-            if (dbgLog != null)
-                try { File.AppendAllText(dbgLog, $"  EXCEPTION: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}\n"); } catch { }
+            // Malformed meta yields whatever parsed so far rather than throwing
+            // into the caller; record why so the loader can show it.
+            result.Warnings.Add($"parse aborted: {ex.GetType().Name}: {ex.Message}");
         }
+        finally { _warn = null; }
     }
 
     // ── State parsing ───────────────────────────────────────────────────────
@@ -415,6 +411,7 @@ internal static class AfFileParser
         if (!ConditionKeywords.TryGetValue(keyword, out MetaConditionType condType))
         {
             rule.Condition = MetaConditionType.Never;
+            _warn?.Add($"unknown condition keyword '{keyword}' in state '{rule.State}' — rule will never fire");
             return;
         }
 
@@ -467,8 +464,9 @@ internal static class AfFileParser
             }
 
             case MetaConditionType.TimeLeftOnSpell_GE:
+            case MetaConditionType.TimeLeftOnSpell_LE:
             {
-                // Format: SecsOnSpellGE <spell_id> <seconds>
+                // Format: SecsOnSpell{GE,LE} <spell_id> <seconds>
                 string[] bp = rest.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
                 string spellId = bp.Length > 0 ? bp[0] : "0";
                 string secs = bp.Length > 1 ? bp[1] : "0";
@@ -525,6 +523,7 @@ internal static class AfFileParser
         if (!ActionKeywords.TryGetValue(keyword, out MetaActionType actionType))
         {
             rule.Action = MetaActionType.None;
+            _warn?.Add($"unknown action keyword '{keyword}' in state '{rule.State}'");
             return;
         }
 

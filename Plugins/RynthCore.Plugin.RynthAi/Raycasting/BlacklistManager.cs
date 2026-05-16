@@ -17,6 +17,9 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         /// </summary>
         private readonly Dictionary<int, DateTime> _blacklistExpirations = new Dictionary<int, DateTime>();
 
+        /// <summary>Optional diagnostic sink — invoked whenever a target is blacklisted.</summary>
+        public Action<string>? Log;
+
         /// <summary>
         /// Number of consecutive attack failures before a target is blacklisted.
         /// Default: 3 attempts (adjustable for different difficulty settings).
@@ -58,7 +61,9 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         {
             DateTime expirationTime = DateTime.Now.AddSeconds(TimeoutSeconds);
             _blacklistExpirations[targetId] = expirationTime;
-            
+
+            int fc = _failureCounts.TryGetValue(targetId, out var c) ? c : 0;
+            Log?.Invoke($"0x{(uint)targetId:X8} blacklisted {TimeoutSeconds}s (failures={fc})");
             System.Diagnostics.Debug.WriteLine($"Target {targetId} blacklisted until {expirationTime:HH:mm:ss}");
         }
 

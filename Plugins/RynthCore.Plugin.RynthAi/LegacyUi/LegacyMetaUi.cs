@@ -48,6 +48,10 @@ internal sealed class LegacyMetaUi
 
     private static readonly string MetaFolder = @"C:\Games\RynthSuite\RynthAi\MetaFiles";
 
+    /// <summary>Warnings from the most recent LoadMacroFile, so the Avalonia
+    /// bridge can surface them too (it doesn't see the LoadedMeta).</summary>
+    internal IReadOnlyList<string> LastLoadWarnings { get; private set; } = System.Array.Empty<string>();
+
     private readonly string[] _metaConditionNames =
     {
         "Never", "Always", "All", "Any", "Chat Message", "Pack Slots <=",
@@ -162,19 +166,24 @@ internal sealed class LegacyMetaUi
                 try
                 {
                     var loaded = AfFileParser.LoadFromText(_sourceText);
+                    string warn = loaded.Warnings.Count == 0 ? ""
+                        : $" — {loaded.Warnings.Count} warning(s): {loaded.Warnings[0]}";
                     if (loaded.Rules.Count == 0)
                     {
-                        _sourceApplyMessage = "No rules parsed — check syntax.";
+                        _sourceApplyMessage = $"No rules parsed — check syntax.{warn}";
                     }
                     else
                     {
-                        _settings.MetaRules = loaded.Rules;
-                        _settings.EmbeddedNavs.Clear();
-                        foreach (var kvp in loaded.EmbeddedNavs)
-                            _settings.EmbeddedNavs[kvp.Key] = kvp.Value;
+                        lock (_settings.MetaRulesLock)
+                        {
+                            _settings.MetaRules = loaded.Rules;
+                            _settings.EmbeddedNavs.Clear();
+                            foreach (var kvp in loaded.EmbeddedNavs)
+                                _settings.EmbeddedNavs[kvp.Key] = kvp.Value;
+                        }
                         _settings.ForceStateReset = true;
                         TryAutoSaveMeta();
-                        _sourceApplyMessage = $"Applied {loaded.Rules.Count} rules.";
+                        _sourceApplyMessage = $"Applied {loaded.Rules.Count} rules.{warn}";
                     }
                 }
                 catch (Exception ex)
@@ -197,10 +206,17 @@ internal sealed class LegacyMetaUi
         }
 
         // ── Visual view ──────────────────────────────────────────────────
-        var groupedRules = _settings.MetaRules
-            .GroupBy(r => r.State)
-            .OrderBy(g => g.Key)
-            .ToList();
+        // Snapshot under the lock (Think mutates MetaRules on the plugin-tick
+        // thread). GroupBy+ToList fully materialises, so the render below works
+        // off the snapshot, not the live list.
+        List<IGrouping<string, MetaRule>> groupedRules;
+        lock (_settings.MetaRulesLock)
+        {
+            groupedRules = _settings.MetaRules
+                .GroupBy(r => r.State)
+                .OrderBy(g => g.Key)
+                .ToList();
+        }
 
         if (ImGui.BeginChild("##metaRulesScroll", new Vector2(0, -35), ImGuiChildFlags.None))
         {
@@ -265,9 +281,13 @@ internal sealed class LegacyMetaUi
                     if (i > 0 && ImGui.Button($"^##up{globalIdx}"))
                     {
                         var prevRule = stateRules[i - 1];
-                        int prevGlobalIdx = _settings.MetaRules.IndexOf(prevRule);
-                        _settings.MetaRules[globalIdx] = prevRule;
-                        _settings.MetaRules[prevGlobalIdx] = rule;
+                        lock (_settings.MetaRulesLock)
+                        {
+                            int a = _settings.MetaRules.IndexOf(rule);
+                            int b = _settings.MetaRules.IndexOf(prevRule);
+                            if (a >= 0 && b >= 0)
+                            { _settings.MetaRules[a] = prevRule; _settings.MetaRules[b] = rule; }
+                        }
                         TryAutoSaveMeta();
                     }
 
@@ -275,9 +295,13 @@ internal sealed class LegacyMetaUi
                     if (i < stateRules.Count - 1 && ImGui.Button($"v##dn{globalIdx}"))
                     {
                         var nextRule = stateRules[i + 1];
-                        int nextGlobalIdx = _settings.MetaRules.IndexOf(nextRule);
-                        _settings.MetaRules[globalIdx] = nextRule;
-                        _settings.MetaRules[nextGlobalIdx] = rule;
+                        lock (_settings.MetaRulesLock)
+                        {
+                            int a = _settings.MetaRules.IndexOf(rule);
+                            int b = _settings.MetaRules.IndexOf(nextRule);
+                            if (a >= 0 && b >= 0)
+                            { _settings.MetaRules[a] = nextRule; _settings.MetaRules[b] = rule; }
+                        }
                         TryAutoSaveMeta();
                     }
 
@@ -285,7 +309,8 @@ internal sealed class LegacyMetaUi
                     ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1, 0, 0, 1));
                     if (ImGui.Button($"X##delm{globalIdx}"))
                     {
-                        _settings.MetaRules.Remove(rule);
+                        lock (_settings.MetaRulesLock)
+                            _settings.MetaRules.Remove(rule);
                         TryAutoSaveMeta();
                     }
                     ImGui.PopStyleColor();
@@ -511,8 +536,13 @@ internal sealed class LegacyMetaUi
         ImGui.SetCursorPosY(ImGui.GetWindowHeight() - 30);
         if (ImGui.Button(_editingRuleIndex == -1 ? "Add Rule" : "Save Rule", new Vector2(100, 25)))
         {
-            if (_editingRuleIndex == -1) _settings.MetaRules.Add(_editingRule);
-            else _settings.MetaRules[_editingRuleIndex] = _editingRule;
+            lock (_settings.MetaRulesLock)
+            {
+                if (_editingRuleIndex == -1 || _editingRuleIndex >= _settings.MetaRules.Count)
+                    _settings.MetaRules.Add(_editingRule);
+                else
+                    _settings.MetaRules[_editingRuleIndex] = _editingRule;
+            }
             _showMetaEditor = false;
             TryAutoSaveMeta();
         }
@@ -1122,8 +1152,11 @@ internal sealed class LegacyMetaUi
     {
         if (string.IsNullOrEmpty(filePath))
         {
-            _settings.MetaRules.Clear();
-            _settings.EmbeddedNavs.Clear();
+            lock (_settings.MetaRulesLock)
+            {
+                _settings.MetaRules.Clear();
+                _settings.EmbeddedNavs.Clear();
+            }
             _settings.CurrentMetaPath = string.Empty;
             _settings.CurrentState = "Default";
             _settings.ForceStateReset = true;
@@ -1148,23 +1181,32 @@ internal sealed class LegacyMetaUi
                 return;
             }
 
+            LastLoadWarnings = loaded.Warnings;
             if (loaded.Rules.Count == 0)
             {
-                _statusMessage = "No rules found (profile?)";
+                _statusMessage = loaded.Warnings.Count > 0
+                    ? $"No rules parsed — {loaded.Warnings.Count} warning(s): {loaded.Warnings[0]}"
+                    : "No rules found (profile?)";
                 _statusTime = DateTime.Now;
                 return;
             }
 
-            _settings.MetaRules = loaded.Rules;
-            _settings.EmbeddedNavs.Clear();
-            foreach (var kvp in loaded.EmbeddedNavs)
-                _settings.EmbeddedNavs[kvp.Key] = kvp.Value;
+            lock (_settings.MetaRulesLock)
+            {
+                _settings.MetaRules = loaded.Rules;
+                _settings.EmbeddedNavs.Clear();
+                foreach (var kvp in loaded.EmbeddedNavs)
+                    _settings.EmbeddedNavs[kvp.Key] = kvp.Value;
+            }
             _settings.CurrentState = loaded.Rules[0].State;
             _settings.ForceStateReset = true;
             _settings.CurrentMetaPath = filePath;
 
             string name = Path.GetFileNameWithoutExtension(filePath);
-            _statusMessage = $"Loaded {loaded.Rules.Count} rules, {loaded.EmbeddedNavs.Count} embedded navs from {name}";
+            int stateCount = loaded.Rules.Select(r => r.State).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+            _statusMessage = loaded.Warnings.Count == 0
+                ? $"Loaded {loaded.Rules.Count} rules / {stateCount} states / {loaded.EmbeddedNavs.Count} navs from {name}"
+                : $"Loaded {loaded.Rules.Count} rules / {stateCount} states from {name} — {loaded.Warnings.Count} warning(s): {loaded.Warnings[0]}";
             _statusTime = DateTime.Now;
         }
         catch (Exception ex)
@@ -1176,6 +1218,7 @@ internal sealed class LegacyMetaUi
 
     private void TryAutoSaveMeta()
     {
+        _settings.MetaRulesStructuralVersion++;   // editor mutation → rebuild meta index
         if (string.IsNullOrEmpty(_settings.CurrentMetaPath))
             return;
 
@@ -1188,9 +1231,12 @@ internal sealed class LegacyMetaUi
             {
                 path = Path.ChangeExtension(path, ".af");
                 _settings.CurrentMetaPath = path;
+                _statusMessage = $"Converted .met → {Path.GetFileName(path)} for editing (original .met left untouched)";
+                _statusTime = DateTime.Now;
             }
 
-            AfFileWriter.Save(path, _settings.MetaRules, _settings.EmbeddedNavs);
+            lock (_settings.MetaRulesLock)
+                AfFileWriter.Save(path, _settings.MetaRules, _settings.EmbeddedNavs);
         }
         catch { }
     }
@@ -1208,7 +1254,8 @@ internal sealed class LegacyMetaUi
 
             Directory.CreateDirectory(MetaFolder);
             string filePath = Path.Combine(MetaFolder, _saveName + ".af");
-            AfFileWriter.Save(filePath, _settings.MetaRules, _settings.EmbeddedNavs);
+            lock (_settings.MetaRulesLock)
+                AfFileWriter.Save(filePath, _settings.MetaRules, _settings.EmbeddedNavs);
 
             _statusMessage = $"Saved to {_saveName}.af";
             _statusTime = DateTime.Now;
