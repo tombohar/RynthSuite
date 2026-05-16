@@ -57,46 +57,80 @@ internal sealed class NavMarkerRenderer
     private readonly bool[] _centerVis = new bool[MaxMarkers];
     private readonly float[] _centerDepth = new float[MaxMarkers];
 
-    public void Render()
+    /// <summary>
+    /// Submits 3D ring + line geometry to the engine's Nav3D buffer.
+    /// Safe to call from OnTick — does not touch ImGui state. No-op when
+    /// the engine doesn't expose the 3D nav API.
+    /// </summary>
+    public void SubmitNav3D()
     {
-        try { RenderCore(); }
-        catch (Exception ex) { _host.Log($"NavMarkers: {ex.Message}"); }
+        if (!_host.HasNav3D)
+            return;
+        try
+        {
+            if (!TryPrepareFrame(out var route, out int count, out float px, out float py, out float pz,
+                    out double playerNS, out double playerEW, out float ringRadius, out float heightOffset))
+                return;
+
+            Render3D(route, count, px, py, pz, playerNS, playerEW, ringRadius, heightOffset);
+        }
+        catch (Exception ex) { _host.Log($"NavMarkers(3D): {ex.Message}"); }
     }
 
-    private void RenderCore()
+    /// <summary>
+    /// Draws the ImGui-projected fallback (2D rings + lines). Only used
+    /// when the engine doesn't expose the 3D nav API. Must be called from
+    /// inside an ImGui frame.
+    /// </summary>
+    public void RenderImGuiFallback()
+    {
+        if (_host.HasNav3D)
+            return;
+        try
+        {
+            if (!TryPrepareFrame(out var route, out int count, out float px, out float py, out float pz,
+                    out double playerNS, out double playerEW, out float ringRadius, out float heightOffset))
+                return;
+
+            RenderImGuiFallback(route, count, px, py, pz, playerNS, playerEW, ringRadius, heightOffset);
+        }
+        catch (Exception ex) { _host.Log($"NavMarkers(ImGui): {ex.Message}"); }
+    }
+
+    private bool TryPrepareFrame(out NavRouteParser route, out int count,
+        out float px, out float py, out float pz,
+        out double playerNS, out double playerEW,
+        out float ringRadius, out float heightOffset)
     {
         _frameCount++;
+        route = null!; count = 0;
+        px = py = pz = 0f;
+        playerNS = playerEW = 0.0;
+        ringRadius = 0f; heightOffset = 0f;
 
-        var route = _settings.CurrentRoute;
-        if (route?.Points == null || route.Points.Count == 0)
-            return;
+        var r = _settings.CurrentRoute;
+        if (r?.Points == null || r.Points.Count == 0)
+            return false;
 
-        if (!NavCoordinateHelper.TryGetNavCoords(_host, out double playerNS, out double playerEW))
-            return;
+        if (!NavCoordinateHelper.TryGetNavCoords(_host, out playerNS, out playerEW))
+            return false;
 
-        if (!_host.TryGetPlayerPose(out uint cellId, out float px, out float py, out float pz,
+        if (!_host.TryGetPlayerPose(out uint cellId, out px, out py, out pz,
                 out _, out _, out _, out _))
-            return;
+            return false;
 
         // Don't paint during portal animation — portalspace has landblock 0x0000,
         // but also check IsPortaling() for the brief window before cellId zeroes out.
         if ((cellId >> 16) == 0)
-            return;
+            return false;
         if (_host.HasIsPortaling && _host.IsPortaling())
-            return;
+            return false;
 
-        float ringRadius = Math.Max(0.1f, _settings.FollowNavMin);
-        float heightOffset = _settings.NavHeightOffset;
-        int count = Math.Min(route.Points.Count, MaxMarkers);
-
-        if (_host.HasNav3D)
-        {
-            Render3D(route, count, px, py, pz, playerNS, playerEW, ringRadius, heightOffset);
-        }
-        else
-        {
-            RenderImGuiFallback(route, count, px, py, pz, playerNS, playerEW, ringRadius, heightOffset);
-        }
+        route = r;
+        ringRadius = Math.Max(0.1f, _settings.FollowNavMin);
+        heightOffset = _settings.NavHeightOffset;
+        count = Math.Min(r.Points.Count, MaxMarkers);
+        return true;
     }
 
     // ═══════════════════════════════════════════════════════════════════

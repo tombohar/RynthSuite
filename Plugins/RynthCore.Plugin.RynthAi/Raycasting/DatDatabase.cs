@@ -56,7 +56,23 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 }
 
                 FilePath = path;
-                _stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                // Plugin init runs *before* acclient.exe opens its own DAT files,
+                // so our handle is the first one Windows sees on the file. Our
+                // share-mode dictates what AC's subsequent open can request — if
+                // we omit FileShare.Delete, AC's open (which needs delete-rename
+                // semantics for DDD/patcher) fails with a sharing violation and
+                // the AC client errors out with "cannot access the data files."
+                //
+                // FileShare.ReadWrite | FileShare.Delete = permit other openers
+                // to read, write, and delete-mark the file. RandomAccess hint +
+                // 4 KB buffer keeps the .dat B-tree reads efficient.
+                _stream = new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete,
+                    bufferSize: 4096,
+                    options: FileOptions.RandomAccess);
 
                 Log($"File: {Path.GetFileName(path)}, Size: {_stream.Length:N0} bytes");
 

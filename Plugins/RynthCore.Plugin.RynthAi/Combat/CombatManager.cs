@@ -140,6 +140,22 @@ public class CombatManager : IDisposable
     /// <summary>True only when actively attacking a specific target. Unlike HasTargets, this is false between kills even when more monsters are scanned nearby.</summary>
     public bool IsActivelyEngaged => activeTargetId != 0;
 
+    /// <summary>
+    /// Pure predicate for the ActivityArbiter: should Combat claim this tick?
+    /// True iff we're already locked on a target, OR a scanned target (the
+    /// scan is already filtered to attackable + LOS-clear) is within actual
+    /// engage range (MonsterRange — the same distance Think() uses for its
+    /// attack gate). Deliberately NOT HasTargets: HasTargets is true for any
+    /// scanned creature including unreachable/out-of-range ones, which made
+    /// Combat squat on the action lock without ever attacking while nav was
+    /// blocked — the "stands there surrounded by far-off mobs" freeze. With
+    /// this predicate, far mobs → Combat doesn't claim → nav runs and closes
+    /// distance → once within MonsterRange this flips true → Combat takes over.
+    /// No side effects; safe to call from the arbiter's pure decision path.
+    /// </summary>
+    public bool HasEngageableTarget =>
+        IsActivelyEngaged || HasCloseThreat(System.Math.Max(1, _settings.MonsterRange));
+
     /// <summary>Diagnostic snapshot for /ra combat — exposes the internal state machine fields.</summary>
     public CombatStateSnapshot GetStateSnapshot()
     {
@@ -723,6 +739,28 @@ public class CombatManager : IDisposable
         return true;
     }
 
+    // Diagnostic: log the combat manager state when meaningful inputs change.
+    // We bucket msSinceAttack into Recent (<3s = "in active engagement") vs
+    // Stale (>=3s) so this doesn't fire on every tick — the raw ms ticks up
+    // continuously and would flood the log at ~30 lines/sec otherwise (which
+    // it did before this fix — bot lived ~64s under that load and the file-
+    // write contention may have helped trigger AC's idle-exit timeout).
+    private string _lastCombatStateKey = "";
+    private void LogCombatStateIfChanged()
+    {
+        long msSinceAttack = lastAttackCmd == DateTime.MinValue
+            ? -1
+            : (long)(DateTime.Now - lastAttackCmd).TotalMilliseconds;
+        string attackBucket = msSinceAttack < 0 ? "never"
+                            : msSinceAttack < 3000 ? "recent"
+                            : msSinceAttack < 10_000 ? "stale"
+                            : "cold";
+        string key = $"enableCombat={_settings.EnableCombat} scanned={_scannedTargets.Count} active=0x{activeTargetId:X8} busy={BusyCount} mode={CurrentCombatMode} attack={attackBucket} action='{_settings.BotAction}'";
+        if (key == _lastCombatStateKey) return;
+        _lastCombatStateKey = key;
+        _host.Log($"Combat: state {key} (msSinceAttack={msSinceAttack})");
+    }
+
     public void OnHeartbeat()
     {
         if (!_settings.IsMacroRunning)
@@ -739,6 +777,8 @@ public class CombatManager : IDisposable
         }
         _wasMacroRunning = true;
 
+        LogCombatStateIfChanged();
+
         // Always run the scan and BotAction state update, even when combat can't
         // take actions. ScanNearbyTargets has no side-effects (no game commands)
         // and must stay fresh so HasTargets is accurate for nav-blocking decisions.
@@ -749,21 +789,23 @@ public class CombatManager : IDisposable
             try { ScanNearbyTargets(); }
             catch (Exception ex) { _host.Log($"[RynthAi] ScanNearbyTargets CRASH: {ex.Message}"); }
 
-            // Never overwrite "Buffing" or "Salvaging" — both take priority over combat.
-            // "Salvaging" covers active loot-container + queued salvage items.
-            if (activeTargetId != 0 || _scannedTargets.Count > 0)
-            {
-                if (_settings.BotAction != "Buffing" && _settings.BotAction != "Salvaging")
-                    _settings.BotAction = "Combat";
-            }
-            else if (_settings.BotAction == "Combat")
-                _settings.BotAction = "Default";
-        }
-        else if (_settings.BotAction == "Combat")
-        {
-            // Combat was disabled mid-run — release the stuck "Combat" BotAction.
-            // The reset paths above are gated on EnableCombat and won't fire once it's off.
-            _settings.BotAction = "Default";
+            // Only hold the "Combat" BotAction lock while actively engaging.
+            // "Actively engaging" = an attack command was issued recently.
+            // Without this, having anything visible in scan range latched
+            // BotAction = "Combat" and blocked NavigationEngine.Tick from
+            // running, even when CombatManager couldn't actually attack
+            // (out of range, BusyCount stuck, etc.) — symptom was bot
+            // standing still surrounded by far-off mobs while nav refused
+            // to move. By tying the lock to recent attack activity, nav
+            // gets to run between engagement windows and bot can chase /
+            // reposition.
+            // BotAction is no longer written here. STEP 2 (ACTIVITY_ARBITER_PLAN.md):
+            // the ActivityArbiter in RynthAiPlugin.OnTick is the sole writer of
+            // the "Combat"/"Navigating" strings, driven by the pure
+            // HasEngageableTarget predicate. CombatManager only reads BotAction
+            // (via canRun below) and acts. Removing these writes is what kills
+            // the squat-without-fighting freeze: Combat can no longer latch the
+            // lock based on broad/stale scan state.
         }
 
         // Combat can run in Default/Combat, can interrupt navigation unless nav boost is on,
@@ -780,15 +822,10 @@ public class CombatManager : IDisposable
             try { Think(); }
             catch (Exception ex) { _host.Log($"[RynthAi] Think CRASH: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}"); }
 
-            // Think() already called ScanNearbyTargets internally — update BotAction
-            // again with the post-Think scan results (target selection may have changed).
-            if (activeTargetId != 0 || _scannedTargets.Count > 0)
-            {
-                if (_settings.BotAction != "Buffing")
-                    _settings.BotAction = "Combat";
-            }
-            else if (_settings.BotAction == "Combat")
-                _settings.BotAction = "Default";
+            // BotAction no longer written post-Think either — the arbiter
+            // recomputes from HasEngageableTarget every tick (33ms lag, picks
+            // up activeTargetId set by the Think() above on the next pass).
+            // See STEP 2 note in the pre-Think branch.
         }
     }
 

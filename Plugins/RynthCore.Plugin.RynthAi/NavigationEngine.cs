@@ -120,6 +120,20 @@ internal sealed class NavigationEngine
     //  PUBLIC API
     // ══════════════════════════════════════════════════════════════════════════
 
+    // Diagnostic: emit a single line summarizing nav state whenever any of
+    // the gating inputs CHANGE. Lets us see (a) when shouldNav flips false,
+    // (b) when _inRecovery flips, and (c) when BotAction changes — the three
+    // things that silently stop nav mid-route. Rate-limited to one log per
+    // distinct state-tuple so the steady-state isn't spammy.
+    private string _lastNavStateKey = "";
+    private void LogNavStateIfChanged()
+    {
+        string key = $"macro={_settings.IsMacroRunning} navEnabled={_settings.EnableNavigation} action='{_settings.BotAction}' recovery={_inRecovery} moving={_isMovingForward} turning={_isTurning} idx={_settings.ActiveNavIndex}";
+        if (key == _lastNavStateKey) return;
+        _lastNavStateKey = key;
+        _host.Log($"Nav: state {key}");
+    }
+
     public void Tick()
     {
         // Nav runs independently of meta state — metas define arbitrary state names,
@@ -130,6 +144,8 @@ internal sealed class NavigationEngine
                       && _settings.EnableNavigation
                       && _settings.BotAction != "Combat"
                       && _settings.BotAction != "Looting";
+
+        LogNavStateIfChanged();
 
         if (!shouldNav)
         {
@@ -584,10 +600,94 @@ internal sealed class NavigationEngine
                 break;
         }
 
+        // Dense-waypoint skip: high-resolution route files (e.g., from auto-
+        // pathfinders that emit 0.03-yard inter-point spacing) leave the
+        // player inside ArrivalYards of every consecutive point. Without
+        // this, Tick() repeatedly hits the `dist < ArrivalYards` branch and
+        // never reaches SteerToWaypoint, so no movement command goes out
+        // and the bot "navigates" while standing still.
+        //
+        // Walk forward (within this route's iteration direction) over any
+        // contiguous run of waypoints that are also already inside our
+        // arrival radius from the current player position. Only stop on a
+        // waypoint we'd actually need to move toward — or a non-Point
+        // waypoint (Pause/Chat/Recall/PortalNPC) that needs explicit
+        // handling regardless of distance.
+        if (_settings.ActiveNavIndex != oldIdx &&
+            IndexValid(_settings.ActiveNavIndex, route) &&
+            TryGetPos(out double curNs, out double curEw))
+        {
+            double arrival = ArrivalYards;
+            int skipped = 0;
+            const int SkipBudget = 4096; // hard cap so we can't loop a circular route forever
+            while (skipped < SkipBudget)
+            {
+                var candidate = route.Points[_settings.ActiveNavIndex];
+                if (candidate.Type != NavPointType.Point)
+                    break; // never skip a control point (Pause/Chat/Recall/PortalNPC)
+
+                double cNS = candidate.NS - curNs;
+                double cEW = candidate.EW - curEw;
+                double cDist = Math.Sqrt(cNS * cNS + cEW * cEW) * 240.0;
+                if (cDist >= arrival)
+                    break; // far enough that SteerToWaypoint has something to do
+
+                int beforeSkip = _settings.ActiveNavIndex;
+                AdvanceOneIndex(route);
+                if (_settings.ActiveNavIndex == beforeSkip)
+                    break; // route ended / cleared / circular wrapped back; stop
+                skipped++;
+            }
+
+            if (skipped > 0)
+                _host.Log($"Nav: skipped {skipped} dense waypoint(s) within {arrival:F1}yd → now on [{_settings.ActiveNavIndex}]");
+        }
+
         if (_settings.ActiveNavIndex != oldIdx && IndexValid(_settings.ActiveNavIndex, route))
         {
             var np = route.Points[_settings.ActiveNavIndex];
             _host.Log($"Nav: advance [{oldIdx}]→[{_settings.ActiveNavIndex}] type={np.Type} tgt=({np.NS:F3},{np.EW:F3})");
+        }
+    }
+
+    /// <summary>
+    /// Bumps <see cref="LegacyUiSettings.ActiveNavIndex"/> by one in the
+    /// current route's iteration direction. Used by the dense-waypoint
+    /// skip loop in <see cref="Advance"/>. Mirrors the single-step logic
+    /// in the main switch; factored out so the skip loop can call it
+    /// without re-clearing _prevDist / _portalState.
+    /// </summary>
+    private void AdvanceOneIndex(NavRouteParser route)
+    {
+        switch (route.RouteType)
+        {
+            case NavRouteType.Circular:
+                _settings.ActiveNavIndex = (_settings.ActiveNavIndex + 1) % route.Points.Count;
+                break;
+
+            case NavRouteType.Linear:
+                int n = _settings.ActiveNavIndex + _linearDir;
+                if (n < 0 || n >= route.Points.Count)
+                {
+                    _linearDir = -_linearDir;
+                    n          = _settings.ActiveNavIndex + _linearDir;
+                }
+                _settings.ActiveNavIndex = n;
+                break;
+
+            case NavRouteType.Once:
+                _settings.ActiveNavIndex++;
+                if (_settings.ActiveNavIndex >= route.Points.Count)
+                {
+                    _settings.EnableNavigation = false;
+                    route.Points.Clear();
+                    StopMovement();
+                }
+                break;
+
+            case NavRouteType.Follow:
+                _settings.ActiveNavIndex = 0;
+                break;
         }
     }
 

@@ -40,6 +40,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private SalvageManager? _salvageManager;
     private ManaStoneManager? _manaStoneManager;
     private Jumper? _jumper;
+    private ActivityArbiter? _arbiter; // STEP 1: shadow-mode only (ACTIVITY_ARBITER_PLAN.md)
     private PlayerVitalsCache _vitals = new();
     private uint _playerId;
     private int _vitalsTickCounter;
@@ -183,7 +184,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         {
             try
             {
-                bool rayOk = raycastRef.Initialize(@"C:\Turbine\Asheron's Call");
+                bool rayOk = raycastRef.Initialize(@"C:\Games\RynthCore\AcClient");
                 Log($"RynthAi: raycast init={rayOk} status={raycastRef.StatusMessage}");
                 if (rayOk)
                 {
@@ -306,6 +307,32 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         bool diag = ++_tickDiag <= 3;
         try
         {
+            // ── Push settings to engine each tick ──────────────────────
+            // OnRender only runs when the engine has an active ImGui pipeline
+            // (PluginManager.RenderAll is called from ImGuiController only).
+            // OnTick runs unconditionally via PluginManager.TickAll, including
+            // in Decal-coexistence mode and when ImGui is disabled. Push the
+            // suppression toggles here so the launcher's Avalonia settings
+            // panel actually controls the radar/chat/powerbar regardless of
+            // whether the in-game ImGui shell is up.
+            // (Renamed local to `pushSettings` to avoid collision with the
+            // `settings` local declared further down in OnTick.)
+            var pushSettings = _dashboard?.Settings;
+            if (diag)
+                Host.Log($"[RynthAi] OnTick: settings push entry — settings null? {pushSettings == null}, HasSetRadarSuppressed={Host.HasSetRadarSuppressed}");
+            if (pushSettings != null)
+            {
+                if (diag)
+                    Host.Log($"[RynthAi] OnTick: pushSettings.SuppressRetailRadar={pushSettings.SuppressRetailRadar}, SuppressRetailChat={pushSettings.SuppressRetailChat}, SuppressRetailPowerbar={pushSettings.SuppressRetailPowerbar}");
+                Host.SetFpsLimit(pushSettings.EnableFPSLimit, pushSettings.TargetFPSFocused, pushSettings.TargetFPSBackground);
+                if (Host.HasSetRadarSuppressed)
+                    Host.SetRadarSuppressed(pushSettings.SuppressRetailRadar);
+                if (Host.HasSetChatSuppressed)
+                    Host.SetChatSuppressed(pushSettings.SuppressRetailChat);
+                if (Host.HasSetPowerbarSuppressed)
+                    Host.SetPowerbarSuppressed(pushSettings.SuppressRetailPowerbar);
+            }
+
             _objectCache?.Tick();
             if (diag) Host.Log("[RynthAi] OnTick: after cache tick");
 
@@ -350,6 +377,30 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 if (settings == null)
                     return;
                 if (diag) Host.Log($"[RynthAi] OnTick: settings ok, macro={settings.IsMacroRunning} action={settings.BotAction}");
+
+                // ── Activity arbiter — STEP 2: AUTHORITATIVE for Combat↔Nav ──
+                // The arbiter is now the SOLE writer of the "Combat" /
+                // "Navigating" / "Default" BotAction strings (CombatManager's
+                // own writes were removed in the same step). Buffing/Looting/
+                // Salvaging strings are still written by their legacy managers
+                // (migrated in steps 3-4). wantCombat uses the tight
+                // HasEngageableTarget predicate — NOT HasTargets — so far-off
+                // mobs no longer latch the action lock while nav is blocked.
+                // See ACTIVITY_ARBITER_PLAN.md.
+                try
+                {
+                    _arbiter ??= new ActivityArbiter(m => Host.Log($"[RynthAi] {m}"));
+                    bool wantBuff = settings.EnableBuffing && _buffManager != null && _buffManager.NeedsAnyBuff();
+                    bool wantCombat = settings.EnableCombat && _combatManager != null && _combatManager.HasEngageableTarget;
+                    bool wantLoot = _openedContainerId != 0 || _targetCorpseId != 0;
+                    bool wantSalvage = _salvageManager != null && _salvageManager.IsBusy;
+                    bool routeLoaded = settings.CurrentRoute != null && settings.CurrentRoute.Points.Count > 0;
+                    bool wantNav = settings.IsMacroRunning && settings.EnableNavigation && routeLoaded;
+                    var inputs = new ArbiterInputs(
+                        settings.IsMacroRunning, wantBuff, wantCombat, wantLoot, wantSalvage, wantNav);
+                    _arbiter.ApplyStep2(in inputs, settings);
+                }
+                catch { /* arbiter must never throw out of the live tick */ }
 
                 // Gap-fill: BuffManager sets BotAction = "Buffing" while casting, but
                 // resets it to "Default" between casts. If buffs are still needed,
@@ -474,12 +525,13 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     TickCorpseOpening();
                 }
                 if (diag) Host.Log("[RynthAi] OnTick: before nav");
-                // Use HasNearbyMonsters (not just HasTargets) so LOS-blocked monsters
-                // in adjacent rooms still stop navigation — prevents the bot walking
-                // through a portal into a room before combat has LOS to engage.
+                // Mirror the arbiter's wantCombat predicate: only pause nav when
+                // combat can actually engage. LOS-blocked mobs would freeze the bot
+                // (arbiter picks Nav, but combatBlocking paused it) — instead let
+                // nav close distance until HasEngageableTarget flips true.
                 bool combatBlocking = settings.EnableCombat
                                    && _combatManager != null
-                                   && _combatManager.HasNearbyMonsters;
+                                   && _combatManager.HasEngageableTarget;
                 bool corpseBlocking = IsCorpseNavigationClaimActive(settings);
 
                 // Track when combat stops blocking so we can hold nav
@@ -537,6 +589,16 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
                 TickPendingMtLoot();
                 _metaManager?.Think();
+
+                // Submit nav-marker 3D geometry here (not in OnRender) so it
+                // keeps working when EnableImGuiShell=false. OnRender is gated
+                // by PluginManager.RenderAll, which the engine skips when the
+                // ImGui shell is off; OnTick runs unconditionally.
+                if (Host.HasNav3D)
+                {
+                    Host.Nav3DClear();
+                    _navMarkerRenderer?.SubmitNav3D();
+                }
             }
         }
         catch (Exception ex)
@@ -967,29 +1029,19 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         if (!_initialized || !_loginComplete || Host.ImGuiContext == IntPtr.Zero)
             return;
 
-        // ── Push FPS limit settings to engine each frame ──────────
-        var settings = _dashboard?.Settings;
-        if (settings != null)
-        {
-            Host.SetFpsLimit(settings.EnableFPSLimit, settings.TargetFPSFocused, settings.TargetFPSBackground);
-            if (Host.HasSetRadarSuppressed)
-                Host.SetRadarSuppressed(settings.SuppressRetailRadar);
-            if (Host.HasSetChatSuppressed)
-                Host.SetChatSuppressed(settings.SuppressRetailChat);
-            if (Host.HasSetPowerbarSuppressed)
-                Host.SetPowerbarSuppressed(settings.SuppressRetailPowerbar);
-        }
+        // Settings push moved to OnTick — see note there. OnRender only runs
+        // when ImGui is up, but the suppression toggles must work regardless.
 
         IntPtr previousContext = ImGui.GetCurrentContext();
         ImGui.SetCurrentContext(Host.ImGuiContext);
         try
         {
-            // Clear 3D geometry once per frame, then let all renderers populate it
-            if (_loginComplete && Host.HasNav3D)
-                Host.Nav3DClear();
-
-            // Always render nav markers and terrain overlay when logged in
-            _navMarkerRenderer?.Render();
+            // Nav3D: in 3D mode, geometry is submitted from OnTick (so it
+            // survives EnableImGuiShell=false). The clear+submit for nav
+            // markers happens there. Here we only need to handle the ImGui
+            // fallback (engines without HasNav3D) and any submitters that
+            // still live in OnRender.
+            _navMarkerRenderer?.RenderImGuiFallback();
             _radarWallRenderer?.Render();
             if (_dashboard?.Settings.ShowTerrainPassability == true)
                 _terrainOverlay?.Render();
