@@ -42,7 +42,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         ///
         /// Returns true if initialization succeeded (both .dat files loaded).
         /// </summary>
-        public bool Initialize(string acFolderPath = null)
+        public bool Initialize(string? acFolderPath = null)
         {
             try
             {

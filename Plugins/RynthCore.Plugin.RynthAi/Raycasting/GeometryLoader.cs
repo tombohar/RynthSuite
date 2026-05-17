@@ -76,7 +76,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         /// Initializes the geometry loader by opening the .dat files.
         /// Call this once during plugin startup.
         /// </summary>
-        public bool Initialize(string acFolderPath = null)
+        public bool Initialize(string? acFolderPath = null)
         {
             try
             {

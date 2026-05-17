@@ -185,9 +185,25 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             try
             {
                 long rayT0 = Environment.TickCount64;
-                bool rayOk = raycastRef.Initialize(@"C:\Games\RynthCore\AcClient");
+                // We're injected into acclient.exe; its own directory is the AC
+                // install with the dats alongside it — correct on any machine.
+                // Only pass it if a portal dat is actually present, else null so
+                // GeometryLoader.FindACFolder() falls back to path/registry search.
+                string? acDir = null;
+                try
+                {
+                    string? exePath = Environment.ProcessPath;
+                    string? exeDir = string.IsNullOrEmpty(exePath)
+                        ? null : System.IO.Path.GetDirectoryName(exePath);
+                    if (!string.IsNullOrEmpty(exeDir) &&
+                        (System.IO.File.Exists(System.IO.Path.Combine(exeDir, "client_portal.dat")) ||
+                         System.IO.File.Exists(System.IO.Path.Combine(exeDir, "portal.dat"))))
+                        acDir = exeDir;
+                }
+                catch { }
+                bool rayOk = raycastRef.Initialize(acDir);
                 long rayMs = Environment.TickCount64 - rayT0;
-                Log($"RynthAi: raycast init={rayOk} in {rayMs}ms status={raycastRef.StatusMessage}");
+                Log($"RynthAi: raycast init={rayOk} in {rayMs}ms acDir={acDir ?? "(auto)"} status={raycastRef.StatusMessage}");
                 if (rayOk)
                 {
                     _combatManager?.SetRaycastSystem(raycastRef);
