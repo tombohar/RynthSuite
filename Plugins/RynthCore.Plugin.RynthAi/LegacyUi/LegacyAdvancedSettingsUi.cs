@@ -166,13 +166,17 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Spacing();
                 ImGui.Text("Monster Blacklist");
                 ImGui.SetNextItemWidth(150);
-                ImGui.SliderInt("Attempts Before Blacklist", ref _settings.BlacklistAttempts, 1, 20);
+                ImGui.SliderInt("Casts Before Blacklist", ref _settings.BlacklistAttempts, 1, 20);
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("How many failed attack attempts on a mob before it gets blacklisted.");
+                    ImGui.SetTooltip("How many offensive casts that deal NO damage (each judged after the settle window) before a mob is blacklisted.");
                 ImGui.SetNextItemWidth(150);
                 ImGui.SliderInt("Blacklist Timeout (sec)", ref _settings.BlacklistTimeoutSec, 5, 120);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("How long a blacklisted mob is ignored before re-trying.");
+                ImGui.SetNextItemWidth(150);
+                ImGui.SliderInt("Cast Settle (ms)", ref _settings.BlacklistCastSettleMs, 250, 5000);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Grace after a cast before it counts as a no-damage miss — lets the damage/health packet arrive so good targets aren't blacklisted prematurely.");
                 ImGui.SetNextItemWidth(150);
                 ImGui.SliderInt("No Progress Timeout (sec)", ref _settings.TargetNoProgressTimeoutSec, 0, 300);
                 if (ImGui.IsItemHovered())
@@ -361,6 +365,10 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.SliderFloat("Height Offset", ref _settings.NavHeightOffset, -5.0f, 5.0f, "%.2f");
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Vertical offset for nav markers above the ground. Negative = lower.");
+                ImGui.SetNextItemWidth(120);
+                ImGui.SliderFloat("Slope Sink", ref _settings.NavSlopeSink, 0.0f, 8.0f, "%.2f");
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Extra downward offset on slopes only. 0 = off; flat ground unaffected.");
 
                 ImGui.Checkbox("Show Terrain Passability", ref _settings.ShowTerrainPassability);
                 if (ImGui.IsItemHovered())

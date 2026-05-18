@@ -52,28 +52,10 @@ internal sealed class LegacyMetaUi
     /// bridge can surface them too (it doesn't see the LoadedMeta).</summary>
     internal IReadOnlyList<string> LastLoadWarnings { get; private set; } = System.Array.Empty<string>();
 
-    private readonly string[] _metaConditionNames =
-    {
-        "Never", "Always", "All", "Any", "Chat Message", "Pack Slots <=",
-        "Seconds in State >=", "Character Death", "Any Vendor Open",
-        "Vendor Closed", "Inventory Item Count <=", "Inventory Item Count >=",
-        "Monster Name Count Within Distance", "Monster Priority Count Within Distance",
-        "Need To Buff", "No Monsters Within Distance", "Landblock ==",
-        "Landcell ==", "Portalspace Entered", "Portalspace Exited", "Not",
-        "Seconds in State (P) >=", "Time Left On Spell >=", "Time Left On Spell <=",
-        "Burden Percentage >=", "Dist Any Route PT >=", "Expression",
-        "Chat Message Capture", "Navroute Empty",
-        "Main Health <=", "Main Health % >=", "Main Mana <=", "Main Mana % >=", "Main Stam <=",
-        "Vitae % >="
-    };
-
-    private readonly string[] _metaActionNames =
-    {
-        "None", "Chat Command", "Set Meta State", "Embedded Nav Route", "All",
-        "Call Meta State", "Return From Call", "Expression Action", "Chat Expression",
-        "Set Watchdog", "Clear Watchdog", "Get RA Option", "Set RA Option",
-        "Create View", "Destroy View", "Destroy All Views"
-    };
+    // §3.3: labels come from the single source of truth (MetaSchema), indexed
+    // by enum int — same strings as before, no longer a hand-synced copy.
+    private readonly string[] _metaConditionNames = RynthCore.Plugin.RynthAi.Meta.MetaSchema.ConditionLabels;
+    private readonly string[] _metaActionNames    = RynthCore.Plugin.RynthAi.Meta.MetaSchema.ActionLabels;
 
     public LegacyMetaUi(LegacyUiSettings settings, List<string> navFiles)
     {

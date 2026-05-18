@@ -312,9 +312,42 @@ public class CharacterSkills
 
             if (_host.TryGetObjectSkill(_playerId, stype, out int buffed, out int training))
             {
-                var info = new CharacterSkillInfo(training, buffed);
-                _lastGood[skill] = info;
-                return info;
+                bool hadGood = _lastGood.TryGetValue(skill, out var prev);
+
+                // A "successful" read of buffed <= 0 for a skill that is
+                // trained, or that previously read a real value, is an engine
+                // qualities artifact — not a legitimate skill level. A live,
+                // trained, in-world skill's buffed value (base + attributes +
+                // augs + enchantments) is never literally 0; the engine can
+                // momentarily return success+0 when InqSkill transiently
+                // fails during a state transition, or the off-thread snapshot
+                // serves a briefly-zeroed entry. Trusting it here would poison
+                // _lastGood with (training, 0) permanently → ComputeTier pins
+                // to tier 1 → war magic collapses to level-1 streaks for the
+                // rest of the session. Reject it: keep last-good (self-heals
+                // the instant a real value returns), else the capable stub.
+                // A genuinely untrained skill (training < 2, never any good
+                // read) still flows through with its real value as before —
+                // the training-based gates exclude it, not this.
+                bool zeroArtifact = buffed <= 0 &&
+                    (training >= 2 || (hadGood && prev.Buffed > 0));
+
+                if (!zeroArtifact)
+                {
+                    var info = new CharacterSkillInfo(training, buffed);
+                    _lastGood[skill] = info;
+                    return info;
+                }
+
+                if (hadGood)
+                    return prev;
+
+                if (!_loggedReadFailure)
+                {
+                    _loggedReadFailure = true;
+                    _host.Log($"[RynthAi] CharacterSkills: host returned success+buffed=0 for trained skill {skill} (player=0x{_playerId:X8}, stype={stype}, training={training}) — engine qualities artifact, not a real level. Using capable-stub fallback until a real read lands (NOT collapsing tier).");
+                }
+                return new CharacterSkillInfo(2, 250);
             }
 
             // Host read failed. Prefer the last good read; if we never had

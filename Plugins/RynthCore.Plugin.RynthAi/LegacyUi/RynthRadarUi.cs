@@ -23,6 +23,7 @@ internal sealed class RynthRadarUi
     private WorldObjectCache? _objectCache;
 
     private bool _open = true;
+    private bool _placementRestored;
 
     // Per-session explored state (grid cells at the DungeonMapUi rasteriser's
     // resolution). Cleared whenever the player transitions landblocks, so
@@ -92,7 +93,32 @@ internal sealed class RynthRadarUi
         int   snapPaint = _settings.RadarWallPaintRadius;
         bool  snapCirc  = _settings.RadarCircular;
 
-        ImGui.SetNextWindowSize(new Vector2(260, 284), ImGuiCond.FirstUseEver);
+        // Restore the window where the user left it last. A fresh RynthRadarUi
+        // (AC restart or RL hot-reload) starts with _placementRestored=false, so
+        // saved coords are re-applied on the first frame the radar shows. Sanity-
+        // check against the viewport so a radar dragged off-screen — or a smaller
+        // AC client window than last session — can't make it vanish.
+        if (!_placementRestored)
+        {
+            float sw = _settings.RadarSizeX > 0f ? _settings.RadarSizeX : 260f;
+            float sh = _settings.RadarSizeY > 0f ? _settings.RadarSizeY : 284f;
+            ImGui.SetNextWindowSize(new Vector2(sw, sh), ImGuiCond.Always);
+
+            Vector2 vp = ImGui.GetMainViewport().Size;
+            float maxX = vp.X > 0 ? vp.X - 60f : 8000f;
+            float maxY = vp.Y > 0 ? vp.Y - 60f : 6000f;
+            float rpx = _settings.RadarPosX;
+            float rpy = _settings.RadarPosY;
+            if (rpx < 0 || rpy < 0 || rpx > maxX || rpy > maxY)
+            {
+                rpx = 60f;
+                rpy = 60f;
+            }
+            ImGui.SetNextWindowPos(new Vector2(rpx, rpy), ImGuiCond.Always);
+            _settings.RadarPosX = rpx;
+            _settings.RadarPosY = rpy;
+            _placementRestored = true;
+        }
         ImGui.SetNextWindowSizeConstraints(new Vector2(140, 160), new Vector2(900, 932));
         ImGui.SetNextWindowBgAlpha(0f);
 
@@ -131,6 +157,15 @@ internal sealed class RynthRadarUi
         float sq = MathF.Min(winSize.X, winSize.Y - FooterH);
         if (MathF.Abs(winSize.X - sq) > 0.5f || MathF.Abs(winSize.Y - (sq + FooterH)) > 0.5f)
             ImGui.SetWindowSize(new Vector2(sq, sq + FooterH));
+
+        // Persist placement so the radar reopens exactly here next session.
+        // LegacyDashboardRenderer's per-frame CheckAndSave writes the JSON when
+        // these change — the same path the main dashboard uses for its own pos.
+        // Store the canonical (squared) size so the restored frame is stable.
+        _settings.RadarPosX  = winPos.X;
+        _settings.RadarPosY  = winPos.Y;
+        _settings.RadarSizeX = sq;
+        _settings.RadarSizeY = sq + FooterH;
 
         Vector2 canvasPos = winPos;
         Vector2 canvasSize = new Vector2(sq, sq);

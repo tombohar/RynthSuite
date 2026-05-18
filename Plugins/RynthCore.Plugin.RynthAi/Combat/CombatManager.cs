@@ -40,6 +40,12 @@ public class CombatManager : IDisposable
     private uint _nativeAttackTargetId;
 
     private bool _facingTarget;
+    // True only on attack cycles where an OFFENSIVE damage spell was actually
+    // cast. The blacklist miss-counter is gated on this in magic mode so it
+    // counts confirmed casts, not wall-clock interval ticks (equip waits,
+    // cast-gate, "no spell found", tier-down learning) which used to blacklist
+    // a perfectly good target in ~3 ticks (~1.2s at SpellCastIntervalMs=400).
+    private bool _offensiveCastThisCycle;
     private DateTime _faceStartTime = DateTime.MinValue;
     private const double FACE_TIMEOUT_MS = 1000.0; // give up waiting and fire anyway
     private const double FACE_TOLERANCE_DEG = 15.0; // heading error threshold to fire
@@ -93,7 +99,14 @@ public class CombatManager : IDisposable
 
     private readonly BlacklistManager _blacklistManager = new();
     private int _lastAttackedTargetId = 0;
-    private int _consecutiveMisses = 0;
+    // Blacklist is driven by CONFIRMED no-damage casts, not wall-clock time.
+    // A cast is queued in _pendingJudge* when issued and only judged a "miss"
+    // after BlacklistCastSettleMs with no damage on the target (so the damage
+    // packet has time to arrive). BlacklistAttempts consecutive misses → drop.
+    private int _consecutiveCastMisses = 0;
+    private DateTime _pendingJudgeCastAt = DateTime.MinValue;
+    private int _pendingJudgeTargetId = 0;
+    private bool _damageSincePendingCast;
     private DateTime _targetLockedAt     = DateTime.MinValue;
     private DateTime _lastDamageDealtAt  = DateTime.MinValue;
 
@@ -286,7 +299,8 @@ public class CombatManager : IDisposable
         {
             _raycastReadyResetPending = false;
             _blacklistManager.ClearAll();
-            _consecutiveMisses = 0;
+            _consecutiveCastMisses = 0;
+            _pendingJudgeCastAt = DateTime.MinValue;
             _lastAttackedTargetId = 0;
             _targetLockedAt = DateTime.MinValue;
             _lastDamageDealtAt = DateTime.MinValue;
@@ -317,6 +331,11 @@ public class CombatManager : IDisposable
         {
             if (wo.Id == playerId) continue;
             if ((int)wo.ObjectClass != (int)AcObjectClass.Monster) continue;
+
+            // Never acquire our own spell projectiles (mis-classified as
+            // Monster, no health record). A real monster is never named
+            // "Flame Bolt"/"Frost Streak"/etc.
+            if (IsSpellProjectileName(wo.Name)) continue;
 
             double dist = _worldFilter.Distance(playerId, wo.Id);
 
@@ -419,6 +438,30 @@ public class CombatManager : IDisposable
     private DateTime _pendingDebuffCastTime = DateTime.MinValue;
     private const double DEBUFF_RESULT_TIMEOUT_MS = 3000.0;
 
+    // Last offensive (war/void) spell we fired and when. If AC never answers it
+    // (char doesn't know it, or no components) the no-chat valve in
+    // AttackWithMagic marks it unresolvable so FindBestOffensiveSpellId tiers
+    // down to an alternative the char actually has — same empirical signal the
+    // buff path uses (the engine IsSpellKnown oracle lies "true" for unknowns).
+    private int _pendingOffensiveSpellId = 0;
+    private DateTime _pendingOffensiveCastAt = DateTime.MinValue;
+    private const double OFFENSIVE_NOCHAT_TIMEOUT_MS = 5000.0;
+
+    // Throttled lowercased inventory-name set for the predictive component
+    // gate (TrySpellByName is called many times per resolution; rebuilding the
+    // set every call would be wasteful). _compSkipLogged dedupes the skip log
+    // within a cache window so a tiered-down spell doesn't spam the log.
+    private readonly HashSet<string> _invNamesLower = new();
+    private DateTime _invNamesBuiltAt = DateTime.MinValue;
+    private const double InvNameCacheMs = 1000.0;
+    private readonly HashSet<int> _compSkipLogged = new();
+
+    // Predictive component gate is OFF: the dat formula is the full historical
+    // recipe, not ACE's actual (reduced) requirement, so it false-rejected
+    // every spell. Empirical no-components learning + persistence handles it
+    // reliably instead. See the long note in TrySpellByName.
+    private const bool EnablePredictiveComponentGate = false;
+
     private static readonly Dictionary<string, string[]> DebuffSpells = new(StringComparer.OrdinalIgnoreCase)
     {
         { "Fester",    new[] { "Fester Other",                    "Decrepitude's Grasp" } },
@@ -440,6 +483,23 @@ public class CombatManager : IDisposable
         { "Slash",     new[] { "Blade Arc", "Blade Ring", "Blade Streak", "Whirling Blade" } },
     };
 
+    // War Streak/Bolt lines have NO "{base} VII" — their tier-7 is a
+    // lore-named spell (Arc uses Roman "VII"; Ring uses RingLoreNames).
+    // [0] = Streak VII lore, [1] = Bolt VII lore. Names verified against
+    // SpellData.txt skill-300 entries 2026-05-17 (e.g. Force Streak VII =
+    // "Outlander's Insolence" id 2133). Slash shares the Blade family.
+    private static readonly Dictionary<string, string[]> WarTier7Lore = new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "Fire",      new[] { "Sizzling Fury",          "Ilservian's Flame" } },
+        { "Cold",      new[] { "Sudden Frost",           "Icy Torment" } },
+        { "Lightning", new[] { "Lhen's Flare",           "Alset's Coil" } },
+        { "Acid",      new[] { "Corrosive Flash",        "Disintegration" } },
+        { "Blade",     new[] { "Rending Wind",           "Evisceration" } },
+        { "Slash",     new[] { "Rending Wind",           "Evisceration" } },
+        { "Pierce",    new[] { "Outlander's Insolence",  "The Spike" } },
+        { "Bludgeon",  new[] { "Cameron's Curse",        "Crushing Shame" } },
+    };
+
     private static readonly Dictionary<string, string[]> RingLoreNames = new(StringComparer.OrdinalIgnoreCase)
     {
         { "Fire",      new[] { "Cassius' Ring of Fire", "Cassius' Ring of Fire II" } },
@@ -458,6 +518,28 @@ public class CombatManager : IDisposable
         { "Fire",   new[] { "Corrosion Arc", "Corrosion Ring", "Corrosion Streak", "Nether Bolt" } },
     };
 
+    // In-world war/void projectiles are named exactly the spell's shape base
+    // (e.g. "Flame Bolt", "Frost Streak"). The object cache sometimes mis-
+    // classifies these transient objects as Monster and they carry no health
+    // record, so the combat scanner would lock onto the bot's OWN projectile,
+    // burn casts on it (no damage possible) and blacklist it. No real
+    // attackable monster is ever named one of these — they are excluded from
+    // target selection. Built once from the authoritative shape tables.
+    private static readonly HashSet<string> ProjectileNames = BuildProjectileNames();
+
+    private static HashSet<string> BuildProjectileNames()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var arr in SpellShapes.Values)
+            foreach (var n in arr) set.Add(n);
+        foreach (var arr in VoidSpellShapes.Values)
+            foreach (var n in arr) set.Add(n);
+        return set;
+    }
+
+    private static bool IsSpellProjectileName(string? name)
+        => !string.IsNullOrEmpty(name) && ProjectileNames.Contains(name);
+
     public void InitializeRaycasting(string? acFolderPath = null)
     {
         try
@@ -471,7 +553,57 @@ public class CombatManager : IDisposable
 
     public void HandleChatForDebuffs(string text)
     {
-        if (!_waitingForDebuffResult || string.IsNullOrEmpty(text)) return;
+        if (string.IsNullOrEmpty(text)) return;
+
+        // Offensive (war/void) cast resolution — runs independent of the debuff
+        // gate (this handler is called for every chat line). Mirrors
+        // BuffManager's categorisation so a war spell the char can't actually
+        // cast gets marked unresolvable and FindBestOffensiveSpellId drops to
+        // an alternative, instead of silently re-firing the dead spell forever.
+        if (_pendingOffensiveSpellId != 0)
+        {
+            string lo = text.ToLowerInvariant();
+
+            // Hard reject: no components / unknown / no target. Same phrases the
+            // buff path treats as a hard rejection. Mark unresolvable so the
+            // tier loop drops down (faster than waiting out the no-chat valve).
+            if (lo.Contains("missing some required") ||
+                lo.Contains("you do not have the") ||
+                lo.Contains("have all the components for this spell"))
+            {
+                _spellManager?.MarkSpellUnresolvable(_pendingOffensiveSpellId);
+                _host.Log($"[CombatCast] NO-COMPONENTS id={_pendingOffensiveSpellId} " +
+                          $"'{SpellTableStub.GetById(_pendingOffensiveSpellId)?.Name}' — '{text.Trim()}'. " +
+                          $"Marked unresolvable → tiering down to an alternative.");
+                _pendingOffensiveSpellId = 0;
+            }
+            else
+            {
+                // Success / fizzle / resisted ⇒ the char DOES know it and has
+                // components — clear pending, never mark. Match the cast id to
+                // ours so a debuff's "ou cast" can't falsely clear it; on a
+                // name-lookup miss, leave pending (the no-chat valve backstops).
+                int ci = text.IndexOf("ou cast ", StringComparison.OrdinalIgnoreCase);
+                if (ci >= 0)
+                {
+                    string after = text.Substring(ci + 8);
+                    int onI = after.IndexOf(" on ", StringComparison.OrdinalIgnoreCase);
+                    int cI  = after.IndexOf(',');
+                    int e   = after.Length;
+                    if (onI > 0) e = onI;
+                    if (cI > 0 && cI < e) e = cI;
+                    int castId = SpellDatabase.GetIdByName(after.Substring(0, e).Trim());
+                    if (castId == _pendingOffensiveSpellId)
+                        _pendingOffensiveSpellId = 0;
+                }
+                else if (lo.Contains("fizzle") || lo.Contains("resists your spell"))
+                {
+                    _pendingOffensiveSpellId = 0;
+                }
+            }
+        }
+
+        if (!_waitingForDebuffResult) return;
 
         // AC strips the leading 'Y' from cast-confirmation chat — text arrives as
         // "ou cast …". IndexOf matches both "You cast" and "ou cast".
@@ -503,8 +635,12 @@ public class CombatManager : IDisposable
 
     public void ReportDamageOnTarget(int targetId)
     {
+        // Damage / health change on the cast we're judging → that cast HIT.
+        if (targetId == _pendingJudgeTargetId)
+            _damageSincePendingCast = true;
+        // Immediate positive feedback on the engaged target clears the streak.
         if (targetId == _lastAttackedTargetId)
-            _consecutiveMisses = 0;
+            _consecutiveCastMisses = 0;
         _blacklistManager.ClearFailure(targetId);
         if (targetId == activeTargetId || targetId == _lockedTargetId)
             _lastDamageDealtAt = DateTime.Now;
@@ -520,32 +656,63 @@ public class CombatManager : IDisposable
     /// </summary>
     private bool RaycastWarmingUp => _settings.EnableRaycasting && !RaycastInitialized;
 
-    private void TrackAttackAttempt(int targetId)
+    /// <summary>
+    /// Judge the cast awaiting a verdict. A cast becomes a "miss" only once
+    /// BlacklistCastSettleMs has elapsed with no damage on the target — so the
+    /// damage/health packet has time to land and blacklisting is driven by
+    /// confirmed no-damage casts, never wall-clock time. BlacklistAttempts
+    /// consecutive misses → blacklist. Called every combat cycle and before
+    /// recording a new cast so the last cast is still judged.
+    /// </summary>
+    private void JudgePendingCast()
+    {
+        if (_pendingJudgeCastAt == DateTime.MinValue) return;
+        if (RaycastWarmingUp) { _pendingJudgeCastAt = DateTime.MinValue; return; }
+        if ((DateTime.Now - _pendingJudgeCastAt).TotalMilliseconds < _settings.BlacklistCastSettleMs)
+            return; // not settled yet — give the damage/health packet time
+
+        int tid  = _pendingJudgeTargetId;
+        bool hit = _damageSincePendingCast;
+        _pendingJudgeCastAt = DateTime.MinValue;
+
+        if (hit) { _consecutiveCastMisses = 0; return; }
+
+        _consecutiveCastMisses++;
+        if (_consecutiveCastMisses >= _settings.BlacklistAttempts)
+        {
+            _blacklistManager.ReportFailure(tid);
+            if (_blacklistManager.IsBlacklisted(tid))
+            {
+                _host.WriteToChat($"[RynthAi] {_consecutiveCastMisses} casts with no damage — blacklisting 0x{(uint)tid:X8}", 2);
+                _consecutiveCastMisses = 0;
+                if (tid == activeTargetId)
+                    DropTarget($"blacklisted after {_settings.BlacklistAttempts} no-damage casts");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Record that an attack (offensive spell cast / weapon swing) was just
+    /// issued at <paramref name="targetId"/>. The prior cast is judged first,
+    /// then this one is queued for judgement after the settle window. Counting
+    /// confirmed casts — not interval ticks — is what makes the blacklist
+    /// "N casts with no damage", not "N seconds".
+    /// </summary>
+    private void RecordOffensiveCast(int targetId)
     {
         if (_lastAttackedTargetId != targetId)
         {
-            // Switched targets — reset miss counter
+            // New target — reset streak + drop any stale pending judgement.
             _lastAttackedTargetId = targetId;
-            _consecutiveMisses = 0;
-            return;
+            _consecutiveCastMisses = 0;
+            _pendingJudgeCastAt = DateTime.MinValue;
         }
 
-        // Raycast not ready yet — don't count these as the target's fault.
-        // Misses here are our own degraded targeting; resume accrual once up.
-        if (RaycastWarmingUp)
-            return;
+        JudgePendingCast(); // verdict on the prior cast if its window elapsed
 
-        _consecutiveMisses++;
-        if (_consecutiveMisses >= _settings.BlacklistAttempts)
-        {
-            _blacklistManager.ReportFailure(targetId);
-            if (_blacklistManager.IsBlacklisted(targetId))
-            {
-                _host.WriteToChat($"[RynthAi] No damage feedback after {_consecutiveMisses} attacks — blacklisting 0x{(uint)targetId:X8}", 2);
-                _consecutiveMisses = 0;
-                DropTarget($"blacklisted after {_settings.BlacklistAttempts} no-damage attacks");
-            }
-        }
+        _pendingJudgeCastAt   = DateTime.Now;
+        _pendingJudgeTargetId = targetId;
+        _damageSincePendingCast = false;
     }
 
     private void DropTarget(string reason)
@@ -559,6 +726,8 @@ public class CombatManager : IDisposable
         _targetLockedAt    = DateTime.MinValue;
         _lastDamageDealtAt = DateTime.MinValue;
         _targetLostScanTime = DateTime.MinValue;
+        _pendingJudgeCastAt = DateTime.MinValue;
+        _consecutiveCastMisses = 0;
         ClearCombatTurnMotions();
     }
 
@@ -570,7 +739,7 @@ public class CombatManager : IDisposable
         // Note: _blacklistManager self-expires entries on read (IsBlacklisted), so no
         // explicit cleanup pass is needed. The old vestigial `blacklistedTargets` dict
         // and its CleanupExpiredBlacklist helper were removed — they were never populated.
-        _blacklistManager.AttemptThreshold = 1; // one report = blacklist; count is controlled by TrackAttackAttempt
+        _blacklistManager.AttemptThreshold = 1; // one report = blacklist; the N-cast count is controlled by JudgePendingCast
         _blacklistManager.TimeoutSeconds   = _settings.BlacklistTimeoutSec;
 
         if (_raycastSystem?.TargetingFSM != null)
@@ -599,6 +768,8 @@ public class CombatManager : IDisposable
 
             if (blacklisted)
                 DropTarget("blacklisted");
+            else if (target != null && IsSpellProjectileName(target.Name))
+                DropTarget("spell projectile (not a monster)");
             else if (target != null && (int)target.ObjectClass != (int)AcObjectClass.Monster)
                 DropTarget("became corpse");
             else if (_worldFilter.GetHealthRatio(activeTargetId) == 0f)
@@ -699,6 +870,9 @@ public class CombatManager : IDisposable
             : 1000.0;
         if ((DateTime.Now - lastAttackCmd).TotalMilliseconds >= attackCmdIntervalMs)
         {
+            _offensiveCastThisCycle = false;
+            JudgePendingCast(); // verdict on the last cast once its window elapses
+
             // Client is busy processing a previous action — don't queue more
             if (BusyCount > 0)
                 return true;
@@ -797,8 +971,14 @@ public class CombatManager : IDisposable
 
             // Ring spells hit an area — no per-target damage feedback is generated,
             // so they must not count toward the blacklist miss counter.
-            if (!_lastCastWasRing)
-                TrackAttackAttempt(activeTargetId);
+            // In magic mode, only count cycles where an offensive damage spell
+            // actually fired — otherwise equip waits, the cast-gate, "no spell
+            // found" and tier-down learning blacklist a good target in ~1.2s
+            // before any real cast lands. Melee/missile attack every cycle and
+            // get prompt damage feedback, so they keep per-cycle counting.
+            bool magicMode = CurrentCombatMode == CombatMode.Magic && _spellManager != null;
+            if (!_lastCastWasRing && (!magicMode || _offensiveCastThisCycle))
+                RecordOffensiveCast(activeTargetId);
             lastAttackCmd = DateTime.Now;
         }
         return true;
@@ -916,7 +1096,8 @@ public class CombatManager : IDisposable
         _lockedTargetId     = bestId;
         _targetLockedAt     = DateTime.Now;
         _lastDamageDealtAt  = DateTime.MinValue;
-        _consecutiveMisses  = 0;
+        _consecutiveCastMisses = 0;
+        _pendingJudgeCastAt = DateTime.MinValue;
         _facingTarget       = false;
         _returnToPhysicalCombat = false;
         ClearCombatTurnMotions();
@@ -1341,11 +1522,25 @@ public class CombatManager : IDisposable
     private void AttackWithMagic(WorldObject target)
     {
         if (_spellManager == null || target == null) return;
+
+        // Keep the authoritative known-spell snapshot warm for the combat
+        // resolver even when the char isn't buffing (GetDynamicSelfBuffId is
+        // the only other pump). Throttled internally — cheap to call per tick.
+        _spellManager.RefreshKnownSpells();
+
+        // Combat spell selection is now purely predictive (known ∧ scarab ∧
+        // skill-window tier ∧ configured shape). No empirical no-chat →
+        // blacklist valve: it falsely poisoned KNOWN spells whenever a cast
+        // didn't execute, which is what collapsed war to Force Bolt I and
+        // re-poisoned bufftimers.txt every few seconds.
+
         // Don't cast while a weapon equip is in progress — the wand may not be registered
         // as wielded yet. _lastEquipTime is set whenever UseObject is called for a wand swap.
         if ((DateTime.Now - _lastEquipTime).TotalMilliseconds < 3000)
             return;
-        if ((DateTime.Now - _lastSpellCast).TotalMilliseconds < _settings.SpellCastIntervalMs) return;
+        // Cadence is the motion-end gate (CanCastNow at the AttackWithMagic
+        // call site, CombatManager.cs:905) — no fixed inter-cast interval;
+        // fire as soon as the cast gesture completes.
 
         if (_waitingForDebuffResult)
         {
@@ -1400,8 +1595,6 @@ public class CombatManager : IDisposable
             }
         }
 
-        if ((DateTime.Now - _lastSpellCast).TotalMilliseconds < ATTACK_SPELL_COOLDOWN_MS) return;
-
         if (rule != null && !rule.UseArc && !rule.UseRing && !rule.UseStreak && !rule.UseBolt) return;
 
         int warTier  = _spellManager?.GetHighestSpellTier(AcSkillType.WarMagic)  ?? 0;
@@ -1409,11 +1602,19 @@ public class CombatManager : IDisposable
         int offensiveSpellId = FindBestShapedSpell(element, rule, out bool isRing);
         if (offensiveSpellId != 0)
         {
+            // Visibility: log exactly what war/void spell we're about to cast
+            // (id + resolved name + element/tier/target). Diagnostic only.
+            _host.Log($"[CombatCast] offensive id={offensiveSpellId} " +
+                      $"'{SpellTableStub.GetById(offensiveSpellId)?.Name}' elem={element} " +
+                      $"ring={isRing} warTier={warTier} voidTier={voidTier} target='{target.Name}'");
             try
             {
                 _host.CastSpell((uint)activeTargetId, offensiveSpellId);
                 _lastSpellCast = DateTime.Now;
                 _lastCastWasRing = isRing;
+                _offensiveCastThisCycle = true;
+                _pendingOffensiveSpellId = offensiveSpellId;
+                _pendingOffensiveCastAt = DateTime.Now;
             }
             catch { }
         }
@@ -1501,7 +1702,7 @@ public class CombatManager : IDisposable
         string tieredBase = spellInfo[0];
         string loreName   = spellInfo[1];
 
-        int maxTier = _spellManager.GetHighestSpellTier(AcSkillType.CreatureEnchantment);
+        int maxTier = EffectiveMaxTier(AcSkillType.CreatureEnchantment);
 
         if (maxTier >= 8) { int id = TrySpellByName($"Incantation of {tieredBase}"); if (id != 0) { tier = 8; return id; } }
         if (maxTier >= 7 && !string.IsNullOrEmpty(loreName)) { int id = TrySpellByName(loreName); if (id != 0) { tier = 7; return id; } }
@@ -1520,7 +1721,7 @@ public class CombatManager : IDisposable
         if (_spellManager == null) return 0;
         if (!VulnSpells.TryGetValue(element, out string[]? vulnBases)) return 0;
 
-        int maxTier = _spellManager.GetHighestSpellTier(AcSkillType.CreatureEnchantment);
+        int maxTier = EffectiveMaxTier(AcSkillType.CreatureEnchantment);
 
         foreach (string baseName in vulnBases)
         {
@@ -1537,16 +1738,53 @@ public class CombatManager : IDisposable
     private int TrySpellByName(string name)
     {
         if (_spellManager == null) return 0;
-        if (_spellManager.SpellDictionary.TryGetValue(name, out int id))
+        // Single source of truth shared with the buff path: unresolvable skip +
+        // the engine's main-thread known-spell snapshot. Combat used to roll
+        // its own check that trusted the mis-bound IsSpellKnown oracle (lies
+        // "true" for unknown spells) and never saw _knownSpellIds, so an
+        // unknown tier-8 (e.g. Incantation of Flame Bolt) resolved as castable
+        // and never tiered down. Delegating fixes that for war/void/debuff/ring
+        // resolution alike. RefreshKnownSpells() is pumped on the attack path.
+        // Deterministic: name → id, REQUIRE the char knows it (authoritative
+        // warm spellbook snapshot). No empirical unresolvable blacklist, no
+        // mis-bound engine oracle — selection is purely predictive so nothing
+        // self-poisons.
+        if (!_spellManager.TryResolveKnownSpellId(name, out int id)) return 0;
+
+        // Scarab gate DISABLED (EnablePredictiveComponentGate=false). Field-
+        // tested 2026-05-17, pid 15372: it rejected every KNOWN Force Arc
+        // tier ("NO-SCARAB" 2724/2723) while the char had the scarab — the
+        // dat-decoded SpellComponentTable scarab name does not match the ACE
+        // inventory item name. This is the documented predictive-components
+        // failure on ACE (see rynthai_predictive_components.md): only the
+        // server knows its real component rules. Selection therefore stays
+        // known ∧ skill-window tier ∧ configured shape; the player keeps
+        // components stocked. Code retained behind the flag for a future
+        // retry IF a verified scarab-name↔inventory-name mapping exists.
+        if (EnablePredictiveComponentGate)
         {
-            if (_playerId != 0 && _host.HasIsSpellKnown)
+            EnsureInventoryNameCache();
+            if (!ComponentDatabase.HasRequiredScarab(id, _invNamesLower))
             {
-                _host.IsSpellKnown(_playerId, unchecked((uint)id), out bool known);
-                if (known) return id;
+                if (_compSkipLogged.Add(id))
+                    _host.Log($"[CombatCast] NO-SCARAB id={id} " +
+                              $"'{SpellTableStub.GetById(id)?.Name}' — required scarab " +
+                              $"not in inventory; tiering down.");
+                return 0;
             }
-            else if (SpellDatabase.IsSpellKnown(id)) return id;
         }
-        return 0;
+        return id;
+    }
+
+    private void EnsureInventoryNameCache()
+    {
+        if ((DateTime.Now - _invNamesBuiltAt).TotalMilliseconds < InvNameCacheMs) return;
+        _invNamesBuiltAt = DateTime.Now;
+        _invNamesLower.Clear();
+        _compSkipLogged.Clear();
+        foreach (var wo in _worldFilter.GetInventory())
+            if (!string.IsNullOrEmpty(wo.Name))
+                _invNamesLower.Add(wo.Name.ToLowerInvariant());
     }
 
     private int CountMonstersInRange(double rangeYards)
@@ -1627,16 +1865,21 @@ public class CombatManager : IDisposable
             if (ringId != 0) { isRing = true; return ringId; }
         }
 
-        int id = FindBestOffensiveSpellId(elementShapes[shapeIdx], skill);
-        if (id != 0) return id;
-
-        for (int i = elementShapes.Length - 1; i >= 0; i--)
+        // Strict TYPE adherence: cast ONLY the shape configured in the
+        // Monsters tab (Arc/Bolt/Streak) — plus the ring override handled
+        // above. No cross-shape fallthrough; that was casting Streak when
+        // Arc was configured but its tiers weren't resolvable.
+        //
+        // Streak (idx 2) / Bolt (idx 3) war lines have a lore-named tier-7
+        // (no "{base} VII"); pass it so tier 7 resolves. Arc (idx 0) uses
+        // Roman "VII" (exists); Void has no lore tier-7 in this table.
+        string? t7 = null;
+        if (!useVoid && WarTier7Lore.TryGetValue(element, out string[]? w7))
         {
-            if (i == shapeIdx) continue;
-            id = FindBestOffensiveSpellId(elementShapes[i], skill);
-            if (id != 0) return id;
+            if (shapeIdx == 2) t7 = w7[0];      // Streak VII lore
+            else if (shapeIdx == 3) t7 = w7[1]; // Bolt VII lore
         }
-        return 0;
+        return FindBestOffensiveSpellId(elementShapes[shapeIdx], skill, t7);
     }
 
     private int FindBestRingSpell(string element, AcSkillType skill)
@@ -1651,7 +1894,7 @@ public class CombatManager : IDisposable
 
         if (!RingLoreNames.TryGetValue(element, out string[]? loreNames) || loreNames.Length < 2) return 0;
 
-        int maxTier = _spellManager!.GetHighestSpellTier(skill);
+        int maxTier = EffectiveMaxTier(skill);
 
         if (maxTier >= 7)
         {
@@ -1683,10 +1926,10 @@ public class CombatManager : IDisposable
         return 0;
     }
 
-    private int FindBestOffensiveSpellId(string baseName, AcSkillType skill)
+    private int FindBestOffensiveSpellId(string baseName, AcSkillType skill, string? tier7Lore = null)
     {
         if (_spellManager == null) return 0;
-        int maxTier = _spellManager.GetHighestSpellTier(skill);
+        int maxTier = EffectiveMaxTier(skill);
 
         if (maxTier >= 8)
         {
@@ -1696,9 +1939,33 @@ public class CombatManager : IDisposable
 
         for (int tier = Math.Min(maxTier, 7); tier >= 1; tier--)
         {
+            // Streak/Bolt war lines have no "{base} VII" — tier-7 is a lore
+            // name (e.g. Force Streak VII = "Outlander's Insolence"). Try it
+            // at the tier-7 step so the highest tier still wins; Arc falls
+            // through to the Roman "{base} VII" below (which exists).
+            if (tier == 7 && !string.IsNullOrEmpty(tier7Lore))
+            {
+                int loreId = TrySpellByName(tier7Lore); if (loreId != 0) return loreId;
+            }
             int id = TrySpellByName($"{baseName} {GetRomanNumeral(tier)}"); if (id != 0) return id;
         }
         return 0;
+    }
+
+    /// <summary>
+    /// Combat tier ceiling. When the authoritative known-spell snapshot is
+    /// cold the resolver can't trust IsSpellKnown (it lies "true" for unknown
+    /// spells), so refuse to blind-pick the tier-8 Incantation — clamp to 7
+    /// until the snapshot warms. A char who really knows L8 loses Incantations
+    /// only during the brief cold window; one who doesn't no longer spams an
+    /// uncastable L8 every fight.
+    /// </summary>
+    private int EffectiveMaxTier(AcSkillType skill)
+    {
+        if (_spellManager == null) return 0;
+        int t = _spellManager.GetHighestSpellTier(skill);
+        if (t > 7 && !_spellManager.IsKnownSnapshotWarm) t = 7;
+        return t;
     }
 
     private static string GetRomanNumeral(int tier) => tier switch

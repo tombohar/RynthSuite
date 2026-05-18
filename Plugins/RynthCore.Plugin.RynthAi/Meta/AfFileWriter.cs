@@ -12,66 +12,7 @@ namespace RynthCore.Plugin.RynthAi.Meta;
 /// </summary>
 internal static class AfFileWriter
 {
-    // ── RynthAi MetaConditionType → .af keyword ─────────────────────────────
-    private static readonly Dictionary<MetaConditionType, string> ConditionKeywordMap = new()
-    {
-        [MetaConditionType.Never]                            = "Never",
-        [MetaConditionType.Always]                           = "Always",
-        [MetaConditionType.All]                              = "All",
-        [MetaConditionType.Any]                              = "Any",
-        [MetaConditionType.ChatMessage]                      = "ChatMatch",
-        [MetaConditionType.PackSlots_LE]                     = "MainSlotsLE",
-        [MetaConditionType.SecondsInState_GE]                = "SecsInStateGE",
-        [MetaConditionType.NavrouteEmpty]                    = "NavEmpty",
-        [MetaConditionType.CharacterDeath]                   = "Death",
-        [MetaConditionType.AnyVendorOpen]                    = "VendorOpen",
-        [MetaConditionType.VendorClosed]                     = "VendorClosed",
-        [MetaConditionType.InventoryItemCount_LE]            = "ItemCountLE",
-        [MetaConditionType.InventoryItemCount_GE]            = "ItemCountGE",
-        [MetaConditionType.MonsterNameCountWithinDistance]    = "MobsInDist_Name",
-        [MetaConditionType.MonsterPriorityCountWithinDistance]= "MobsInDist_Priority",
-        [MetaConditionType.NeedToBuff]                       = "NeedToBuff",
-        [MetaConditionType.NoMonstersWithinDistance]          = "NoMobsInDist",
-        [MetaConditionType.Landblock_EQ]                     = "BlockE",
-        [MetaConditionType.Landcell_EQ]                      = "CellE",
-        [MetaConditionType.PortalspaceEntered]               = "IntoPortal",
-        [MetaConditionType.PortalspaceExited]                = "ExitPortal",
-        [MetaConditionType.Not]                              = "Not",
-        [MetaConditionType.SecondsInStateP_GE]               = "PSecsInStateGE",
-        [MetaConditionType.TimeLeftOnSpell_GE]               = "SecsOnSpellGE",
-        [MetaConditionType.TimeLeftOnSpell_LE]               = "SecsOnSpellLE",
-        [MetaConditionType.BurdenPercentage_GE]              = "BuPercentGE",
-        [MetaConditionType.DistAnyRoutePT_GE]                = "DistToRteGE",
-        [MetaConditionType.Expression]                       = "Expr",
-        [MetaConditionType.ChatMessageCapture]               = "ChatCapture",
-        [MetaConditionType.MainHealthLE]                     = "Expr",
-        [MetaConditionType.MainHealthPHE]                    = "Expr",
-        [MetaConditionType.MainManaLE]                       = "Expr",
-        [MetaConditionType.MainManaPHE]                      = "Expr",
-        [MetaConditionType.MainStamLE]                       = "Expr",
-        [MetaConditionType.VitaePHE]                         = "Expr",
-    };
-
-    // ── RynthAi MetaActionType → .af keyword ────────────────────────────────
-    private static readonly Dictionary<MetaActionType, string> ActionKeywordMap = new()
-    {
-        [MetaActionType.None]             = "None",
-        [MetaActionType.SetMetaState]     = "SetState",
-        [MetaActionType.ChatCommand]      = "Chat",
-        [MetaActionType.EmbeddedNavRoute] = "EmbedNav",
-        [MetaActionType.All]              = "DoAll",
-        [MetaActionType.CallMetaState]    = "CallState",
-        [MetaActionType.ReturnFromCall]   = "Return",
-        [MetaActionType.ExpressionAction] = "DoExpr",
-        [MetaActionType.ChatExpression]   = "ChatExpr",
-        [MetaActionType.SetWatchdog]      = "SetWatchdog",
-        [MetaActionType.ClearWatchdog]    = "ClearWatchdog",
-        [MetaActionType.GetRAOption]      = "GetOpt",
-        [MetaActionType.SetRAOption]      = "SetOpt",
-        [MetaActionType.CreateView]       = "CreateView",
-        [MetaActionType.DestroyView]      = "DestroyView",
-        [MetaActionType.DestroyAllViews]  = "DestroyAllViews",
-    };
+    // .af keyword ↔ type now lives in MetaSchema (§3.3 single source of truth).
 
     // ── Public API ──────────────────────────────────────────────────────────
 
@@ -126,6 +67,11 @@ internal static class AfFileWriter
 
     private static void WriteRule(TextWriter writer, MetaRule rule)
     {
+        // Disabled marker (backward-compatible: a plain ~~ comment to old
+        // parsers, recognised by AfFileParser to set Enabled=false).
+        if (!rule.Enabled)
+            writer.WriteLine("\t~~ @disabled");
+
         // Write IF: line
         writer.Write("\tIF:\t");
         WriteCondition(writer, rule, "\t\t\t\t");
@@ -139,30 +85,12 @@ internal static class AfFileWriter
 
     private static void WriteCondition(TextWriter writer, MetaRule rule, string childIndent)
     {
-        string keyword = ConditionKeywordMap.TryGetValue(rule.Condition, out string? kw) ? kw : "Never";
+        string keyword = MetaSchema.ConditionKeyword(rule.Condition);
 
-        // Handle RynthAi-only conditions by converting to expressions
-        switch (rule.Condition)
-        {
-            case MetaConditionType.MainHealthLE:
-                writer.Write($"Expr {{getcharvital_current[2]<={rule.ConditionData}}}");
-                return;
-            case MetaConditionType.MainHealthPHE:
-                writer.Write($"Expr {{getcharvital_current[2]*100/getcharvital_buffedmax[2]<={rule.ConditionData}}}");
-                return;
-            case MetaConditionType.MainManaLE:
-                writer.Write($"Expr {{getcharvital_current[4]<={rule.ConditionData}}}");
-                return;
-            case MetaConditionType.MainManaPHE:
-                writer.Write($"Expr {{getcharvital_current[4]*100/getcharvital_buffedmax[4]<={rule.ConditionData}}}");
-                return;
-            case MetaConditionType.MainStamLE:
-                writer.Write($"Expr {{getcharvital_current[6]<={rule.ConditionData}}}");
-                return;
-            case MetaConditionType.VitaePHE:
-                writer.Write($"Expr {{100-vitae[]*100>={rule.ConditionData}}}");
-                return;
-        }
+        // §2.6: typed vitals (MainHealthLE…VitaePHE) used to be written as
+        // Expr{…} here and reloaded as a generic Expression (lossy + slow).
+        // They now have real keywords in MetaSchema and fall through to the
+        // bare-numeric writer below, so they round-trip to the typed enum.
 
         if (rule.Condition == MetaConditionType.All ||
             rule.Condition == MetaConditionType.Any ||
@@ -195,7 +123,13 @@ internal static class AfFileWriter
             case MetaConditionType.NoMonstersWithinDistance:
             case MetaConditionType.Landblock_EQ:
             case MetaConditionType.Landcell_EQ:
-                // Bare values (no braces): MainSlotsLE 4, BlockE F6820033
+            case MetaConditionType.MainHealthLE:
+            case MetaConditionType.MainHealthPHE:
+            case MetaConditionType.MainManaLE:
+            case MetaConditionType.MainManaPHE:
+            case MetaConditionType.MainStamLE:
+            case MetaConditionType.VitaePHE:
+                // Bare values (no braces): MainSlotsLE 4, MainHealthLE 50
                 writer.Write($"{keyword} {data}");
                 break;
 
@@ -255,7 +189,7 @@ internal static class AfFileWriter
 
     private static void WriteAction(TextWriter writer, MetaRule rule, string childIndent)
     {
-        string keyword = ActionKeywordMap.TryGetValue(rule.Action, out string? kw) ? kw : "None";
+        string keyword = MetaSchema.ActionKeyword(rule.Action);
 
         if (rule.Action == MetaActionType.All)
         {

@@ -11,6 +11,7 @@ internal sealed class MetaRuleDto
     public string ActionData { get; set; } = string.Empty;
     public List<MetaRuleDto> Children { get; set; } = new();
     public List<MetaRuleDto> ActionChildren { get; set; } = new();
+    public bool Enabled { get; set; } = true;
 }
 
 internal sealed class MetaCommand

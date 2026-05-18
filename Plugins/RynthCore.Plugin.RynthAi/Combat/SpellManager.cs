@@ -12,6 +12,24 @@ public class SpellManager
     private CharacterSkills? _charSkills;
     private uint _playerId;
 
+    // Spell ids a cast empirically proved the char does NOT know (AC sent zero
+    // chat back → silently dropped). This is the trustworthy "unknown" signal:
+    // the engine IsSpellKnown oracle is known-broken (hardcoded VA, returns
+    // true for unknown spells), so tier-down can't rely on it. BuffManager
+    // feeds these in on a no-chat timeout; TryGetId then skips them so
+    // GetDynamicSelfBuffId falls to the next lower (known) tier and caches it.
+    private readonly HashSet<int> _unresolvableSpellIds = new();
+
+    // Authoritative known-spell inventory: snapshot of the char's actual
+    // spellbook, read by the engine ON AC's main thread (the per-spell
+    // IsSpellKnown function is mis-bound and lies "true" for unknown spells;
+    // the off-thread pump can't read AC live). Populated via host
+    // ReadKnownSpells. Empty = snapshot cold → TryGetId degrades to the
+    // legacy path (no regression).
+    private readonly HashSet<int> _knownSpellIds = new();
+    private DateTime _lastKnownRefreshUtc = DateTime.MinValue;
+    private const double KnownRefreshThrottleMs = 3000;
+
     public Dictionary<string, int> SpellDictionary { get; private set; } =
         new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
@@ -151,6 +169,8 @@ public class SpellManager
 
     public int GetDynamicSelfBuffId(string baseSpellName, AcSkillType magicSkill)
     {
+        RefreshKnownSpells(); // keep the authoritative inventory current (throttled)
+
         // Self-buffs use the buffing-specific thresholds so the user can tune
         // buffing tier independently from combat tier.
         int maxTier = GetHighestBuffSpellTier(magicSkill);
@@ -188,12 +208,128 @@ public class SpellManager
         return 0;
     }
 
+    /// <summary>
+    /// Record that a spell id is not actually castable by this character
+    /// (empirically: a cast of it got zero chat back). Resolution will skip
+    /// it from now on so the family falls to the next lower tier.
+    /// </summary>
+    public void MarkSpellUnresolvable(int spellId)
+    {
+        if (spellId > 0) _unresolvableSpellIds.Add(spellId);
+    }
+
+    /// <summary>Persisted by BuffManager so the tier-7→6 drop is learned once
+    /// (first rebuff per char) then instant on every later session/RL.</summary>
+    public IReadOnlyCollection<int> UnresolvableSpellIds => _unresolvableSpellIds;
+
+    /// <summary>
+    /// Public, authoritative name→id resolver shared by the combat war/void
+    /// path so it gets the SAME logic the buff path uses: unresolvable skip +
+    /// the main-thread <c>_knownSpellIds</c> snapshot (the engine IsSpellKnown
+    /// oracle is mis-bound and lies "true" for unknown spells). A char that
+    /// doesn't know e.g. the tier-8 Incantation resolves false here, so the
+    /// caller's tier loop drops to a tier it actually knows. Call
+    /// <see cref="RefreshKnownSpells"/> on the consuming path first to keep the
+    /// snapshot warm even when not buffing.
+    /// </summary>
+    public bool TryResolveSpellId(string exactName, out int spellId)
+        => TryGetId(exactName, out spellId);
+
+    /// <summary>
+    /// Combat-facing resolver. Deterministic: name → id via the dictionary,
+    /// then REQUIRES membership in the authoritative warm spellbook snapshot.
+    /// Deliberately does NOT consult <c>_unresolvableSpellIds</c> (the
+    /// empirical no-chat blacklist) or the mis-bound engine oracle — combat
+    /// selection is purely predictive (known ∧ scarab ∧ tier ∧ shape), so
+    /// nothing here can self-poison. Cold snapshot ⇒ false (combat waits for
+    /// the snapshot to warm rather than blind-casting an unknown spell).
+    /// </summary>
+    public bool TryResolveKnownSpellId(string exactName, out int spellId)
+    {
+        spellId = 0;
+        if (!SpellDictionary.TryGetValue(exactName, out int id)) return false;
+        if (_knownSpellIds.Count == 0) return false;     // cold — don't guess
+        if (!_knownSpellIds.Contains(id)) return false;  // char doesn't know it
+        spellId = id;
+        return true;
+    }
+
+    /// <summary>
+    /// True once the authoritative main-thread spellbook snapshot has been
+    /// populated. While false (cold: pre-login, fast cold-login before the
+    /// qualities ptr seeds, or an engine without ReadKnownSpells) TryGetId
+    /// degrades to the mis-bound IsSpellKnown oracle, which lies "true" for
+    /// unknown spells. The combat resolver uses this to refuse to blind-pick
+    /// the tier-8 Incantation during a cold window.
+    /// </summary>
+    public bool IsKnownSnapshotWarm => _knownSpellIds.Count > 0;
+
+    /// <summary>
+    /// True if the authoritative main-thread spellbook snapshot contains this
+    /// id. Only meaningful when <see cref="IsKnownSnapshotWarm"/> is true.
+    /// Used by the combat no-chat valve to refuse to blacklist a spell the
+    /// char demonstrably KNOWS — no chat for a known spell means the cast
+    /// didn't execute (off-thread busy-count leak), NOT "unknown/no comps".
+    /// </summary>
+    public bool IsKnownSpellId(int id) => _knownSpellIds.Contains(id);
+
+    /// <summary>
+    /// Refresh the known-spell inventory from the engine's main-thread
+    /// spellbook snapshot (host ReadKnownSpells). Throttled. Safe no-op if the
+    /// host API is absent (old engine) or the snapshot is still cold — the set
+    /// just stays empty and TryGetId keeps using the legacy path.
+    /// </summary>
+    public void RefreshKnownSpells()
+    {
+        if ((DateTime.UtcNow - _lastKnownRefreshUtc).TotalMilliseconds < KnownRefreshThrottleMs)
+            return;
+        _lastKnownRefreshUtc = DateTime.UtcNow;
+        try
+        {
+            if (!_host.HasReadKnownSpells) return;
+            var buf = new uint[2048];
+            int n = _host.ReadKnownSpells(buf, buf.Length);
+            if (n <= 0) return; // cold/unavailable — keep whatever we have
+            var fresh = new HashSet<int>();
+            int take = Math.Min(n, buf.Length);
+            for (int i = 0; i < take; i++)
+                if (buf[i] != 0) fresh.Add(unchecked((int)buf[i]));
+            if (fresh.Count == 0) return;
+            _knownSpellIds.Clear();
+            foreach (int id in fresh) _knownSpellIds.Add(id);
+        }
+        catch { }
+    }
+
     private bool TryGetId(string exactName, out int spellId)
     {
         if (!SpellDictionary.TryGetValue(exactName, out spellId))
             return false;
 
-        // Use real IsSpellKnown when available; fall back to database presence check
+        // Skip ids a cast empirically proved unknown — overrides the broken
+        // engine IsSpellKnown (which lies "true" for unknown spells). This is
+        // what lets the tier walk in GetDynamicSelfBuffId drop to a known tier.
+        if (_unresolvableSpellIds.Contains(spellId))
+        {
+            spellId = 0;
+            return false;
+        }
+
+        // Authoritative: the main-thread spellbook snapshot is the only
+        // reliable "does the char know this" source (the engine IsSpellKnown
+        // function is mis-bound and lies "true" for unknown spells). If the
+        // snapshot is populated, REQUIRE membership — unknown ids are skipped
+        // here so GetDynamicSelfBuffId instantly drops to the known tier.
+        if (_knownSpellIds.Count > 0)
+        {
+            if (_knownSpellIds.Contains(spellId)) return true;
+            spellId = 0;
+            return false;
+        }
+
+        // Snapshot cold (pre-login / engine without ReadKnownSpells) — degrade
+        // to the legacy path. The mis-bound IsSpellKnown is still bounded by
+        // the empirical _unresolvableSpellIds cache above + the no-chat timeout.
         if (_playerId != 0 && _host.HasIsSpellKnown)
         {
             _host.IsSpellKnown(_playerId, unchecked((uint)spellId), out bool known);

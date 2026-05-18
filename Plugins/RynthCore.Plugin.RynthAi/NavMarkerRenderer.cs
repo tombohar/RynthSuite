@@ -161,7 +161,7 @@ internal sealed class NavMarkerRenderer
 
             // D3D coords: X=EW, Y=height(up), Z=NS
             float wx = px + (float)((pt.EW - playerEW) * 240.0);
-            float wy = RouteHeightToWorldY((float)pt.Z, heightOffset);
+            float wy = ResolveMarkerWorldY(route, i, heightOffset);
             float wz = py + (float)((pt.NS - playerNS) * 240.0);
 
             wxArr[i] = wx; wyArr[i] = wy; wzArr[i] = wz;
@@ -238,7 +238,7 @@ internal sealed class NavMarkerRenderer
                 continue;
 
             float wx = px + (float)((pt.EW - playerEW) * 240.0);
-            float wy = RouteHeightToWorldY((float)pt.Z, heightOffset);
+            float wy = ResolveMarkerWorldY(route, i, heightOffset);
             float wz = py + (float)((pt.NS - playerNS) * 240.0);
 
             if (_host.WorldToScreen(wx, wy, wz, out float sx, out float sy))
@@ -280,7 +280,7 @@ internal sealed class NavMarkerRenderer
                 continue;
 
             float cx = px + (float)((pt.EW - playerEW) * 240.0);
-            float cy = RouteHeightToWorldY((float)pt.Z, heightOffset);
+            float cy = ResolveMarkerWorldY(route, i, heightOffset);
             float cz = py + (float)((pt.NS - playerNS) * 240.0);
 
             int visCount = 0;
@@ -332,6 +332,65 @@ internal sealed class NavMarkerRenderer
         return next;
     }
 
-    private static float RouteHeightToWorldY(float routeZ, float heightOffset)
-        => routeZ * 240.0f + heightOffset;
+    // Nav-coord → AC world-metre scale. The horizontal render math (proven
+    // correct) is `wx = px + (pt.EW − playerEW) * 240`, i.e. a *relative*
+    // delta from the player scaled by 240. We reuse exactly that delta and
+    // anchor it to the player's known world metres, so this is unit-safe for
+    // whatever frame the uTank2 .nav stores (NOT the /loc frame).
+    private const double NavToMetres = 240.0;
+
+    /// <summary>
+    /// World-Y for a nav marker. Base height is the recorded path Z — the
+    /// original, known-good behaviour. A flat ring floats above the downhill
+    /// ground on a slope; we estimate the local grade purely from the route's
+    /// own neighbouring points (rise/run in nav units — no terrain lookup and
+    /// no shared raycast state, so it is thread-safe and works in structure
+    /// cells) and sink the marker by NavSlopeSink x grade. Flat route =&gt;
+    /// grade 0 =&gt; identical to the original behaviour.
+    /// </summary>
+    private float ResolveMarkerWorldY(NavRouteParser route, int i, float heightOffset)
+    {
+        var pt = route.Points[i];
+        float baseY = (float)(pt.Z * NavToMetres) + heightOffset;
+
+        float sink = _settings.NavSlopeSink;
+        if (sink <= 0f)
+            return baseY;
+
+        // Steeper of the two route segments meeting at this point. Delta-Z and
+        // the horizontal run are both in nav units, so grade is a unitless
+        // rise/run (= tan slope) and the 240 scale cancels out.
+        double grade = Math.Max(SegmentGrade(route, i, -1), SegmentGrade(route, i, +1));
+        if (grade <= 0.0)
+            return baseY;
+        if (grade > 2.0) grade = 2.0;                    // bound garbage/cliff segments
+
+        return baseY - sink * (float)grade;
+    }
+
+    /// <summary>
+    /// |Delta-Z| / horizontal-run between route point i and the neighbour
+    /// i+step (honouring circular wrap). 0 when the neighbour is missing or
+    /// coincident.
+    /// </summary>
+    private static double SegmentGrade(NavRouteParser route, int i, int step)
+    {
+        int n = route.Points.Count;
+        int j = i + step;
+        if (j < 0 || j >= n)
+        {
+            if (route.RouteType != NavRouteType.Circular || n < 2)
+                return 0.0;
+            j = ((j % n) + n) % n;
+        }
+
+        var a = route.Points[i];
+        var b = route.Points[j];
+        double dE = b.EW - a.EW;
+        double dN = b.NS - a.NS;
+        double run = Math.Sqrt(dE * dE + dN * dN);
+        if (run < 1e-6)
+            return 0.0;
+        return Math.Abs(b.Z - a.Z) / run;
+    }
 }

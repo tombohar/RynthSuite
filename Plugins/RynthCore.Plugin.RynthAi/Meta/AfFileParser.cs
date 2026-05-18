@@ -13,60 +13,9 @@ namespace RynthCore.Plugin.RynthAi.Meta;
 /// </summary>
 internal static class AfFileParser
 {
-    // ── .af condition keyword → RynthAi MetaConditionType ───────────────────
-    private static readonly Dictionary<string, MetaConditionType> ConditionKeywords = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["Never"]              = MetaConditionType.Never,
-        ["Always"]             = MetaConditionType.Always,
-        ["All"]                = MetaConditionType.All,
-        ["Any"]                = MetaConditionType.Any,
-        ["ChatMatch"]          = MetaConditionType.ChatMessage,
-        ["MainSlotsLE"]        = MetaConditionType.PackSlots_LE,
-        ["SecsInStateGE"]      = MetaConditionType.SecondsInState_GE,
-        ["NavEmpty"]           = MetaConditionType.NavrouteEmpty,
-        ["Death"]              = MetaConditionType.CharacterDeath,
-        ["VendorOpen"]         = MetaConditionType.AnyVendorOpen,
-        ["VendorClosed"]       = MetaConditionType.VendorClosed,
-        ["ItemCountLE"]        = MetaConditionType.InventoryItemCount_LE,
-        ["ItemCountGE"]        = MetaConditionType.InventoryItemCount_GE,
-        ["MobsInDist_Name"]    = MetaConditionType.MonsterNameCountWithinDistance,
-        ["MobsInDist_Priority"]= MetaConditionType.MonsterPriorityCountWithinDistance,
-        ["NeedToBuff"]         = MetaConditionType.NeedToBuff,
-        ["NoMobsInDist"]       = MetaConditionType.NoMonstersWithinDistance,
-        ["BlockE"]             = MetaConditionType.Landblock_EQ,
-        ["CellE"]              = MetaConditionType.Landcell_EQ,
-        ["IntoPortal"]         = MetaConditionType.PortalspaceEntered,
-        ["ExitPortal"]         = MetaConditionType.PortalspaceExited,
-        ["Not"]                = MetaConditionType.Not,
-        ["PSecsInStateGE"]     = MetaConditionType.SecondsInStateP_GE,
-        ["SecsOnSpellGE"]      = MetaConditionType.TimeLeftOnSpell_GE,
-        ["SecsOnSpellLE"]      = MetaConditionType.TimeLeftOnSpell_LE,
-        ["BuPercentGE"]        = MetaConditionType.BurdenPercentage_GE,
-        ["DistToRteGE"]        = MetaConditionType.DistAnyRoutePT_GE,
-        ["Expr"]               = MetaConditionType.Expression,
-        ["ChatCapture"]        = MetaConditionType.ChatMessageCapture,
-    };
-
-    // ── .af action keyword → RynthAi MetaActionType ─────────────────────────
-    private static readonly Dictionary<string, MetaActionType> ActionKeywords = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["None"]               = MetaActionType.None,
-        ["SetState"]           = MetaActionType.SetMetaState,
-        ["Chat"]               = MetaActionType.ChatCommand,
-        ["EmbedNav"]           = MetaActionType.EmbeddedNavRoute,
-        ["DoAll"]              = MetaActionType.All,
-        ["CallState"]          = MetaActionType.CallMetaState,
-        ["Return"]             = MetaActionType.ReturnFromCall,
-        ["DoExpr"]             = MetaActionType.ExpressionAction,
-        ["ChatExpr"]           = MetaActionType.ChatExpression,
-        ["SetWatchdog"]        = MetaActionType.SetWatchdog,
-        ["ClearWatchdog"]      = MetaActionType.ClearWatchdog,
-        ["GetOpt"]             = MetaActionType.GetRAOption,
-        ["SetOpt"]             = MetaActionType.SetRAOption,
-        ["CreateView"]         = MetaActionType.CreateView,
-        ["DestroyView"]        = MetaActionType.DestroyView,
-        ["DestroyAllViews"]    = MetaActionType.DestroyAllViews,
-    };
+    // .af keyword ↔ MetaConditionType/MetaActionType now lives in MetaSchema
+    // (§3.3 single source of truth; replaces the read/write map pair that
+    // desynced and caused the §2.6 SecsOnSpell _LE→_GE loss).
 
     // Per-parse warning sink (ThreadStatic: parsing is synchronous, but two
     // threads could load different metas at once). Points at the active
@@ -145,6 +94,7 @@ internal static class AfFileParser
         string stateName = ExtractBraceContent(lines[idx], out _);
         idx++; // consume STATE: line
 
+        bool pendingDisabled = false;   // set by a "~~ @disabled" marker line
         while (idx < lines.Length)
         {
             string trimmed = lines[idx].TrimStart();
@@ -157,6 +107,8 @@ internal static class AfFileParser
 
             if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith("~~"))
             {
+                if (trimmed.Equals("~~ @disabled", StringComparison.OrdinalIgnoreCase))
+                    pendingDisabled = true;
                 idx++;
                 continue;
             }
@@ -164,7 +116,8 @@ internal static class AfFileParser
             // Look for IF: line
             if (trimmed.StartsWith("IF:"))
             {
-                var rule = new MetaRule { State = stateName };
+                var rule = new MetaRule { State = stateName, Enabled = !pendingDisabled };
+                pendingDisabled = false;
                 int ifIndent = CountLeadingTabs(lines[idx]);
                 ParseIfBlock(lines, ref idx, rule, ifIndent);
                 rules.Add(rule);
@@ -408,7 +361,7 @@ internal static class AfFileParser
         string keyword = text.Substring(0, keyEnd).Trim();
         string rest = keyEnd < text.Length ? text.Substring(keyEnd).Trim() : "";
 
-        if (!ConditionKeywords.TryGetValue(keyword, out MetaConditionType condType))
+        if (!MetaSchema.TryCondition(keyword, out MetaConditionType condType))
         {
             rule.Condition = MetaConditionType.Never;
             _warn?.Add($"unknown condition keyword '{keyword}' in state '{rule.State}' — rule will never fire");
@@ -482,6 +435,15 @@ internal static class AfFileParser
             case MetaConditionType.NoMonstersWithinDistance:
             case MetaConditionType.Landblock_EQ:
             case MetaConditionType.Landcell_EQ:
+            // §2.6: typed vitals now have real .af keywords (bare numeric data,
+            // same as MainSlotsLE) so they round-trip instead of being written
+            // as Expr{…} and reloaded as a generic Expression.
+            case MetaConditionType.MainHealthLE:
+            case MetaConditionType.MainHealthPHE:
+            case MetaConditionType.MainManaLE:
+            case MetaConditionType.MainManaPHE:
+            case MetaConditionType.MainStamLE:
+            case MetaConditionType.VitaePHE:
                 // These use bare numbers (no braces): e.g. MainSlotsLE 4, BlockE F6820033
                 rule.ConditionData = ExtractBareOrBrace(rest);
                 break;
@@ -520,7 +482,7 @@ internal static class AfFileParser
         string keyword = text.Substring(0, keyEnd).Trim();
         string rest = keyEnd < text.Length ? text.Substring(keyEnd).Trim() : "";
 
-        if (!ActionKeywords.TryGetValue(keyword, out MetaActionType actionType))
+        if (!MetaSchema.TryAction(keyword, out MetaActionType actionType))
         {
             rule.Action = MetaActionType.None;
             _warn?.Add($"unknown action keyword '{keyword}' in state '{rule.State}'");

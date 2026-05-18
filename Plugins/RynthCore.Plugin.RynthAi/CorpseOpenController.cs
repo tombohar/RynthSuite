@@ -131,6 +131,25 @@ public sealed partial class RynthAiPlugin
         PruneCorpseCollections();
     }
 
+    // Off-thread ClientMagicSystem::CastSpell makes AC increment its busy-count
+    // but the matching decrement never pairs, so busy stays stuck +1 after every
+    // cast and only the 10s CheckBusyTimeout watchdog clears it → ~10s/buff.
+    // BuffManager calls this the instant a cast RESOLVES in chat (the proven-
+    // reliable signal): run the same busy-only reset the watchdog performs, now,
+    // so the next buff fires immediately. No-op when nothing is stuck.
+    private void OnBuffCastResolved(string reason)
+    {
+        if (_busyCount <= 0) return;
+        int was = _busyCount;
+        _busyCount = 0;
+        _busyCountLastIncrementAt = 0;
+        _busyCountBecamePositiveAt = 0;
+        if (_combatManager != null) _combatManager.BusyCount = 0;
+        if (_buffManager != null) _buffManager.BusyCount = 0;
+        if (Host.HasForceResetBusyCount) Host.ForceResetBusyCount();
+        Log($"[RynthAi] busy-reset on cast resolve (was {was}, {reason})");
+    }
+
     private long _lastCorpsePruneAt;
     private const long CorpsePruneIntervalMs = 60_000; // prune once per minute
     private const int  CorpseSetCap          = 500;    // trim when either set exceeds this
@@ -1139,44 +1158,32 @@ public sealed partial class RynthAiPlugin
         isSalvage   = false;
         ruleLabel   = string.Empty;
 
-        // Consumable overrides — checked before loot profile.  Only match items
-        // whose name appears in the user's Consumables tab with type "ManaStone";
-        // a generic "Mana Stone" name match is too loose and floods the bag.
-        bool isConfiguredManaStone = settings.ConsumableRules.Any(r =>
-            r.Type.Equals("ManaStone", StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrWhiteSpace(r.Name) &&
-            r.Name.Equals(item.Name, StringComparison.OrdinalIgnoreCase));
+        // Consumable override — checked before loot profile. Stone detection is
+        // centralized in ManaStoneManager.IsManaStone so this loot gate and the
+        // KeepCount tally below use one predicate: named-rule match if the user
+        // configured ManaStone rules, otherwise any ObjectClass.ManaStone when
+        // tapping is on (zero-config looting).
+        bool isConfiguredManaStone = _manaStoneManager?.IsManaStone(item) == true;
 
         if (isConfiguredManaStone)
         {
-            // Cache-side counting: both GetInventory() and GetDirectInventory()
-            // miss items intermittently (the same bug that hid wielded arrows).
-            // Walk every cache-known object and match by player ownership +
-            // configured mana stone name. We exclude items that look like they're
-            // on the world or on a corpse (Wielder set to a non-player, or
-            // ObjectClass==Corpse) so we don't double-count loose stones on
-            // nearby corpses.
-            // Use GetDirectInventory(forceRefresh:true) which actively walks the
-            // player's containers via Host.GetContainerContents — it's immune
-            // to the cache-classification race that bites AllKnownObjects()
-            // immediately after RL/login (when stones-in-pack haven't been
-            // re-classified yet, the count comes back 0 and the bot over-loots).
+            // Count stones already in the pack against the KeepCount cap, using
+            // the SAME IsManaStone predicate as the loot gate above — if these
+            // diverged the cap would silently stop working (e.g. gate loots by
+            // ObjectClass but tally counts by name → tally stays 0 → over-loot).
+            // GetDirectInventory(forceRefresh:true) actively walks the player's
+            // containers via Host.GetContainerContents, so it's immune to the
+            // cache-classification race that bites AllKnownObjects() right after
+            // RL/login. IsManaStone's name fallback also keys on Name (always
+            // present), so the tally is reliable even before ITEM_TYPE lands.
             int liveCount = 0;
             if (_objectCache != null)
             {
                 foreach (var inv in _objectCache.GetDirectInventory(forceRefresh: true))
                 {
                     if (string.IsNullOrEmpty(inv.Name)) continue;
-                    foreach (var r in settings.ConsumableRules)
-                    {
-                        if (!r.Type.Equals("ManaStone", StringComparison.OrdinalIgnoreCase)) continue;
-                        if (string.IsNullOrWhiteSpace(r.Name)) continue;
-                        if (r.Name.Equals(inv.Name, StringComparison.OrdinalIgnoreCase))
-                        {
-                            liveCount++;
-                            break;
-                        }
-                    }
+                    if (_manaStoneManager?.IsManaStone(inv) == true)
+                        liveCount++;
                 }
             }
 

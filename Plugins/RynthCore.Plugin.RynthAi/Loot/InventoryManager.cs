@@ -141,16 +141,31 @@ public sealed class InventoryManager
 
     private int FindOpenPack(List<WorldObject> inv, int playerId)
     {
-        // We deliberately do NOT count items per pack here. The engine-side
-        // GetContainerContents brute-forces the entire 0x8000xxxx weenie range
-        // and matches by containerID, which picks up STALE weenies for items
-        // the player has merely seen/looted/dropped — their old containerID
-        // field never gets cleared. That makes per-pack item counts wildly
-        // inflated and causes every sub-pack to look "full".
+        // Cram MUST NOT target a full sub-pack. AC's native PutItemInContainer
+        // path (MoveItemInternal -> FUN_00588f70) walks the target container's
+        // slot table; on a genuinely full pack it can take the client down (the
+        // partial/edge-state AC-native-method AV class) — the move CRASHES
+        // rather than failing cleanly, so the blacklist-after-failure net never
+        // gets a chance to fire.
         //
-        // Instead: return the first non-foci sub-pack. Items that fail to
-        // cram (because the pack is genuinely full) get blacklisted for 30s
-        // via _cramBlacklist, so we don't spam retries on the same item.
+        // Capacity comes from the pack's own ITEMS_CAPACITY (STypeInt 6) — a
+        // static PublicWeenieDesc property that reads reliably for the player's
+        // OWN containers (only non-player/monster qualities AV — see
+        // rynthcore_ace_partial_qualities_data). The used-slot count is taken
+        // from `inv`, which is the already name-filtered GetDirectInventory BFS
+        // snapshot (live, named, reachable items only) — NOT a raw engine-side
+        // GetContainerContents brute-force. That brute-force is what historically
+        // over-counted via stale 0x8000xxxx weenies; the BFS + name filter strips
+        // those. Any residual phantom can only INFLATE the count, biasing us to
+        // skip a pack that had room (safe: the item waits / another pack is
+        // tried) — it can never hide a real item and let us cram into a full one.
+        //
+        // Pick the pack with the MOST free slots so an off-by-one can't tip a
+        // near-full pack over. Packs whose capacity hasn't resolved yet
+        // (ItemsCapacity == 0, e.g. early post-login) are skipped rather than
+        // risked — cram just waits a few seconds and self-heals.
+        int bestPack = 0;
+        int bestFree = 0;
         foreach (var p in inv)
         {
             if (p.Container != playerId) continue;
@@ -161,10 +176,26 @@ public sealed class InventoryManager
                 && p.Name.IndexOf("Foci", StringComparison.OrdinalIgnoreCase) >= 0)
                 continue;
 
-            return p.Id;
+            int capacity = p.Values(LongValueKey.ItemsCapacity, 0);
+            if (capacity <= 0) continue; // capacity unknown — don't risk the move
+
+            int used = 0;
+            foreach (var it in inv)
+            {
+                if (it.Container != p.Id) continue;
+                if (it.ObjectClass == AcObjectClass.Container) continue; // sub-containers use CONTAINERS_CAPACITY
+                used++;
+            }
+
+            int free = capacity - used;
+            if (free > bestFree)
+            {
+                bestFree = free;
+                bestPack = p.Id;
+            }
         }
 
-        return 0;
+        return bestPack;
     }
 
     // ── AutoStack ─────────────────────────────────────────────────────────

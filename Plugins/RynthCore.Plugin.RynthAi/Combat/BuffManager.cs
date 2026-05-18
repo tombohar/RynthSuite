@@ -18,6 +18,21 @@ public class BuffManager : IDisposable
     private DateTime _lastCastAttempt = DateTime.MinValue;
     private bool _isForceRebuffing = false;
     private int _pendingSpellId = 0;
+    private Action<string>? _onCastResolved;
+
+    // A cast that gets ZERO chat back (e.g. the char has the SKILL for a tier
+    // but doesn't KNOW that spell — AC silently drops it) never resolves, so
+    // pending never clears and the cycle wedges on it forever. Last-resort
+    // bound: if pending is outstanding this long with no chat, abandon it
+    // (cooldown the family + advance). Comfortably longer than any normal
+    // resolution (~0.5–1s) so a valid slow cast is never abandoned.
+    private const double NoChatResolveTimeoutMs = 5000;
+
+    // Wired by RynthAiPlugin. Invoked the instant a buff cast resolves in chat
+    // (success / fizzle / hard-fail / too-busy) so the owner can clear the
+    // leaked busy-count immediately instead of waiting out the 10s watchdog —
+    // that post-cast stall is the entire "slow buffing" symptom.
+    public void SetCastResolvedCallback(Action<string> cb) => _onCastResolved = cb;
 
     private class RamTimerInfo
     {
@@ -192,6 +207,10 @@ public class BuffManager : IDisposable
                 var info = kvp.Value;
                 lines.Add($"item|{kvp.Key}|{info.CastAt.Ticks}|{info.ExpiresAt.Ticks}|{info.SpellLevel}|{info.SpellName}");
             }
+            // Learned "char doesn't know this spell id" set — persisted so the
+            // tier-down is paid once (first rebuff per char) then instant.
+            foreach (int unkId in _spellManager.UnresolvableSpellIds)
+                lines.Add($"unknown|{unkId}");
             System.IO.File.WriteAllLines(_buffTimerPath, lines);
         }
         catch { }
@@ -224,6 +243,12 @@ public class BuffManager : IDisposable
                             SpellLevel = level, SpellName = name,
                         };
                     }
+                    continue;
+                }
+
+                if (p[0] == "unknown" && p.Length >= 2 && int.TryParse(p[1], out int unkId))
+                {
+                    _spellManager.MarkSpellUnresolvable(unkId);
                     continue;
                 }
 
@@ -346,6 +371,32 @@ public class BuffManager : IDisposable
             // Don't cast anything until we have a real snapshot — otherwise
             // we'd recast over a 1-hour-old buff at the start of every login.
             return;
+        }
+
+        // No-chat safety valve: a cast AC never answers (unknown spell, etc.)
+        // would otherwise wedge the cycle forever. Abandon it after a long
+        // timeout — cooldown the family (same bound as a hard reject; NOT a
+        // fast retry, so no spam/AV) and clear pending so the loop advances.
+        // Also logs the spell-knowledge state so the real root cause (skill
+        // vs. known) is visible without another investigation round.
+        if (_pendingSpellId != 0
+            && (DateTime.Now - _lastCastAttempt).TotalMilliseconds > NoChatResolveTimeoutMs)
+        {
+            int stuckId = _pendingSpellId;
+            var stuck = SpellTableStub.GetById(stuckId);
+            string knownDiag = "n/a (HasIsSpellKnown=false)";
+            if (_host.HasIsSpellKnown)
+            {
+                uint pid = (uint)_host.GetPlayerId();
+                _host.IsSpellKnown(pid, (uint)stuckId, out bool known);
+                knownDiag = known.ToString();
+            }
+            _spellManager.MarkSpellUnresolvable(stuckId);
+            _host.Log($"[BuffChat] NO-CHAT TIMEOUT pending={stuckId} ('{stuck?.Name}') — AC sent no chat in " +
+                      $"{NoChatResolveTimeoutMs:0}ms (char doesn't know it; engine IsSpellKnown={knownDiag} is " +
+                      $"unreliable). Marked unresolvable → resolution drops to next lower tier.");
+            _pendingSpellId = 0;
+            _onCastResolved?.Invoke("no-chat timeout");
         }
 
         // Hold the cycle for item enchantments (banes/Impen/Brogard's) until the
@@ -543,14 +594,12 @@ public class BuffManager : IDisposable
 
             var spellInfo = SpellTableStub.GetById(spellId);
             if (spellInfo != null)
-            {
                 _host.WriteToChat($"[RynthAi] Casting: {spellInfo.Name}", 5);
-
-                // Record item spell timers immediately on cast — don't rely on chat parsing
-                // or enchantment hooks (item enchantments fire on the item, not the player).
-                if (IsArmorEnchantment(spellInfo.Name))
-                    RecordItemSpellCast(spellInfo);
-            }
+            // NOTE: timers are recorded ONLY on chat confirmation ("you cast X"),
+            // never optimistically here. An optimistic item-timer at cast time
+            // left a phantom 1h "active" buff whenever a cast silently failed
+            // (e.g. an unknown higher tier), so the bot thought armor was
+            // buffed when it wasn't and never retried the known tier.
 
             if (diagnose) _host.Log($"[FR] CAST '{buffBaseName}' resolvedSpellId={spellId} (pending now set)");
             bool castOk = _host.CastSpell((uint)_host.GetPlayerId(), spellId);
@@ -559,10 +608,9 @@ public class BuffManager : IDisposable
             {
                 // Local CastSpell rejected — packet never went out, so no chat
                 // will ever arrive. Clear the gate immediately so the cycle
-                // doesn't hang on this spell.
+                // doesn't hang on this spell. (No timer to undo — we no longer
+                // record optimistically.)
                 _pendingSpellId = 0;
-                if (spellInfo != null && IsArmorEnchantment(spellInfo.Name))
-                    _itemSpellTimers.Remove(spellInfo.Family);
                 if (diagnose) _host.Log($"[FR] cast '{buffBaseName}' returned false — pending cleared");
             }
             return true;
@@ -1288,6 +1336,7 @@ public class BuffManager : IDisposable
                 _host.Log($"[BuffChat] PARKED pending={_pendingSpellId} — AC too busy (cast gesture in progress); throttle kept, re-issue when cast gate reopens.");
             }
             _pendingSpellId = 0;
+            _onCastResolved?.Invoke("too busy");
             return;
         }
 
@@ -1321,6 +1370,7 @@ public class BuffManager : IDisposable
                 _host.Log($"[BuffChat] CLEARED+COOLED pending={_pendingSpellId} ({BuffFailCooldownSec:0}s) — hard rejection in '{text}'");
             }
             _pendingSpellId = 0;
+            _onCastResolved?.Invoke("hard-reject");
             return;
         }
 
@@ -1342,6 +1392,7 @@ public class BuffManager : IDisposable
             }
             _lastCastAttempt = DateTime.MinValue;
             _pendingSpellId = 0;
+            _onCastResolved?.Invoke("soft-fail");
             return;
         }
 
@@ -1372,7 +1423,13 @@ public class BuffManager : IDisposable
         if (spellInfo != null)
         {
             _buffFailCooldownUntil.Remove(spellInfo.Family); // it cast — clear any stale hard-fail cooldown
-            RecordSpellTimer(spellInfo);
+            // Chat-authoritative record: only NOW (AC confirmed "you cast X").
+            // Item/armor enchants live in _itemSpellTimers (what IsBuffActive
+            // checks for them); player buffs in _ramBuffTimers.
+            if (IsArmorEnchantment(spellInfo.Name))
+                RecordItemSpellCast(spellInfo);
+            else
+                RecordSpellTimer(spellInfo);
         }
 
         if (_pendingSpellId != 0)
@@ -1385,6 +1442,7 @@ public class BuffManager : IDisposable
             _host.Log($"[BuffChat] CLEARED pending={_pendingSpellId} via ou-cast match name='{spellName}' resolvedId={spellId}");
         }
         _pendingSpellId = 0;
+        _onCastResolved?.Invoke($"cast '{spellName}'");
     }
 
     private void RecordSpellTimer(SpellInfo spellInfo, double durationSeconds = -1)

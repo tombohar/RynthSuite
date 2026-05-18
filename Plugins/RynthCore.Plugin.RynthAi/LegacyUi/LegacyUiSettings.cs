@@ -107,6 +107,7 @@ public sealed class LegacyUiSettings
     public float NavRingThickness = 6.0f;
     public float NavLineThickness = 6.0f;
     public float NavHeightOffset = 0.05f;
+    public float NavSlopeSink = 1.5f;
     public bool  ShowTerrainPassability = true;
     public double MaxMonRange = 12.0;
     public bool SummonPets;
@@ -138,6 +139,13 @@ public sealed class LegacyUiSettings
 
     public int BlacklistAttempts = 3;
     public int BlacklistTimeoutSec = 30;
+    /// <summary>
+    /// Grace after an offensive cast before it's judged a "miss". A cast only
+    /// counts toward BlacklistAttempts if no damage landed on the target within
+    /// this window — so blacklisting is driven by confirmed no-damage casts,
+    /// not wall-clock time / damage-packet latency. Default 1500ms.
+    /// </summary>
+    public int BlacklistCastSettleMs = 1500;
     /// <summary>
     /// Blacklist a target after being engaged with it for this many seconds without
     /// dealing any damage. 0 = disabled. Default 60s.
@@ -302,6 +310,12 @@ public sealed class LegacyUiSettings
     public int   RadarWallPaintRadius  = 3;
     public bool  RadarCircular         = false;   // false = square frame, true = circular
     public bool  RadarClickThrough     = false;   // mouse passes through to the game
+    // Persisted radar window placement. -1 = never saved; the first session
+    // applies the default size and captures the position once it's shown.
+    public float RadarPosX             = -1f;
+    public float RadarPosY             = -1f;
+    public float RadarSizeX            = 260f;
+    public float RadarSizeY            = 284f;
 
     [JsonIgnore]
     public readonly string[] AdvancedTabs =
@@ -491,6 +505,7 @@ public sealed class SettingsBridgePayload
     public float MagicArcVelocity { get; set; }
     public int BlacklistAttempts { get; set; }
     public int BlacklistTimeoutSec { get; set; }
+    public int BlacklistCastSettleMs { get; set; }
     public int TargetNoProgressTimeoutSec { get; set; }
     public int GiveQueueIntervalMs { get; set; }
 
@@ -541,6 +556,7 @@ public sealed class SettingsBridgePayload
     public float NavRingThickness { get; set; }
     public float NavLineThickness { get; set; }
     public float NavHeightOffset { get; set; }
+    public float NavSlopeSink { get; set; }
     public bool ShowTerrainPassability { get; set; }
     public bool OpenDoors { get; set; }
     public float OpenDoorRange { get; set; }
@@ -672,6 +688,11 @@ public sealed class MetaRule
     public string ActionData { get; set; } = string.Empty;
     public List<MetaRule> Children { get; set; } = new();
     public List<MetaRule> ActionChildren { get; set; } = new();
+
+    /// <summary>Disabled rules are excluded from the per-state index so they
+    /// never evaluate. Default true; missing in old JSON/.af → stays true
+    /// (the property initializer runs, so backward-compatible).</summary>
+    public bool Enabled { get; set; } = true;
 
     [JsonIgnore]
     public bool HasFired { get; set; }

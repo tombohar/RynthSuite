@@ -309,6 +309,15 @@ internal sealed class LegacyDashboardRenderer
         return $"Loaded profile '{name}'.";
     }
 
+    /// <summary>
+    /// Render-independent autosave entry, driven from RynthAiPlugin.OnTick so
+    /// settings + the active-profile marker persist even when the in-AC ImGui
+    /// shell is disabled (EnableImGuiShell=false) and Render() never runs.
+    /// CheckAndSave self-throttles via a content hash, so this only touches disk
+    /// when something actually changed.
+    /// </summary>
+    public void TickAutoSave() => CheckAndSave();
+
     private void CheckAndSave()
     {
         if (string.IsNullOrEmpty(_settingsFilePath)) return;
@@ -572,6 +581,7 @@ internal sealed class LegacyDashboardRenderer
                 MagicArcVelocity           = s.MagicArcVelocity,
                 BlacklistAttempts          = s.BlacklistAttempts,
                 BlacklistTimeoutSec        = s.BlacklistTimeoutSec,
+                BlacklistCastSettleMs      = s.BlacklistCastSettleMs,
                 TargetNoProgressTimeoutSec = s.TargetNoProgressTimeoutSec,
                 GiveQueueIntervalMs        = s.GiveQueueIntervalMs,
                 // Recharge
@@ -617,6 +627,7 @@ internal sealed class LegacyDashboardRenderer
                 NavRingThickness           = s.NavRingThickness,
                 NavLineThickness           = s.NavLineThickness,
                 NavHeightOffset            = s.NavHeightOffset,
+                NavSlopeSink               = s.NavSlopeSink,
                 ShowTerrainPassability     = s.ShowTerrainPassability,
                 OpenDoors                  = s.OpenDoors,
                 OpenDoorRange              = s.OpenDoorRange,
@@ -717,6 +728,7 @@ internal sealed class LegacyDashboardRenderer
             s.MagicArcVelocity           = p.MagicArcVelocity;
             s.BlacklistAttempts          = p.BlacklistAttempts;
             s.BlacklistTimeoutSec        = p.BlacklistTimeoutSec;
+            s.BlacklistCastSettleMs      = p.BlacklistCastSettleMs;
             s.TargetNoProgressTimeoutSec = p.TargetNoProgressTimeoutSec;
             s.GiveQueueIntervalMs        = p.GiveQueueIntervalMs;
             // Recharge
@@ -762,6 +774,7 @@ internal sealed class LegacyDashboardRenderer
             s.NavRingThickness           = p.NavRingThickness;
             s.NavLineThickness           = p.NavLineThickness;
             s.NavHeightOffset            = p.NavHeightOffset;
+            s.NavSlopeSink               = p.NavSlopeSink;
             s.ShowTerrainPassability     = p.ShowTerrainPassability;
             s.OpenDoors                  = p.OpenDoors;
             s.OpenDoorRange              = p.OpenDoorRange;
@@ -1128,6 +1141,7 @@ internal sealed class LegacyDashboardRenderer
         dst.NavRingThickness         = tmp.NavRingThickness;
         dst.NavLineThickness         = tmp.NavLineThickness;
         dst.NavHeightOffset          = tmp.NavHeightOffset;
+        dst.NavSlopeSink             = tmp.NavSlopeSink;
         dst.MaxMonRange              = tmp.MaxMonRange;
         dst.SummonPets               = tmp.SummonPets;
         dst.CustomPetRange           = tmp.CustomPetRange;
@@ -1149,6 +1163,7 @@ internal sealed class LegacyDashboardRenderer
         dst.RebuffSecondsRemaining   = tmp.RebuffSecondsRemaining;
         dst.BlacklistAttempts             = tmp.BlacklistAttempts;
         dst.BlacklistTimeoutSec           = tmp.BlacklistTimeoutSec;
+        dst.BlacklistCastSettleMs         = tmp.BlacklistCastSettleMs;
         dst.TargetNoProgressTimeoutSec    = tmp.TargetNoProgressTimeoutSec;
         dst.MeleeAttackPower         = tmp.MeleeAttackPower;
         dst.MissileAttackPower       = tmp.MissileAttackPower;
@@ -2351,10 +2366,11 @@ internal sealed class LegacyDashboardRenderer
                 entries.Add((f, $"[af]  {System.IO.Path.GetFileName(f)}"));
             entries.Sort((a, b) => string.Compare(a.Item2, b.Item2, System.StringComparison.OrdinalIgnoreCase));
             result.AddRange(entries);
-            _host.Log($"[Meta] BuildMetaFileList: {entries.Count} file(s) in '{MetaFolder}' (exists={System.IO.Directory.Exists(MetaFolder)})");
         }
         catch (System.Exception ex)
         {
+            // Was a silent catch — surface it (§2.8 philosophy) but don't spam:
+            // this only fires on an actual directory/IO failure, not per refresh.
             _host.Log($"[Meta] BuildMetaFileList FAILED for '{MetaFolder}': {ex.GetType().Name}: {ex.Message}");
         }
         return result;
@@ -2381,6 +2397,7 @@ internal sealed class LegacyDashboardRenderer
         sb.Append("\"actionData\":\""); AppendEscaped(sb, r.ActionData ?? ""); sb.Append("\",");
         sb.Append("\"children\":"); AppendMetaRuleArray(sb, r.Children ?? new List<MetaRule>()); sb.Append(',');
         sb.Append("\"actionChildren\":"); AppendMetaRuleArray(sb, r.ActionChildren ?? new List<MetaRule>()); sb.Append(',');
+        sb.Append("\"enabled\":").Append(r.Enabled ? "true" : "false").Append(',');
         long ms = r.LastFiredAt == DateTime.MinValue ? 99999L : (long)(DateTime.Now - r.LastFiredAt).TotalMilliseconds;
         sb.Append("\"lastFiredMs\":").Append(ms.ToString(System.Globalization.CultureInfo.InvariantCulture));
         sb.Append('}');
@@ -2524,6 +2541,23 @@ internal sealed class LegacyDashboardRenderer
                         TryAutoSaveMetaCmd();
                     }
                     break;
+
+                case "duplicate_rule":
+                    if (cmd.Rule != null && cmd.Index >= 0 && cmd.Index < _settings.MetaRules.Count)
+                    {
+                        _settings.MetaRules.Insert(cmd.Index + 1, DtoToMetaRule(cmd.Rule));
+                        TryAutoSaveMetaCmd();
+                    }
+                    break;
+
+                case "set_rule_enabled":
+                    if (cmd.Index >= 0 && cmd.Index < _settings.MetaRules.Count)
+                    {
+                        _settings.MetaRules[cmd.Index].Enabled =
+                            string.Equals(cmd.Value, "true", System.StringComparison.OrdinalIgnoreCase);
+                        TryAutoSaveMetaCmd();
+                    }
+                    break;
             }
         }
         catch { }
@@ -2557,6 +2591,7 @@ internal sealed class LegacyDashboardRenderer
             ConditionData = dto.ConditionData ?? "",
             Action        = (MetaActionType)dto.Action,
             ActionData    = dto.ActionData ?? "",
+            Enabled       = dto.Enabled,
         };
         foreach (var c in dto.Children ?? new List<MetaRuleDto>())
             r.Children.Add(DtoToMetaRule(c));

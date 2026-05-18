@@ -98,3 +98,22 @@ bot moves. No retained state to wedge. The pause-flag soup is deleted entirely;
   NavigationEngine pathing. Those work. Only the coordination/arbitration glue
   is replaced.
 - NOT touching the engine (RynthCore) — this is entirely RynthAi plugin-side.
+
+## Deferred inbound integration: Meta (added 2026-05-17)
+
+The meta-system review (`Docs/MetaManager_Review.md` §3.1/§3.2) found that
+MetaManager is an unaccounted-for ~20th writer of `BotAction`/state: meta
+actions (`SetState`, `SetRAOption`→`VtOptionMap`, `EmbedNav`) mutate
+`_settings` one tick *after* the arbiter decides, so meta silently fights the
+arbiter. The proper fix is to make Meta a **declared arbiter input** (a
+high-priority claimant when a meta rule wants to force a state), not a post-hoc
+settings mutator.
+
+This is intentionally **deferred** — it is NOT one of steps 2-5 above and must
+not be bolted onto a half-migrated arbiter mid-soak (same failure mode the Risk
+Controls warn about). Sequence it as its own step **after** steps 2-5 land and
+soak clean: add a `Meta` claimant to the arbiter with priority above the
+operational activities (a fired meta `SetState` should win over Combat/Nav
+cycling), and delete meta's direct `_settings` writes in favour of an arbiter
+claim. Until then, the meta-review Day1-Week1 changes (locking, recursion guard,
+schema, observability) are independent and already shipped.

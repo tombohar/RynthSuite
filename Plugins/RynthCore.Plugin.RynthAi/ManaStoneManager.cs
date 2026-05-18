@@ -338,17 +338,38 @@ internal sealed class ManaStoneManager
     /// </summary>
     public int FreeEmptyStoneSlots() => Math.Max(0, CountEmptyStones() - CountPendingDrainItems());
 
-    /// <summary>True only when the item's name matches a configured ManaStone consumable.</summary>
-    private bool IsManaStone(WorldObject item)
+    /// <summary>
+    /// True when the item is a mana stone.
+    ///   * If the user configured one or more ManaStone consumable rules, only
+    ///     stones whose name matches a rule qualify (explicit opt-in to specific
+    ///     stones — the user narrowed it on purpose).
+    ///   * If there are no ManaStone rules and tapping is enabled, an item
+    ///     qualifies if it's classified ObjectClass.ManaStone OR named
+    ///     "Mana Stone" — so looting and tapping work with zero configuration.
+    ///     The name fallback is load-bearing: items still on a corpse are
+    ///     usually unappraised, AC hasn't sent ITEM_TYPE, so the cache can only
+    ///     classify them Unknown. Name survives where ITEM_TYPE doesn't.
+    /// CorpseOpenController shares this predicate for both the loot gate and the
+    /// KeepCount inventory tally — they must agree or the cap stops working.
+    /// </summary>
+    public bool IsManaStone(WorldObject item)
     {
+        bool hasRule = false;
         foreach (var rule in _settings.ConsumableRules)
         {
             if (!rule.Type.Equals("ManaStone", StringComparison.OrdinalIgnoreCase)) continue;
             if (string.IsNullOrWhiteSpace(rule.Name)) continue;
+            hasRule = true;
             if (rule.Name.Equals(item.Name, StringComparison.OrdinalIgnoreCase))
                 return true;
         }
-        return false;
+
+        if (hasRule) return false;                      // explicit rules → match by name only
+        if (!_settings.EnableManaTapping) return false; // no rules → auto-detect only when tapping is on
+
+        if (item.ObjectClass == AcObjectClass.ManaStone) return true;
+        return !string.IsNullOrEmpty(item.Name)
+               && item.Name.Contains("Mana Stone", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>True if the item's container chain roots at the player's pack.</summary>

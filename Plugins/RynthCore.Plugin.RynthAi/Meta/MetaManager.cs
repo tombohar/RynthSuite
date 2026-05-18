@@ -39,6 +39,7 @@ internal sealed class MetaManager
     private DateTime _lastFiredAt = DateTime.MinValue;
     private string _lastExprError = "";
     private DateTime _lastExprErrorAt = DateTime.MinValue;
+    private bool _viewsWarned;   // one-shot: VTank Views unsupported notice
 
     // Per-state rule index (§4). Rebuilt when the list ref/count or the
     // structural version (in-place rule edits) changes. Buckets are built in
@@ -86,6 +87,10 @@ internal sealed class MetaManager
         _settings = settings;
         _host = host;
         _vitals = vitals;
+        // §3.3: surface schema/enum drift once per session instead of letting a
+        // mid-enum insert silently corrupt every saved meta + the JSON bridge.
+        if (MetaSchema.DriftError != null)
+            _host.Log($"[Meta] SCHEMA DRIFT — fix MetaSchema/enum alignment: {MetaSchema.DriftError}");
     }
 
     public void SetMtCommandHandler(Func<string, bool> handler) => _mtCommandHandler = handler;
@@ -855,10 +860,21 @@ internal sealed class MetaManager
                 }
                 break;
 
-            // ── View actions (VTank UI construct — no-op in RynthAi) ──────────
+            // ── View actions (VTank HUD/XML construct — NOT supported) ────────
+            // Don't silently no-op (§2.8): a meta author using Views otherwise
+            // sees nothing happen with no explanation. Warn once per session and
+            // surface it on the debug strip.
             case MetaActionType.CreateView:
             case MetaActionType.DestroyView:
             case MetaActionType.DestroyAllViews:
+                if (!_viewsWarned)
+                {
+                    _viewsWarned = true;
+                    _lastExprError   = $"{rule.Action} ignored — VTank Views are not supported in RynthAi";
+                    _lastExprErrorAt = DateTime.Now;
+                    _host.WriteToChat("[RynthAi] Meta uses VTank Views (CreateView/DestroyView) — not supported; those actions are ignored.", 1);
+                    _host.Log($"[Meta] {rule.Action} ignored — VTank Views unsupported");
+                }
                 break;
         }
     }
@@ -1045,6 +1061,7 @@ internal sealed class MetaManager
         var list = _settings.MetaRules;
         foreach (var r in list)
         {
+            if (!r.Enabled) continue;   // disabled rules never enter a bucket → never evaluate
             string st = r.State ?? "";
             if (!_stateIndex.TryGetValue(st, out var b))
                 _stateIndex[st] = b = new List<MetaRule>();

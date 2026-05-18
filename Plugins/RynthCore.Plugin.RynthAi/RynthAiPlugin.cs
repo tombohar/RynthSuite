@@ -46,6 +46,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private int _vitalsTickCounter;
     private bool _initialized;
     private bool _loginComplete;
+    private DateTime _notInWorldSince = DateTime.MinValue;
     private bool _windowVisible;
     private int _tickDiag;
     private int _currentCombatMode = 1; // 1=noncombat
@@ -65,6 +66,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private CreatureData.CreatureProfileStore? _creatureStore;
     internal CreatureData.CreatureProfileStore? CreatureStore => _creatureStore;
     private int _creatureSaveTickCounter;
+    private int _settingsSaveTickCounter;
+    private int _settingsLoadRetryCounter;
 
     public override int Initialize()
     {
@@ -104,6 +107,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
     public override void Shutdown()
     {
+        try { _dashboard?.SaveSettings(); } catch { }
         TeardownSession();
         try { _creatureStore?.SaveIfDirty(); } catch { }
         _creatureStore = null;
@@ -121,6 +125,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     public override void OnLogout()
     {
         Log("RynthAi: logout — tearing down session.");
+        try { _dashboard?.SaveSettings(); } catch { }
         TeardownSession();
     }
 
@@ -245,6 +250,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _spellManager.SetPlayerId(_playerId);
         _spellManager.InitializeNatively();
         _buffManager = new BuffManager(Host, _dashboard.Settings, _spellManager, _vitals);
+        _buffManager.SetCastResolvedCallback(OnBuffCastResolved);
         _buffManager.SetCharacterSkills(_charSkills);
         if (_objectCache != null) _buffManager.SetWorldObjectCache(_objectCache);
         // Use the same per-character folder as the dashboard settings so all
@@ -364,12 +370,81 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 _creatureSaveTickCounter = 0;
                 _creatureStore?.SaveIfDirty();
             }
+
+            // Deferred per-character settings load. OnLoginComplete tries
+            // LoadSettings once, gated on Host.GetPlayerId()/TryGetObjectName
+            // being readable at that instant. In Decal-coexistence / off-thread
+            // pump mode the player object often isn't materialised that early,
+            // so that one shot fails, _charFolder/_settingsFilePath stay empty,
+            // and EVERY SaveSettings()/CheckAndSave() silently no-ops for the
+            // whole session (incl. the Avalonia SettingsPanel write-back path).
+            // Retry on the unconditional tick until the name resolves — the
+            // player object always comes good once the bot is actually running.
+            if (_loginComplete && _dashboard != null
+                && string.IsNullOrEmpty(_dashboard.CharFolder)
+                && ++_settingsLoadRetryCounter >= 30)
+            {
+                _settingsLoadRetryCounter = 0;
+                uint pid = _playerId != 0 ? _playerId : Host.GetPlayerId();
+                if (pid != 0 && Host.HasGetObjectName
+                    && Host.TryGetObjectName(pid, out string lateName)
+                    && !string.IsNullOrWhiteSpace(lateName))
+                {
+                    _dashboard.LoadSettings(lateName);
+                    if (!string.IsNullOrEmpty(_dashboard.CharFolder))
+                    {
+                        _buffManager?.SetTimerPath(_dashboard.CharFolder);
+                        Log($"RynthAi: per-character settings established late for '{lateName}' (early OnLoginComplete read had failed).");
+                    }
+                }
+            }
+
+            // Render-independent settings/profile autosave (~every 2s at 60Hz).
+            // The dashboard's own dirty-check save runs inside Render(), which
+            // never fires when the in-AC ImGui shell is disabled — drive it from
+            // the unconditional tick instead. TickAutoSave self-throttles by
+            // content hash, so this only writes when settings actually changed.
+            if (++_settingsSaveTickCounter >= 120)
+            {
+                _settingsSaveTickCounter = 0;
+                _dashboard?.TickAutoSave();
+            }
             _questTracker?.Tick();
             if (diag) Host.Log("[RynthAi] OnTick: after quest tracker");
             DrainGiveQueue();
             if (diag) Host.Log("[RynthAi] OnTick: after drain give queue");
             _jumper?.Tick();
             if (diag) Host.Log("[RynthAi] OnTick: after jumper tick");
+
+            // ── Affirmative in-world gate ────────────────────────────────
+            // _loginComplete is cleared only by the engine's one-shot logout
+            // hook (CPlayerSystem::ExecuteLogOff / RecvNotice_Logoff). That
+            // hook does not fire for every way an in-world session ends — a
+            // server disconnect, link death, or world-server bounce (routine
+            // on ACE) drops the client to char-select without it, leaving the
+            // bot ticking against torn-down world data. AC's native
+            // GetPlayerId returns 0 whenever no player is in world, so a
+            // sustained 0 is treated as logout and runs the same teardown the
+            // hook would have. Debounced so a one-frame transient 0 (it does
+            // not go 0 across portals) can never tear down a healthy session.
+            if (_loginComplete && Host.HasGetPlayerId)
+            {
+                if (Host.GetPlayerId() == 0)
+                {
+                    if (_notInWorldSince == DateTime.MinValue)
+                        _notInWorldSince = DateTime.UtcNow;
+                    else if ((DateTime.UtcNow - _notInWorldSince).TotalMilliseconds >= 1500)
+                    {
+                        _notInWorldSince = DateTime.MinValue;
+                        Log("RynthAi: player not in world (GetPlayerId=0 ≥1.5s) — treating as logout.");
+                        OnLogout();
+                    }
+                }
+                else
+                {
+                    _notInWorldSince = DateTime.MinValue;
+                }
+            }
 
             if (_loginComplete)
             {
