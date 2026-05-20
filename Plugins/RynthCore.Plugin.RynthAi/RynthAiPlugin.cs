@@ -46,6 +46,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private int _vitalsTickCounter;
     private bool _initialized;
     private bool _loginComplete;
+    private bool _patrolOnLoginPending;
     private DateTime _notInWorldSince = DateTime.MinValue;
     private bool _windowVisible;
     private int _tickDiag;
@@ -232,7 +233,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
         // Load per-character settings — character name comes from the player's object name
         if (_playerId != 0 && Host.HasGetObjectName && Host.TryGetObjectName(_playerId, out string charName) && !string.IsNullOrWhiteSpace(charName))
+        {
             _dashboard.LoadSettings(charName);
+            _patrolOnLoginPending = _dashboard.Settings.PatrolOnLogin;
+        }
 
         // Restore last-known dashboard visibility so the window reopens where it was after RL/restart.
         _windowVisible = _dashboard.Settings.DashboardVisible;
@@ -351,12 +355,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             if (pushSettings != null)
             {
                 if (diag)
-                    Host.Log($"[RynthAi] OnTick: pushSettings.SuppressRetailRadar={pushSettings.SuppressRetailRadar}, SuppressRetailChat={pushSettings.SuppressRetailChat}, SuppressRetailPowerbar={pushSettings.SuppressRetailPowerbar}");
+                    Host.Log($"[RynthAi] OnTick: pushSettings.SuppressRetailRadar={pushSettings.SuppressRetailRadar}, SuppressRetailPowerbar={pushSettings.SuppressRetailPowerbar}");
                 Host.SetFpsLimit(pushSettings.EnableFPSLimit, pushSettings.TargetFPSFocused, pushSettings.TargetFPSBackground);
                 if (Host.HasSetRadarSuppressed)
                     Host.SetRadarSuppressed(pushSettings.SuppressRetailRadar);
-                if (Host.HasSetChatSuppressed)
-                    Host.SetChatSuppressed(pushSettings.SuppressRetailChat);
                 if (Host.HasSetPowerbarSuppressed)
                     Host.SetPowerbarSuppressed(pushSettings.SuppressRetailPowerbar);
             }
@@ -394,6 +396,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     if (!string.IsNullOrEmpty(_dashboard.CharFolder))
                     {
                         _buffManager?.SetTimerPath(_dashboard.CharFolder);
+                        _patrolOnLoginPending = _dashboard.Settings.PatrolOnLogin;
                         Log($"RynthAi: per-character settings established late for '{lateName}' (early OnLoginComplete read had failed).");
                     }
                 }
@@ -474,6 +477,12 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 if (settings == null)
                     return;
                 if (diag) Host.Log($"[RynthAi] OnTick: settings ok, macro={settings.IsMacroRunning} action={settings.BotAction}");
+
+                if (_patrolOnLoginPending && _raycast?.GeometryLoader?.CellDat?.IsLoaded == true)
+                {
+                    _patrolOnLoginPending = false;
+                    HandleDungeonNavPatrol();
+                }
 
                 // ── Activity arbiter — STEP 2: AUTHORITATIVE for Combat↔Nav ──
                 // The arbiter is now the SOLE writer of the "Combat" /

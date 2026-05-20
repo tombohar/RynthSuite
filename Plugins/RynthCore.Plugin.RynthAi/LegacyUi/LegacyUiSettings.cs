@@ -136,6 +136,7 @@ public sealed class LegacyUiSettings
     /// </summary>
     public int RebuffSecondsRemaining = 300;
     public bool StartMacroOnLogin;
+    public bool PatrolOnLogin;
 
     public int BlacklistAttempts = 3;
     public int BlacklistTimeoutSec = 30;
@@ -281,9 +282,6 @@ public sealed class LegacyUiSettings
 
     // When true, the engine suppresses the vanilla retail radar entirely.
     public bool  SuppressRetailRadar   = false;
-
-    // When true, the engine hides the vanilla retail chatbox.
-    public bool  SuppressRetailChat    = false;
 
     // When true, the engine no-ops the gmPowerbarUI notices so the vanilla
     // attack/magic power bar never appears on screen.
@@ -485,7 +483,6 @@ public sealed class SettingsBridgePayload
     public bool SuppressRetailRadar { get; set; }
     public bool ShowRynthRadar { get; set; }
     public bool RadarClickThrough { get; set; }
-    public bool SuppressRetailChat { get; set; }
     public bool ShowRynthChat { get; set; }
     public bool ChatClickThrough { get; set; }
     public bool SuppressRetailPowerbar { get; set; }
@@ -497,6 +494,7 @@ public sealed class SettingsBridgePayload
     public bool EnableAutocram { get; set; }
     public bool PeaceModeWhenIdle { get; set; }
     public bool StartMacroOnLogin { get; set; }
+    public bool PatrolOnLogin { get; set; }
     public bool EnableRaycasting { get; set; }
     public bool UseArcs { get; set; }
     public float BowArcVelocity { get; set; }

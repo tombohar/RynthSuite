@@ -155,18 +155,6 @@ internal sealed class RynthChatUi
             ImGui.OpenPopup("##rchat_settings");
         RenderSettingsPopup();
 
-        // ── Enter-to-focus input ────────────────────────────────────────
-        // When retail chat is suppressed and no ImGui widget is currently
-        // active, pressing Enter focuses our input box. The `_swallowFirstEnter`
-        // flag eats the same Enter so it doesn't immediately submit.
-        if (_settings.SuppressRetailChat
-            && !ImGui.IsAnyItemActive()
-            && (ImGui.IsKeyPressed(ImGuiKey.Enter, false) || ImGui.IsKeyPressed(ImGuiKey.KeypadEnter, false)))
-        {
-            _focusInputNextFrame = true;
-            _swallowFirstEnter = true;
-        }
-
         // Input row is always rendered at the bottom so the scrollback has a
         // stable layout and never gets covered when typing.
         const float InputRowH = 24f;

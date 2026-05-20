@@ -646,43 +646,30 @@ public sealed class SalvageManager
     }
 
     /// <summary>
-    /// Returns true when a salvage bag has structure < max (i.e. not full).
-    /// Two name formats observed:
-    ///   "Iron Salvage (91)" — emulator style, trailing number IS fullness
-    ///   "Salvage (11)"      — retail/this-server style, trailing number is the
-    ///                          MATERIAL ID, not fullness — must not be misread.
-    /// For the second format we have to trust the property reads. Defaults to
-    /// true on read failure: assume under-full and let the server reject a
-    /// truly-full merge, vs. treating it as full and never combining (review §6).
+    /// True when a salvage bag is under-full (structure &lt; max) and thus worth
+    /// merging. The #92/#91 property reads are authoritative but fail-close off
+    /// the AC main thread (P0-2 qualities gate) — which is ALWAYS the case from
+    /// the plugin pump. The old code then "assumed under-full", so on this ACE
+    /// server (bags are "Salvage (N)" where N is the FILL level —
+    /// Player_Crafting.cs ~281, see TryGetSalvageBagMaterial) every FULL
+    /// "Salvage (100)" looked mergeable forever → a combine sweep every 30s
+    /// that re-merged already-full bags and interrupted vendors/gameplay.
+    /// Fix: when the properties can't be read, trust the bag NAME's trailing
+    /// "(N)" fill level (covers both "Iron Salvage (91)" and ACE "Salvage
+    /// (100)"); only if there's no parseable fill do we treat the bag as full
+    /// (skip) so an unreadable bag can never drive an endless sweep.
     /// </summary>
     private bool IsBagUnderFull(uint bagId, string? name)
     {
-        if (HasPrefixBeforeSalvage(name) && TryParseTrailingNumber(name, out int pct))
-            return pct < 100;
-        if (!_host.TryGetObjectIntProperty(bagId, StypeStructure, out int cur))
-        {
-            Log($"[Salvage] IsBagUnderFull: Structure(#92) unreadable for 0x{bagId:X8} ({name}) — assuming under-full.");
-            return true;
-        }
-        if (!_host.TryGetObjectIntProperty(bagId, StypeMaxStructure, out int max))
-        {
-            Log($"[Salvage] IsBagUnderFull: MaxStructure(#91) unreadable for 0x{bagId:X8} ({name}) — assuming under-full.");
-            return true;
-        }
-        return max <= 0 || cur < max;
-    }
+        if (_host.TryGetObjectIntProperty(bagId, StypeStructure, out int cur)
+            && _host.TryGetObjectIntProperty(bagId, StypeMaxStructure, out int max))
+            return max <= 0 || cur < max;
 
-    /// <summary>
-    /// True if the bag name starts with something other than "Salvage" — i.e.
-    /// "Iron Salvage (91)" returns true, "Salvage (11)" returns false. Used to
-    /// disambiguate the two known bag-name formats so the trailing number is
-    /// only interpreted as fullness when it's actually fullness.
-    /// </summary>
-    private static bool HasPrefixBeforeSalvage(string? name)
-    {
-        if (string.IsNullOrEmpty(name)) return false;
-        ReadOnlySpan<char> s = name.AsSpan().TrimStart();
-        return !s.StartsWith("Salvage".AsSpan(), StringComparison.OrdinalIgnoreCase);
+        if (TryParseTrailingNumber(name, out int fill))
+            return fill < 100;
+
+        Log($"[Salvage] IsBagUnderFull: Structure unreadable AND name '{name}' has no numeric fill — treating 0x{bagId:X8} as full (skip) so it can't drive an endless sweep.");
+        return false;
     }
 
     /// <summary>

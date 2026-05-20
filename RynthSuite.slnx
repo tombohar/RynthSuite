@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/Plugins/">
     <Project Path="Plugins/RynthCore.Plugin.RynthAi/RynthCore.Plugin.RynthAi.csproj" />
+    <Project Path="Plugins/RynthCore.Plugin.RynthChat/RynthCore.Plugin.RynthChat.csproj" />
   </Folder>
   <Folder Name="/Shared/">
     <Project Path="Shared/RynthCore.LootSdk/RynthCore.LootSdk.csproj" />

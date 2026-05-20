@@ -39,7 +39,21 @@ public class BuffManager : IDisposable
         public DateTime Expiration;
         public int SpellLevel;
         public string SpellName = "";
+        // True when this is a permanent player enchantment (server reports no
+        // expiry). It is a presence-only marker re-derived from the live
+        // registry on every RefreshFromLiveMemory — NOT a synthetic timer and
+        // NEVER persisted (a relog after death/dispel must not resurrect it).
+        public bool IsPermanent;
     }
+
+    // "Never expires" sentinel for permanent player enchantments. Far enough
+    // from DateTime.MaxValue that IsBuffActive's Expiration.AddSeconds(-rebufferSec)
+    // (rebufferSec ≤ 1800) can't underflow.
+    private static readonly DateTime PermanentSentinel = DateTime.MaxValue.AddDays(-1);
+
+    // Permanent-enchant families already logged this session (once-per-family
+    // diagnostic so the 30s refresh doesn't spam the log).
+    private readonly HashSet<int> _loggedPermanentFamilies = new();
 
     /// <summary>
     /// Buff timer for an enchantment on a specific equipped item (armor/weapon).
@@ -200,6 +214,11 @@ public class BuffManager : IDisposable
             foreach (var kvp in _ramBuffTimers)
             {
                 var info = kvp.Value;
+                // Never persist permanent player enchants: they are a live-read
+                // presence cache. After a death/dispel + relog the buff is gone
+                // server-side, so it must be re-proven by a fresh live read,
+                // not restored from disk as still-active.
+                if (info.IsPermanent) continue;
                 lines.Add($"ram|{kvp.Key}|{info.Expiration.Ticks}|{info.SpellLevel}|{info.SpellName}");
             }
             foreach (var kvp in _itemSpellTimers)
@@ -336,6 +355,8 @@ public class BuffManager : IDisposable
 
     private bool _liveBuffsRefreshed;
     private DateTime _lastLiveRefreshAttempt = DateTime.MinValue;
+    private DateTime _lastPeriodicRefreshAt = DateTime.MinValue;
+    private const int PeriodicRefreshIntervalMs = 30_000;
 
     public void OnHeartbeat()
     {
@@ -371,6 +392,19 @@ public class BuffManager : IDisposable
             // Don't cast anything until we have a real snapshot — otherwise
             // we'd recast over a 1-hour-old buff at the start of every login.
             return;
+        }
+
+        // Periodic re-sync: if the character died and lost all enchantments, the
+        // in-memory timers still show buffs as "active" until their timestamps
+        // expire normally — causing NeedsAnyBuff() to return false while the char
+        // is completely unbuffed. Re-read from live AC memory every 30s to detect
+        // this gap and clear stale timers so rebuffing resumes promptly.
+        if ((DateTime.Now - _lastPeriodicRefreshAt).TotalMilliseconds > PeriodicRefreshIntervalMs)
+        {
+            _lastPeriodicRefreshAt = DateTime.Now;
+            int n = RefreshFromLiveMemory();
+            if (n >= 0)
+                _host.Log($"[BuffDiag] periodic sync: {n} active enchantment(s) in RAM timers.");
         }
 
         // No-chat safety valve: a cast AC never answers (unknown spell, etc.)
@@ -434,7 +468,7 @@ public class BuffManager : IDisposable
         // casts/UseObject while the hourglass action is mid-flight.
         // Keep BotAction pinned to "Buffing" while our cast is in flight so
         // CombatManager can't sneak in a peace-mode switch mid-cast.
-        if (!_host.CanCastNow || BusyCount > 0)
+        if (!CastGateWatchdog.CanCastNow(_host.CanCastNow, s => _host.Log(s)) || BusyCount > 0)
         {
             if (_pendingSpellId != 0) _settings.BotAction = "Buffing";
             return;
@@ -963,17 +997,28 @@ public class BuffManager : IDisposable
             double remainingSeconds = expiryTimes[i] - serverNow;
             if (remainingSeconds <= 0) continue;
 
-            // Skip permanent enchantments — they don't need timers and
-            // double.MaxValue would overflow DateTime.AddSeconds.
-            if (remainingSeconds > 86400 * 365) continue;
+            // A permanent player enchantment: the engine reports no expiry
+            // (double.MaxValue). It IS active right now — record it as a
+            // presence-only entry instead of dropping it (the old code
+            // skipped it here, so the family never recorded → IsBuffActive
+            // false → recast every refresh forever). This is rebuilt from the
+            // live registry every cycle: on death or a dispel trap the enchant
+            // leaves the registry, the next read won't return it, the family
+            // drops, and the bot rebuffs. IsPermanent keeps it out of
+            // SaveBuffTimers so a relog can't resurrect a stripped buff.
+            bool isPermanent = remainingSeconds > 86400 * 365;
 
             int level = GetSpellLevel(spellInfo);
             _ramBuffTimers[spellInfo.Family] = new RamTimerInfo
             {
-                Expiration = DateTime.Now.AddSeconds(remainingSeconds),
-                SpellLevel = level,
-                SpellName  = spellInfo.Name,
+                Expiration  = isPermanent ? PermanentSentinel : DateTime.Now.AddSeconds(remainingSeconds),
+                SpellLevel  = level,
+                SpellName   = spellInfo.Name,
+                IsPermanent = isPermanent,
             };
+
+            if (isPermanent && _loggedPermanentFamilies.Add(spellInfo.Family))
+                _host.Log($"[BuffDiag] permanent player enchant tracked: id={spellInfo.Id} '{spellInfo.Name}' (fam={spellInfo.Family}, lvl={level}) — presence-only, not persisted");
         }
 
         // Restore item enchantment timers that weren't covered by player enchantments

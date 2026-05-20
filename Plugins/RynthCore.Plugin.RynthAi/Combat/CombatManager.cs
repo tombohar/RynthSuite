@@ -207,13 +207,9 @@ public class CombatManager : IDisposable
                 {
                     pickedWeaponName = w.Name ?? "";
                     weaponWieldLoc   = w.Values(LongValueKey.CurrentWieldedLocation, 0);
-                    pickedWeaponMode = w.ObjectClass switch
-                    {
-                        AcObjectClass.WandStaffOrb  => CombatMode.Magic,
-                        AcObjectClass.MissileWeapon => CombatMode.Missile,
-                        AcObjectClass.MeleeWeapon   => CombatMode.Melee,
-                        _                           => CombatMode.Melee,
-                    };
+                    pickedWeaponMode = IsWandObject(w)                                  ? CombatMode.Magic
+                                    : w.ObjectClass == AcObjectClass.MissileWeapon ? CombatMode.Missile
+                                    : CombatMode.Melee;
                 }
             }
         }
@@ -445,7 +441,18 @@ public class CombatManager : IDisposable
     // buff path uses (the engine IsSpellKnown oracle lies "true" for unknowns).
     private int _pendingOffensiveSpellId = 0;
     private DateTime _pendingOffensiveCastAt = DateTime.MinValue;
+    // Target id captured when the offensive cast was *issued*, so the
+    // chat-confirmation handler can record the cast against the right target
+    // for blacklist judgement — even if activeTargetId has since changed.
+    private int _pendingOffensiveTargetId = 0;
     private const double OFFENSIVE_NOCHAT_TIMEOUT_MS = 5000.0;
+    // ACE doesn't emit "You cast X" chat for offensive war magic, so we infer
+    // a successful server cast by NEGATION: if no "You're too busy!" arrives
+    // within this many ms of issuance, the gesture proceeded — queue the cast
+    // for blacklist judgement. Server "too busy" responses arrive within
+    // ~100–200ms; 500ms is a comfortable margin without delaying the next
+    // attempt noticeably.
+    private const double OffensiveRefusalWindowMs = 500.0;
 
     // Throttled lowercased inventory-name set for the predictive component
     // gate (TrySpellByName is called many times per resolution; rebuilding the
@@ -564,10 +571,20 @@ public class CombatManager : IDisposable
         {
             string lo = text.ToLowerInvariant();
 
+            // "You're too busy!" — server refused the cast mid-gesture (a
+            // previous cast is still animating). NOT a real cast: must NOT
+            // count toward the blacklist miss streak. Clear pending silently
+            // so JudgePendingOffensiveCast's 500ms no-too-busy window stays
+            // honest, and the next attempt can be issued under the throttle.
+            if (lo.Contains("you're too busy") || lo.Contains("you are too busy"))
+            {
+                _pendingOffensiveSpellId   = 0;
+                _pendingOffensiveTargetId  = 0;
+            }
             // Hard reject: no components / unknown / no target. Same phrases the
             // buff path treats as a hard rejection. Mark unresolvable so the
             // tier loop drops down (faster than waiting out the no-chat valve).
-            if (lo.Contains("missing some required") ||
+            else if (lo.Contains("missing some required") ||
                 lo.Contains("you do not have the") ||
                 lo.Contains("have all the components for this spell"))
             {
@@ -594,7 +611,18 @@ public class CombatManager : IDisposable
                     if (cI > 0 && cI < e) e = cI;
                     int castId = SpellDatabase.GetIdByName(after.Substring(0, e).Trim());
                     if (castId == _pendingOffensiveSpellId)
-                        _pendingOffensiveSpellId = 0;
+                    {
+                        // ACE doesn't emit "You cast X" for offensive war
+                        // magic, so on ACE this branch is effectively dead —
+                        // the successful-cast detection happens via
+                        // JudgePendingOffensiveCast (no "too busy" within
+                        // OffensiveRefusalWindowMs of the issue). This branch
+                        // is kept so forks/retail that DO emit chat still
+                        // clear pending; it must NOT itself call
+                        // RecordOffensiveCast or the cast would double-count.
+                        _pendingOffensiveSpellId   = 0;
+                        _pendingOffensiveTargetId  = 0;
+                    }
                 }
                 else if (lo.Contains("fizzle") || lo.Contains("resists your spell"))
                 {
@@ -689,6 +717,34 @@ public class CombatManager : IDisposable
                     DropTarget($"blacklisted after {_settings.BlacklistAttempts} no-damage casts");
             }
         }
+    }
+
+    /// <summary>
+    /// ACE doesn't emit "You cast X" chat for offensive war magic, so the
+    /// offensive cast-confirmation works by NEGATION: cast issuance sets
+    /// _pendingOffensiveSpellId/CastAt/TargetId; if a "You're too busy!" chat
+    /// hits within OffensiveRefusalWindowMs the chat handler clears pending
+    /// silently (server refused, don't count); otherwise this method runs
+    /// once that window has elapsed and queues the cast for blacklist
+    /// judgement (the BlacklistCastSettleMs damage-wait then runs in
+    /// JudgePendingCast as usual). Effect: refused spam attempts never reach
+    /// _consecutiveCastMisses.
+    /// </summary>
+    private void JudgePendingOffensiveCast()
+    {
+        if (_pendingOffensiveSpellId == 0) return;
+        if (_pendingOffensiveTargetId == 0) return;
+        if (_pendingOffensiveCastAt == DateTime.MinValue) return;
+        if ((DateTime.Now - _pendingOffensiveCastAt).TotalMilliseconds < OffensiveRefusalWindowMs)
+            return;
+
+        // Refusal window passed without a "too busy" — the server accepted
+        // the gesture. Queue this cast for blacklist judgement.
+        int targetId = _pendingOffensiveTargetId;
+        _pendingOffensiveSpellId   = 0;
+        _pendingOffensiveTargetId  = 0;
+        _pendingOffensiveCastAt    = DateTime.MinValue;
+        RecordOffensiveCast(targetId);
     }
 
     /// <summary>
@@ -871,6 +927,10 @@ public class CombatManager : IDisposable
         if ((DateTime.Now - lastAttackCmd).TotalMilliseconds >= attackCmdIntervalMs)
         {
             _offensiveCastThisCycle = false;
+            // Convert any pending offensive cast whose refusal window has
+            // elapsed into a queued judgement (ACE has no "You cast X" for
+            // war magic; this is our successful-cast detector).
+            JudgePendingOffensiveCast();
             JudgePendingCast(); // verdict on the last cast once its window elapses
 
             // Client is busy processing a previous action — don't queue more
@@ -919,8 +979,12 @@ public class CombatManager : IDisposable
                 // bounds retries. Melee/missile (AttackTarget, below) is
                 // deliberately NOT gated on this — a weapon swing isn't a spell
                 // cast and AC paces the swing animation itself.
-                if (!_host.CanCastNow)
+                if (!CastGateWatchdog.CanCastNow(_host.CanCastNow, s => _host.Log(s)))
+                {
+                    if ((DateTime.Now - lastAttackCmd).TotalMilliseconds > 5000)
+                        _host.Log($"[CombatCast] CanCastNow=false — gesture gate blocking cast (last attack {(DateTime.Now - lastAttackCmd).TotalMilliseconds:0}ms ago, target=0x{activeTargetId:X8})");
                     return true;
+                }
 
                 AttackWithMagic(targetObj);
 
@@ -971,11 +1035,12 @@ public class CombatManager : IDisposable
 
             // Ring spells hit an area — no per-target damage feedback is generated,
             // so they must not count toward the blacklist miss counter.
-            // In magic mode, only count cycles where an offensive damage spell
-            // actually fired — otherwise equip waits, the cast-gate, "no spell
-            // found" and tier-down learning blacklist a good target in ~1.2s
-            // before any real cast lands. Melee/missile attack every cycle and
-            // get prompt damage feedback, so they keep per-cycle counting.
+            // Magic mode no longer counts from here at all: RecordOffensiveCast
+            // is invoked from the chat-confirmation path ("ou cast X" matching
+            // _pendingOffensiveSpellId) so a server-refused attempt ("too busy",
+            // equip waits, "no spell found" etc.) never queues a judgement.
+            // Melee/missile attack every cycle and get prompt damage feedback,
+            // so they keep per-cycle counting (the magicMode branch is false).
             bool magicMode = CurrentCombatMode == CombatMode.Magic && _spellManager != null;
             if (!_lastCastWasRing && (!magicMode || _offensiveCastThisCycle))
                 RecordOffensiveCast(activeTargetId);
@@ -1135,6 +1200,7 @@ public class CombatManager : IDisposable
 
     private DateTime _lastEquipTime = DateTime.MinValue;
     private DateTime _lastStanceTime = DateTime.MinValue;
+    private DateTime _lastEquipDiagAt = DateTime.MinValue;
 
     // Returns true when the correct weapon is wielded and combat mode matches — safe to attack.
     // Returns false when a weapon swap or stance change is in progress — caller should skip this tick.
@@ -1151,33 +1217,57 @@ public class CombatManager : IDisposable
 
         string desired = (rule != null && rule.DamageType != "Auto") ? rule.DamageType : monsterWeakness;
 
+        string weaponSource = "none";
         if (rule != null && rule.WeaponId != 0)
+        {
             targetWeaponId = rule.WeaponId;
+            weaponSource = "rule.WeaponId";
+        }
         else
         {
             var bestWeapon = _settings.ItemRules.FirstOrDefault(i => i.Element.Equals(desired, StringComparison.OrdinalIgnoreCase))
                              ?? _settings.ItemRules.FirstOrDefault();
-            if (bestWeapon != null) targetWeaponId = bestWeapon.Id;
+            if (bestWeapon != null) { targetWeaponId = bestWeapon.Id; weaponSource = "ItemRules"; }
         }
 
         if (targetWeaponId == 0)
+        {
             targetWeaponId = FindWandInItems();
-        if (targetWeaponId == 0) return true;
+            if (targetWeaponId != 0) weaponSource = "FindWandInItems";
+        }
+        if (targetWeaponId == 0)
+        {
+            if ((DateTime.Now - _lastEquipDiagAt).TotalSeconds > 5)
+            {
+                _lastEquipDiagAt = DateTime.Now;
+                _host.Log($"[EquipDiag] no weapon found (source=none, desired='{desired}', ItemRules={_settings.ItemRules.Count}, MonsterRule='{rule?.Name ?? "null"}') — proceeding unarmed");
+            }
+            return true;
+        }
 
         var weaponObj = _worldFilter[targetWeaponId];
-        if (weaponObj == null) return true;
-
-        int desiredMode = (weaponObj.ObjectClass) switch
+        if (weaponObj == null)
         {
-            AcObjectClass.WandStaffOrb  => CombatMode.Magic,
-            AcObjectClass.MissileWeapon => CombatMode.Missile,
-            AcObjectClass.MeleeWeapon   => CombatMode.Melee,
-            _                           => CombatMode.Melee,
-        };
+            if ((DateTime.Now - _lastEquipDiagAt).TotalSeconds > 5)
+            {
+                _lastEquipDiagAt = DateTime.Now;
+                _host.Log($"[EquipDiag] weapon 0x{targetWeaponId:X8} not in WorldFilter (source={weaponSource}) — proceeding unarmed");
+            }
+            return true;
+        }
+
+        // Use IsWandObject (ObjectClass + name fallback) so wands with
+        // ObjectClass=Unknown (stale WorldFilter classification) still get
+        // Magic mode instead of falling through to the Melee default.
+        int desiredMode = IsWandObject(weaponObj)                                  ? CombatMode.Magic
+                        : weaponObj.ObjectClass == AcObjectClass.MissileWeapon ? CombatMode.Missile
+                        : CombatMode.Melee;
 
         // Use CurrentWieldedLocation (stype=10) — has an InqInt fallback that works even
         // when the phys-obj offset probe hasn't fired yet (unlike TryGetObjectWielderInfo).
         bool alreadyWielded = weaponObj.Values(LongValueKey.CurrentWieldedLocation, 0) > 0;
+
+        bool diagNow = (DateTime.Now - _lastEquipDiagAt).TotalSeconds > 5;
 
         if (alreadyWielded)
         {
@@ -1188,8 +1278,14 @@ public class CombatManager : IDisposable
             if (CurrentCombatMode != desiredMode &&
                 (DateTime.Now - lastStanceAttempt).TotalMilliseconds > 1000)
             {
+                if (diagNow) { _lastEquipDiagAt = DateTime.Now; _host.Log($"[EquipDiag] wielded=true mode={CurrentCombatMode}→{desiredMode} (weapon=0x{targetWeaponId:X8} '{weaponObj.Name}' src={weaponSource}) — sending ChangeCombatMode"); }
                 _host.ChangeCombatMode(desiredMode);
                 lastStanceAttempt = DateTime.Now;
+            }
+            else if (diagNow && CurrentCombatMode != desiredMode)
+            {
+                _lastEquipDiagAt = DateTime.Now;
+                _host.Log($"[EquipDiag] wielded=true mode={CurrentCombatMode}≠{desiredMode} throttled (weapon=0x{targetWeaponId:X8} '{weaponObj.Name}') — waiting for mode change");
             }
             return CurrentCombatMode == desiredMode;
         }
@@ -1209,11 +1305,13 @@ public class CombatManager : IDisposable
         //    it truly isn't wielded yet.
         if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > 1000)
         {
+            if (diagNow) { _lastEquipDiagAt = DateTime.Now; _host.Log($"[EquipDiag] wielded=FALSE mode={CurrentCombatMode}→{desiredMode} (weapon=0x{targetWeaponId:X8} '{weaponObj.Name}' src={weaponSource} class={weaponObj.ObjectClass}) — ChangeCombatMode"); }
             _host.ChangeCombatMode(desiredMode);
             lastStanceAttempt = DateTime.Now;
         }
         if ((DateTime.Now - _lastEquipTime).TotalMilliseconds > 2000)
         {
+            if (diagNow) { _lastEquipDiagAt = DateTime.Now; _host.Log($"[EquipDiag] wielded=FALSE UseObject(0x{targetWeaponId:X8} '{weaponObj.Name}') — equip attempt"); }
             _host.UseObject((uint)targetWeaponId);
             _lastEquipTime = DateTime.Now;
         }
@@ -1523,6 +1621,17 @@ public class CombatManager : IDisposable
     {
         if (_spellManager == null || target == null) return;
 
+        // Hard safety veto: never cast offensive magic at something AC's combat
+        // system says is not attackable. AC NPCs/vendors are ItemType=Creature,
+        // so classification (the ItemType-flag rescue path in WorldObjectCache)
+        // can still promote them to "Monster" even after the engine fix cleans
+        // the primary attackable-gated path. The attackable check is the game's
+        // own authority for "can I fight this". The engine serves the REAL
+        // ObjectIsAttackable from a main-thread snapshot to this off-thread
+        // pump; if it says not-attackable, bail before any cast/select.
+        if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable((uint)target.Id))
+            return;
+
         // Keep the authoritative known-spell snapshot warm for the combat
         // resolver even when the char isn't buffing (GetDynamicSelfBuffId is
         // the only other pump). Throttled internally — cheap to call per tick.
@@ -1537,7 +1646,10 @@ public class CombatManager : IDisposable
         // Don't cast while a weapon equip is in progress — the wand may not be registered
         // as wielded yet. _lastEquipTime is set whenever UseObject is called for a wand swap.
         if ((DateTime.Now - _lastEquipTime).TotalMilliseconds < 3000)
+        {
+            _host.Log($"[CombatCast] equip-gate: wand equip in progress ({(DateTime.Now - _lastEquipTime).TotalMilliseconds:0}ms < 3000ms), skipping cast");
             return;
+        }
         // Cadence is the motion-end gate (CanCastNow at the AttackWithMagic
         // call site, CombatManager.cs:905) — no fixed inter-cast interval;
         // fire as soon as the cast gesture completes.
@@ -1595,7 +1707,11 @@ public class CombatManager : IDisposable
             }
         }
 
-        if (rule != null && !rule.UseArc && !rule.UseRing && !rule.UseStreak && !rule.UseBolt) return;
+        if (rule != null && !rule.UseArc && !rule.UseRing && !rule.UseStreak && !rule.UseBolt)
+        {
+            _host.Log($"[CombatCast] rule '{rule.Name}' has no attack shapes enabled (UseArc/Ring/Streak/Bolt all false) — no offensive cast");
+            return;
+        }
 
         int warTier  = _spellManager?.GetHighestSpellTier(AcSkillType.WarMagic)  ?? 0;
         int voidTier = _spellManager?.GetHighestSpellTier(AcSkillType.VoidMagic) ?? 0;
@@ -1612,15 +1728,22 @@ public class CombatManager : IDisposable
                 _host.CastSpell((uint)activeTargetId, offensiveSpellId);
                 _lastSpellCast = DateTime.Now;
                 _lastCastWasRing = isRing;
-                _offensiveCastThisCycle = true;
-                _pendingOffensiveSpellId = offensiveSpellId;
-                _pendingOffensiveCastAt = DateTime.Now;
+                // _offensiveCastThisCycle is NOT set here anymore — a cast
+                // attempt that the server refuses (e.g. "You're too busy!")
+                // must not count toward the blacklist miss streak. The
+                // RecordOffensiveCast trigger moved to the chat-confirmation
+                // path so only chat-confirmed casts queue a judgement.
+                _pendingOffensiveSpellId   = offensiveSpellId;
+                _pendingOffensiveCastAt    = DateTime.Now;
+                _pendingOffensiveTargetId  = activeTargetId;
             }
             catch { }
         }
         else
         {
-            _host.WriteToChat($"[RynthAi] No spell found: elem={element} warTier={warTier} voidTier={voidTier} pid={_playerId}", 2);
+            bool snapWarm = _spellManager?.IsKnownSnapshotWarm == true;
+            _host.WriteToChat($"[RynthAi] No spell found: elem={element} warTier={warTier} voidTier={voidTier} snapshotWarm={snapWarm} pid={_playerId}", 2);
+            _host.Log($"[CombatCast] no offensive spell: elem={element} warTier={warTier} voidTier={voidTier} snapshotWarm={snapWarm} rule={rule?.Name ?? "null"} target='{target.Name}'");
             _lastSpellCast = DateTime.Now; // suppress repeated spam
         }
     }

@@ -92,10 +92,6 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Spacing();
                 ImGui.Separator();
                 ImGui.Text("Chat");
-                ImGui.Checkbox("Get Rid of Retail Chatbox", ref _settings.SuppressRetailChat);
-                if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Hide the game's built-in chat window.\nThe AC chat input still works underneath — your typed commands and tells function unchanged.");
-
                 ImGui.Checkbox("Show RynthChat", ref _settings.ShowRynthChat);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Render the custom chat viewer (scrollback + channel coloring).");
@@ -138,6 +134,9 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Checkbox("Start Macro On Login", ref _settings.StartMacroOnLogin);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Automatically starts the macro when RynthAi loads.");
+                ImGui.Checkbox("Patrol On Login", ref _settings.PatrolOnLogin);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Automatically starts dungeon patrol when RynthAi loads.");
                 ImGui.Checkbox("Enable Raycasting", ref _settings.EnableRaycasting);
 
                 ImGui.Separator();
@@ -174,7 +173,7 @@ internal sealed class LegacyAdvancedSettingsUi
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("How long a blacklisted mob is ignored before re-trying.");
                 ImGui.SetNextItemWidth(150);
-                ImGui.SliderInt("Cast Settle (ms)", ref _settings.BlacklistCastSettleMs, 250, 5000);
+                ImGui.SliderInt("Cast Settle (ms)", ref _settings.BlacklistCastSettleMs, 250, 15000);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Grace after a cast before it counts as a no-damage miss — lets the damage/health packet arrive so good targets aren't blacklisted prematurely.");
                 ImGui.SetNextItemWidth(150);

@@ -562,7 +562,6 @@ internal sealed class LegacyDashboardRenderer
                 SuppressRetailRadar        = s.SuppressRetailRadar,
                 ShowRynthRadar             = s.ShowRynthRadar,
                 RadarClickThrough          = s.RadarClickThrough,
-                SuppressRetailChat         = s.SuppressRetailChat,
                 ShowRynthChat              = s.ShowRynthChat,
                 ChatClickThrough           = s.ChatClickThrough,
                 SuppressRetailPowerbar     = s.SuppressRetailPowerbar,
@@ -573,6 +572,7 @@ internal sealed class LegacyDashboardRenderer
                 EnableAutocram             = s.EnableAutocram,
                 PeaceModeWhenIdle          = s.PeaceModeWhenIdle,
                 StartMacroOnLogin          = s.StartMacroOnLogin,
+                PatrolOnLogin              = s.PatrolOnLogin,
                 EnableRaycasting           = s.EnableRaycasting,
                 UseArcs                    = s.UseArcs,
                 BowArcVelocity             = s.BowArcVelocity,
@@ -709,7 +709,6 @@ internal sealed class LegacyDashboardRenderer
             s.SuppressRetailRadar        = p.SuppressRetailRadar;
             s.ShowRynthRadar             = p.ShowRynthRadar;
             s.RadarClickThrough          = p.RadarClickThrough;
-            s.SuppressRetailChat         = p.SuppressRetailChat;
             s.ShowRynthChat              = p.ShowRynthChat;
             s.ChatClickThrough           = p.ChatClickThrough;
             s.SuppressRetailPowerbar     = p.SuppressRetailPowerbar;
@@ -720,6 +719,7 @@ internal sealed class LegacyDashboardRenderer
             s.EnableAutocram             = p.EnableAutocram;
             s.PeaceModeWhenIdle          = p.PeaceModeWhenIdle;
             s.StartMacroOnLogin          = p.StartMacroOnLogin;
+            s.PatrolOnLogin              = p.PatrolOnLogin;
             s.EnableRaycasting           = p.EnableRaycasting;
             s.UseArcs                    = p.UseArcs;
             s.BowArcVelocity             = p.BowArcVelocity;
@@ -1232,6 +1232,7 @@ internal sealed class LegacyDashboardRenderer
         dst.ManaStoneKeepCount       = tmp.ManaStoneKeepCount;
         dst.MetaDebug                = tmp.MetaDebug;
         dst.StartMacroOnLogin        = tmp.StartMacroOnLogin;
+        dst.PatrolOnLogin            = tmp.PatrolOnLogin;
         dst.ShowTerrainPassability   = tmp.ShowTerrainPassability;
         dst.GiveQueueIntervalMs      = tmp.GiveQueueIntervalMs;
         dst.SpellCastIntervalMs      = tmp.SpellCastIntervalMs;
@@ -1248,7 +1249,6 @@ internal sealed class LegacyDashboardRenderer
         dst.RadarWallPaintRadius     = tmp.RadarWallPaintRadius;
         dst.RadarCircular            = tmp.RadarCircular;
         dst.RadarClickThrough        = tmp.RadarClickThrough;
-        dst.SuppressRetailChat       = tmp.SuppressRetailChat;
         dst.SuppressRetailPowerbar   = tmp.SuppressRetailPowerbar;
         dst.ShowRynthChat            = tmp.ShowRynthChat;
         dst.ChatOpacity              = tmp.ChatOpacity;

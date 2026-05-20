@@ -22,7 +22,11 @@ public sealed partial class RynthAiPlugin
         public bool KillerIsFellow { get; init; }
     }
 
-    private readonly HashSet<int> _completedCorpses = new();
+    // id → completed-at ms. Authoritative "looted, do not reopen" set. Aged out
+    // by PruneCorpseCollections well past max AC corpse lifetime; deliberately
+    // never cleared by a reopen, so AC re-announcing a still-open looted corpse
+    // on a patrol loop cannot resurrect it.
+    private readonly Dictionary<int, long> _completedCorpses = new();
     private readonly HashSet<int> _processedCorpseItems = new();
     private readonly Dictionary<int, int> _corpseItemAttempts = new();
     private readonly Dictionary<int, long> _corpseCooldownUntil = new();
@@ -152,7 +156,10 @@ public sealed partial class RynthAiPlugin
 
     private long _lastCorpsePruneAt;
     private const long CorpsePruneIntervalMs = 60_000; // prune once per minute
-    private const int  CorpseSetCap          = 500;    // trim when either set exceeds this
+    // Retain a completed-corpse mark this long. Must exceed the longest AC corpse
+    // lifetime by a wide margin (so an aged-out entry's corpse is provably gone and
+    // can never be re-looted) while staying well under server GUID-reuse timescales.
+    private const long CompletedCorpseRetentionMs = 30 * 60_000; // 30 min
 
     private void PruneCorpseCollections()
     {
@@ -160,18 +167,25 @@ public sealed partial class RynthAiPlugin
         if (now - _lastCorpsePruneAt < CorpsePruneIntervalMs) return;
         _lastCorpsePruneAt = now;
 
-        // _completedCorpses — only prune entries for corpses that have already despawned.
-        // Never clear the whole set: completed corpses that are still present in the world
-        // must stay marked so the bot doesn't re-open them.
-        if (_completedCorpses.Count > CorpseSetCap)
+        // _completedCorpses — authoritative "looted, do not reopen" set. Evict ONLY by
+        // age: an entry older than the retention window refers to a corpse that has long
+        // since despawned (well past max AC corpse lifetime), so it cannot be re-looted
+        // and its id is past realistic server GUID reuse. Presence in the render cache is
+        // NOT a despawn signal — an out-of-range corpse must stay marked or the bot
+        // re-opens it on the next patrol loop — so it is deliberately not consulted here.
+        if (_completedCorpses.Count > 0)
         {
-            var presentIds = new HashSet<int>();
-            if (_objectCache != null)
-                foreach (var wo in _objectCache.GetLandscapeObjects())
-                    presentIds.Add(wo.Id);
-            int before = _completedCorpses.Count;
-            _completedCorpses.RemoveWhere(id => !presentIds.Contains(id));
-            Log($"[RynthAi] Pruned _completedCorpses: {before} → {_completedCorpses.Count}");
+            var stale = new List<int>();
+            foreach (var kvp in _completedCorpses)
+                if (now - kvp.Value >= CompletedCorpseRetentionMs)
+                    stale.Add(kvp.Key);
+            if (stale.Count > 0)
+            {
+                int before = _completedCorpses.Count;
+                foreach (int id in stale)
+                    _completedCorpses.Remove(id);
+                Log($"[RynthAi] Pruned _completedCorpses: {before} → {_completedCorpses.Count}");
+            }
         }
 
         // _ownershipSkipLogged / _corpseIdRequested — pure spam-prevention, safe to wipe periodically
@@ -201,7 +215,19 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
-        bool wasCompleted = _completedCorpses.Remove(sid);
+        // _completedCorpses is authoritative. FinalizeCorpse deliberately leaves a
+        // looted corpse open server-side, so AC re-announces its contents every time
+        // it re-streams into range on a patrol loop. Treat any reopen of a completed
+        // corpse as a passive re-announce: never clear the mark, never start a loot
+        // session. Membership alone decides — same rule the polling reconciler
+        // already enforces in SyncCorpseContainerState. A corpse NOT in the set
+        // (incl. one the user manually opens) still loots normally below.
+        if (_completedCorpses.ContainsKey(sid))
+        {
+            LootDiag($"[RynthAi] Corpse loot: ignoring reopen of completed corpse 0x{objectId:X8}.");
+            return;
+        }
+
         _corpseCooldownUntil.Remove(sid);
         bool sameCorpse = _targetCorpseId == sid;
         bool switchedTarget = _targetCorpseId != 0 && _targetCorpseId != sid;
@@ -214,15 +240,13 @@ public sealed partial class RynthAiPlugin
         _corpseItemsMatched = 0;
         _corpseIdsRequested = false;
         ResetCurrentLootItem();
-        if (!sameCorpse || wasCompleted)
+        if (!sameCorpse)
         {
             _processedCorpseItems.Clear();
             _corpseItemAttempts.Clear();
             _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear();
         }
         LootDiag($"[RynthAi] Corpse loot: opened container 0x{objectId:X8}.");
-        if (wasCompleted)
-            LootDiag($"[RynthAi] Corpse loot: manual open cleared completed state for 0x{objectId:X8}.");
         if (switchedTarget)
             LootDiag($"[RynthAi] Corpse loot: switching active corpse target from 0x{(uint)_targetCorpseId:X8} to 0x{objectId:X8}.");
 
@@ -283,7 +307,7 @@ public sealed partial class RynthAiPlugin
 
         if (_targetCorpseId == sid)
         {
-            if (_completedCorpses.Contains(sid))
+            if (_completedCorpses.ContainsKey(sid))
             {
                 ResetCorpseTarget(releaseState: true);
                 return;
@@ -472,7 +496,7 @@ public sealed partial class RynthAiPlugin
             if (candidate.ObjectClass != AcObjectClass.Corpse)
                 continue;
 
-            if (candidate.Id == _targetCorpseId || _completedCorpses.Contains(candidate.Id))
+            if (candidate.Id == _targetCorpseId || _completedCorpses.ContainsKey(candidate.Id))
                 continue;
 
             if (_corpseCooldownUntil.TryGetValue(candidate.Id, out long blockedUntil))
@@ -736,7 +760,7 @@ public sealed partial class RynthAiPlugin
             _corpseTargetSince = CorpseNowMs;
         }
 
-        if (_completedCorpses.Contains(corpseId))
+        if (_completedCorpses.ContainsKey(corpseId))
         {
             _openedContainerId = 0;
             _openedContainerAt = 0;
@@ -1113,7 +1137,7 @@ public sealed partial class RynthAiPlugin
         {
             if (candidate.ObjectClass != AcObjectClass.Corpse)
                 continue;
-            if (_completedCorpses.Contains(candidate.Id))
+            if (_completedCorpses.ContainsKey(candidate.Id))
                 continue;
             if (_corpseCooldownUntil.TryGetValue(candidate.Id, out long blockedUntil) && blockedUntil > now)
                 continue;
@@ -1431,7 +1455,7 @@ public sealed partial class RynthAiPlugin
         if (corpseId == 0)
             return;
 
-        _completedCorpses.Add(corpseId);
+        _completedCorpses[corpseId] = CorpseNowMs;
         _corpseCooldownUntil.Remove(corpseId);
         _processedCorpseItems.Clear();
         _corpseItemAttempts.Clear();
@@ -1575,7 +1599,7 @@ public sealed partial class RynthAiPlugin
 
             if (_targetCorpseId == previousOpen)
             {
-                if (_completedCorpses.Contains(previousOpen))
+                if (_completedCorpses.ContainsKey(previousOpen))
                 {
                     LootDiag($"[RynthAi] Corpse loot: observed close for completed corpse 0x{(uint)previousOpen:X8}.");
                     ResetCorpseTarget(releaseState: true);
@@ -1594,7 +1618,7 @@ public sealed partial class RynthAiPlugin
             // Don't re-claim a corpse we've already completed — the server still
             // reports it as open, but we're done with it. It will close when we
             // open the next corpse or move away.
-            if (_completedCorpses.Contains(rawOpen))
+            if (_completedCorpses.ContainsKey(rawOpen))
                 return;
 
             bool switchedTarget = _targetCorpseId != 0 && _targetCorpseId != rawOpen;
@@ -1754,7 +1778,7 @@ public sealed partial class RynthAiPlugin
         long ageMs = _corpseTargetSince != 0 ? now - _corpseTargetSince : 0;
         LootDiag($"[RynthAi] Corpse loot: abandoning corpse 0x{(uint)corpseId:X8} after {ageMs}ms ({reason}).");
         ChatLine($"[RynthAi] Corpse timeout: giving up on 0x{(uint)corpseId:X8} after {ageMs}ms.");
-        _completedCorpses.Add(corpseId);
+        _completedCorpses[corpseId] = now;
         _corpseCooldownUntil.Remove(corpseId);
 
         // Force-clear container state — don't try UseObject to close.
