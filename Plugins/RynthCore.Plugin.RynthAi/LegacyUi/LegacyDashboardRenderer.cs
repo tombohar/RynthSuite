@@ -617,6 +617,7 @@ internal sealed class LegacyDashboardRenderer
                 MinSkillLevelTier8         = s.MinSkillLevelTier8,
                 // Ranges
                 MonsterRange               = s.MonsterRange,
+                MonsterDisengageRange      = s.MonsterDisengageRange,
                 RingRange                  = s.RingRange,
                 ApproachRange              = s.ApproachRange,
                 CorpseApproachRangeMax     = s.CorpseApproachRangeMax,
@@ -637,6 +638,9 @@ internal sealed class LegacyDashboardRenderer
                 NavResumeTurnAngle         = s.NavResumeTurnAngle,
                 NavDeadZone                = s.NavDeadZone,
                 NavSweepMult               = s.NavSweepMult,
+                NavLookaheadYards          = s.NavLookaheadYards,
+                NavTurnRateDegPerSec       = s.NavTurnRateDegPerSec,
+                NavTier1TurnSpeed          = s.NavTier1TurnSpeed,
                 PostPortalDelaySec         = s.PostPortalDelaySec,
                 T2Speed                    = s.T2Speed,
                 T2WalkWithinYd             = s.T2WalkWithinYd,
@@ -764,6 +768,7 @@ internal sealed class LegacyDashboardRenderer
             s.MinSkillLevelTier8         = p.MinSkillLevelTier8;
             // Ranges
             s.MonsterRange               = p.MonsterRange;
+            s.MonsterDisengageRange      = p.MonsterDisengageRange;
             s.RingRange                  = p.RingRange;
             s.ApproachRange              = p.ApproachRange;
             s.CorpseApproachRangeMax     = p.CorpseApproachRangeMax;
@@ -784,6 +789,9 @@ internal sealed class LegacyDashboardRenderer
             s.NavResumeTurnAngle         = p.NavResumeTurnAngle;
             s.NavDeadZone                = p.NavDeadZone;
             s.NavSweepMult               = p.NavSweepMult;
+            s.NavLookaheadYards          = p.NavLookaheadYards;
+            s.NavTurnRateDegPerSec       = p.NavTurnRateDegPerSec;
+            s.NavTier1TurnSpeed          = p.NavTier1TurnSpeed;
             s.PostPortalDelaySec         = p.PostPortalDelaySec;
             s.T2Speed                    = p.T2Speed;
             s.T2WalkWithinYd             = p.T2WalkWithinYd;
@@ -1082,6 +1090,9 @@ internal sealed class LegacyDashboardRenderer
         dst.NavResumeTurnAngle       = tmp.NavResumeTurnAngle;
         dst.NavDeadZone              = tmp.NavDeadZone;
         dst.NavSweepMult             = tmp.NavSweepMult;
+        dst.NavLookaheadYards        = tmp.NavLookaheadYards;
+        dst.NavTurnRateDegPerSec     = tmp.NavTurnRateDegPerSec;
+        dst.NavTier1TurnSpeed        = tmp.NavTier1TurnSpeed;
         dst.PostPortalDelaySec       = tmp.PostPortalDelaySec;
         dst.T2Speed                  = tmp.T2Speed;
         dst.T2DistanceTo             = tmp.T2DistanceTo;
@@ -1134,6 +1145,7 @@ internal sealed class LegacyDashboardRenderer
         dst.RestamOthersAt           = tmp.RestamOthersAt;
         dst.InfuseOthersAt           = tmp.InfuseOthersAt;
         dst.MonsterRange             = tmp.MonsterRange;
+        dst.MonsterDisengageRange    = tmp.MonsterDisengageRange;
         dst.RingRange                = tmp.RingRange;
         dst.ApproachRange            = tmp.ApproachRange;
         dst.MinRingTargets           = tmp.MinRingTargets;

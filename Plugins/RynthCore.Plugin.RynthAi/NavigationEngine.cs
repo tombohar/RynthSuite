@@ -48,7 +48,8 @@ internal sealed class NavigationEngine
     private float _lastGoodHeading;
     private bool  _hasGoodHeading;
     private bool  _postTeleport;        // true on the first steer after a teleport — forces big-turn
-    private int   _lastTurnDir;         // +1 = right, -1 = left, 0 = none — hysteresis for small corrections
+    private int   _lastTurnDir;         // +1 = right, -1 = left, 0 = none — hysteresis for small corrections (legacy/servo)
+    private int   _tier1TurnDir;        // +1 = right, -1 = left, 0 = none — edge-tracking for Tier 1 (CM_Movement) turn commands
     private bool  _trackingPortalSpace; // global portal-space edge detection (independent of HandlePortalOrRecall)
     private double _globalLastNS = double.NaN; // position tracking for teleport detection
     private double _globalLastEW = double.NaN;
@@ -94,7 +95,27 @@ internal sealed class NavigationEngine
     private double BigTurnExit  => Math.Max(1.0,  Math.Min(_settings.NavResumeTurnAngle, BigTurnEnter - 1.0));
     private double SweepMult    => Math.Max(1.0,  _settings.NavSweepMult);
     private double ArrivalYards => Math.Max(1.5,  _settings.FollowNavMin);
-    private double LookaheadYards => ArrivalYards * 0.1;
+
+    // Lookahead: within this distance of a waypoint, blend the aim point toward
+    // the next one so corners are cut smoothly. 0 = off (aim straight at each
+    // waypoint). Tunable in Advanced ▸ Navigation ▸ Steering.
+    private double LookaheadYards => Math.Max(0.0, _settings.NavLookaheadYards);
+
+    // Mode 0 heading servo: cap the heading change we command per tick so the
+    // turn is smooth and never overshoots (deadbeat). Floored at 10°/s so a
+    // stray 0 from an old config can't freeze turning.
+    private double MaxStepDeg => Math.Max(10.0, _settings.NavTurnRateDegPerSec) * (NavTickMs / 1000.0);
+
+    // Mode 1 (Tier 1 / CM_Movement) DoMovement turn-command speed = magnitude of
+    // the client's CMotionInterp turn_speed (1.0 = native keyboard turn rate).
+    // Treat 0/unset as the default rather than flooring to a crawl.
+    private double Tier1TurnSpeed => _settings.NavTier1TurnSpeed > 0f ? _settings.NavTier1TurnSpeed : 3.0;
+
+    // True when the Tier 1 (CM_Movement) actuator should drive steering: the
+    // user picked Movement Engine = Tier 1 and the host exposes the CM_Movement
+    // events. Mode 0 (heading servo) and an unbuilt Tier 2 fall through to the
+    // servo path.
+    private bool Tier1Movement => _settings.MovementMode == 1 && _host.HasDoMovement && _host.HasStopMovement;
 
     private static long Now => Environment.TickCount64;
 
@@ -437,20 +458,105 @@ internal sealed class NavigationEngine
 
         UpdateStatusLine(idx, dist, route, error);
 
-        // ── STATE: Turning in place (big turn while stopped) ────────────────
-        // Uses native turn motions for smooth animation instead of instant snap.
+        // ── Steering actuator selection ─────────────────────────────────────
+        // Mode 1 (Tier 1) uses CM_Movement turn commands; mode 0 uses the
+        // heading servo. Only fall back to the legacy bang-bang motion keys when
+        // neither actuator is available (stale host without TurnToHeading and
+        // not Tier-1-capable).
+        if (!Tier1Movement && !_host.HasTurnToHeading)
+        {
+            SteerToWaypointLegacy(error, absError, dist);
+            return;
+        }
+
+        // Run-gate hysteresis: when we're far off heading, turn in place (autorun
+        // off) so we don't arc wide; once within BigTurnExit, resume running and
+        // keep slewing to hug the line. BigTurnEnter/BigTurnExit keep their
+        // original meaning — they now gate the servo instead of the turn keys.
         if (_isTurning)
         {
             if (absError <= BigTurnExit)
             {
-                // Close enough — stop turning, start running
+                _isTurning    = false;
+                _postTeleport = false;
+                StartForward();
+            }
+            else if (_isMovingForward)
+            {
+                StopForward();
+            }
+        }
+        else if (absError > BigTurnEnter || (_postTeleport && absError > BigTurnExit))
+        {
+            _isTurning = true;
+            if (_isMovingForward) StopForward();
+        }
+        else
+        {
+            _postTeleport = false;
+            StartForward();
+        }
+
+        // ── Turn actuator ───────────────────────────────────────────────────
+        if (Tier1Movement)
+        {
+            // Tier 1 (CM_Movement): edge-triggered DoMovement/StopMovement turn.
+            // We send the turn command ONCE when the desired direction changes
+            // and stop it ONCE when aligned — the server then rotates the body
+            // smoothly, instead of toggling a key every tick (the old weave).
+            // Forward stays on autorun and combines with the turn (like W+D).
+            int want = absError <= DeadZone ? 0 : (error > 0 ? 1 : -1);
+            if (want != _tier1TurnDir)
+            {
+                if (_tier1TurnDir > 0)      _host.StopMovement(MotionTurnRight, 0);
+                else if (_tier1TurnDir < 0) _host.StopMovement(MotionTurnLeft,  0);
+
+                if (want > 0)      _host.DoMovement(MotionTurnRight, (float)Tier1TurnSpeed, 0);
+                else if (want < 0) _host.DoMovement(MotionTurnLeft,  (float)Tier1TurnSpeed, 0);
+
+                _tier1TurnDir = want;
+            }
+        }
+        else
+        {
+            // Mode 0 heading servo: command the heading directly toward the
+            // target, rate-limited to MaxStepDeg/tick. Because we never command
+            // past the target, the turn converges with no overshoot.
+            if (absError > DeadZone)
+            {
+                double step       = Math.Clamp(error, -MaxStepDeg, MaxStepDeg);
+                double newHeading = currentDeg + step;
+                if (newHeading >= 360.0)     newHeading -= 360.0;
+                else if (newHeading <   0.0) newHeading += 360.0;
+                _host.TurnToHeading((float)newHeading);
+            }
+        }
+
+        // ── Heartbeat: periodically re-assert autorun ───────────────────────
+        if (_isMovingForward && Now - _lastHeartbeat > (long)HeartbeatMs)
+        {
+            _host.SetAutoRun(true);
+            _lastHeartbeat = Now;
+        }
+    }
+
+    /// <summary>
+    /// Legacy bang-bang turn fallback for engines that don't expose
+    /// TurnToHeading. Toggles the native TurnLeft/TurnRight motion keys — the
+    /// old steering behaviour, kept only so a stale host still navigates.
+    /// </summary>
+    private void SteerToWaypointLegacy(double error, double absError, double dist)
+    {
+        if (_isTurning)
+        {
+            if (absError <= BigTurnExit)
+            {
                 _isTurning = false;
                 ClearTurnMotions();
                 StartForward();
                 return;
             }
 
-            // Continue smooth turn in the correct direction
             if (error > 0)
             {
                 _host.SetMotion(MotionTurnRight, true);
@@ -464,10 +570,6 @@ internal sealed class NavigationEngine
             return;
         }
 
-        // ── BIG TURN (>BigTurnEnter° or first steer after teleport): stop and turn ─
-        // Uses SetMotion turn keys so the character rotates with native animation.
-        // After a teleport, always do a big turn to properly orient before running —
-        // jumping straight into small corrections causes left-right oscillation.
         if (absError > BigTurnEnter || (_postTeleport && absError > DeadZone))
         {
             _postTeleport = false;
@@ -487,27 +589,16 @@ internal sealed class NavigationEngine
         }
         _postTeleport = false;
 
-        // ── Ensure forward motion ───────────────────────────────────────────
         StartForward();
 
-        // ── Near waypoint: stop turning, just run straight ──────────────────
-        // Matches old code: dist < ArrivalYards * SweepMult
         bool closeToWaypoint = dist < ArrivalYards * SweepMult;
 
-        // ── SMALL CORRECTION: TurnRight/TurnLeft while running ──────────────
-        // These combine with autorun naturally (like pressing W+A or W+D).
-        // Hysteresis: once a direction is chosen, hold it until error crosses
-        // zero or enters the dead zone. Prevents left-right oscillation when
-        // the error hovers near zero (common after portals).
         if (absError > DeadZone && !closeToWaypoint)
         {
             int wantDir = error > 0 ? 1 : -1;
-
-            // Only change direction if the error has clearly crossed to the other side
             if (_lastTurnDir != 0 && _lastTurnDir != wantDir && absError < DeadZone * 2.0)
             {
-                // Error is small and we'd be reversing — hold current direction
-                // until the error either grows or clearly crosses zero.
+                // hold current direction until error grows or clearly crosses zero
             }
             else
             {
@@ -531,7 +622,6 @@ internal sealed class NavigationEngine
             ClearTurnMotions();
         }
 
-        // ── Heartbeat: periodically re-assert autorun ───────────────────────
         if (_isMovingForward && Now - _lastHeartbeat > (long)HeartbeatMs)
         {
             _host.SetAutoRun(true);
@@ -1027,8 +1117,19 @@ internal sealed class NavigationEngine
 
     private void ClearTurnMotions()
     {
+        // Mode-0/legacy motion keys are local cmdinterp toggles — cheap, always clear.
         _host.SetMotion(MotionTurnRight, false);
         _host.SetMotion(MotionTurnLeft,  false);
+
+        // Tier 1 turns are CM_Movement *server events* (0xF661). Only send a
+        // StopMovement when a turn is actually in flight — this method is called
+        // every tick by the pause/portal/settle/idle paths, so an unconditional
+        // send floods the server. _tier1TurnDir tracks the one active direction.
+        if (_tier1TurnDir != 0 && _host.HasStopMovement)
+        {
+            _host.StopMovement(_tier1TurnDir > 0 ? MotionTurnRight : MotionTurnLeft, 0);
+            _tier1TurnDir = 0;
+        }
     }
 
     private void StopMovement()

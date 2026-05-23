@@ -39,6 +39,9 @@ public sealed class LegacyUiSettings
     public float NavResumeTurnAngle = 10f;
     public float NavDeadZone = 4f;
     public float NavSweepMult = 2.5f;
+    public float NavLookaheadYards = 4.0f;       // distance to start blending the aim point toward the next waypoint (0 = off)
+    public float NavTurnRateDegPerSec = 270f;    // mode 0 (heading servo) max turn rate
+    public float NavTier1TurnSpeed = 3.0f;       // mode 1 (CM_Movement) DoMovement turn-command speed (magnitude of CMotionInterp turn_speed; 1.0 = native keyboard rate)
     public float PostPortalDelaySec = 4.0f;
     public float T2Speed = 1.0f;
     public float T2DistanceTo = 0.5f;
@@ -100,6 +103,12 @@ public sealed class LegacyUiSettings
     public int InfuseOthersAt = 10;
 
     public int MonsterRange = 50;
+    // Disengage distance for an already-locked target (hysteresis deadband).
+    // 0 = auto (MonsterRange + 3). Must exceed MonsterRange or it's ignored.
+    // Without the deadband, the small step-back AC applies on combat-mode entry
+    // can push a mob just past MonsterRange, dropping it and flipping to peace,
+    // then re-approaching — an endless engage/peace oscillation at the edge.
+    public int MonsterDisengageRange = 0;
     public int RingRange = 5;
     public int ApproachRange = 4;
     public int MinRingTargets = 4;
@@ -543,6 +552,7 @@ public sealed class SettingsBridgePayload
 
     // Ranges
     public int MonsterRange { get; set; }
+    public int MonsterDisengageRange { get; set; }
     public int RingRange { get; set; }
     public int ApproachRange { get; set; }
     public double CorpseApproachRangeMax { get; set; }
@@ -564,6 +574,9 @@ public sealed class SettingsBridgePayload
     public float NavResumeTurnAngle { get; set; }
     public float NavDeadZone { get; set; }
     public float NavSweepMult { get; set; }
+    public float NavLookaheadYards { get; set; }
+    public float NavTurnRateDegPerSec { get; set; }
+    public float NavTier1TurnSpeed { get; set; }
     public float PostPortalDelaySec { get; set; }
     public float T2Speed { get; set; }
     public float T2WalkWithinYd { get; set; }

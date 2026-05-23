@@ -12,17 +12,18 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <IlcOptimizationPreference>Size</IlcOptimizationPreference>
     <StripSymbols>false</StripSymbols>
-    <RootNamespace>RynthCore.Plugin.RynthAi</RootNamespace>
-    <AssemblyName>RynthCore.Plugin.RynthAi</AssemblyName>
+    <RootNamespace>RynthCore.Plugin.RynthVision</RootNamespace>
+    <AssemblyName>RynthCore.Plugin.RynthVision</AssemblyName>
     <Platforms>x86</Platforms>
+    <!-- Publish straight to the plugin's launcher-registered home so a bare
+         `dotnet publish` lands where the engine hot-reloads it. Build still
+         uses bin\; only publish is redirected. Deploy-RynthCore.ps1 points its
+         copy step at this same path and skips the redundant self-copy. -->
+    <PublishDir>C:\Games\RynthSuite\RynthVision\</PublishDir>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <EmbeddedResource Include="Combat\SpellData.txt" />
   </ItemGroup>
 
   <ItemGroup>
@@ -32,21 +33,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
     <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
-    <ProjectReference Include="..\..\Shared\RynthCore.LootSdk\RynthCore.LootSdk.csproj" />
     <ProjectReference Include="..\..\Shared\RynthCore.TerrainData\RynthCore.TerrainData.csproj" />
   </ItemGroup>
-
-  <!--
-    Historically this target auto-copied the published plugin DLL into the
-    RynthCore engine's bin\Plugins\ folder so a fresh engine build would pick
-    up the plugin without manual intervention. That behaviour conflicts with
-    the launcher's plugin-discovery model (users opt-in via "Add Plugin DLL"
-    in the launcher UI, persisted to %APPDATA%\RynthCore\engine.json).
-    Auto-copy removed intentionally — deploy plugin DLLs to their canonical
-    home (e.g. C:\Games\RynthSuite\RynthAi\) and add the path in the launcher.
-  -->
-
-
 
   <Target Name="RemoveBundledImGuiNativeFromBuild" AfterTargets="Build">
     <Delete Files="$(OutputPath)cimgui.dll" Condition="Exists('$(OutputPath)cimgui.dll')" />

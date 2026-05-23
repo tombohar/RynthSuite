@@ -66,6 +66,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra dumpinv       — dump all inventory items (cache + direct)");
         ChatLine("[RynthAi] /ra combat        — dump combat state machine snapshot");
         ChatLine("[RynthAi] /ra clearbusy     — force-clear busy state (hourglass cursor)");
+        ChatLine("[RynthAi] /ra panic         — full AC state reset (cancel attack + peace mode + stop motion + clear busy)");
         ChatLine("[RynthAi] /ra forcebuff          — force-recast all buffs immediately");
         ChatLine("[RynthAi] /ra cancelforcebuff    — cancel an in-progress force rebuff");
         ChatLine("[RynthAi] /ra bufftest           — one-shot: snapshot enchant registries pre/post next item-spell cast (logs to RynthCore.log)");
@@ -1548,6 +1549,30 @@ public sealed partial class RynthAiPlugin
         if (_buffManager != null)   _buffManager.BusyCount = 0;
         int after = Host.HasGetBusyState ? Host.GetBusyState() : -1;
         ChatLine($"[RynthAi] Busy state cleared (was {before} → {after})");
+    }
+
+    // Broader reset for the "AC wedged with item-action notice" failure mode
+    // that /ra clearbusy can't fix — the orphan attack from a missing
+    // CancelAttack at the Combat→Buffing handoff lives outside the
+    // CommandInterpreter / m_cBusy state that clearbusy targets.
+    private void HandlePanicCommand()
+    {
+        int before = Host.HasGetBusyState ? Host.GetBusyState() : -1;
+        ChatLine("[RynthAi] PANIC — full AC state reset");
+
+        if (Host.HasCancelAttack)      Host.CancelAttack();
+        if (Host.HasChangeCombatMode)  Host.ChangeCombatMode(CombatMode.NonCombat);
+        if (Host.HasStopCompletely)    Host.StopCompletely();
+        if (Host.HasForceResetBusyCount) Host.ForceResetBusyCount();
+
+        _busyCount = 0;
+        _busyCountLastIncrementAt = 0;
+        _busyCountBecamePositiveAt = 0;
+        if (_combatManager != null) _combatManager.BusyCount = 0;
+        if (_buffManager != null)   _buffManager.BusyCount = 0;
+
+        int after = Host.HasGetBusyState ? Host.GetBusyState() : -1;
+        ChatLine($"[RynthAi] Panic complete (busy {before} → {after}). If still stuck, relog.");
     }
 
     private void HandleForceBuff()

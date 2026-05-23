@@ -334,6 +334,10 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.SetNextItemWidth(120);
                 ImGui.InputInt("Monster Range", ref _settings.MonsterRange);
                 ImGui.SetNextItemWidth(120);
+                ImGui.InputInt("Disengage Range", ref _settings.MonsterDisengageRange);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Drop a locked target only past this distance (hysteresis).\n0 or <= Monster Range = auto (Monster Range + 3).");
+                ImGui.SetNextItemWidth(120);
                 ImGui.InputInt("Ring Range", ref _settings.RingRange);
                 ImGui.SetNextItemWidth(120);
                 ImGui.InputInt("Approach Range", ref _settings.ApproachRange);
@@ -398,9 +402,9 @@ internal sealed class LegacyAdvancedSettingsUi
                 if (ImGui.IsItemHovered())
                 {
                     ImGui.SetTooltip(
-                        "Legacy: SetAutorun + TurnLeft/TurnRight\n" +
-                        "Tier 1: Direct CM_Movement server events\n" +
-                        "Tier 2: Client physics MoveToPosition");
+                        "Legacy: SetAutorun + smooth heading servo (TurnToHeading)\n" +
+                        "Tier 1: SetAutorun + CM_Movement turn commands (DoMovement)\n" +
+                        "Tier 2: Client physics MoveToPosition (not built yet — falls back to Legacy)");
                 }
 
                 ImGui.Spacing();
@@ -426,6 +430,22 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.InputFloat("Sweep Detect Mult", ref _settings.NavSweepMult, 0.5f, 1f, "%.1f");
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Closest-approach detection radius multiplier.");
+
+                ImGui.SetNextItemWidth(80);
+                ImGui.InputFloat("Lookahead (yd)", ref _settings.NavLookaheadYards, 0.5f, 1f, "%.1f");
+                if (_settings.NavLookaheadYards < 0f) _settings.NavLookaheadYards = 0f;
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Within this distance of a waypoint, blend the aim point toward the next one to cut corners smoothly. 0 = off (aim straight at each waypoint).");
+
+                ImGui.SetNextItemWidth(80);
+                ImGui.InputFloat("Turn Rate (deg/s)", ref _settings.NavTurnRateDegPerSec, 15f, 45f, "%.0f");
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Mode 0 (heading servo) max turn speed. Higher = snappier turns, lower = gentler. Ignored by Tier 1 / Tier 2.");
+
+                ImGui.SetNextItemWidth(80);
+                ImGui.InputFloat("Tier1 Turn Speed", ref _settings.NavTier1TurnSpeed, 0.1f, 0.5f, "%.2f");
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Tier 1 (CM_Movement) DoMovement turn-command speed. Only used when Movement Engine = Tier 1.");
 
                 ImGui.SetNextItemWidth(80);
                 ImGui.InputFloat("Post-Portal Delay (s)", ref _settings.PostPortalDelaySec, 0.25f, 1f, "%.2f");

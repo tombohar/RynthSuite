@@ -11,10 +11,21 @@ internal static class ChatClassifier
     internal const string Channels = "Channels";  // General/Trade/LFG/Roleplay/Society/Admin — all 0x08/0x09
     internal const string System   = "System";
     internal const string Combat   = "Combat";
+    internal const string Rynth    = "Rynth";     // Any RynthCore/RynthAi/RynthChat plugin output ("[Rynth…]")
     internal const string Other    = "Other";
 
     internal static readonly string[] AllChannels =
-        { Chat, Channels, System, Combat, Other };
+        { Chat, Channels, System, Combat, Rynth, Other };
+
+    /// <summary>
+    /// True for output emitted by the Rynth stack itself — every Rynth plugin tags
+    /// its chat lines with a "[Rynth…]" prefix (e.g. "[RynthAi]", "[RynthChat]",
+    /// "[RynthAi Craft]"). These are routed to the dedicated Rynth tab regardless of
+    /// the chatType the plugin happened to write them with, so nothing gets scattered
+    /// across System/Other/Chat and lost.
+    /// </summary>
+    internal static bool IsRynthOutput(string text) =>
+        text.StartsWith("[Rynth", StringComparison.OrdinalIgnoreCase);
 
     // ── Channel classification ─────────────────────────────────────────────
 

@@ -287,8 +287,24 @@ public class SpellManager
         try
         {
             if (!_host.HasReadKnownSpells) return;
-            var buf = new uint[2048];
-            int n = _host.ReadKnownSpells(buf, buf.Length);
+
+            // Grow the buffer until it is NOT completely filled. A full buffer means
+            // the spellbook was TRUNCATED — and because higher spell tiers carry
+            // higher ids, the dropped entries are exactly the high-tier self-buffs
+            // (Strength Self VI/VII/VIII, Incantations…). That collapses the tier
+            // walk to the low-id tier that survived (Strength Self I = id 2). A full
+            // buffing mage knows well over 2048 spells, so a fixed 2048 cap is the
+            // real "casts level 1" bug. Cap at 65536 as a sanity bound.
+            uint[] buf;
+            int n;
+            int cap = 8192;
+            while (true)
+            {
+                buf = new uint[cap];
+                n = _host.ReadKnownSpells(buf, buf.Length);
+                if (n < cap || cap >= 65536) break; // got the whole spellbook (or hit sanity cap)
+                cap *= 2;
+            }
             if (n <= 0) return; // cold/unavailable — keep whatever we have
             var fresh = new HashSet<int>();
             int take = Math.Min(n, buf.Length);
@@ -297,6 +313,13 @@ public class SpellManager
             if (fresh.Count == 0) return;
             _knownSpellIds.Clear();
             foreach (int id in fresh) _knownSpellIds.Add(id);
+            // Purge stale blacklist entries. The empirical blacklist accumulates
+            // false positives from lag-induced no-chat timeouts and persists to
+            // disk across sessions — higher tiers get permanently suppressed,
+            // causing tier walk-down to level 1. Now that the snapshot is
+            // authoritative, any blacklisted spell the char demonstrably knows
+            // was a false positive; remove it so the correct tier resolves.
+            _unresolvableSpellIds.RemoveWhere(id => _knownSpellIds.Contains(id));
         }
         catch { }
     }
@@ -306,20 +329,9 @@ public class SpellManager
         if (!SpellDictionary.TryGetValue(exactName, out spellId))
             return false;
 
-        // Skip ids a cast empirically proved unknown — overrides the broken
-        // engine IsSpellKnown (which lies "true" for unknown spells). This is
-        // what lets the tier walk in GetDynamicSelfBuffId drop to a known tier.
-        if (_unresolvableSpellIds.Contains(spellId))
-        {
-            spellId = 0;
-            return false;
-        }
-
-        // Authoritative: the main-thread spellbook snapshot is the only
-        // reliable "does the char know this" source (the engine IsSpellKnown
-        // function is mis-bound and lies "true" for unknown spells). If the
-        // snapshot is populated, REQUIRE membership — unknown ids are skipped
-        // here so GetDynamicSelfBuffId instantly drops to the known tier.
+        // Authoritative snapshot wins unconditionally when warm: if the char
+        // demonstrably knows the spell, trust that over the empirical blacklist
+        // (which can be poisoned by lag-induced no-chat timeouts).
         if (_knownSpellIds.Count > 0)
         {
             if (_knownSpellIds.Contains(spellId)) return true;
@@ -327,9 +339,15 @@ public class SpellManager
             return false;
         }
 
-        // Snapshot cold (pre-login / engine without ReadKnownSpells) — degrade
-        // to the legacy path. The mis-bound IsSpellKnown is still bounded by
-        // the empirical _unresolvableSpellIds cache above + the no-chat timeout.
+        // Snapshot cold — fall back to the empirical blacklist. The mis-bound
+        // engine IsSpellKnown is still bounded by _unresolvableSpellIds so the
+        // tier walk doesn't spin on silently-dropped unknown spells.
+        if (_unresolvableSpellIds.Contains(spellId))
+        {
+            spellId = 0;
+            return false;
+        }
+
         if (_playerId != 0 && _host.HasIsSpellKnown)
         {
             _host.IsSpellKnown(_playerId, unchecked((uint)spellId), out bool known);

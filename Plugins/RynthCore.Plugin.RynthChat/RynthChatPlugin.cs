@@ -39,6 +39,9 @@ public sealed class RynthChatPlugin : RynthPluginBase
 
     internal string BuildScrollbackJson(ulong sinceSeq) => _buffer.BuildJson(sinceSeq);
 
+    // Called on the game thread from the engine's deferred chat dispatch
+    // (Win32Backend posts WM_RYNTHCORE_CHAT so this runs on a fresh, non-reentrant
+    // message dispatch rather than inline inside the Enter keystroke handler).
     internal void SendLine(string text)
     {
         if (!Host.HasInvokeChatParser || string.IsNullOrWhiteSpace(text)) return;

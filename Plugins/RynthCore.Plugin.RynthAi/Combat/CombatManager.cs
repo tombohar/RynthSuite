@@ -73,6 +73,13 @@ public class CombatManager : IDisposable
     private bool _returnToPhysicalCombat = false;
     private int _savedWeaponId = 0;
 
+    // Shared cross-subsystem weapon-swap serializer (set by RynthAiPlugin).
+    // Prevents combat weapon equips from racing the buff wand-equip, and also
+    // serializes CombatManager's own re-equip + EquipWeaponAndSetStance so two
+    // equips can't fire in one tick.
+    private WeaponSwapGate? _weaponSwapGate;
+    public void SetWeaponSwapGate(WeaponSwapGate gate) => _weaponSwapGate = gate;
+
     /// <summary>Current combat mode — read live from AC client each access to avoid event-drop drift.</summary>
     public int CurrentCombatMode =>
         _host.HasGetCurrentCombatMode ? _host.GetCurrentCombatMode() : CombatMode.NonCombat;
@@ -174,6 +181,18 @@ public class CombatManager : IDisposable
     /// </summary>
     public bool HasEngageableTarget =>
         IsActivelyEngaged || HasCloseThreat(System.Math.Max(1, _settings.MonsterRange));
+
+    /// <summary>
+    /// Distance at which an already-locked target is dropped / stops being
+    /// attacked. Larger than MonsterRange (the acquire distance) to form a
+    /// hysteresis deadband around the combat-mode step-back. Configurable via
+    /// MonsterDisengageRange; 0 or any value not exceeding MonsterRange falls
+    /// back to MonsterRange + 3.
+    /// </summary>
+    private double DisengageDistance =>
+        _settings.MonsterDisengageRange > _settings.MonsterRange
+            ? _settings.MonsterDisengageRange
+            : _settings.MonsterRange + 3;
 
     /// <summary>Diagnostic snapshot for /ra combat — exposes the internal state machine fields.</summary>
     public CombatStateSnapshot GetStateSnapshot()
@@ -792,6 +811,12 @@ public class CombatManager : IDisposable
         if (!_settings.EnableCombat) return false;
 
         double acDistanceLimit = _settings.MonsterRange;
+        // Hysteresis: a locked target is retained (and kept under attack) out to
+        // the larger disengage distance, while new targets are still only
+        // acquired within MonsterRange (ScanNearbyTargets). The gap absorbs the
+        // step-back AC applies on combat-mode entry so a mob at the edge doesn't
+        // oscillate engage<->peace.
+        double disengageLimit = DisengageDistance;
         // Note: _blacklistManager self-expires entries on read (IsBlacklisted), so no
         // explicit cleanup pass is needed. The old vestigial `blacklistedTargets` dict
         // and its CleanupExpiredBlacklist helper were removed — they were never populated.
@@ -831,7 +856,7 @@ public class CombatManager : IDisposable
             else if (_worldFilter.GetHealthRatio(activeTargetId) == 0f)
                 DropTarget("hp=0");
             else if (target != null &&
-                     _worldFilter.Distance(_host.GetPlayerId() == 0 ? 0 : (int)_host.GetPlayerId(), activeTargetId) > acDistanceLimit)
+                     _worldFilter.Distance(_host.GetPlayerId() == 0 ? 0 : (int)_host.GetPlayerId(), activeTargetId) > disengageLimit)
                 DropTarget("out of range");
             // If target == null here it's a transient world-filter miss — keep the lock,
             // the stillScanned grace period below will handle a truly dead/vanished mob.
@@ -902,11 +927,13 @@ public class CombatManager : IDisposable
         }
 
         // Distance gate: don't issue any attack commands (SelectItem, attack, cast)
-        // when the target is beyond MonsterRange. The lock stays so we re-engage if
-        // it comes back in range, but no commands means no client auto-run toward it.
+        // when the target is beyond the disengage distance. Within the deadband
+        // (MonsterRange..disengage) we KEEP issuing commands so AC's auto-run
+        // pulls the character back into engage range after the combat-mode
+        // step-back — instead of dropping to peace and restarting the approach.
         double currentDist = _worldFilter.Distance(
             _host.GetPlayerId() == 0 ? 0 : (int)_host.GetPlayerId(), activeTargetId);
-        if (currentDist > acDistanceLimit)
+        if (currentDist > disengageLimit)
             return true;
 
         if (!EquipWeaponAndSetStance(targetObj, "Auto"))
@@ -995,7 +1022,8 @@ public class CombatManager : IDisposable
                     if (rule2 != null && !HasPendingDebuffs(rule2, elem2))
                     {
                         _returnToPhysicalCombat = false;
-                        if (_savedWeaponId != 0)
+                        if (_savedWeaponId != 0
+                            && (_weaponSwapGate == null || _weaponSwapGate.TryBeginSwap("combat-restore")))
                         {
                             _host.UseObject((uint)_savedWeaponId);
                             _savedWeaponId = 0;
@@ -1014,7 +1042,8 @@ public class CombatManager : IDisposable
                     if (HasPendingDebuffs(rule, elem))
                     {
                         int wandId = FindWandInItems();
-                        if (wandId != 0)
+                        if (wandId != 0
+                            && (_weaponSwapGate == null || _weaponSwapGate.TryBeginSwap("combat-debuff-wand")))
                         {
                             // TODO: Save current equipped weapon when inventory API is available.
                             _savedWeaponId = 0;
@@ -1309,7 +1338,8 @@ public class CombatManager : IDisposable
             _host.ChangeCombatMode(desiredMode);
             lastStanceAttempt = DateTime.Now;
         }
-        if ((DateTime.Now - _lastEquipTime).TotalMilliseconds > 2000)
+        if ((DateTime.Now - _lastEquipTime).TotalMilliseconds > 2000
+            && (_weaponSwapGate == null || _weaponSwapGate.TryBeginSwap("combat-equip")))
         {
             if (diagNow) { _lastEquipDiagAt = DateTime.Now; _host.Log($"[EquipDiag] wielded=FALSE UseObject(0x{targetWeaponId:X8} '{weaponObj.Name}') — equip attempt"); }
             _host.UseObject((uint)targetWeaponId);
@@ -1352,7 +1382,8 @@ public class CombatManager : IDisposable
             _host.ChangeCombatMode(CombatMode.Magic);
             lastStanceAttempt = DateTime.Now;
         }
-        if ((DateTime.Now - _lastEquipTime).TotalMilliseconds > 2000)
+        if ((DateTime.Now - _lastEquipTime).TotalMilliseconds > 2000
+            && (_weaponSwapGate == null || _weaponSwapGate.TryBeginSwap("combat-magicready-wand")))
         {
             _host.UseObject((uint)wandId);
             _lastEquipTime = DateTime.Now;

@@ -32,6 +32,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private SpellManager? _spellManager;
     private BuffManager? _buffManager;
     private CombatManager? _combatManager;
+    private WeaponSwapGate? _weaponSwapGate;
     private MissileCraftingManager? _missileCraftingManager;
     private FellowshipTracker? _fellowshipTracker;
     private MetaManager? _metaManager;
@@ -108,13 +109,18 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
     public override void Shutdown()
     {
+        long t0 = Environment.TickCount64;
         try { _dashboard?.SaveSettings(); } catch { }
+        long tAfterSettings = Environment.TickCount64;
         TeardownSession();
+        long tAfterTeardown = Environment.TickCount64;
         try { _creatureStore?.SaveIfDirty(); } catch { }
+        long tAfterStore = Environment.TickCount64;
         _creatureStore = null;
         _objectCache = null;
         _initialized = false;
         _dashboard = null;
+        Log($"RynthAi: Shutdown done — SaveSettings={tAfterSettings - t0} ms, TeardownSession={tAfterTeardown - tAfterSettings} ms, SaveCreatureStore={tAfterStore - tAfterTeardown} ms, total={tAfterStore - t0} ms");
     }
 
     /// <summary>
@@ -139,13 +145,18 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _navigationEngine?.Stop();
         _navigationEngine = null;
         _navMarkerRenderer = null;
+        long tFlush0 = Environment.TickCount64;
         _radarWallRenderer?.Flush();
+        long tFlushMs = Environment.TickCount64 - tFlush0;
         _radarWallRenderer = null;
         _terrainOverlay = null;
+        long tRay0 = Environment.TickCount64;
         _raycast?.Dispose();
+        long tRayMs = Environment.TickCount64 - tRay0;
         _raycast = null;
         _combatManager?.Dispose();
         _combatManager = null;
+        Log($"RynthAi: TeardownSession — RadarWallFlush={tFlushMs} ms, RaycastDispose={tRayMs} ms");
         _fellowshipTracker?.Dispose();
         _fellowshipTracker = null;
         _metaManager = null;
@@ -253,7 +264,14 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _spellManager.SetCharacterSkills(_charSkills);
         _spellManager.SetPlayerId(_playerId);
         _spellManager.InitializeNatively();
+        // Shared weapon-swap serializer — both managers consult it so a buff
+        // wand-equip and a combat weapon-equip can't fire within ~3s of each
+        // other (the collision behind "you can only move or use one item at a
+        // time" and the object-teardown AV).
+        _weaponSwapGate ??= new WeaponSwapGate();
+
         _buffManager = new BuffManager(Host, _dashboard.Settings, _spellManager, _vitals);
+        _buffManager.SetWeaponSwapGate(_weaponSwapGate);
         _buffManager.SetCastResolvedCallback(OnBuffCastResolved);
         _buffManager.SetCharacterSkills(_charSkills);
         if (_objectCache != null) _buffManager.SetWorldObjectCache(_objectCache);
@@ -277,6 +295,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             _currentCombatMode = Host.GetCurrentCombatMode();
 
         _combatManager = new CombatManager(Host, _dashboard.Settings, _objectCache!, _spellManager);
+        _combatManager.SetWeaponSwapGate(_weaponSwapGate);
         _combatManager.SetCharacterSkills(_charSkills);
         _combatManager.SetPlayerId(_playerId);
         _navigationEngine?.SetCombatManager(_combatManager);
@@ -1084,6 +1103,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "combat":       HandleCombatStateCommand(); break;
             case "mapdump":      HandleMapDumpCommand(); break;
             case "clearbusy":    HandleClearBusyCommand(); break;
+            case "panic":        HandlePanicCommand(); break;
             case "forcebuff":        HandleForceBuff(); break;
             case "cancelforcebuff":  HandleCancelForceBuff(); break;
             case "bufftest":

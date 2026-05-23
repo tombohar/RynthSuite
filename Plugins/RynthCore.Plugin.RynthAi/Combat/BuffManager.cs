@@ -20,13 +20,20 @@ public class BuffManager : IDisposable
     private int _pendingSpellId = 0;
     private Action<string>? _onCastResolved;
 
-    // A cast that gets ZERO chat back (e.g. the char has the SKILL for a tier
-    // but doesn't KNOW that spell — AC silently drops it) never resolves, so
-    // pending never clears and the cycle wedges on it forever. Last-resort
-    // bound: if pending is outstanding this long with no chat, abandon it
-    // (cooldown the family + advance). Comfortably longer than any normal
-    // resolution (~0.5–1s) so a valid slow cast is never abandoned.
+    // ARMOR/ITEM enchants only: a cast that gets ZERO chat back (unknown tier /
+    // no comps — AC silently drops it) never resolves, so pending never clears
+    // and the cycle wedges. Last-resort bound: abandon after this long. Self-
+    // buffs do NOT use this path — they confirm via the live registry below.
     private const double NoChatResolveTimeoutMs = 5000;
+
+    // SELF-BUFFS confirm via the live player-enchantment registry, not chat
+    // (ReadPlayerEnchantments returns player buffs in real time; item enchants
+    // are NOT in it). Wait SelfBuffConfirmMs for the cast to settle server-side,
+    // then poll the registry; if still absent by SelfBuffGiveUpMs the tier
+    // didn't take (drop a tier only when the known-spell snapshot is cold).
+    private const double SelfBuffConfirmMs = 600;
+    private const double SelfBuffGiveUpMs  = 2500;
+    private DateTime _lastSelfBuffPollAt = DateTime.MinValue;
 
     // Wired by RynthAiPlugin. Invoked the instant a buff cast resolves in chat
     // (success / fizzle / hard-fail / too-busy) so the owner can clear the
@@ -80,6 +87,12 @@ public class BuffManager : IDisposable
     }
 
     private readonly Dictionary<int, RamTimerInfo> _ramBuffTimers = new();
+    // Highest tier we've actually seen LAND for a family. Incantations (nominal
+    // tier 8) land at a skill-capped lower tier; without this the upgrade rule
+    // in IsBuffActive recasts forever. Updated whenever a family's timer is
+    // recorded (live refresh or post-cast). Max-of-observed so it converges to
+    // the character's true ceiling after the first cast.
+    private readonly Dictionary<int, int> _familyAchievedTier = new();
     /// <summary>Keyed by (objectId, spellFamily) packed as long.</summary>
     private readonly Dictionary<long, ItemBuffTimerInfo> _itemBuffTimers = new();
     /// <summary>Keyed by spell family. Tracks item-enchantment casts (armor banes, Impenetrability) directly.</summary>
@@ -131,6 +144,29 @@ public class BuffManager : IDisposable
     private bool _isRechargingMana = false;
     private bool _isRechargingStamina = false;
     private bool _isHealingSelf = false;
+
+    // Pre-buff combat teardown: one-shot flag set the first tick we issue
+    // UseObject(wand) while in a physical combat mode. Reset on reaching Magic.
+    // Without the teardown, AC sees the equip request while a melee/missile
+    // attack is still pending server-side and the resulting "you can only
+    // move or use one item at a time" notice can wedge all item actions
+    // until relog.
+    private bool _combatTeardownDoneForCurrentBuffCycle;
+
+    // Wield gate: suppress duplicate UseObject(wand) calls while a prior
+    // equip is in flight. Cleared the moment the wielded check confirms;
+    // if it never does, the cooldown short-circuits further retries so we
+    // don't compound the same desync the missing CancelAttack causes.
+    private int _pendingWieldId;
+    private DateTime _pendingWieldAt = DateTime.MinValue;
+    private DateTime _wieldCooldownUntil = DateTime.MinValue;
+    private const double WieldResolveTimeoutMs = 2500;
+    private const double WieldCooldownMs = 5000;
+
+    // Shared cross-subsystem weapon-swap serializer (set by RynthAiPlugin).
+    // Prevents the buff wand-equip from racing CombatManager's weapon equip.
+    private WeaponSwapGate? _weaponSwapGate;
+    public void SetWeaponSwapGate(WeaponSwapGate gate) => _weaponSwapGate = gate;
 
     /// <summary>Live combat mode read from AC each access — never drifts if OnCombatModeChange is missed.</summary>
     public int CurrentCombatMode =>
@@ -226,10 +262,11 @@ public class BuffManager : IDisposable
                 var info = kvp.Value;
                 lines.Add($"item|{kvp.Key}|{info.CastAt.Ticks}|{info.ExpiresAt.Ticks}|{info.SpellLevel}|{info.SpellName}");
             }
-            // Learned "char doesn't know this spell id" set — persisted so the
-            // tier-down is paid once (first rebuff per char) then instant.
-            foreach (int unkId in _spellManager.UnresolvableSpellIds)
-                lines.Add($"unknown|{unkId}");
+            // The "char doesn't know this spell" blacklist is NO LONGER persisted.
+            // Persisting it meant one lag-induced no-chat timeout permanently
+            // poisoned a KNOWN spell across all future sessions, collapsing the
+            // tier walk down to level 1. It is now session-only: re-proven each
+            // login, cleared on relog.
             System.IO.File.WriteAllLines(_buffTimerPath, lines);
         }
         catch { }
@@ -265,11 +302,10 @@ public class BuffManager : IDisposable
                     continue;
                 }
 
-                if (p[0] == "unknown" && p.Length >= 2 && int.TryParse(p[1], out int unkId))
-                {
-                    _spellManager.MarkSpellUnresolvable(unkId);
-                    continue;
-                }
+                // Legacy "unknown|<id>" blacklist lines are intentionally ignored
+                // (no longer restored — see SaveBuffTimers). Skip so they don't
+                // fall through and misparse. Existing files self-clean on next save.
+                if (p[0] == "unknown") continue;
 
                 // Legacy single-prefix "family|ticks|level|name" or new "ram|family|ticks|level|name"
                 int offset = (p[0] == "ram") ? 1 : 0;
@@ -358,6 +394,15 @@ public class BuffManager : IDisposable
     private DateTime _lastPeriodicRefreshAt = DateTime.MinValue;
     private const int PeriodicRefreshIntervalMs = 30_000;
 
+    // Login-refresh stabilization: the server streams the active-enchantment
+    // registry over a few seconds after login, so an early read returns a
+    // partial/empty set. Opening the gate on that wipes timers → full rebuff
+    // every login. Wait until the count is the SAME across two consecutive 1s
+    // reads (registry done streaming — works for 0 buffs or 50), or a timeout.
+    private DateTime _loginRefreshStartAt = DateTime.MinValue;
+    private int _lastLoginRefreshCount = -1;
+    private const int LoginRefreshMaxWaitMs = 20_000;
+
     public void OnHeartbeat()
     {
         // Post-cast diffs for the bufftest experiment run unconditionally — even if the
@@ -385,8 +430,19 @@ public class BuffManager : IDisposable
                 int n = RefreshFromLiveMemory();
                 if (n >= 0)
                 {
-                    _liveBuffsRefreshed = true;
-                    _host.WriteToChat($"[RynthAi] Live buff timers ready ({n} loaded).", 1);
+                    if (_loginRefreshStartAt == DateTime.MinValue) _loginRefreshStartAt = DateTime.Now;
+                    // Only trust the snapshot once the registry stops growing
+                    // (two equal 1s reads), so we don't open the gate on a
+                    // half-streamed set and rebuff buffs that are still landing.
+                    bool stable    = (n == _lastLoginRefreshCount);
+                    bool timedOut  = (DateTime.Now - _loginRefreshStartAt).TotalMilliseconds > LoginRefreshMaxWaitMs;
+                    _lastLoginRefreshCount = n;
+                    if (stable || timedOut)
+                    {
+                        _liveBuffsRefreshed = true;
+                        _host.Log($"[BuffDiag] login refresh ready: {n} enchantment(s) (stable={stable} timedOut={timedOut})");
+                        _host.WriteToChat($"[RynthAi] Live buff timers ready ({n} loaded).", 1);
+                    }
                 }
             }
             // Don't cast anything until we have a real snapshot — otherwise
@@ -407,46 +463,76 @@ public class BuffManager : IDisposable
                 _host.Log($"[BuffDiag] periodic sync: {n} active enchantment(s) in RAM timers.");
         }
 
-        // No-chat safety valve: a cast AC never answers (unknown spell, etc.)
-        // would otherwise wedge the cycle forever. Abandon it after a long
-        // timeout — cooldown the family (same bound as a hard reject; NOT a
-        // fast retry, so no spam/AV) and clear pending so the loop advances.
-        // Also logs the spell-knowledge state so the real root cause (skill
-        // vs. known) is visible without another investigation round.
-        if (_pendingSpellId != 0
-            && (DateTime.Now - _lastCastAttempt).TotalMilliseconds > NoChatResolveTimeoutMs)
-        {
-            int stuckId = _pendingSpellId;
-            var stuck = SpellTableStub.GetById(stuckId);
-            string knownDiag = "n/a (HasIsSpellKnown=false)";
-            if (_host.HasIsSpellKnown)
-            {
-                uint pid = (uint)_host.GetPlayerId();
-                _host.IsSpellKnown(pid, (uint)stuckId, out bool known);
-                knownDiag = known.ToString();
-            }
-            _spellManager.MarkSpellUnresolvable(stuckId);
-            _host.Log($"[BuffChat] NO-CHAT TIMEOUT pending={stuckId} ('{stuck?.Name}') — AC sent no chat in " +
-                      $"{NoChatResolveTimeoutMs:0}ms (char doesn't know it; engine IsSpellKnown={knownDiag} is " +
-                      $"unreliable). Marked unresolvable → resolution drops to next lower tier.");
-            _pendingSpellId = 0;
-            _onCastResolved?.Invoke("no-chat timeout");
-        }
-
-        // Hold the cycle for item enchantments (banes/Impen/Brogard's) until the
-        // previous cast resolves via chat. Player self-buffs cast at full speed
-        // and use SpellCastIntervalMs alone — the bane/Impen path is the one
-        // that silently rejects when fired faster than server cast time
-        // (bufftest measured 0/10 land rate without this gate). OnChatWindowText
-        // clears _pendingSpellId on "ou cast X" / fizzle / fail / component /
-        // lack the mana. No time-based fallback: chat is authoritative.
+        // ── Pending-cast resolution — self-buffs and armor use DIFFERENT signals ──
+        // Self-buffs ARE in the live player-enchantment registry, so we confirm
+        // them by reading it (no chat, no no-chat blacklisting that poisons the
+        // tier walk). Armor/item enchants are NOT in the player registry — they
+        // live on the item — so they still resolve via chat + the no-chat valve.
         if (_pendingSpellId != 0)
         {
             var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
-            if (pendingSpell != null && IsArmorEnchantment(pendingSpell.Name))
+            bool pendingIsArmor = pendingSpell != null && IsItemEnchantment(pendingSpell.Name);
+
+            if (pendingSpell != null && !pendingIsArmor)
             {
-                _settings.BotAction = "Buffing";
-                return;
+                // SELF-BUFF: confirm against the live registry once the cast has
+                // settled. (OnEnchantmentAdded usually clears pending faster; this
+                // poll is the authoritative fallback when the hook doesn't fire.)
+                double sinceCastMs = (DateTime.Now - _lastCastAttempt).TotalMilliseconds;
+                if (sinceCastMs > SelfBuffConfirmMs
+                    && (DateTime.Now - _lastSelfBuffPollAt).TotalMilliseconds > 250)
+                {
+                    _lastSelfBuffPollAt = DateTime.Now;
+                    RefreshFromLiveMemory();
+                    bool active = _ramBuffTimers.TryGetValue(pendingSpell.Family, out RamTimerInfo? st)
+                                  && st.Expiration > DateTime.Now;
+                    if (active)
+                    {
+                        // During an auto-batch / force-rebuff, IsBuffActive gates on
+                        // _forceRebuffCastFamilies (not timers), so the family MUST be
+                        // marked cast here or the batch respins this buff forever.
+                        if (_isForceRebuffing) _forceRebuffCastFamilies.Add(pendingSpell.Family);
+                        _pendingSpellId = 0; // landed — registry confirms it; advance
+                        _onCastResolved?.Invoke("self-buff confirmed (registry)");
+                    }
+                    else if (sinceCastMs > SelfBuffGiveUpMs)
+                    {
+                        // Not in the registry after settling → this tier didn't take.
+                        // A WARM snapshot already excludes unknown tiers, so a no-show
+                        // is lag/fizzle → retry (NO blacklist). A COLD snapshot has no
+                        // other tier-down signal → blacklist this id to drop a tier.
+                        bool cold = !_spellManager.IsKnownSnapshotWarm;
+                        if (cold) _spellManager.MarkSpellUnresolvable(_pendingSpellId);
+                        _host.Log($"[BuffDiag] self-buff '{pendingSpell.Name}' (id={_pendingSpellId}, fam={pendingSpell.Family}) absent from live registry after {sinceCastMs:0}ms — " +
+                                  (cold ? "cold snapshot → blacklisted, tier-down." : "warm snapshot → retry (lag/fizzle)."));
+                        _pendingSpellId = 0;
+                        _onCastResolved?.Invoke("self-buff no-show (registry)");
+                    }
+                }
+                // Hold buffing state while the self-buff cast is in flight so
+                // CombatManager can't sneak a peace-mode switch in mid-cast.
+                if (_pendingSpellId != 0) { _settings.BotAction = "Buffing"; return; }
+            }
+            else if (pendingIsArmor)
+            {
+                // ARMOR/ITEM: chat is authoritative. No-chat valve abandons a cast
+                // AC never answers so the cycle can't wedge; the chat handlers do
+                // the cooldown. Blacklist (unless snapshot confirms known) drops tier.
+                if ((DateTime.Now - _lastCastAttempt).TotalMilliseconds > NoChatResolveTimeoutMs)
+                {
+                    int stuckId = _pendingSpellId;
+                    var stuck = SpellTableStub.GetById(stuckId);
+                    bool confirmedKnown = _spellManager.IsKnownSnapshotWarm && _spellManager.IsKnownSpellId(stuckId);
+                    if (!confirmedKnown)
+                        _spellManager.MarkSpellUnresolvable(stuckId);
+                    _host.Log($"[BuffChat] NO-CHAT TIMEOUT (armor) pending={stuckId} ('{stuck?.Name}') — no chat in " +
+                              $"{NoChatResolveTimeoutMs:0}ms. confirmedKnown={confirmedKnown}. " +
+                              (confirmedKnown ? "Lag/busy — NOT blacklisted." : "Blacklisted → tier-down."));
+                    _pendingSpellId = 0;
+                    _onCastResolved?.Invoke("no-chat timeout (armor)");
+                }
+                // Hold the cycle until chat resolves the item cast.
+                if (_pendingSpellId != 0) { _settings.BotAction = "Buffing"; return; }
             }
         }
 
@@ -571,20 +657,42 @@ public class BuffManager : IDisposable
     public bool NeedsAnyBuff()
     {
         if (!_settings.EnableBuffing) return false;
-        List<string> desiredBuffs = BuildDynamicBuffList();
+        return _isForceRebuffing || AnyBuffBelowThreshold(BuildDynamicBuffList(), _settings.RebuffSecondsRemaining);
+    }
+
+    // Returns true if any castable buff in the list has < thresholdSec remaining.
+    // Used both as the arbiter query (NeedsAnyBuff) and as the batch-rebuff trigger
+    // inside CheckAndCastSelfBuffs — keeps the two in sync on when buffing is needed.
+    private bool AnyBuffBelowThreshold(List<string> desiredBuffs, int thresholdSec)
+    {
         foreach (string buffBaseName in desiredBuffs)
         {
             AcSkillType castSkill = SkillForBuff(buffBaseName);
             if (!IsSkillUsable(castSkill)) continue;
             int spellId = FindBestSpellId(buffBaseName, castSkill);
             if (spellId == 0) continue;
-            if (!IsBuffActive(spellId)) return true;
+            if (!IsBuffActive(spellId, thresholdSec)) return true;
         }
         return false;
     }
 
     private bool CheckAndCastSelfBuffs()
     {
+        // Auto batch-rebuff: when any buff drops below the configured threshold,
+        // trigger a full rebuff so ALL timers re-align in one session rather than
+        // each buff trickling in one at a time as it individually expires.
+        if (!_isForceRebuffing && AnyBuffBelowThreshold(BuildDynamicBuffList(), _settings.RebuffSecondsRemaining))
+        {
+            // Batch trigger — reuse FR family-tracking but do NOT clear timers.
+            // ForceFullRebuff clears _ramBuffTimers, which causes an immediate
+            // re-trigger: any spell that can't be resolved (spellId=0) never
+            // gets a timer recorded, so the next AnyBuffBelowThreshold call sees
+            // "no timer = below threshold" and loops forever.
+            _isForceRebuffing = true;
+            _forceRebuffCastFamilies.Clear();
+            _buffFailCooldownUntil.Clear();
+        }
+
         List<string> desiredBuffs = BuildDynamicBuffList();
         bool diagnose = _isForceRebuffing;
 
@@ -655,15 +763,30 @@ public class BuffManager : IDisposable
     private int FindBestSpellId(string baseName, AcSkillType skill)
         => _spellManager.GetDynamicSelfBuffId(baseName, skill);
 
-    private static bool IsArmorEnchantment(string name)
+    // True for enchantments that live on an ITEM (armor or weapon), NOT on the
+    // player. These do NOT appear in ReadPlayerEnchantments, so they must be
+    // confirmed via chat, stored in _itemSpellTimers, and PRESERVED across a
+    // RefreshFromLiveMemory (which rebuilds player buffs from the live registry
+    // and would otherwise wipe them → perpetual recast = "buffing in circles").
+    // Matches base names AND tier-7 lore / "Aura of" forms.
+    private static bool IsItemEnchantment(string name)
     {
-        string[] armorSpells = {
+        string[] itemSpells = {
+            // Armor: Impenetrability + Brogard's, and the elemental/physical Banes
             "Impenetrability", "Brogard's Defiance", "Acid Bane", "Olthoi's Bane",
             "Blade Bane", "Swordsman's Bane", "Swordman's Bane", "Bludgeoning Bane", "Tusker's Bane",
             "Flame Bane", "Inferno's Bane", "Frost Bane", "Gelidite's Bane",
-            "Lightning Bane", "Astyrrian's Bane", "Piercing Bane", "Archer's Bane"
+            "Lightning Bane", "Astyrrian's Bane", "Piercing Bane", "Archer's Bane",
+            // Weapon auras: base names cover "Aura of X Self N" / "Incantation of X Self";
+            // the explicit lore names cover the tier-7 forms that drop the base word.
+            "Blood Drinker", "Aura of Infected Caress",
+            "Hermetic Link", "Aura of Mystic's Blessing",
+            "Heart Seeker", "Aura of Elysa's Sight",
+            "Spirit Drinker", "Aura of Infected Spirit Carress", "Aura of Infected Spirit Caress",
+            "Swift Killer", "Aura of Atlan's Alacrity",
+            "Defender", "Aura of Cragstone's Will",
         };
-        foreach (string s in armorSpells)
+        foreach (string s in itemSpells)
             if (name.IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0) return true;
         return false;
     }
@@ -840,7 +963,7 @@ public class BuffManager : IDisposable
         }
     }
 
-    private bool IsBuffActive(int spellId)
+    private bool IsBuffActive(int spellId, int? rebufferSecOverride = null)
     {
         var targetSpell = SpellTableStub.GetById(spellId);
         if (targetSpell == null) return false;
@@ -853,8 +976,9 @@ public class BuffManager : IDisposable
 
         int targetLevel = GetSpellLevel(targetSpell);
         // Recast when remaining duration drops below this many seconds.
-        // User-configurable via Advanced Settings → Buffing.
-        int rebufferSec = Math.Max(0, _settings.RebuffSecondsRemaining);
+        // User-configurable via Advanced Settings → Buffing; overridden during
+        // batch-rebuff passes (CheckAndCastSelfBuffs) to 1200s (20 min).
+        int rebufferSec = Math.Max(0, rebufferSecOverride ?? _settings.RebuffSecondsRemaining);
 
         // Tier-upgrade rule (applies to both item enchantments and player buffs):
         // if a better-tier spell is now available than what's currently active,
@@ -864,7 +988,7 @@ public class BuffManager : IDisposable
         // itself via the existing "Casting: X" line in CheckAndCastSelfBuffs.
 
         // Item spells (armor banes, Impenetrability) tracked in their own dictionary.
-        if (IsArmorEnchantment(targetSpell.Name))
+        if (IsItemEnchantment(targetSpell.Name))
         {
             if (_itemSpellTimers.TryGetValue(targetSpell.Family, out ItemSpellRecord? itemTimer))
             {
@@ -891,15 +1015,62 @@ public class BuffManager : IDisposable
         // Player buffs — use RAM timers
         if (_ramBuffTimers.TryGetValue(targetSpell.Family, out RamTimerInfo? timer))
         {
-            if (timer.SpellLevel < targetLevel)
+            // Tier-upgrade flap guard: many high-tier buffs are Incantations
+            // (nominal tier 8) that LAND at a lower, skill-capped tier — e.g.
+            // "Incantation of Sprint Self" (target 8) lands as "Sprint Self VI"
+            // (6). Comparing the landed 6 against the nominal 8 makes the
+            // upgrade rule fire forever → endless recast. Cap the target at the
+            // highest tier we've actually observed land for this family, so once
+            // the Incantation lands at its real ceiling we stop chasing 8.
+            int effectiveTarget = targetLevel;
+            if (_familyAchievedTier.TryGetValue(targetSpell.Family, out int achieved) && achieved < effectiveTarget)
+                effectiveTarget = achieved;
+
+            if (timer.SpellLevel < effectiveTarget)
+            {
+                LogPlayerRecast(targetSpell, $"tier-upgrade storedLvl={timer.SpellLevel} < effTarget={effectiveTarget} (nominal={targetLevel}, achievedCap={(_familyAchievedTier.TryGetValue(targetSpell.Family, out int a2) ? a2 : -1)}, stored='{timer.SpellName}')");
                 return false;
+            }
             if (DateTime.Now < timer.Expiration.AddSeconds(-rebufferSec))
+            {
+                _lastArmorRecastReason.Remove(targetSpell.Family);
                 return true;
+            }
+            double remainSec = (timer.Expiration - DateTime.Now).TotalSeconds;
+            LogPlayerRecast(targetSpell, $"expiry-window remainSec={remainSec:F0} threshold={rebufferSec} storedLvl={timer.SpellLevel} exp={timer.Expiration:HH:mm:ss} (stored='{timer.SpellName}')");
+        }
+        else
+        {
+            LogPlayerRecast(targetSpell, $"NO ram-timer entry for family={targetSpell.Family} (targetLvl={targetLevel}, _ramBuffTimers.Count={_ramBuffTimers.Count})");
         }
 
         if (_isForceRebuffing) return false;
 
         return false;
+    }
+
+    // Player-buff counterpart to LogArmorRecast — explains why a character
+    // self-buff (Impregnability/Aura of Deflection, masteries, etc.) is judged
+    // inactive. Throttled per-family (IsBuffActive is polled every tick).
+    private void LogPlayerRecast(SpellInfo targetSpell, string reason)
+    {
+        if (_lastArmorRecastReason.TryGetValue(targetSpell.Family, out string? prev) && prev == reason)
+            return;
+        _lastArmorRecastReason[targetSpell.Family] = reason;
+        _host.Log($"[BuffDiag] player-recast '{targetSpell.Name}' (id={targetSpell.Id}, fam={targetSpell.Family}): {reason}");
+    }
+
+    /// <summary>
+    /// Remember the highest tier a family has actually LANDED at (read from the
+    /// live registry, never from the cast name — an Incantation echoes its
+    /// nominal tier in chat but lands skill-capped). Capping the upgrade target
+    /// at this in IsBuffActive stops the endless "tier 6 < tier 8" recast flap.
+    /// </summary>
+    private void RecordAchievedTier(int family, int landedLevel)
+    {
+        if (landedLevel <= 0) return;
+        if (!_familyAchievedTier.TryGetValue(family, out int cur) || landedLevel > cur)
+            _familyAchievedTier[family] = landedLevel;
     }
 
     private void LogArmorRecast(SpellInfo targetSpell, string reason)
@@ -984,7 +1155,7 @@ public class BuffManager : IDisposable
         var preservedItemTimers = new Dictionary<int, RamTimerInfo>();
         foreach (var kvp in _ramBuffTimers)
         {
-            if (kvp.Value.Expiration > DateTime.Now && IsArmorEnchantment(kvp.Value.SpellName))
+            if (kvp.Value.Expiration > DateTime.Now && IsItemEnchantment(kvp.Value.SpellName))
                 preservedItemTimers[kvp.Key] = kvp.Value;
         }
 
@@ -992,10 +1163,18 @@ public class BuffManager : IDisposable
         for (int i = 0; i < count; i++)
         {
             var spellInfo = SpellTableStub.GetById((int)spellIds[i]);
-            if (spellInfo == null) continue;
+            if (spellInfo == null)
+            {
+                _host.Log($"[BuffDiag] refresh DROP: id={spellIds[i]} unresolved by SpellTableStub (no name) — would never re-add to RAM timers");
+                continue;
+            }
 
             double remainingSeconds = expiryTimes[i] - serverNow;
-            if (remainingSeconds <= 0) continue;
+            if (remainingSeconds <= 0)
+            {
+                _host.Log($"[BuffDiag] refresh DROP: id={spellIds[i]} '{spellInfo.Name}' fam={spellInfo.Family} remainSec={remainingSeconds:F0} (expiry={expiryTimes[i]:F0} serverNow={serverNow:F0}) — treated as expired");
+                continue;
+            }
 
             // A permanent player enchantment: the engine reports no expiry
             // (double.MaxValue). It IS active right now — record it as a
@@ -1016,6 +1195,9 @@ public class BuffManager : IDisposable
                 SpellName   = spellInfo.Name,
                 IsPermanent = isPermanent,
             };
+            // Learn the real ceiling this family lands at (Incantations cap below
+            // their nominal tier) so IsBuffActive stops chasing an unreachable tier.
+            RecordAchievedTier(spellInfo.Family, level);
 
             if (isPermanent && _loggedPermanentFamilies.Add(spellInfo.Family))
                 _host.Log($"[BuffDiag] permanent player enchant tracked: id={spellInfo.Id} '{spellInfo.Name}' (fam={spellInfo.Family}, lvl={level}) — presence-only, not persisted");
@@ -1026,7 +1208,10 @@ public class BuffManager : IDisposable
             _ramBuffTimers.TryAdd(kvp.Key, kvp.Value);
 
         SaveBuffTimers();
-        _liveBuffsRefreshed = true;
+        // NOTE: do NOT set _liveBuffsRefreshed here. The login gate in OnHeartbeat
+        // owns that flag and only opens it once the enchantment count STABILIZES
+        // across consecutive reads. Setting it here let the first partial/empty
+        // login read open the gate early → timers wiped → full rebuff every login.
         return _ramBuffTimers.Count;
     }
 
@@ -1269,7 +1454,7 @@ public class BuffManager : IDisposable
             "Armor Self", "Acid Protection Self", "Fire Protection Self",
             "Cold Protection Self", "Lightning Protection Self",
             "Blade Protection Self", "Piercing Protection Self",
-            "Bludgeoning Protection Self", "Impregnability Self"
+            "Bludgeoning Protection Self"
         });
 
         step6_WeaponAuras.AddRange(new List<string> {
@@ -1373,7 +1558,7 @@ public class BuffManager : IDisposable
             if (_pendingSpellId != 0)
             {
                 var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
-                if (pendingSpell != null && IsArmorEnchantment(pendingSpell.Name))
+                if (pendingSpell != null && IsItemEnchantment(pendingSpell.Name))
                 {
                     _itemSpellTimers.Remove(pendingSpell.Family);
                     SaveBuffTimers();
@@ -1404,7 +1589,7 @@ public class BuffManager : IDisposable
                 var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
                 if (pendingSpell != null)
                 {
-                    if (IsArmorEnchantment(pendingSpell.Name))
+                    if (IsItemEnchantment(pendingSpell.Name))
                     {
                         _itemSpellTimers.Remove(pendingSpell.Family);
                         SaveBuffTimers();
@@ -1428,7 +1613,7 @@ public class BuffManager : IDisposable
             if (_pendingSpellId != 0)
             {
                 var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
-                if (pendingSpell != null && IsArmorEnchantment(pendingSpell.Name))
+                if (pendingSpell != null && IsItemEnchantment(pendingSpell.Name))
                 {
                     _itemSpellTimers.Remove(pendingSpell.Family);
                     SaveBuffTimers();
@@ -1471,7 +1656,7 @@ public class BuffManager : IDisposable
             // Chat-authoritative record: only NOW (AC confirmed "you cast X").
             // Item/armor enchants live in _itemSpellTimers (what IsBuffActive
             // checks for them); player buffs in _ramBuffTimers.
-            if (IsArmorEnchantment(spellInfo.Name))
+            if (IsItemEnchantment(spellInfo.Name))
                 RecordItemSpellCast(spellInfo);
             else
                 RecordSpellTimer(spellInfo);
@@ -1513,7 +1698,9 @@ public class BuffManager : IDisposable
 
     private static AcSkillType SkillForBuff(string name)
     {
-        if (name.Contains("Impregnability") || name.Contains("Blood Drinker") ||
+        // Impregnability Self = Missile Defense (Creature Enchantment), NOT Item Enchantment.
+        // Impenetrability / Bane / weapon auras = Item Enchantment.
+        if (name.Contains("Blood Drinker") ||
             name.Contains("Hermetic Link") || name.Contains("Heart Seeker") ||
             name.Contains("Spirit Drinker") || name.Contains("Swift Killer") ||
             name.Contains("Defender") || name.Contains("Impenetrability") ||
@@ -1532,7 +1719,15 @@ public class BuffManager : IDisposable
 
     private bool EnsureMagicMode()
     {
-        if (CurrentCombatMode == CombatMode.Magic) return true;
+        if (CurrentCombatMode == CombatMode.Magic)
+        {
+            // Successfully reached magic mode — clear per-cycle teardown flag
+            // and wield gate so the next switch out of magic restarts cleanly.
+            _combatTeardownDoneForCurrentBuffCycle = false;
+            _pendingWieldId = 0;
+            _wieldCooldownUntil = DateTime.MinValue;
+            return true;
+        }
 
         int wandId = FindWandInItems();
         if (wandId == 0)
@@ -1562,12 +1757,61 @@ public class BuffManager : IDisposable
 
         if (!alreadyWielded)
         {
+            // Wield gate: don't spam UseObject. Hold off after the first issue
+            // until either the wielded check confirms (cleared on the Magic-mode
+            // branch above) or the resolve timeout elapses, then cool down
+            // before retrying. Mirrors the no-chat-timeout pattern used for
+            // spell casts at the top of OnHeartbeat. Checked BEFORE the shared
+            // swap gate so a denied attempt never claims the cross-subsystem slot.
+            DateTime now = DateTime.Now;
+            if (now < _wieldCooldownUntil)
+                return false;
+
+            if (_pendingWieldId != 0)
+            {
+                if ((now - _pendingWieldAt).TotalMilliseconds < WieldResolveTimeoutMs)
+                    return false;
+
+                _host.Log($"[WieldGate] UseObject(0x{(uint)_pendingWieldId:X8}) not confirmed in " +
+                          $"{WieldResolveTimeoutMs:0}ms — cooling down {WieldCooldownMs:0}ms");
+                _pendingWieldId = 0;
+                _wieldCooldownUntil = now.AddMilliseconds(WieldCooldownMs);
+                return false;
+            }
+
+            // Shared weapon-swap gate: if CombatManager (or anything else) swapped
+            // a weapon within the last few seconds, wait — two equips in flight
+            // collide ("you can only move or use one item at a time" / AV).
+            if (_weaponSwapGate != null && !_weaponSwapGate.TryBeginSwap("buff-wand"))
+                return false;
+
+            // Tear down any in-flight physical combat BEFORE the UseObject. The
+            // transition Melee/Missile → Magic-via-wand must explicitly cancel the
+            // pending attack, or AC gets a UseObject while m_bAttacking is still
+            // set and wedges the item-action gate. Done only after we've claimed
+            // the swap slot above, so we don't cancel an attack then fail to swap.
+            if (!_combatTeardownDoneForCurrentBuffCycle &&
+                (CurrentCombatMode == CombatMode.Melee || CurrentCombatMode == CombatMode.Missile))
+            {
+                if (_host.HasCancelAttack)   _host.CancelAttack();
+                if (_host.HasStopCompletely) _host.StopCompletely();
+                _combatTeardownDoneForCurrentBuffCycle = true;
+                _host.Log($"[BuffPre] CancelAttack+StopCompletely before wand equip (mode was {CurrentCombatMode})");
+            }
+
             _host.UseObject((uint)wandId);
-            _lastCastAttempt = DateTime.Now;
+            _pendingWieldId = wandId;
+            _pendingWieldAt = now;
+            _lastCastAttempt = now;
             return false; // Yield — let the server equip the wand
         }
 
-        // Wand is wielded — safe to switch stance
+        // Wand is wielded — clear the gate and switch stance.
+        if (_pendingWieldId == wandId)
+        {
+            _pendingWieldId = 0;
+            _wieldCooldownUntil = DateTime.MinValue;
+        }
         _host.ChangeCombatMode(CombatMode.Magic);
         _lastCastAttempt = DateTime.Now;
         return false; // Yield — let stance animation finish

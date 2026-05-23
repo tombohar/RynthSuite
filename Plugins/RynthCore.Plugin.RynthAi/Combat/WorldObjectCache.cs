@@ -36,12 +36,49 @@ public class WorldObjectCache
     private readonly Dictionary<uint, int> _classifyRetry = new();
     private const int MaxClassifyRetries = 8;
 
+    // Slow-retry rescue. When the 8-tick fast-retry burst exhausts (all attempts
+    // within ~10 ms because Tick processes 30 pending entries per pass), the uid
+    // moves here instead of being abandoned. Every ReclassifyIntervalSec the
+    // entries are flushed back into _pending so the engine has fresh chances to
+    // populate name+position. Successful classification evicts the uid at the
+    // top of TryClassify; a fresh give-up re-adds it. OnDeleteObject cleans up.
+    // Roots out the "respawned monster invisible until clicked" bug where AC's
+    // weenie data lagged behind OnCreateObject by more than 10 ms.
+    private readonly HashSet<uint> _slowRetry = new();
+
     // Objects deleted while still pending classification — skip to avoid stale-pointer AV
     private readonly HashSet<uint> _deletedWhilePending = new();
 
     // Periodic reclassification — rescues Unknown landscape objects that become recognisable later
     private DateTime _lastReclassifyTime = DateTime.MinValue;
     private const double ReclassifyIntervalSec = 2.0;
+
+    // Diagnostic state for the "bot ignores mobs until clicked" investigation.
+    // Records the latest reason each Unknown landscape uid keeps failing to be promoted
+    // to creature so we can correlate skip ↔ HEALTHADD-RESCUE ↔ promotion in the log.
+    // State-change suppressed per uid; cleared on promotion / health-add rescue.
+    private readonly Dictionary<uint, string> _reclassifySkipState = new();
+    private int _reclassifyDiagCount;
+    private int _reclassifyDiagSummaryCount;
+    private const int MaxReclassifyDiagLines = 500;
+    private const int MaxReclassifyDiagSummaries = 60;
+
+    // Diagnostic — track every uid OnCreateObject ever saw. Lets HEALTHADD-RESCUE
+    // and INDEXER-RESCUE log lines flag the case where a mob enters _creatures via
+    // a path other than OnCreateObject → TryClassify (i.e. the engine's CreateObject
+    // hook never fired for this respawn — the suspected bug). No eviction: a delete +
+    // recreate of the same id MUST keep showing seenCreate=1 to be diagnostic-correct.
+    private readonly HashSet<uint> _seenCreateObject = new();
+    private int _healthAddLogCount;
+    private int _indexerRescueLogCount;
+    private int _classifyGiveupLogCount;
+    private int _deleteWhilePendingSkipLogCount;
+    private int _deleteBeforeClassifyLogCount;
+    private const int MaxHealthAddDiagLines = 200;
+    private const int MaxIndexerRescueDiagLines = 200;
+    private const int MaxClassifyGiveupLogLines = 200;
+    private const int MaxDeleteWhilePendingSkipLogLines = 200;
+    private const int MaxDeleteBeforeClassifyLogLines = 200;
 
     // ItemType flag constants (AC ITEM_TYPE bitmask)
     private const uint ItemTypeMeleeWeapon              = 0x00000001;
@@ -102,6 +139,7 @@ public class WorldObjectCache
         // before re-queueing so TryClassify doesn't skip it.
         _deletedWhilePending.Remove(id);
         _pending.Enqueue(id);
+        _seenCreateObject.Add(id); // diagnostic: record that the engine fired CreateObject for this uid
     }
 
     public void OnDeleteObject(uint id)
@@ -113,13 +151,28 @@ public class WorldObjectCache
         _landscape.Remove(sid);
         _healthRatios.Remove(sid);
         _classifyRetry.Remove(id);
+        _slowRetry.Remove(id);
+        _reclassifySkipState.Remove(id);
         // Only mark as "deleted while pending" when the object was never classified —
         // i.e. it might still be sitting in _pending and TryClassify must skip it to
         // avoid touching freed AC memory. For already-classified objects the cache
         // entries above are gone cleanly and no protection is needed; marking them
         // would leak forever (TryClassify is never called for them again).
         if (!wasClassified)
+        {
             _deletedWhilePending.Add(id);
+            // DIAG: OnDeleteObject fired BEFORE TryClassify ever processed this uid.
+            // Sets the delete-while-pending mark which TryClassify will use to skip
+            // the object. If a respawn never re-fires OnCreateObject (which would
+            // clear this mark), the plugin loses awareness of the uid until the
+            // indexer's lazy lookup is forced (typically by a user click).
+            if (id >= 0x80000000u && _deleteBeforeClassifyLogCount < MaxDeleteBeforeClassifyLogLines)
+            {
+                _deleteBeforeClassifyLogCount++;
+                bool seenCreate = _seenCreateObject.Contains(id);
+                _host.Log($"[ReclassifyDiag] 0x{id:X8} DELETE-BEFORE-CLASSIFY seenCreate={(seenCreate ? 1 : 0)}");
+            }
+        }
         if (wasInventory)
             _inventoryDirty = true;
     }
@@ -137,6 +190,26 @@ public class WorldObjectCache
 
         if (!_creatures.Add(sid))
             return; // creature already known — ratio updated above, nothing more to do
+
+        // DIAG: unconditional log for the FIRST time a dynamic uid lands in _creatures via
+        // OnUpdateHealth. seenCreate=0 is the smoking gun for the suspected bug — the
+        // engine's CreateObject hook never fired for this respawn, yet the server is
+        // sending vitals for it, meaning the mob exists for AC but was invisible to the
+        // plugin until something poked it (typically a user click → QueryHealth response).
+        if (id >= 0x80000000u && _healthAddLogCount < MaxHealthAddDiagLines)
+        {
+            _healthAddLogCount++;
+            bool wasSkipped = _reclassifySkipState.Remove(id);
+            bool seenCreate = _seenCreateObject.Contains(id);
+            bool inLandscape = _landscape.Contains(sid);
+            bool inById = _byId.ContainsKey(sid);
+            _host.Log($"[ReclassifyDiag] 0x{id:X8} HEALTHADD-RESCUE ratio={healthRatio:0.00} seenCreate={(seenCreate ? 1 : 0)} inLandscape={(inLandscape ? 1 : 0)} inById={(inById ? 1 : 0)} wasSkipped={(wasSkipped ? 1 : 0)}");
+        }
+        else if (_reclassifySkipState.ContainsKey(id))
+        {
+            // Past the log cap — still clean up skip state so the dict doesn't grow unbounded.
+            _reclassifySkipState.Remove(id);
+        }
 
         // DIAG: a creature first learned via server health update (the
         // "aggressive mob self-rescues" path) — NOT via TryClassify. Lets us
@@ -204,9 +277,13 @@ public class WorldObjectCache
 
         // Periodically re-check Unknown landscape objects — dynamic creatures whose weenie
         // wasn't ready at classify time will be promoted to _creatures here.
+        // Same cadence also re-queues uids parked in _slowRetry (their fast-retry burst
+        // exhausted in <10 ms before AC could populate their weenie), giving them a
+        // fresh 8-tick attempt each pass.
         if ((DateTime.Now - _lastReclassifyTime).TotalSeconds >= ReclassifyIntervalSec)
         {
             _lastReclassifyTime = DateTime.Now;
+            FlushSlowRetry();
             ReclassifyUnknownDynamics();
         }
 
@@ -244,9 +321,12 @@ public class WorldObjectCache
     // conclusive without flooding. Dynamic (0x8000+) only — that's the
     // creature/NPC/equipped range the login-mob bug lives in.
     private int _classifyTrace;
+    // Bumped from 500 while the missing-respawn investigation needs coverage of late
+    // OnCreateObject events (login-burst alone blows the 500 cap in <2s, leaving the
+    // session blind to anything that spawned later).
     private void TraceClassify(uint uid, bool hasName, bool hasPos, bool gotType, uint flags, string note)
     {
-        if (_classifyTrace >= 500 || uid < 0x80000000u) return;
+        if (_classifyTrace >= 5000 || uid < 0x80000000u) return;
         _classifyTrace++;
         int atk = -1;
         try { if (_host.HasObjectIsAttackable) atk = _host.ObjectIsAttackable(uid) ? 1 : 0; }
@@ -256,11 +336,27 @@ public class WorldObjectCache
 
     private void TryClassify(uint uid)
     {
+        // Slow-retry eviction: any uid TryClassify gets to process is by definition no
+        // longer "abandoned" for this pass. If we give up again below, the give-up
+        // branch re-adds; if we succeed or hit a clean early-return, the set is now
+        // correct without further bookkeeping.
+        _slowRetry.Remove(uid);
+
         // Skip objects that were deleted after being enqueued — accessing their AC memory
         // would touch stale pointers and cause an AccessViolationException.
         if (_deletedWhilePending.Contains(uid))
         {
             _deletedWhilePending.Remove(uid);
+            // DIAG: TryClassify abandoned this uid because OnDeleteObject marked it
+            // delete-while-pending. If the mob is actually still alive (server kept
+            // the entity, the delete fired spuriously, or the create-delete-recreate
+            // sequence dropped one create), it sits invisible to the plugin until
+            // an indexer access rescues it. Pairs with DELETE-BEFORE-CLASSIFY.
+            if (uid >= 0x80000000u && _deleteWhilePendingSkipLogCount < MaxDeleteWhilePendingSkipLogLines)
+            {
+                _deleteWhilePendingSkipLogCount++;
+                _host.Log($"[ReclassifyDiag] 0x{uid:X8} DELETE-WHILE-PENDING-SKIP");
+            }
             return;
         }
 
@@ -294,6 +390,22 @@ public class WorldObjectCache
                 {
                     _classifyRetry[uid] = retries + 1;
                     _pending.Enqueue(uid);
+                }
+                else
+                {
+                    // Fast-retry burst exhausted (8 ticks ≈ 10 ms because Tick drains
+                    // 30 pending per pass). Hand off to slow-retry: reset the fast
+                    // counter so the next attempt gets a fresh 8 ticks, and park the
+                    // uid in _slowRetry. FlushSlowRetry re-enqueues it every
+                    // ReclassifyIntervalSec until the engine populates name/position.
+                    _classifyRetry.Remove(uid);
+                    _slowRetry.Add(uid);
+
+                    if (_classifyGiveupLogCount < MaxClassifyGiveupLogLines)
+                    {
+                        _classifyGiveupLogCount++;
+                        _host.Log($"[ReclassifyDiag] 0x{uid:X8} CLASSIFY-GIVEUP retries={retries} (name+pos unreadable across {MaxClassifyRetries} ticks; parked in slow-retry)");
+                    }
                 }
             }
             return;
@@ -442,6 +554,21 @@ public class WorldObjectCache
     }
 
     /// <summary>
+    /// Re-enqueue every uid that's currently parked in <see cref="_slowRetry"/>. Pairs
+    /// with the give-up branch of <see cref="TryClassify"/>: when an OnCreateObject-then-
+    /// fast-retry burst exhausts in &lt;10 ms before AC populates the weenie, the uid
+    /// lands here. The 2 s flush hands it back to <see cref="_pending"/> so TryClassify
+    /// gets another 8-tick window. Successful classification evicts the uid at the top
+    /// of TryClassify; persistent failure re-adds it for the next cycle.
+    /// </summary>
+    private void FlushSlowRetry()
+    {
+        if (_slowRetry.Count == 0) return;
+        foreach (uint uid in _slowRetry)
+            _pending.Enqueue(uid);
+    }
+
+    /// <summary>
     /// Scan landscape objects classified as Unknown with dynamic GUIDs and try to promote
     /// any that are now recognised as TYPE_CREATURE. Runs every ~2 seconds from Tick().
     /// This rescues creatures whose weenie data wasn't available when they were first classified.
@@ -449,12 +576,34 @@ public class WorldObjectCache
     private void ReclassifyUnknownDynamics()
     {
         List<int>? toPromote = null;
+        List<int>? toCorpse  = null;
         foreach (int id in _landscape)
         {
-            if (_creatures.Contains(id)) continue;
             uint uid = unchecked((uint)id);
-            if (uid < 0x80000000u) continue; // static objects never become creatures
-            if (!_byId.TryGetValue(id, out var wo) || wo.ObjectClass != AcObjectClass.Unknown) continue;
+            if (uid < 0x80000000u) continue; // static objects never become creatures/corpses
+            if (!_byId.TryGetValue(id, out var wo)) continue;
+            if (wo.ObjectClass == AcObjectClass.Corpse) continue; // already correct
+
+            // Corpse rescue: a dead creature whose corpse name/position wasn't
+            // readable at OnCreateObject gets bucketed as Monster (or Unknown).
+            // The loot finder (TryFindNearestCorpse) matches ObjectClass==Corpse,
+            // and this is the ONLY path that promotes a non-Unknown object to
+            // Corpse — without it those corpses are permanently invisible to
+            // looting (corpse exists with a valid name, but classed as Monster).
+            // Bounded to Monster/Unknown so we don't name-query every ground
+            // item each pass; IsCorpseName is specific ("X corpse"/"Corpse of X")
+            // so a live mob cannot be misread as a corpse.
+            if ((wo.ObjectClass == AcObjectClass.Monster || wo.ObjectClass == AcObjectClass.Unknown)
+                && _host.TryGetObjectName(uid, out string maybeCorpse)
+                && IsCorpseName(maybeCorpse))
+            {
+                toCorpse ??= new List<int>();
+                toCorpse.Add(id);
+                continue;
+            }
+
+            if (_creatures.Contains(id)) continue;
+            if (wo.ObjectClass != AcObjectClass.Unknown) continue;
 
             // Promote if EITHER the (laggy) qualities ItemType now reports
             // creature, OR AC's native combat check says it's attackable (the
@@ -467,10 +616,38 @@ public class WorldObjectCache
                 && _host.HasObjectIsAttackable
                 && _host.ObjectIsAttackable(uid))
                 isCreature = true;
-            if (!isCreature) continue;
+            if (!isCreature)
+            {
+                DiagLogReclassifySkip(uid, wo.Name);
+                continue;
+            }
 
             toPromote ??= new List<int>();
             toPromote.Add(id);
+        }
+
+        if (toCorpse != null)
+        {
+            foreach (int id in toCorpse)
+            {
+                uint uid = unchecked((uint)id);
+                _host.TryGetObjectName(uid, out string name);
+                _creatures.Remove(id);
+                _inventory.Remove(id);
+                _byId[id] = Make(id, name ?? string.Empty, AcObjectClass.Corpse);
+            }
+            _host.Log($"[RynthAi] ReclassifyUnknownDynamics: rescued {toCorpse.Count} stale corpse(s) → Corpse");
+        }
+
+        // DIAG: heartbeat — Unknown landscape candidates checked but nothing promoted
+        // this pass. Confirms ReclassifyUnknownDynamics is running and engine signals
+        // keep failing for the stuck uids (vs. them never reaching _landscape at all).
+        if (toPromote == null
+            && _reclassifySkipState.Count > 0
+            && _reclassifyDiagSummaryCount < MaxReclassifyDiagSummaries)
+        {
+            _reclassifyDiagSummaryCount++;
+            _host.Log($"[ReclassifyDiag] pass: {_reclassifySkipState.Count} stuck Unknown landscape candidate(s), 0 promoted");
         }
 
         if (toPromote == null) return;
@@ -481,9 +658,35 @@ public class WorldObjectCache
             _host.TryGetObjectName(uid, out string name);
             _creatures.Add(id);
             _byId[id] = Make(id, name ?? string.Empty, AcObjectClass.Monster);
+            _reclassifySkipState.Remove(uid); // diagnostic state cleared on success
         }
 
         _host.Log($"[RynthAi] ReclassifyUnknownDynamics: promoted {toPromote.Count} object(s) to Creature");
+    }
+
+    // Diagnostic helper for ReclassifyUnknownDynamics. Logs the live engine signals
+    // (name, position, item-type flags, attackable bit) for each Unknown landscape
+    // candidate the rescue pass keeps rejecting. Bounded + state-change suppressed so
+    // a stuck mob produces one log line, and only re-logs if its engine state changes.
+    private void DiagLogReclassifySkip(uint uid, string name)
+    {
+        if (_reclassifyDiagCount >= MaxReclassifyDiagLines) return;
+
+        bool gotType = _host.TryGetItemType(uid, out uint flags);
+        bool hasAtk = _host.HasObjectIsAttackable;
+        int atk = -1;
+        if (hasAtk)
+        {
+            try { atk = _host.ObjectIsAttackable(uid) ? 1 : 0; }
+            catch { atk = -2; }
+        }
+        bool hasPos = _host.TryGetObjectPosition(uid, out _, out _, out _, out _);
+        string state = $"name='{name}' hasPos={(hasPos ? 1 : 0)} gotType={(gotType ? 1 : 0)} flags=0x{flags:X8} hasAtk={(hasAtk ? 1 : 0)} atk={atk}";
+        if (_reclassifySkipState.TryGetValue(uid, out string? prev) && prev == state)
+            return; // state unchanged — suppress duplicate
+        _reclassifySkipState[uid] = state;
+        _reclassifyDiagCount++;
+        _host.Log($"[ReclassifyDiag] 0x{uid:X8} skip: {state}");
     }
 
     // ── WorldFilter API ───────────────────────────────────────────────────
@@ -526,6 +729,17 @@ public class WorldObjectCache
                 {
                     cls = AcObjectClass.Monster;
                     _creatures.Add(id);
+                    // DIAG: indexer's lazy-lookup side-effect just added a fresh uid to
+                    // _creatures. This is the "click → OnSelectedTargetChange → indexer
+                    // queries qualities → TYPE_CREATURE finally readable → bot sees the
+                    // mob" path. seenCreate=0 here is the strongest signal that the
+                    // engine's CreateObject hook missed this respawn entirely.
+                    if (uid >= 0x80000000u && _indexerRescueLogCount < MaxIndexerRescueDiagLines)
+                    {
+                        _indexerRescueLogCount++;
+                        bool seenCreate = _seenCreateObject.Contains(uid);
+                        _host.Log($"[ReclassifyDiag] 0x{uid:X8} INDEXER-RESCUE name='{name}' flags=0x{typeFlags:X8} seenCreate={(seenCreate ? 1 : 0)}");
+                    }
                 }
                 else
                     cls = ClassifyByItemType(typeFlags);

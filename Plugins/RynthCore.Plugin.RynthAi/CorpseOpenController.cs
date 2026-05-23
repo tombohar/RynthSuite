@@ -36,6 +36,16 @@ public sealed partial class RynthAiPlugin
     private long _busyCountLastIncrementAt;
     private long _busyCountBecamePositiveAt; // when count first went 0→positive
     private const long BUSY_TIMEOUT_MS = 10_000; // safety: force-clear if stuck >10s
+
+    // Wedge detection: when AC's item-action state locks up (server-side, e.g.
+    // after a corpse pile is opened too fast), EVERY corpse open times out.
+    // Rather than hammer a dead client for 45 min, count consecutive open
+    // timeouts → at the threshold, halt looting briefly, fire one reset, and
+    // tell the user to relog (only thing that clears a server-side lock).
+    private int _consecutiveLootTimeouts;
+    private long _lootHaltUntil;
+    private const int LootWedgeThreshold = 3;    // consecutive open timeouts ⇒ wedged
+    private const long LootWedgeHaltMs = 20_000; // pause looting this long after detecting
     private const uint MotionTurnRight = 0x6500000D;
     private const uint MotionTurnLeft  = 0x6500000E;
     private int _openedContainerId;
@@ -247,6 +257,7 @@ public sealed partial class RynthAiPlugin
             _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear();
         }
         LootDiag($"[RynthAi] Corpse loot: opened container 0x{objectId:X8}.");
+        _consecutiveLootTimeouts = 0; // a successful open proves AC is responsive again
         if (switchedTarget)
             LootDiag($"[RynthAi] Corpse loot: switching active corpse target from 0x{(uint)_targetCorpseId:X8} to 0x{objectId:X8}.");
 
@@ -353,6 +364,13 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
+        // Wedge halt: AC's item-action state is locked (consecutive open
+        // timeouts). Stop firing opens into a dead client until the halt window
+        // elapses — hammering it can't recover a server-side lock, only a relog
+        // can. Navigation/combat (non-item-action) still run elsewhere.
+        if (CorpseNowMs < _lootHaltUntil)
+            return;
+
         // ── Buffing: halt loot work but retain target so looting resumes immediately ──
         if (string.Equals(settings.BotAction, "Buffing", StringComparison.OrdinalIgnoreCase))
             return;
@@ -448,12 +466,35 @@ public sealed partial class RynthAiPlugin
 
         StopCorpseMovement();
 
-        if (_lastCorpseOpenAttemptAt == 0 || now - _lastCorpseOpenAttemptAt >= Math.Max(500, settings.LootOpenRetryMs))
+        // Don't stack a corpse-open on top of a still-pending item action. AC
+        // allows one at a time; firing the open every 500ms regardless of busy
+        // spikes the count to 5-6 during loot+salvage and trips "you can only
+        // move or use one item at a time". Wait for busy to clear — but only up
+        // to OpenBusyWaitMaxMs, so a leaked/desynced count (off-thread casts,
+        // salvage) can't stall looting forever; the cast-resolve reset and the
+        // busy watchdog clear the leak independently.
+        bool throttleOk = _lastCorpseOpenAttemptAt == 0
+            || now - _lastCorpseOpenAttemptAt >= Math.Max(500, settings.LootOpenRetryMs);
+        if (throttleOk)
         {
+            if (_busyCount > 0)
+            {
+                if (_corpseOpenBusyWaitSince == 0) _corpseOpenBusyWaitSince = now;
+                if (now - _corpseOpenBusyWaitSince < OpenBusyWaitMaxMs)
+                    return; // busy — hold the open briefly
+            }
+            _corpseOpenBusyWaitSince = 0;
             AttemptOpenCorpse(_targetCorpseId);
             _lastCorpseOpenAttemptAt = now;
         }
     }
+
+    private long _corpseOpenBusyWaitSince;
+    // Wait for busy to genuinely clear before opening the next corpse. The long
+    // backstop only exists so a leaked/desynced count can't permanently freeze
+    // looting — the busy watchdog force-clears a real leak at ~10s, so by then
+    // busy is 0 and the open proceeds normally rather than stacking into a wedge.
+    private const long OpenBusyWaitMaxMs = 8000;
 
     private bool ShouldDriveCorpseOpening(LegacyUiSettings settings)
     {
@@ -781,17 +822,30 @@ public sealed partial class RynthAiPlugin
 
         long openAge = now - _openedContainerAt;
 
-        // Brief settle after open for client to populate container
-        if (openAge < Math.Max(50, settings.LootContentSettleMs))
-            return;
-
-        // Wait for inventory update event from server
-        if (_openedContainerInventoryObservedAt == 0)
+        // Fast path: items for this corpse are already in the cache. AC's CreateObject
+        // burst populates the corpse's contents during the landscape sweep that precedes
+        // the ViewContents packet, so OnUpdateObjectInventory effectively never fires for
+        // corpses — leaving the settle+probe gates below as pure dead time (~400ms/corpse).
+        // When the cache already has contents, mark observed and proceed immediately.
+        if (_openedContainerInventoryObservedAt == 0 && _objectCache.GetContainedItems(corpseId).Any())
         {
-            if (openAge < Math.Max(300, settings.LootEmptyCorpseMs))
+            _openedContainerInventoryObservedAt = now;
+            LootDiag($"[RynthAi] Corpse loot: cache pre-populated for 0x{(uint)corpseId:X8} at {openAge}ms; skipping inv-wait.");
+        }
+        else
+        {
+            // Brief settle after open for client to populate container
+            if (openAge < Math.Max(50, settings.LootContentSettleMs))
                 return;
-            _openedContainerInventoryObservedAt = _openedContainerAt;
-            LootDiag($"[RynthAi] Corpse loot: no inventory update for 0x{(uint)corpseId:X8}; probing after {openAge}ms.");
+
+            // Wait for inventory update event from server
+            if (_openedContainerInventoryObservedAt == 0)
+            {
+                if (openAge < Math.Max(300, settings.LootEmptyCorpseMs))
+                    return;
+                _openedContainerInventoryObservedAt = _openedContainerAt;
+                LootDiag($"[RynthAi] Corpse loot: no inventory update for 0x{(uint)corpseId:X8}; probing after {openAge}ms.");
+            }
         }
 
         // Handle pending pickup confirmation (don't block evaluation — just check)
@@ -1679,6 +1733,19 @@ public sealed partial class RynthAiPlugin
         _ownershipSkipLogged.Remove(sid);
         _corpseIdRequested.Remove(sid);
 
+        // If this is the corpse we were actively looting (container was open and we received
+        // at least one inventory update), mark it completed before resetting. Without this,
+        // the corpse leaves range without an entry in _completedCorpses; on the next patrol
+        // pass TryFindNearestCorpse picks it up again and the bot re-opens an already-looted
+        // corpse. Marking it here is safe: if items remained, they're unrecoverable once
+        // we've walked far enough for DeleteObject to fire; if all matching items were already
+        // taken, the mark prevents the pointless re-open.
+        if (_targetCorpseId == sid && _openedContainerId == sid && _openedContainerInventoryObservedAt != 0)
+        {
+            LootDiag($"[RynthAi] Corpse loot: corpse 0x{objectId:X8} left range mid-loot; marking completed to prevent re-open.");
+            _completedCorpses[sid] = CorpseNowMs;
+        }
+
         if (_targetCorpseId == sid)
             ResetCorpseTarget(releaseState: true);
 
@@ -1791,6 +1858,41 @@ public sealed partial class RynthAiPlugin
         }
 
         ResetCorpseTarget(releaseState: true);
+
+        // Track open timeouts to detect a wedged item-action state. A successful
+        // open resets this counter; a run of timeouts means AC stopped accepting
+        // item actions (the "you can only move or use one item at a time" lock).
+        if (reason.IndexOf("timeout", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            _consecutiveLootTimeouts++;
+            if (_consecutiveLootTimeouts >= LootWedgeThreshold)
+                HandleLootWedge(now);
+        }
+    }
+
+    /// <summary>
+    /// AC's item-action queue is wedged (N consecutive corpse opens timed out).
+    /// Halt looting briefly, fire one client-side reset (same actions as
+    /// /ra panic), and tell the user — a server-side lock only clears on relog,
+    /// so the worst thing we can do is keep hammering opens into a dead client.
+    /// </summary>
+    private void HandleLootWedge(long now)
+    {
+        _lootHaltUntil = now + LootWedgeHaltMs;
+        _consecutiveLootTimeouts = 0; // re-arm; if still wedged it trips again after the halt
+
+        if (Host.HasCancelAttack)        Host.CancelAttack();
+        if (Host.HasChangeCombatMode)    Host.ChangeCombatMode(CombatMode.NonCombat);
+        if (Host.HasStopCompletely)      Host.StopCompletely();
+        if (Host.HasForceResetBusyCount) Host.ForceResetBusyCount();
+        _busyCount = 0;
+        _busyCountLastIncrementAt = 0;
+        _busyCountBecamePositiveAt = 0;
+        if (_combatManager != null) _combatManager.BusyCount = 0;
+        if (_buffManager != null)   _buffManager.BusyCount = 0;
+
+        ChatLine($"[RynthAi] WEDGE: {LootWedgeThreshold} corpse opens timed out — AC item-actions are locked. Halting looting {LootWedgeHaltMs / 1000}s and resetting. If equip/loot stays stuck, RELOG (server-side lock — /ra panic can't clear it).");
+        Log($"[RynthAi] LOOT WEDGE detected ({LootWedgeThreshold} consecutive open timeouts) — halt {LootWedgeHaltMs}ms + reset fired.");
     }
 
     private static double NormalizeCorpseRangeYards(double value, double fallbackYards)
