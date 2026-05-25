@@ -1981,7 +1981,8 @@ public sealed partial class RynthAiPlugin
         var settings = _dashboard?.Settings;
         if (settings == null) { ChatLine("[RynthAi] Settings not ready."); return; }
 
-        if (!Host.TryGetPlayerPose(out uint playerCell, out _, out _, out float patrolWZ, out _, out _, out _, out _))
+        if (!Host.TryGetPlayerPose(out uint playerCell, out float playerLocalX, out float playerLocalY,
+                                   out float patrolWZ, out _, out _, out _, out _))
         {
             ChatLine("[RynthAi] Cannot get player position."); return;
         }
@@ -2007,17 +2008,85 @@ public sealed partial class RynthAiPlugin
         var graph = DungeonPathfinder.GetGraph(landblockKey, cellDat);
         if (graph.Count == 0) { ChatLine("[RynthAi] DunNav-Patrol: dungeon graph is empty."); return; }
 
-        uint startCell = DungeonPathfinder.NearestCell(graph, playerNS, playerEW, patrolWZ);
-        if (startCell == 0) { ChatLine("[RynthAi] DunNav-Patrol: cannot find starting cell."); return; }
+        // Prefer the actual cell the player is standing in. NearestCell-by-distance can
+        // pick a same-floor cell across an interior wall when the player is hugging a
+        // wall corner; the engine's own playerCell is authoritative.
+        uint startCell;
+        if (graph.ContainsKey(playerCell))
+        {
+            startCell = playerCell;
+        }
+        else
+        {
+            startCell = DungeonPathfinder.NearestCell(graph, playerNS, playerEW, patrolWZ);
+            if (startCell == 0) { ChatLine("[RynthAi] DunNav-Patrol: cannot find starting cell."); return; }
+        }
 
-        var route = DungeonPathfinder.BuildPatrolRoute(graph, startCell);
+        var hazards = _objectCache?.GetHazardCells();
+        var route = DungeonPathfinder.BuildPatrolRoute(graph, startCell, hazards);
+
+        // Pick the first waypoint with a clear line of sight from the player. The patrol
+        // builder emits its first waypoints at the doorway between startCell and its DFS-
+        // chosen neighbor — that doorway can sit on the far wall of startCell, so a player
+        // who logged in near the opposite wall faces a pillar or corner between them and
+        // waypoint 0. Walking the list forward to the first LOS-clear point sidesteps the
+        // "patrol immediately runs into a wall on login" failure mode.
+        int startIdx = FindFirstLineOfSightWaypoint(route, playerCell, playerLocalX, playerLocalY, patrolWZ);
 
         settings.IsMacroRunning   = true;
         settings.CurrentNavPath   = string.Empty;
         settings.CurrentRoute     = route;
-        settings.ActiveNavIndex   = 0;
+        settings.ActiveNavIndex   = startIdx;
         settings.EnableNavigation = true;
 
-        ChatLine($"[RynthAi] DunNav-Patrol: {graph.Count} cells, {route.Points.Count} waypoints → circular patrol started");
+        string hazardNote = (hazards != null && hazards.Count > 0) ? $", {hazards.Count} hazard cell(s) avoided" : "";
+        string skipNote   = startIdx > 0 ? $", skipped {startIdx} blocked waypoint(s)" : "";
+        ChatLine($"[RynthAi] DunNav-Patrol: {graph.Count} cells, {route.Points.Count} waypoints → circular patrol started{skipNote}{hazardNote}");
+    }
+
+    /// <summary>
+    /// Scans <paramref name="route"/> and returns the index of the first NavPoint whose
+    /// world position has clear line of sight from the player. Returns 0 if no LOS check
+    /// is possible (no raycast subsystem / no geometry) or if no waypoint clears — at
+    /// worst we behave like the old "always start at 0" code, so this is a strict win.
+    /// </summary>
+    private int FindFirstLineOfSightWaypoint(NavRouteParser route, uint playerCell,
+                                             float playerLocalX, float playerLocalY, float playerZ)
+    {
+        if (route?.Points == null || route.Points.Count == 0) return 0;
+        var geo = _raycast?.GeometryLoader;
+        if (geo == null) return 0;
+
+        var geometry = geo.GetLandblockGeometry(playerCell);
+        if (geometry == null || geometry.Count == 0) return 0;
+
+        uint pBlockX = (playerCell >> 24) & 0xFF;
+        uint pBlockY = (playerCell >> 16) & 0xFF;
+        // Origin ≈ chest height so the ray doesn't graze floor polygons at the source.
+        var origin = new Vector3(pBlockX * 192f + playerLocalX,
+                                 pBlockY * 192f + playerLocalY,
+                                 playerZ + 1.0f);
+
+        for (int i = 0; i < route.Points.Count; i++)
+        {
+            var p = route.Points[i];
+            if (p.Type != NavPointType.Point) continue; // skip pause/chat/portal-action nodes
+
+            // NavPoint NS/EW use the same basis as NavCoordinateHelper; invert to world:
+            //   globalX = (EW * 10 + 1019.5) * 24
+            //   globalY = (NS * 10 + 1019.5) * 24
+            //   worldZ  = navZ * 240   (NavPoint.Z is raw / 240)
+            float gx = (float)((p.EW * 10.0 + 1019.5) * 24.0);
+            float gy = (float)((p.NS * 10.0 + 1019.5) * 24.0);
+            float gz = (float)(p.Z * 240.0) + 1.0f;
+            var target = new Vector3(gx, gy, gz);
+
+            // multiRay=true matches dungeon LOS used elsewhere (TargetingFSM) so thin
+            // corner walls don't slip between the center ray.
+            if (!RaycastEngine.IsLinearPathBlocked(origin, target, geometry, multiRay: true))
+                return i;
+        }
+
+        return 0;
     }
 }

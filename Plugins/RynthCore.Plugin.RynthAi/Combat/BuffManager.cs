@@ -121,6 +121,23 @@ public class BuffManager : IDisposable
     private readonly Dictionary<int, DateTime> _buffFailCooldownUntil = new();
     private const double BuffFailCooldownSec = 120.0;
 
+    // Per-family SILENT no-show counter. Distinct from _buffFailCooldownUntil
+    // (which catches chat-explicit hard rejects). This catches the /god case:
+    // skill is Trained → IsSkillUsable says yes → BuildDynamicBuffList includes
+    // the buff → cast is issued → AC silently does nothing because the spell
+    // isn't in the spellbook → no chat, no enchantment-added event, no _ramBuffTimers
+    // entry → IsBuffActive returns false → loop forever. The existing no-show
+    // branch in TickBuffing only blacklists when IsKnownSnapshotWarm == false;
+    // with /god the snapshot stays warm (knowledge bits exist) so retry never
+    // exits. This counter bounds the retry: after SilentNoShowThreshold misses
+    // we park the family in _buffFailCooldownUntil for SilentNoShowCooldown so
+    // CheckAndCastSelfBuffs skips it on subsequent cycles. Counter + cooldown
+    // are cleared in OnEnchantmentAdded when the family actually lands later
+    // (character learns the spell, components arrive, server-side fix, etc.).
+    private readonly Dictionary<int, int> _silentNoShowCounts = new();
+    private const int SilentNoShowThreshold = 2;
+    private static readonly TimeSpan SilentNoShowCooldown = TimeSpan.FromMinutes(30);
+
     private sealed class RegistrySnapshot
     {
         public uint OwnerId;
@@ -167,6 +184,13 @@ public class BuffManager : IDisposable
     // Prevents the buff wand-equip from racing CombatManager's weapon equip.
     private WeaponSwapGate? _weaponSwapGate;
     public void SetWeaponSwapGate(WeaponSwapGate gate) => _weaponSwapGate = gate;
+
+    // CombatManager handle (set by RynthAiPlugin after CombatManager is built).
+    // CheckVitals consults HasCloseThreat(MonsterRange) to pick between the
+    // in-combat thresholds (HealAt / RestamAt / GetManaAt) and the idle top-off
+    // thresholds (TopOffHP / TopOffStam / TopOffMana). Null = treat as idle.
+    private CombatManager? _combatManager;
+    public void SetCombatManager(CombatManager cm) => _combatManager = cm;
 
     /// <summary>Live combat mode read from AC each access — never drifts if OnCombatModeChange is missed.</summary>
     public int CurrentCombatMode =>
@@ -333,6 +357,7 @@ public class BuffManager : IDisposable
         _isForceRebuffing = true;
         _forceRebuffCastFamilies.Clear();
         _buffFailCooldownUntil.Clear(); // explicit recast-all must not be blocked by stale cooldowns
+        _silentNoShowCounts.Clear();    // give parked families a fresh shot on FR too
         _ramBuffTimers.Clear();
         _itemSpellTimers.Clear();
         _pendingSpellId = 0;
@@ -503,8 +528,25 @@ public class BuffManager : IDisposable
                         // other tier-down signal → blacklist this id to drop a tier.
                         bool cold = !_spellManager.IsKnownSnapshotWarm;
                         if (cold) _spellManager.MarkSpellUnresolvable(_pendingSpellId);
-                        _host.Log($"[BuffDiag] self-buff '{pendingSpell.Name}' (id={_pendingSpellId}, fam={pendingSpell.Family}) absent from live registry after {sinceCastMs:0}ms — " +
-                                  (cold ? "cold snapshot → blacklisted, tier-down." : "warm snapshot → retry (lag/fizzle)."));
+
+                        // Per-family silent-no-show bookkeeping (the /god loop break).
+                        // Increment regardless of warmth — even the "warm → retry" path
+                        // needs an upper bound, otherwise a buff whose family is in the
+                        // dynamic list but can never actually land loops forever.
+                        int fam = pendingSpell.Family;
+                        int noShowCount = _silentNoShowCounts.TryGetValue(fam, out int prev) ? prev + 1 : 1;
+                        _silentNoShowCounts[fam] = noShowCount;
+                        bool parked = false;
+                        if (noShowCount >= SilentNoShowThreshold)
+                        {
+                            _buffFailCooldownUntil[fam] = DateTime.Now + SilentNoShowCooldown;
+                            parked = true;
+                        }
+
+                        _host.Log($"[BuffDiag] self-buff '{pendingSpell.Name}' (id={_pendingSpellId}, fam={fam}) absent from live registry after {sinceCastMs:0}ms — " +
+                                  (cold ? "cold snapshot → blacklisted, tier-down." : "warm snapshot → retry (lag/fizzle).") +
+                                  $" noShows={noShowCount}/{SilentNoShowThreshold}" +
+                                  (parked ? $" — family parked {SilentNoShowCooldown.TotalMinutes:0}min." : ""));
                         _pendingSpellId = 0;
                         _onCastResolved?.Invoke("self-buff no-show (registry)");
                     }
@@ -597,14 +639,36 @@ public class BuffManager : IDisposable
         int curManaPct   = _vitals.ManaPct;
         int curStamPct   = _vitals.StaminaPct;
 
-        if (curHealthPct <= 30 && curStamPct > 20) return AttemptVitalCast("Stamina to Health Self");
+        // Reset per-tick recharge flags; they reflect "would recharge right now"
+        // and are repopulated from the predicates below. The /ra buff snapshot
+        // reads these for diagnostics.
+        _isHealingSelf       = false;
+        _isRechargingMana    = false;
+        _isRechargingStamina = false;
 
-        if (curHealthPct <= _settings.HealAt)    _isHealingSelf = true;
-        if (curHealthPct >= _settings.TopOffHP)  _isHealingSelf = false;
-        if (curManaPct <= _settings.GetManaAt)   _isRechargingMana = true;
-        if (curManaPct >= _settings.TopOffMana)  _isRechargingMana = false;
-        if (curStamPct <= _settings.RestamAt)    _isRechargingStamina = true;
-        if (curStamPct >= _settings.TopOffStam)  _isRechargingStamina = false;
+        // Emergency override regardless of mode: HP critical + stam available →
+        // burn stam for HP. Sits below the configurable thresholds so even a
+        // "do nothing" recharge config still saves the character.
+        if (curHealthPct <= 30 && curStamPct > 20)
+        {
+            _isHealingSelf = true;
+            return AttemptVitalCast("Stamina to Health Self");
+        }
+
+        // Pick the threshold set based on hunting state. A target within
+        // MonsterRange = active combat → react at the LOW (HealAt / RestamAt /
+        // GetManaAt) thresholds so we don't bloat cast traffic mid-fight.
+        // Otherwise idle → top up to the HIGH (TopOffHP / TopOffStam /
+        // TopOffMana) thresholds so we re-engage at full. Thresholds are
+        // strict "<": set a value to 0 to disable that vital in that mode.
+        bool inCombat = _combatManager?.HasCloseThreat(System.Math.Max(1, _settings.MonsterRange)) == true;
+        int hpThreshold   = inCombat ? _settings.HealAt    : _settings.TopOffHP;
+        int manaThreshold = inCombat ? _settings.GetManaAt : _settings.TopOffMana;
+        int stamThreshold = inCombat ? _settings.RestamAt  : _settings.TopOffStam;
+
+        _isHealingSelf       = curHealthPct < hpThreshold;
+        _isRechargingMana    = curManaPct   < manaThreshold;
+        _isRechargingStamina = curStamPct   < stamThreshold;
 
         if (_isHealingSelf)
         {
@@ -663,14 +727,23 @@ public class BuffManager : IDisposable
     // Returns true if any castable buff in the list has < thresholdSec remaining.
     // Used both as the arbiter query (NeedsAnyBuff) and as the batch-rebuff trigger
     // inside CheckAndCastSelfBuffs — keeps the two in sync on when buffing is needed.
+    // Families currently parked in _buffFailCooldownUntil are skipped so a parked
+    // family can't keep retriggering the batch (which would otherwise loop:
+    // batch starts → clears cooldown → cast again → silent no-show → re-park).
     private bool AnyBuffBelowThreshold(List<string> desiredBuffs, int thresholdSec)
     {
+        DateTime now = DateTime.Now;
         foreach (string buffBaseName in desiredBuffs)
         {
             AcSkillType castSkill = SkillForBuff(buffBaseName);
             if (!IsSkillUsable(castSkill)) continue;
             int spellId = FindBestSpellId(buffBaseName, castSkill);
             if (spellId == 0) continue;
+            int family = SpellTableStub.GetById(spellId)?.Family ?? 0;
+            if (family != 0
+                && _buffFailCooldownUntil.TryGetValue(family, out DateTime coolUntil)
+                && now < coolUntil)
+                continue;
             if (!IsBuffActive(spellId, thresholdSec)) return true;
         }
         return false;
@@ -688,9 +761,14 @@ public class BuffManager : IDisposable
             // re-trigger: any spell that can't be resolved (spellId=0) never
             // gets a timer recorded, so the next AnyBuffBelowThreshold call sees
             // "no timer = below threshold" and loops forever.
+            // Also do NOT clear _buffFailCooldownUntil here. Auto-batch must
+            // respect parked families (chat hard-rejects + silent no-shows);
+            // only an explicit ForceFullRebuff resets them. Without this,
+            // /god kicks off auto-batch → cooldown cleared → cast → silent
+            // no-show → re-park → another auto-batch → loop. Hard-reject
+            // cooldowns are short-lived (120s) so they expire on their own.
             _isForceRebuffing = true;
             _forceRebuffCastFamilies.Clear();
-            _buffFailCooldownUntil.Clear();
         }
 
         List<string> desiredBuffs = BuildDynamicBuffList();
@@ -1497,6 +1575,18 @@ public class BuffManager : IDisposable
             var pendingSpell = SpellTableStub.GetById(_pendingSpellId);
             if (pendingSpell != null && pendingSpell.Family == spellInfo.Family)
                 _pendingSpellId = 0;
+        }
+
+        // The family did land — clear any silent-no-show state (counter +
+        // cooldown park) so future expiries trigger casts normally again.
+        // Important for the /god case: if the user later learns the spell
+        // the buff system should resume casting without a manual reset.
+        // Also clears the chat-driven hard-reject cooldown if the family
+        // somehow lands despite a recent reject (server-side fix etc.).
+        if (_silentNoShowCounts.Remove(spellInfo.Family) ||
+            _buffFailCooldownUntil.Remove(spellInfo.Family))
+        {
+            // No log spam in the common case — only the rare "park-then-recover" path.
         }
 
         // Prefer live memory read — gives accurate remaining time for all enchantments.

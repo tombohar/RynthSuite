@@ -15,10 +15,13 @@ namespace RynthCore.TerrainData;
 /// </summary>
 public sealed class TerrainSampler : IDisposable
 {
-    // AC's walkable surface threshold is normal.Z >= 0.664 (cos 48°), but the
-    // coarse 9x9 terrain mesh over-marks gentle slopes, so 0.5 (cos 60°) cuts
-    // false positives. Matches RynthAi's ScatterSystem.FloorZ.
-    public const float FloorZ = 0.5f;
+    // AC's actual walkable threshold from ACE PhysicsGlobals.FloorZ — anything
+    // with normal.Z below this value is blocked by is_valid_walkable. The visual
+    // overlay must match the game's blocker, not a tuned-for-scatter looser
+    // value, or moderate slopes the game blocks render as walkable.
+    // (RynthAi's ScatterSystem.FloorZ is intentionally looser to suppress
+    // gentle-slope false positives on vegetation placement and is unrelated.)
+    public const float FloorZ = 0.66417414618662751f;
 
     private const float CellLength = 24.0f;
 
@@ -100,30 +103,88 @@ public sealed class TerrainSampler : IDisposable
     }
 
     /// <summary>
-    /// Per-triangle walkability for cell (cx,cy), 0–7. Triangle 1 = SE half,
-    /// triangle 2 = NW half. Mirrors RynthAi's ScatterSystem.GetTrianglePassability.
+    /// AC's per-cell diagonal-split PRNG (ACE LandblockStruct.ConstructPolygons /
+    /// FSplitNESW). When true the cell is cut SW→NE (triangles SW-SE-NE and
+    /// SW-NE-NW); when false it's cut SE→NW (triangles SW-SE-NW and SE-NE-NW).
+    /// Roughly 50/50 across cells. Slope and Z-interpolation queries must agree
+    /// with this or they describe the wrong triangle pair.
+    ///
+    /// The PRNG inputs are the cell's *vertex-grid* coordinates (landblock
+    /// index × 8 + cell index within landblock), NOT raw landblock indices —
+    /// this matches ACE's <c>blockid_to_lcoord</c>, which shifts the byte
+    /// landblock index left by <c>LandblockShift</c> (= 3, i.e. ×8) before
+    /// feeding it to the seed multiplications. Getting this wrong gives the
+    /// wrong diagonal on most cells and paints the wrong triangle half.
     /// </summary>
-    public static void GetTrianglePassability(LandblockData lb, int cx, int cy,
-        out bool tri1Passable, out bool tri2Passable)
+    public static bool SwToNeCut(uint landblockKey, int cellX, int cellY)
+    {
+        int lbX = (int)((landblockKey >> 8) & 0xFF);
+        int lbY = (int)(landblockKey & 0xFF);
+        int vertexX = (lbX << 3) + cellX; // lbX * 8 + cellX (ACE LandblockShift = 3)
+        int vertexY = (lbY << 3) + cellY;
+        unchecked
+        {
+            uint seedA = (uint)vertexX * 214614067u;
+            uint seedB = (uint)vertexX * 1109124029u;
+            uint magicA = seedA + 1813693831u;
+            uint magicB = seedB;
+            uint splitDir = (uint)vertexY * magicA - magicB - 1369149221u;
+            return (splitDir & 0x80000000u) != 0;
+        }
+    }
+
+    /// <summary>
+    /// Per-triangle walkability for cell (cx,cy) in landblock <paramref name="lb"/>.
+    /// The tri1/tri2 identity depends on <paramref name="swToNeCut"/>:
+    ///   swToNeCut=true  → tri1 = SE half (SW,SE,NE); tri2 = NW half (SW,NE,NW)
+    ///   swToNeCut=false → tri1 = SW half (SW,SE,NW); tri2 = NE half (SE,NE,NW)
+    /// <paramref name="floorZ"/> overrides the default walkable-normal threshold
+    /// (defaults to <see cref="FloorZ"/>); the visual overlay exposes it as a
+    /// slider so the user can match what AC actually blocks in their environment.
+    /// </summary>
+    public static void GetTrianglePassability(LandblockData lb, int cx, int cy, bool swToNeCut,
+        out bool tri1Passable, out bool tri2Passable, float floorZ = FloorZ)
     {
         float h00 = lb.GetVertexZ(cx,     cy);
         float h10 = lb.GetVertexZ(cx + 1, cy);
         float h01 = lb.GetVertexZ(cx,     cy + 1);
         float h11 = lb.GetVertexZ(cx + 1, cy + 1);
 
-        float nz = CellLength * CellLength;
+        float nzSquare = CellLength * CellLength;
 
-        float n1x = -CellLength * (h10 - h00);
-        float n1y =  CellLength * (h10 - h11);
-        float z1  = nz / (float)Math.Sqrt(n1x * n1x + n1y * n1y + nz * nz);
+        float n1x, n1y, n2x, n2y;
+        if (swToNeCut)
+        {
+            // tri1 (SE): SW(0,0,h00), SE(24,0,h10), NE(24,24,h11)
+            n1x = -CellLength * (h10 - h00);
+            n1y = -CellLength * (h11 - h10);
+            // tri2 (NW): SW(0,0,h00), NE(24,24,h11), NW(0,24,h01)
+            n2x = -CellLength * (h11 - h01);
+            n2y = -CellLength * (h01 - h00);
+        }
+        else
+        {
+            // tri1 (SW): SW(0,0,h00), SE(24,0,h10), NW(0,24,h01)
+            n1x = -CellLength * (h10 - h00);
+            n1y = -CellLength * (h01 - h00);
+            // tri2 (NE): SE(24,0,h10), NE(24,24,h11), NW(0,24,h01)
+            n2x = -CellLength * (h11 - h01);
+            n2y = -CellLength * (h11 - h10);
+        }
 
-        float n2x =  CellLength * (h01 - h11);
-        float n2y = -CellLength * (h01 - h00);
-        float z2  = nz / (float)Math.Sqrt(n2x * n2x + n2y * n2y + nz * nz);
-
-        tri1Passable = z1 >= FloorZ;
-        tri2Passable = z2 >= FloorZ;
+        float z1 = nzSquare / (float)Math.Sqrt(n1x * n1x + n1y * n1y + nzSquare * nzSquare);
+        float z2 = nzSquare / (float)Math.Sqrt(n2x * n2x + n2y * n2y + nzSquare * nzSquare);
+        tri1Passable = z1 >= floorZ;
+        tri2Passable = z2 >= floorZ;
     }
+
+    /// <summary>
+    /// Convenience overload that looks up the cell's split direction itself.
+    /// </summary>
+    public static void GetTrianglePassability(LandblockData lb, int cx, int cy,
+        out bool tri1Passable, out bool tri2Passable)
+        => GetTrianglePassability(lb, cx, cy, SwToNeCut(lb.LandblockKey, cx, cy),
+            out tri1Passable, out tri2Passable);
 
     /// <summary>
     /// AC terrain-type index (0–31) at vertex (ix,iy), 0–8. Decoded from the

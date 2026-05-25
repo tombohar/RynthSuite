@@ -29,6 +29,7 @@ internal sealed class NavigationEngine
     private const double ActionTimeoutMs = 60000.0;  // max wait for recall/portal (longer so cast can finish)
     private const double SettleDelayMs   = 600.0;    // pause before recall/portal action
     private const double RecallCastRetryMs = 4000.0; // re-issue CastSpell every N ms until teleport
+    private const double PortalNpcRetryMs  = 1500.0; // re-search cache for portal NPC every N ms until found (cache classifies on a budget after teleport)
 
     // Tunable: settle delay after any portal/recall teleport (from settings, in seconds).
     private double PostTeleportMs => Math.Max(0.0, _settings.PostPortalDelaySec) * 1000.0;
@@ -123,6 +124,8 @@ internal sealed class NavigationEngine
     private uint _playerId;
     private CombatManager? _combatManager;
     private long _lastRecallCastAt;
+    private bool _portalNpcFired;     // true once UseObject was successfully called for a PortalNPC waypoint (prevents canceling the walk-to-NPC with a second UseObject)
+    private bool _portalNpcDiagLogged; // one-shot: deep dump of nearest landscape + any portal-named object across all buckets, on the first miss only
 
     // Reference-tracked so we detect route swaps (e.g., meta EmbedNav) and reset state.
     private NavRouteParser? _lastRoute;
@@ -865,14 +868,16 @@ internal sealed class NavigationEngine
     /// Find the landscape object whose name matches pt.TargetName (case-insensitive)
     /// and UseObject it. The player has already navigated to the NPC's point,
     /// so the nearest match is the correct one.
+    /// Returns true iff UseObject was actually called (caller uses this to gate
+    /// retries — a "no match" is retried by the caller until the cache catches up).
     /// </summary>
-    private void FirePortalNpcUse(NavPoint pt)
+    private bool FirePortalNpcUse(NavPoint pt)
     {
         _settings.NavStatusLine = $"Nav: portal '{pt.TargetName}'...";
         if (_objectCache == null || string.IsNullOrWhiteSpace(pt.TargetName) || !_host.HasUseObject)
         {
             _host.Log($"Nav: PortalNPC — cache/target/UseObject unavailable for '{pt.TargetName}'");
-            return;
+            return false;
         }
 
         string target = pt.TargetName.Trim();
@@ -880,26 +885,204 @@ internal sealed class NavigationEngine
 
         int bestId = 0;
         double bestDist = double.MaxValue;
+        int landscapeCount = 0;
+        int emptyNameRefreshed = 0;  // landscape items whose empty name was successfully backfilled this pass
+        int emptyNameStillBlank = 0; // landscape items whose name was still empty after a forced probe
+        int fallbackChecked = 0;     // _byId items scanned in the fallback pass (only when landscape misses)
+        int fallbackHits = 0;        // _byId items whose name matched (after distance guard)
+        int probeChecked = 0;        // direct ID probes (cache-bypass scan) issued this pass
+        int probeNamed = 0;          // probes that returned a non-empty name
+        int probeHits = 0;           // probes whose name matched the target
+        string fallbackSource = "";  // "landscape", "all-known", or "id-probe" — which pass produced bestId
 
         foreach (var wo in _objectCache.GetLandscapeObjects())
         {
-            if (string.IsNullOrEmpty(wo.Name)) continue;
-            if (!wo.Name.Equals(target, StringComparison.OrdinalIgnoreCase) &&
-                wo.Name.IndexOf(target, StringComparison.OrdinalIgnoreCase) < 0)
+            landscapeCount++;
+
+            // Refresh empty names directly. WorldObjectCache classifies on a
+            // per-tick budget and can park objects in _landscape with no name
+            // when AC's initial GetObjectName probe races weenie-data load
+            // (the [ReclassifyDiag] "stuck Unknown landscape candidate(s)"
+            // line is the symptom). Going through the cache's indexer triggers
+            // its empty-name patch path — successful lookups write back into
+            // _byId so the next pass finds the name already populated.
+            string name = wo.Name;
+            if (string.IsNullOrEmpty(name))
+            {
+                var refreshed = _objectCache[wo.Id];
+                if (refreshed != null && !string.IsNullOrEmpty(refreshed.Name))
+                {
+                    name = refreshed.Name;
+                    emptyNameRefreshed++;
+                }
+                else
+                {
+                    emptyNameStillBlank++;
+                }
+            }
+            if (string.IsNullOrEmpty(name)) continue;
+
+            if (!name.Equals(target, StringComparison.OrdinalIgnoreCase) &&
+                name.IndexOf(target, StringComparison.OrdinalIgnoreCase) < 0)
                 continue;
 
             double d = pid != 0 ? _objectCache.Distance(pid, wo.Id) : 0.0;
-            if (d < bestDist) { bestDist = d; bestId = wo.Id; }
+            if (d < bestDist) { bestDist = d; bestId = wo.Id; fallbackSource = "landscape"; }
+        }
+
+        // Tier 2 fallback: WorldObjectCache's classification race can put a
+        // static landscape object (esp. portal NPCs whose initial
+        // GetObjectPosition probe returns no position) into _inventory or
+        // leave it in _byId without ever adding to _landscape. When the
+        // landscape pass misses, search every known object — gated by
+        // distance so we don't match a stale 50,000yd portal entry from a
+        // prior landblock.
+        const double FallbackMaxDistYd = 250.0;
+        if (bestId == 0)
+        {
+            foreach (var wo in _objectCache.AllKnownObjects())
+            {
+                fallbackChecked++;
+                string name = wo.Name;
+                if (string.IsNullOrEmpty(name))
+                {
+                    var refreshed = _objectCache[wo.Id];
+                    if (refreshed != null && !string.IsNullOrEmpty(refreshed.Name))
+                        name = refreshed.Name;
+                }
+                if (string.IsNullOrEmpty(name)) continue;
+                if (!name.Equals(target, StringComparison.OrdinalIgnoreCase) &&
+                    name.IndexOf(target, StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+
+                double d = pid != 0 ? _objectCache.Distance(pid, wo.Id) : 0.0;
+                if (d > FallbackMaxDistYd) continue; // stale position guard
+                fallbackHits++;
+                if (d < bestDist) { bestDist = d; bestId = wo.Id; fallbackSource = "all-known"; }
+            }
+        }
+
+        // Tier 3 fallback: cache-bypass ID-range probe. WorldObjectCache
+        // misses some static portal entities entirely — the engine's
+        // OnCreateObject hook doesn't fire for certain ID ranges (e.g.
+        // 0x70007xxx Town Network portal devices), so the object exists in
+        // AC's data and is visible/clickable in-game but never makes it
+        // into _byId. TryGetObjectName reads AC's object table directly,
+        // not our cache, so it returns names regardless of hook coverage.
+        // The stale entry at log 19:28:52 (0x70007095 'Portal to Nanto')
+        // proves this range carries the portals we need; we re-probe it
+        // on demand. Distance gate prevents matching stale-position
+        // entries from prior landblocks.
+        if (bestId == 0 && pid != 0)
+        {
+            const uint StaticPortalRangeStart = 0x70007000u;
+            const uint StaticPortalRangeEnd   = 0x700070FFu;
+            for (uint candidateId = StaticPortalRangeStart; candidateId <= StaticPortalRangeEnd; candidateId++)
+            {
+                probeChecked++;
+                if (!_host.TryGetObjectName(candidateId, out string probeName) || string.IsNullOrEmpty(probeName))
+                    continue;
+                probeNamed++;
+                if (!probeName.Equals(target, StringComparison.OrdinalIgnoreCase) &&
+                    probeName.IndexOf(target, StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                probeHits++;
+
+                int candidateSid = unchecked((int)candidateId);
+                double d = _objectCache.Distance(pid, candidateSid);
+                if (d > FallbackMaxDistYd) continue;
+                if (d < bestDist) { bestDist = d; bestId = candidateSid; fallbackSource = "id-probe"; }
+            }
         }
 
         if (bestId == 0)
         {
-            _host.Log($"Nav: PortalNPC — no match found for '{target}'");
-            return;
+            // landscapeCount tells us whether the cache is still warming up
+            // (low count after a teleport) vs. genuinely missing the object
+            // (high count but no name match → route file likely has a typo).
+            // fallback{Checked,Hits} report on the all-known-objects rescue.
+            _host.Log($"Nav: PortalNPC — no match for '{target}' (landscapeCount={landscapeCount} refreshedNames={emptyNameRefreshed} stillBlank={emptyNameStillBlank} fallbackChecked={fallbackChecked} fallbackHits={fallbackHits} probeChecked={probeChecked} probeNamed={probeNamed} probeHits={probeHits}) — will retry");
+
+            // ONE-SHOT DEEP DUMP on the first miss: closest 8 landscape items
+            // (so we can see what the cache *does* think is around the player)
+            // and EVERY object across all buckets whose name contains "portal"
+            // (in case the portal is real but landed in a different bucket, or
+            // has a name we didn't expect). Resets in ResetPortalState.
+            if (!_portalNpcDiagLogged)
+            {
+                _portalNpcDiagLogged = true;
+                LogPortalSearchDiag(target, pid);
+            }
+
+            return false;
         }
 
         _host.UseObject((uint)bestId);
-        _host.Log($"Nav: UseObject portal '{target}' (dist={bestDist:F1}yd) → 0x{bestId:X8}");
+        _host.Log($"Nav: UseObject portal '{target}' (dist={bestDist:F1}yd src={fallbackSource}) → 0x{bestId:X8}");
+        return true;
+    }
+
+    /// <summary>
+    /// One-shot diagnostic when FirePortalNpcUse can't find its target. Dumps:
+    ///   (a) the 8 closest landscape items by distance, so we can see what the
+    ///       cache thinks is around the player; and
+    ///   (b) any object across all buckets (landscape, creatures, inventory,
+    ///       unknown) whose name contains "portal" — catches the case where
+    ///       AC's portal landed in a non-landscape bucket or has a name that
+    ///       doesn't include the substring we searched for.
+    /// Logs at most ~10 lines. Called once per portal attempt (reset by
+    /// ResetPortalState), so log volume stays bounded.
+    /// </summary>
+    private void LogPortalSearchDiag(string searchTarget, int pid)
+    {
+        if (_objectCache == null) return;
+
+        // (a) Closest 8 landscape items by distance.
+        var landscapeByDist = new System.Collections.Generic.List<(double d, int id, string name)>();
+        foreach (var wo in _objectCache.GetLandscapeObjects())
+        {
+            double d = pid != 0 ? _objectCache.Distance(pid, wo.Id) : double.MaxValue;
+            landscapeByDist.Add((d, wo.Id, wo.Name ?? "<null>"));
+        }
+        landscapeByDist.Sort((a, b) => a.d.CompareTo(b.d));
+        int take = Math.Min(8, landscapeByDist.Count);
+        _host.Log($"Nav: PortalNPC diag — closest {take} landscape obj(s):");
+        for (int i = 0; i < take; i++)
+        {
+            var (d, id, name) = landscapeByDist[i];
+            _host.Log($"  [{i}] 0x{id:X8} '{name}' dist={d:F1}yd");
+        }
+
+        // (b) Any object with "portal" in name across all buckets. Cap output
+        //     so a portal-heavy area can't spam the log.
+        int portalHits = 0;
+        const int MaxPortalDumpLines = 50;
+        foreach (var wo in _objectCache.AllKnownObjects())
+        {
+            if (string.IsNullOrEmpty(wo.Name)) continue;
+            if (wo.Name.IndexOf("portal", StringComparison.OrdinalIgnoreCase) < 0) continue;
+            portalHits++;
+            if (portalHits > MaxPortalDumpLines) continue;
+
+            double d = pid != 0 ? _objectCache.Distance(pid, wo.Id) : double.MaxValue;
+            bool inLandscape = false;
+            // Cheap landscape membership check — re-iterate, since the cache
+            // doesn't expose a public Contains helper. Only runs once per
+            // portal attempt and the inner set is small.
+            foreach (var ls in _objectCache.GetLandscapeObjects())
+            {
+                if (ls.Id == wo.Id) { inLandscape = true; break; }
+            }
+            _host.Log($"Nav: PortalNPC diag — portal-named: 0x{wo.Id:X8} '{wo.Name}' dist={d:F1}yd inLandscape={(inLandscape ? 1 : 0)}");
+        }
+        if (portalHits == 0)
+        {
+            _host.Log($"Nav: PortalNPC diag — NO object across any bucket has 'portal' in its name (searched for '{searchTarget}'). Portal is missing from cache entirely OR named without the word 'portal'.");
+        }
+        else if (portalHits > MaxPortalDumpLines)
+        {
+            _host.Log($"Nav: PortalNPC diag — {portalHits} portal-named object(s) total (showed first {MaxPortalDumpLines}).");
+        }
     }
 
     /// <summary>
@@ -925,9 +1108,11 @@ internal sealed class NavigationEngine
         if (_portalState == PortalState.None)
         {
             StopMovement();
-            _portalState      = PortalState.Settling;
-            _portalStateStart = Now;
-            _lastRecallCastAt = 0;
+            _portalState         = PortalState.Settling;
+            _portalStateStart    = Now;
+            _lastRecallCastAt    = 0;
+            _portalNpcFired      = false;
+            _portalNpcDiagLogged = false;
 
             // Record pre-action position for teleport detection
             TryGetPos(out _prePortalNS, out _prePortalEW);
@@ -1000,10 +1185,22 @@ internal sealed class NavigationEngine
                 }
                 else if (pt.Type == NavPointType.PortalNPC)
                 {
-                    // PortalNPC is fire-once (UseObject starts a walk to the NPC).
-                    if (_lastRecallCastAt == 0)
+                    // PortalNPC is fire-once *once it actually fires* — UseObject
+                    // starts a walk to the NPC and a second call would cancel
+                    // it. But if the target isn't in WorldObjectCache._landscape
+                    // yet (common right after a teleport — classification runs
+                    // on a per-tick budget so a portal at the destination can
+                    // take a couple of seconds to land in _landscape), retry
+                    // the search every PortalNpcRetryMs until FirePortalNpcUse
+                    // returns true. Without retry, the no-match path would set
+                    // _lastRecallCastAt and we'd burn the full 60s timeout then
+                    // skip the portal — exactly the failure seen at
+                    // 12:02:10/18:55:33 in the 2026-05-24 log.
+                    if (!_portalNpcFired &&
+                        (_lastRecallCastAt == 0 || Now - _lastRecallCastAt > (long)PortalNpcRetryMs))
                     {
-                        FirePortalNpcUse(pt);
+                        if (FirePortalNpcUse(pt))
+                            _portalNpcFired = true;
                         _lastRecallCastAt = Now;
                     }
                 }
@@ -1056,6 +1253,8 @@ internal sealed class NavigationEngine
         _globalSettling      = false;
         _globalLastNS        = double.NaN;
         _globalLastEW        = double.NaN;
+        _portalNpcFired      = false;
+        _portalNpcDiagLogged = false;
     }
 
     // ══════════════════════════════════════════════════════════════════════════

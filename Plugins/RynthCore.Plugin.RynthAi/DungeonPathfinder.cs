@@ -224,12 +224,14 @@ internal static class DungeonPathfinder
 
     /// <summary>
     /// Finds the shortest portal-connected path from startCell to goalCell,
-    /// skipping any edge classified as a drop by IsDropEdge.
+    /// skipping any edge classified as a drop by IsDropEdge and any neighbor cell
+    /// in <paramref name="hazardCells"/> (lava / acid pools, etc.).
     /// Returns ordered List of cell IDs, or empty if unreachable.
     /// </summary>
     public static List<uint> FindPath(
         uint startCell, uint goalCell,
-        Dictionary<uint, DungeonNavNode> graph)
+        Dictionary<uint, DungeonNavNode> graph,
+        IReadOnlySet<uint>? hazardCells = null)
     {
         if (!graph.ContainsKey(startCell) || !graph.ContainsKey(goalCell))
             return new List<uint>();
@@ -258,6 +260,8 @@ internal static class DungeonPathfinder
                 if (closed.Contains(nbId)) continue;
                 if (!graph.TryGetValue(nbId, out var nbNode)) continue;
                 if (IsDropEdge(curNode, nbNode)) continue;
+                // Goal cell is allowed even if marked hazardous (the player asked to go there).
+                if (nbId != goalCell && hazardCells != null && hazardCells.Contains(nbId)) continue;
 
                 double dNS   = curNode.NS - nbNode.NS;
                 double dEW   = curNode.EW - nbNode.EW;
@@ -368,9 +372,12 @@ internal static class DungeonPathfinder
     /// small to be useful (small or purely linear dungeons).
     /// </summary>
     private static HashSet<uint> GetMainRouteNodes(
-        Dictionary<uint, DungeonNavNode> graph, uint startCell)
+        Dictionary<uint, DungeonNavNode> graph, uint startCell,
+        IReadOnlySet<uint>? hazardCells = null)
     {
-        // BFS to collect all cells reachable from startCell without drops.
+        // BFS to collect all cells reachable from startCell without drops or hazards.
+        // The start cell is always kept (player is already standing there) even if
+        // it's somehow marked hazardous — we can't refuse to start the patrol.
         var reachable = new HashSet<uint>();
         var queue     = new Queue<uint>();
         if (graph.ContainsKey(startCell))
@@ -383,12 +390,12 @@ internal static class DungeonPathfinder
                 if (!graph.TryGetValue(cur, out var node)) continue;
                 foreach (uint nb in node.Neighbors)
                 {
-                    if (!reachable.Contains(nb) && graph.ContainsKey(nb) &&
-                        !IsDropEdge(node, graph[nb]))
-                    {
-                        reachable.Add(nb);
-                        queue.Enqueue(nb);
-                    }
+                    if (reachable.Contains(nb)) continue;
+                    if (!graph.ContainsKey(nb)) continue;
+                    if (IsDropEdge(node, graph[nb])) continue;
+                    if (hazardCells != null && hazardCells.Contains(nb)) continue;
+                    reachable.Add(nb);
+                    queue.Enqueue(nb);
                 }
             }
         }
@@ -439,9 +446,10 @@ internal static class DungeonPathfinder
     /// </summary>
     public static NavRouteParser BuildPatrolRoute(
         Dictionary<uint, DungeonNavNode> graph,
-        uint startCell)
+        uint startCell,
+        IReadOnlySet<uint>? hazardCells = null)
     {
-        var mainRoute = GetMainRouteNodes(graph, startCell);
+        var mainRoute = GetMainRouteNodes(graph, startCell, hazardCells);
 
         var visited  = new HashSet<uint>();
         var walkPath = new List<uint>();
@@ -465,6 +473,8 @@ internal static class DungeonPathfinder
             while (nextNb < node.Neighbors.Count)
             {
                 uint nb = node.Neighbors[nextNb];
+                // mainRoute is already hazard-filtered (via GetMainRouteNodes), so
+                // membership there implies non-hazard — no separate hazard check needed.
                 if (!visited.Contains(nb) && mainRoute.Contains(nb) &&
                     graph.ContainsKey(nb) && !IsDropEdge(node, graph[nb])) break;
                 nextNb++;
@@ -507,7 +517,8 @@ internal static class DungeonPathfinder
         uint landblockKey, DatDatabase cellDat,
         double playerNS, double playerEW, float playerZ,
         double destNS,   double destEW,
-        out int nodeCount, out int pathLength)
+        out int nodeCount, out int pathLength,
+        IReadOnlySet<uint>? hazardCells = null)
     {
         nodeCount  = 0;
         pathLength = 0;
@@ -524,7 +535,7 @@ internal static class DungeonPathfinder
         // IsDropEdge filters out jumps — AC requires a jump to initiate a drop
         // and the navigation engine has no jump primitive yet.
         // If the destination is only reachable via a drop this returns null.
-        var path = FindPath(startCell, goalCell, graph);
+        var path = FindPath(startCell, goalCell, graph, hazardCells);
         pathLength = path.Count;
         if (pathLength == 0) return null;
 

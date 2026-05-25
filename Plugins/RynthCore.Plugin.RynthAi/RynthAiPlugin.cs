@@ -299,6 +299,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _combatManager.SetCharacterSkills(_charSkills);
         _combatManager.SetPlayerId(_playerId);
         _navigationEngine?.SetCombatManager(_combatManager);
+        // BuffManager.CheckVitals consults CombatManager.HasCloseThreat to pick
+        // between in-combat and idle top-off recharge thresholds. Wire here
+        // because BuffManager is constructed before CombatManager.
+        _buffManager?.SetCombatManager(_combatManager);
 
         _missileCraftingManager = new MissileCraftingManager(Host, _dashboard.Settings);
         _missileCraftingManager.SetObjectCache(_objectCache!);
@@ -470,6 +474,14 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
             if (_loginComplete)
             {
+                // try/finally so the Nav3D marker submit runs on every tick the
+                // login is complete — even when the Buffing / missile-crafting /
+                // BoostNavPriority branches `return` early. The engine clears
+                // the Nav3D buffer at the start of each TickAll, so any tick we
+                // skip the submit blanks the rings until the next clean tick.
+                // That is the cause of markers vanishing while the macro runs.
+                try
+                {
                 if (diag) Host.Log("[RynthAi] OnTick: entering loginComplete block");
                 if (++_vitalsTickCounter >= 30)
                 {
@@ -741,14 +753,20 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 TickPendingMtLoot();
                 _metaManager?.Think();
 
-                // Submit nav-marker 3D geometry here (not in OnRender) so it
-                // keeps working when EnableImGuiShell=false. OnRender is gated
-                // by PluginManager.RenderAll, which the engine skips when the
-                // ImGui shell is off; OnTick runs unconditionally.
-                if (Host.HasNav3D)
+                }
+                finally
                 {
-                    Host.Nav3DClear();
-                    _navMarkerRenderer?.SubmitNav3D();
+                    // Submit nav-marker 3D geometry here (not in OnRender) so it
+                    // keeps working when EnableImGuiShell=false. OnRender is gated
+                    // by PluginManager.RenderAll, which the engine skips when the
+                    // ImGui shell is off; OnTick runs unconditionally. The engine
+                    // clears the Nav3D buffer at the start of each TickAll, so we
+                    // just submit our geometry on top of whatever other plugins
+                    // have already added this frame. The try/finally above ensures
+                    // this fires even when an early return short-circuits the body
+                    // (Buffing / missile-crafting / BoostNavPriority branches).
+                    if (Host.HasNav3D)
+                        _navMarkerRenderer?.SubmitNav3D();
                 }
             }
         }
@@ -864,6 +882,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         if (targetId != _playerId && maxHealth > 0)
             CaptureCreatureSample(targetId, maxHealth);
     }
+
 
     // Stable: PropertyInt indices used by the AC client appraisal table.
     private const uint PROP_INT_CREATURE_TYPE = 2;

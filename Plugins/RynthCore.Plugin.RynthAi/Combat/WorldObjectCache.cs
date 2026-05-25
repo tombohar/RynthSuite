@@ -547,6 +547,7 @@ public class WorldObjectCache
 
             cls = AcObjectClass.Unknown; // landscape non-creature (static object, portal, etc.)
             _landscape.Add(id);
+            MaybeRegisterHazard(uid, name); // lava/acid hotspots arrive here as Unknown landscape
         }
 
         _classifyRetry.Remove(uid);
@@ -755,6 +756,8 @@ public class WorldObjectCache
             {
                 _inventory.Remove(id);
                 _landscape.Add(id);
+                if (cls == AcObjectClass.Unknown)
+                    MaybeRegisterHazard(uid, name);
             }
             else
             {
@@ -994,6 +997,54 @@ public class WorldObjectCache
             if (_byId.TryGetValue(id, out var wo))
                 yield return wo;
         }
+    }
+
+    // ── Hazard cells (lava / acid / fire / cold pools) ───────────────────────
+    //
+    // Hotspot weenies in AC are server-side WorldObjects that damage on collision;
+    // they're not part of the EnvCell graph and so the dungeon pathfinder can't see
+    // them. We populate this set two ways:
+    //   1. WO sightings: any landscape (positioned, non-creature) object whose name
+    //      matches a known hazard pattern marks its cellId here.
+    //   2. Reactive blacklist: NavigationEngine / patrol loop marks the player's
+    //      current cell if HP drops with no nearby hostile (see MarkCellHazard).
+    // DungeonPathfinder consumes this set via the hazardCells parameter on
+    // FindPath / BuildPatrolRoute and skips edges into hazard cells the same way
+    // it skips drop edges.
+
+    private static readonly string[] HazardNamePatterns =
+    {
+        "lava", "pool of acid", "acid pool", "pool of fire", "pool of cold",
+        "cesspool", "hot spring", "magma",
+    };
+
+    private readonly HashSet<uint> _hazardCells = new();
+
+    public bool IsHazardCell(uint cellId) => _hazardCells.Contains(cellId);
+
+    public IReadOnlySet<uint> GetHazardCells() => _hazardCells;
+
+    private static bool IsHazardName(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        foreach (string pat in HazardNamePatterns)
+            if (name.IndexOf(pat, StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Inspect a freshly-classified landscape object and register it as a hazard if
+    /// its name matches a known hotspot pattern (lava, acid pool, etc.).
+    /// Safe to call repeatedly for the same uid — set membership is idempotent.
+    /// </summary>
+    private void MaybeRegisterHazard(uint uid, string name)
+    {
+        if (!IsHazardName(name)) return;
+        if (!_host.TryGetObjectPosition(uid, out uint cellId, out _, out _, out _)) return;
+        if (cellId == 0) return;
+        if (_hazardCells.Add(cellId))
+            _host.Log($"[Hazard] 0x{uid:X8} '{name}' → cell 0x{cellId:X8}");
     }
 
     /// <summary>
