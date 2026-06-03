@@ -16,6 +16,25 @@ public class BuffManager : IDisposable
     private WorldObjectCache? _worldObjectCache;
 
     private DateTime _lastCastAttempt = DateTime.MinValue;
+    // Throttles ChangeCombatMode(Magic) from EnsureMagicMode's "wand wielded but
+    // mode != Magic" branch. Without this, when the server rejects/silently-drops
+    // mode flips (e.g. wedged-target combat state), the branch fires every tick
+    // (~2.5Hz) and spams AC with thousands of stance-change packets, eventually
+    // crashing the client. 2026-05-25 AcActionTrace caught 256 consecutive
+    // ChangeCombatMode(Magic) calls at ~400ms intervals immediately before pid
+    // 39584 died.
+    //
+    // 2026-05-25 update: a fixed 1s cooldown only paced the spam at 1Hz (pid
+    // 16656 still crashed after ~48min on engine-side AV at 0x04F24E0 ref 0x18).
+    // Switched to exponential backoff that doubles wait on each consecutive
+    // failed flip: 1s → 2s → 4s → 8s → 16s → 30s cap. The bot KEEPS TRYING
+    // forever (per user requirement — bot must continue) but at a rate that
+    // decays as failures accumulate. Counter resets to 0 as soon as
+    // EnsureMagicMode is entered with mode == Magic (i.e. any successful flip
+    // re-enables fast cadence for the next problem). Worst-case wedge load:
+    // ~100 calls over 48min instead of ~2,880.
+    private DateTime _lastBuffStanceAttempt = DateTime.MinValue;
+    private int _buffStanceConsecutiveFails = 0;
     private bool _isForceRebuffing = false;
     private int _pendingSpellId = 0;
     private Action<string>? _onCastResolved;
@@ -567,9 +586,46 @@ public class BuffManager : IDisposable
                     bool confirmedKnown = _spellManager.IsKnownSnapshotWarm && _spellManager.IsKnownSpellId(stuckId);
                     if (!confirmedKnown)
                         _spellManager.MarkSpellUnresolvable(stuckId);
+
+                    // 2026-05-25 — per-family silent-no-show bookkeeping on the
+                    // ARMOR path, mirroring the self-buff path above.
+                    //
+                    // Without this, an armor enchant whose target item isn't
+                    // wielded — for example after the character died and lost
+                    // her armor — loops forever at the 5s no-chat timeout:
+                    // AC accepts the cast attempt ("Casting Impenetrability
+                    // VI"), can't bind it to an item, silently drops it, never
+                    // produces success chat. confirmedKnown=True (Impen is in
+                    // the spellbook), so the existing path logged "NOT
+                    // blacklisted — lag/busy" and ForceRebuff re-fired the same
+                    // cast 12+ times/minute. Every retry pushes "Casting <X>"
+                    // through AC's text pipeline, feeding the documented text-
+                    // parser singleton race
+                    // (rynthcore_crash_investigation.md 2026-05-25 entry).
+                    //
+                    // Park after SilentNoShowThreshold consecutive misses; the
+                    // selectors at lines 763/823 honour _buffFailCooldownUntil
+                    // so the family is skipped during the cooldown window. The
+                    // bot keeps trying eventually — just not 12×/min while
+                    // there's no armor to bind to.
+                    int fam = stuck?.Family ?? 0;
+                    bool parked = false;
+                    if (fam != 0)
+                    {
+                        int noShowCount = _silentNoShowCounts.TryGetValue(fam, out int prev) ? prev + 1 : 1;
+                        _silentNoShowCounts[fam] = noShowCount;
+                        if (noShowCount >= SilentNoShowThreshold)
+                        {
+                            _buffFailCooldownUntil[fam] = DateTime.Now + SilentNoShowCooldown;
+                            parked = true;
+                        }
+                    }
+
                     _host.Log($"[BuffChat] NO-CHAT TIMEOUT (armor) pending={stuckId} ('{stuck?.Name}') — no chat in " +
                               $"{NoChatResolveTimeoutMs:0}ms. confirmedKnown={confirmedKnown}. " +
-                              (confirmedKnown ? "Lag/busy — NOT blacklisted." : "Blacklisted → tier-down."));
+                              (confirmedKnown ? "Lag/busy — NOT blacklisted." : "Blacklisted → tier-down.") +
+                              (fam != 0 ? $" noShows={_silentNoShowCounts[fam]}/{SilentNoShowThreshold}" : "") +
+                              (parked ? $" — family parked {SilentNoShowCooldown.TotalMinutes:0}min." : ""));
                     _pendingSpellId = 0;
                     _onCastResolved?.Invoke("no-chat timeout (armor)");
                 }
@@ -1816,6 +1872,9 @@ public class BuffManager : IDisposable
             _combatTeardownDoneForCurrentBuffCycle = false;
             _pendingWieldId = 0;
             _wieldCooldownUntil = DateTime.MinValue;
+            // Reset the exponential-backoff counter so the next problem starts
+            // at the fast 1s cadence again. See field comment for rationale.
+            _buffStanceConsecutiveFails = 0;
             return true;
         }
 
@@ -1902,8 +1961,21 @@ public class BuffManager : IDisposable
             _pendingWieldId = 0;
             _wieldCooldownUntil = DateTime.MinValue;
         }
-        _host.ChangeCombatMode(CombatMode.Magic);
-        _lastCastAttempt = DateTime.Now;
+        // Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s cap. Counter
+        // increments only when this branch fires AND the previous flip didn't
+        // stick (we got back here with mode != Magic). Reset to 0 at the top
+        // of EnsureMagicMode when mode == Magic. See field comment.
+        int shift = _buffStanceConsecutiveFails;
+        if (shift > 5) shift = 5;
+        int gateMs = 1000 << shift;        // 1s, 2s, 4s, 8s, 16s, 32s
+        if (gateMs > 30000) gateMs = 30000; // cap at 30s
+        if ((DateTime.Now - _lastBuffStanceAttempt).TotalMilliseconds > gateMs)
+        {
+            _host.ChangeCombatMode(CombatMode.Magic);
+            _lastBuffStanceAttempt = DateTime.Now;
+            _lastCastAttempt = DateTime.Now;
+            if (_buffStanceConsecutiveFails < 6) _buffStanceConsecutiveFails++;
+        }
         return false; // Yield — let stance animation finish
     }
 

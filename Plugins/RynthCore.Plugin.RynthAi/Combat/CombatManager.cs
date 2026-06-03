@@ -992,7 +992,13 @@ public class CombatManager : IDisposable
             if (CurrentCombatMode == CombatMode.Missile && !HasWieldedAmmo())
                 return true;
 
-            _host.SelectItem((uint)activeTargetId);
+            // SelectItem removed 2026-06-03: targeted casts now use the explicit-target
+            // FreeHandsAndCastSpell path and direct attacks pass targetId explicitly, so
+            // AC's global selection no longer needs setting here. Setting it stole the
+            // user's inventory selection every combat tick (AC has a single selection) and
+            // was an off-thread SetSelectedObject mutation (not marshalled by P1). Matches
+            // RC2's RynthBot, which never selects. (Native physical attack in AttackTarget
+            // still selects — it genuinely requires AC's selection.)
 
             if (CurrentCombatMode == CombatMode.Magic && _spellManager != null)
             {
@@ -1199,8 +1205,11 @@ public class CombatManager : IDisposable
         // Internal lock is set unconditionally so combat is ready to swing the
         // moment busy clears. SelectItem during a combat-mode transition can
         // wedge the client action queue, so only fire it when not busy.
-        if (BusyCount == 0)
-            _host.SelectItem((uint)bestId);
+        // SelectItem removed 2026-06-03 (see the combat-tick note): the target lock is
+        // purely internal (activeTargetId / _lockedTargetId set above). Casts use the
+        // explicit-target FreeHandsAndCastSpell path and attacks pass targetId, so AC's
+        // selection needn't track the combat target. Removing it frees the user's
+        // inventory selection and drops an off-thread SetSelectedObject mutation.
     }
 
     private double ScoreCandidate(in ScannedTarget c)
