@@ -56,6 +56,13 @@ internal sealed class LegacyDashboardRenderer
     private readonly List<string> _navFiles = new();
     private readonly List<string> _lootFiles = new();
     private readonly List<string> _metaFiles = new();
+    // Guards the four profile-name lists above against the cross-thread race
+    // between BuildSnapshotJson (Avalonia panel poll thread, ~10 Hz) and the
+    // Refresh*Files mutators (AC pump thread). Enumerating a List<string> while
+    // another thread Clear()s it throws InvalidOperationException; when that
+    // escaped the snapshot poll's reverse-P/Invoke boundary it fail-fasted the
+    // NativeAOT runtime. Copy-under-lock on read; lock the Clear+AddRange swap.
+    private readonly object _profileListsLock = new();
     private readonly string _navFolder = @"C:\Games\RynthSuite\RynthAi\NavProfiles";
     private readonly string _lootFolder = @"C:\Games\RynthSuite\RynthAi\LootProfiles";
     private readonly string _metaFolder = @"C:\Games\RynthSuite\RynthAi\MetaFiles";
@@ -1852,8 +1859,7 @@ internal sealed class LegacyDashboardRenderer
 
     private void RefreshProfilesList()
     {
-        _profiles.Clear();
-        _profiles.Add("Default");
+        var list = new List<string> { "Default" };
         try
         {
             if (!string.IsNullOrEmpty(_charFolder) && Directory.Exists(_charFolder))
@@ -1864,67 +1870,77 @@ internal sealed class LegacyDashboardRenderer
                     if (name.Equals("settings", StringComparison.OrdinalIgnoreCase)) continue;
                     if (name.Equals("Default", StringComparison.OrdinalIgnoreCase)) continue;
                     if (name.Equals("monsters", StringComparison.OrdinalIgnoreCase)) continue;
-                    if (!_profiles.Contains(name, StringComparer.OrdinalIgnoreCase))
-                        _profiles.Add(name);
+                    if (!list.Contains(name, StringComparer.OrdinalIgnoreCase))
+                        list.Add(name);
                 }
             }
         }
         catch { }
+        lock (_profileListsLock) { _profiles.Clear(); _profiles.AddRange(list); }
         if (!_profiles.Contains(_settings.SelectedProfile, StringComparer.OrdinalIgnoreCase))
             _settings.SelectedProfile = _profiles[0];
     }
 
     private void RefreshNavFiles()
     {
-        _navFiles.Clear(); _navFiles.Add("None"); _selectedNavIdx = 0;
-        if (!Directory.Exists(_navFolder)) return;
-        foreach (string file in Directory.GetFiles(_navFolder, "*.nav"))
-        {
-            _navFiles.Add(Path.GetFileNameWithoutExtension(file));
-            if (file.Equals(_settings.CurrentNavPath, StringComparison.OrdinalIgnoreCase)) _selectedNavIdx = _navFiles.Count - 1;
-        }
+        var list = new List<string> { "None" };
+        int sel = 0;
+        if (Directory.Exists(_navFolder))
+            foreach (string file in Directory.GetFiles(_navFolder, "*.nav"))
+            {
+                list.Add(Path.GetFileNameWithoutExtension(file));
+                if (file.Equals(_settings.CurrentNavPath, StringComparison.OrdinalIgnoreCase)) sel = list.Count - 1;
+            }
+        lock (_profileListsLock) { _navFiles.Clear(); _navFiles.AddRange(list); }
+        _selectedNavIdx = sel;
     }
 
     private void RefreshLootFiles()
     {
-        _lootFiles.Clear(); _lootFiles.Add("None");
-        if (!Directory.Exists(_lootFolder)) return;
-
-        var files = new System.Collections.Generic.List<string>();
-        files.AddRange(Directory.GetFiles(_lootFolder, "*.utl"));
-        files.AddRange(Directory.GetFiles(_lootFolder, "*.json"));
-        files.Sort(StringComparer.OrdinalIgnoreCase);
-
-        foreach (string file in files)
+        var list = new System.Collections.Generic.List<string> { "None" };
+        int idx = _settings.LootProfileIdx;
+        if (Directory.Exists(_lootFolder))
         {
-            _lootFiles.Add(Path.GetFileName(file));
-            if (file.Equals(_settings.CurrentLootPath, StringComparison.OrdinalIgnoreCase))
-                _settings.LootProfileIdx = _lootFiles.Count - 1;
+            var files = new System.Collections.Generic.List<string>();
+            files.AddRange(Directory.GetFiles(_lootFolder, "*.utl"));
+            files.AddRange(Directory.GetFiles(_lootFolder, "*.json"));
+            files.Sort(StringComparer.OrdinalIgnoreCase);
+
+            foreach (string file in files)
+            {
+                list.Add(Path.GetFileName(file));
+                if (file.Equals(_settings.CurrentLootPath, StringComparison.OrdinalIgnoreCase))
+                    idx = list.Count - 1;
+            }
         }
+        lock (_profileListsLock) { _lootFiles.Clear(); _lootFiles.AddRange(list); }
+        _settings.LootProfileIdx = idx;
     }
 
     private void RefreshMetaFiles()
     {
-        _metaFiles.Clear();
-        _metaFiles.Add("None");
-        _settings.MetaProfileIdx = 0;
-        if (!Directory.Exists(_metaFolder)) return;
-
-        var files = new List<string>();
-        foreach (string f in Directory.GetFiles(_metaFolder, "*.met"))
+        var list = new List<string> { "None" };
+        int idx = 0;
+        if (Directory.Exists(_metaFolder))
         {
-            if (Path.GetFileName(f).StartsWith("--")) continue;
-            files.Add(f);
-        }
-        files.AddRange(Directory.GetFiles(_metaFolder, "*.af"));
-        files.Sort(StringComparer.OrdinalIgnoreCase);
+            var files = new List<string>();
+            foreach (string f in Directory.GetFiles(_metaFolder, "*.met"))
+            {
+                if (Path.GetFileName(f).StartsWith("--")) continue;
+                files.Add(f);
+            }
+            files.AddRange(Directory.GetFiles(_metaFolder, "*.af"));
+            files.Sort(StringComparer.OrdinalIgnoreCase);
 
-        foreach (string file in files)
-        {
-            _metaFiles.Add(Path.GetFileName(file));
-            if (file.Equals(_settings.CurrentMetaPath, StringComparison.OrdinalIgnoreCase))
-                _settings.MetaProfileIdx = _metaFiles.Count - 1;
+            foreach (string file in files)
+            {
+                list.Add(Path.GetFileName(file));
+                if (file.Equals(_settings.CurrentMetaPath, StringComparison.OrdinalIgnoreCase))
+                    idx = list.Count - 1;
+            }
         }
+        lock (_profileListsLock) { _metaFiles.Clear(); _metaFiles.AddRange(list); }
+        _settings.MetaProfileIdx = idx;
     }
 
     private void LoadSelectedNav()
@@ -2133,10 +2149,22 @@ internal sealed class LegacyDashboardRenderer
         AppendString(sb, "currentState", _settings.CurrentState ?? string.Empty); sb.Append(',');
         AppendString(sb, "botAction", _settings.BotAction ?? "Default"); sb.Append(',');
         AppendString(sb, "selectedProfile", _settings.SelectedProfile ?? "Default"); sb.Append(',');
-        AppendStringArray(sb, "profiles", _profiles); sb.Append(',');
-        AppendStringArray(sb, "navProfiles", _navFiles); sb.Append(',');
-        AppendStringArray(sb, "lootProfiles", _lootFiles); sb.Append(',');
-        AppendStringArray(sb, "metaProfiles", _metaFiles); sb.Append(',');
+        // Copy the four profile lists under the lock so we never enumerate one
+        // while a Refresh*Files mutator Clear()s it on the pump thread — that
+        // race threw InvalidOperationException and, escaping this snapshot
+        // poll's reverse-P/Invoke boundary, fail-fasted the NativeAOT runtime.
+        List<string> profilesCopy, navCopy, lootCopy, metaCopy;
+        lock (_profileListsLock)
+        {
+            profilesCopy = new List<string>(_profiles);
+            navCopy      = new List<string>(_navFiles);
+            lootCopy     = new List<string>(_lootFiles);
+            metaCopy     = new List<string>(_metaFiles);
+        }
+        AppendStringArray(sb, "profiles", profilesCopy); sb.Append(',');
+        AppendStringArray(sb, "navProfiles", navCopy); sb.Append(',');
+        AppendStringArray(sb, "lootProfiles", lootCopy); sb.Append(',');
+        AppendStringArray(sb, "metaProfiles", metaCopy); sb.Append(',');
         AppendString(sb, "currentNavName",
             string.IsNullOrEmpty(_settings.CurrentNavPath) ? "None" : Path.GetFileNameWithoutExtension(_settings.CurrentNavPath)); sb.Append(',');
         AppendString(sb, "currentLootName",
@@ -2146,7 +2174,7 @@ internal sealed class LegacyDashboardRenderer
         AppendInt(sb, "selectedNavIdx", _selectedNavIdx); sb.Append(',');
         AppendInt(sb, "selectedLootIdx", _settings.LootProfileIdx); sb.Append(',');
         AppendInt(sb, "selectedMetaIdx", _settings.MetaProfileIdx); sb.Append(',');
-        AppendInt(sb, "selectedProfileIdx", Math.Max(0, _profiles.IndexOf(_settings.SelectedProfile ?? string.Empty))); sb.Append(',');
+        AppendInt(sb, "selectedProfileIdx", Math.Max(0, profilesCopy.IndexOf(_settings.SelectedProfile ?? string.Empty))); sb.Append(',');
         AppendBool(sb, "combatEnabled", _settings.EnableCombat); sb.Append(',');
         AppendBool(sb, "buffingEnabled", _settings.EnableBuffing); sb.Append(',');
         AppendBool(sb, "navigationEnabled", _settings.EnableNavigation); sb.Append(',');

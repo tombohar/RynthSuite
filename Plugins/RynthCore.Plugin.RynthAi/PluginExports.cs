@@ -127,31 +127,42 @@ public static unsafe class PluginExports
         }
     }
 
+    // Every void action export below is a reverse-P/Invoke (UnmanagedCallersOnly)
+    // boundary: a managed exception escaping one fail-fasts the NativeAOT runtime
+    // (no dump, no log — the "illegal exception" crash class). Funnel them through
+    // this guard so a UI click that races plugin state (e.g. SelectProfile indexing
+    // a profile list mid-Refresh) can never kill the AC client.
+    private static void SafeInvoke(Action action)
+    {
+        try { action(); }
+        catch { /* never let a managed exception cross the native boundary */ }
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginToggleMacro", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static void ToggleMacro() => Runtime.Plugin?.DashboardRenderer?.TogglePanelMacro();
+    public static void ToggleMacro() => SafeInvoke(() => Runtime.Plugin?.DashboardRenderer?.TogglePanelMacro());
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginSetSubsystemEnabled", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void SetSubsystemEnabled(int subsystemId, int enabled)
-        => Runtime.Plugin?.DashboardRenderer?.SetSubsystemEnabled(subsystemId, enabled != 0);
+        => SafeInvoke(() => Runtime.Plugin?.DashboardRenderer?.SetSubsystemEnabled(subsystemId, enabled != 0));
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginSelectProfile", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void SelectProfile(int kind, int index)
-        => Runtime.Plugin?.DashboardRenderer?.SelectProfileAtIndex(kind, index);
+        => SafeInvoke(() => Runtime.Plugin?.DashboardRenderer?.SelectProfileAtIndex(kind, index));
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginForceRebuff", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static void ForceRebuff() => Runtime.Plugin?.DashboardRenderer?.RequestForceRebuff();
+    public static void ForceRebuff() => SafeInvoke(() => Runtime.Plugin?.DashboardRenderer?.RequestForceRebuff());
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginCancelForceRebuff", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static void CancelForceRebuff() => Runtime.Plugin?.DashboardRenderer?.RequestCancelForceRebuff();
+    public static void CancelForceRebuff() => SafeInvoke(() => Runtime.Plugin?.DashboardRenderer?.RequestCancelForceRebuff());
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginAdjustOpacity", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static void AdjustOpacity(float delta) => Runtime.Plugin?.DashboardRenderer?.AdjustOpacity(delta);
+    public static void AdjustOpacity(float delta) => SafeInvoke(() => Runtime.Plugin?.DashboardRenderer?.AdjustOpacity(delta));
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginTogglePanelLock", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static void TogglePanelLock() => Runtime.Plugin?.DashboardRenderer?.TogglePanelLock();
+    public static void TogglePanelLock() => SafeInvoke(() => Runtime.Plugin?.DashboardRenderer?.TogglePanelLock());
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginTogglePanelMinimize", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static void TogglePanelMinimize() => Runtime.Plugin?.DashboardRenderer?.TogglePanelMinimize();
+    public static void TogglePanelMinimize() => SafeInvoke(() => Runtime.Plugin?.DashboardRenderer?.TogglePanelMinimize());
 
     // ── Radar bridge (engine-side Avalonia radar panel) ─────────────────────
     // Engine passes the MapVersion it has cached (0 on first call). When the

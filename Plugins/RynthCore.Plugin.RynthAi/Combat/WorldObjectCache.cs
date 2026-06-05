@@ -16,11 +16,27 @@ namespace RynthCore.Plugin.RynthAi;
 ///   - Landscape  : TryGetObjectPosition returns true + not a creature = static object
 ///   - Weapon type: TryGetItemType flags first; name-based heuristics as fallback
 ///
-/// All accesses are from the game thread (EndScene hook thread), so no locks are needed.
+/// THREADING: the mutating handlers (OnCreateObject/OnDeleteObject/OnUpdateHealth) and the
+/// classify pump (Tick → TryClassify/ReclassifyUnknownDynamics) all run on the engine's
+/// plugin pump thread — the engine queues AC's main-thread object events and dispatches them
+/// (PluginManager.ProcessPendingActions) then runs TickAll, sequentially on that one thread.
+/// HOWEVER the read enumerators (GetLandscape/GetLandscapeObjects/GetInventory/AllKnownObjects/
+/// GetContainedItems/GetDirectInventory) are ALSO pulled from the Avalonia panel poll thread
+/// (~10 Hz) for the radar/dashboard snapshot. Enumerating a collection there while the pump
+/// mutates it throws "Collection was modified"; escaping the snapshot's reverse-P/Invoke
+/// boundary that fail-fasts the NativeAOT runtime (0xC0000602). So ALL collection access goes
+/// through _gate: mutators lock their whole body, enumerators copy-under-lock then iterate the
+/// copy outside the lock. The _host.* reads used here are non-blocking/cache-served off-thread,
+/// so holding _gate across them cannot deadlock against AC's main thread.
 /// </summary>
 public class WorldObjectCache
 {
     private readonly RynthCoreHost _host;
+
+    // Serializes all collection access (see the THREADING note above). Single reentrant
+    // monitor — the indexer re-enters via EnsureInCache — and one lock means no lock-ordering
+    // deadlock is possible. Contended only between the pump thread and the ~10 Hz Avalonia poll.
+    private readonly object _gate = new();
 
     private readonly Dictionary<int, WorldObject> _byId = new();
     private readonly HashSet<int> _creatures = new();   // received OnUpdateHealth or TYPE_CREATURE
@@ -119,15 +135,18 @@ public class WorldObjectCache
 
     public void SetPlayerId(uint playerId)
     {
-        _playerId = playerId;
-        _loginTime = DateTime.Now;
-        _deletedWhilePending.Clear();
-        // Remove self if mistakenly added as creature before login completed
-        if (playerId == 0) return;
-        int sid = (int)playerId;
-        _creatures.Remove(sid);
-        _landscape.Remove(sid);
-        _byId.Remove(sid);
+        lock (_gate)
+        {
+            _playerId = playerId;
+            _loginTime = DateTime.Now;
+            _deletedWhilePending.Clear();
+            // Remove self if mistakenly added as creature before login completed
+            if (playerId == 0) return;
+            int sid = (int)playerId;
+            _creatures.Remove(sid);
+            _landscape.Remove(sid);
+            _byId.Remove(sid);
+        }
     }
 
     // ── Event handlers ────────────────────────────────────────────────────
@@ -137,13 +156,18 @@ public class WorldObjectCache
         // AC recycles dynamic GUIDs after delete. A fresh create on a previously-deleted
         // id means the new object should classify normally — drop any stale delete mark
         // before re-queueing so TryClassify doesn't skip it.
-        _deletedWhilePending.Remove(id);
-        _pending.Enqueue(id);
-        _seenCreateObject.Add(id); // diagnostic: record that the engine fired CreateObject for this uid
+        lock (_gate)
+        {
+            _deletedWhilePending.Remove(id);
+            _pending.Enqueue(id);
+            _seenCreateObject.Add(id); // diagnostic: record that the engine fired CreateObject for this uid
+        }
     }
 
     public void OnDeleteObject(uint id)
     {
+        lock (_gate)
+        {
         int sid = (int)id;
         bool wasInventory = _inventory.Remove(sid);
         bool wasClassified = _byId.Remove(sid);
@@ -175,13 +199,20 @@ public class WorldObjectCache
         }
         if (wasInventory)
             _inventoryDirty = true;
+        }
     }
 
     /// <summary>Returns the last known health ratio (0–1) for <paramref name="id"/>, or -1 if no update has been received.</summary>
-    public float GetHealthRatio(int id) => _healthRatios.TryGetValue(id, out float v) ? v : -1f;
+    public float GetHealthRatio(int id)
+    {
+        lock (_gate)
+            return _healthRatios.TryGetValue(id, out float v) ? v : -1f;
+    }
 
     public void OnUpdateHealth(uint id, float healthRatio)
     {
+        lock (_gate)
+        {
         if (_playerId != 0 && id == _playerId)
             return; // ignore self
 
@@ -238,6 +269,7 @@ public class WorldObjectCache
 
         _landscape.Add(sid);
         _inventory.Remove(sid);
+        }
     }
 
     // ── Per-frame processing ──────────────────────────────────────────────
@@ -262,17 +294,27 @@ public class WorldObjectCache
     /// <summary>Call from OnTick to classify queued objects.</summary>
     public void Tick()
     {
-        int pending0 = _pending.Count;
+        int pending0;
+        lock (_gate) pending0 = _pending.Count;
+
         int processed = 0;
-        while (_pending.Count > 0 && processed < MaxClassifyPerTick)
+        while (processed < MaxClassifyPerTick)
         {
-            TryClassify(_pending.Dequeue());
+            uint uid;
+            lock (_gate)
+            {
+                if (_pending.Count == 0) break;
+                uid = _pending.Dequeue();
+            }
+            TryClassify(uid); // re-enters _gate for its own body
             processed++;
         }
         if (processed > 0 && _tickDiagCount < 3)
         {
             _tickDiagCount++;
-            _host.Log($"[RynthAi] Cache.Tick classified {processed} from {pending0} pending, total now {_byId.Count}, landscape={_landscape.Count}, creatures={_creatures.Count}");
+            int total, landscape, creatures;
+            lock (_gate) { total = _byId.Count; landscape = _landscape.Count; creatures = _creatures.Count; }
+            _host.Log($"[RynthAi] Cache.Tick classified {processed} from {pending0} pending, total now {total}, landscape={landscape}, creatures={creatures}");
         }
 
         // Periodically re-check Unknown landscape objects — dynamic creatures whose weenie
@@ -336,6 +378,8 @@ public class WorldObjectCache
 
     private void TryClassify(uint uid)
     {
+        lock (_gate)
+        {
         // Slow-retry eviction: any uid TryClassify gets to process is by definition no
         // longer "abandoned" for this pass. If we give up again below, the give-up
         // branch re-adds; if we succeed or hit a clean early-return, the set is now
@@ -552,6 +596,7 @@ public class WorldObjectCache
 
         _classifyRetry.Remove(uid);
         _byId[id] = Make(id, name, cls);
+        }
     }
 
     /// <summary>
@@ -564,9 +609,12 @@ public class WorldObjectCache
     /// </summary>
     private void FlushSlowRetry()
     {
-        if (_slowRetry.Count == 0) return;
-        foreach (uint uid in _slowRetry)
-            _pending.Enqueue(uid);
+        lock (_gate)
+        {
+            if (_slowRetry.Count == 0) return;
+            foreach (uint uid in _slowRetry)
+                _pending.Enqueue(uid);
+        }
     }
 
     /// <summary>
@@ -576,6 +624,8 @@ public class WorldObjectCache
     /// </summary>
     private void ReclassifyUnknownDynamics()
     {
+        lock (_gate)
+        {
         List<int>? toPromote = null;
         List<int>? toCorpse  = null;
         foreach (int id in _landscape)
@@ -663,6 +713,7 @@ public class WorldObjectCache
         }
 
         _host.Log($"[RynthAi] ReclassifyUnknownDynamics: promoted {toPromote.Count} object(s) to Creature");
+        }
     }
 
     // Diagnostic helper for ReclassifyUnknownDynamics. Logs the live engine signals
@@ -696,6 +747,8 @@ public class WorldObjectCache
     {
         get
         {
+            lock (_gate)
+            {
             if (_byId.TryGetValue(id, out var wo))
             {
                 // Patch empty name on access
@@ -764,6 +817,7 @@ public class WorldObjectCache
                 _inventory.Add(id);
             }
             return obj;
+            }
         }
     }
 
@@ -855,10 +909,15 @@ public class WorldObjectCache
     /// <summary>Enumerate objects in player's inventory (no physics position).</summary>
     public IEnumerable<WorldObject> GetInventory()
     {
-        foreach (int id in _inventory)
+        // Copy-under-lock then iterate the copy outside the lock (the Avalonia radar/
+        // dashboard poll thread enumerates this while the pump thread mutates _inventory).
+        lock (_gate)
         {
-            if (_byId.TryGetValue(id, out var wo))
-                yield return wo;
+            var snapshot = new List<WorldObject>(_inventory.Count);
+            foreach (int id in _inventory)
+                if (_byId.TryGetValue(id, out var wo))
+                    snapshot.Add(wo);
+            return snapshot;
         }
     }
 
@@ -868,7 +927,11 @@ public class WorldObjectCache
     /// yet (the cache classifies items asynchronously and the wielderInfo probe
     /// can race with consumers like HasWieldedAmmo).
     /// </summary>
-    public IEnumerable<WorldObject> AllKnownObjects() => _byId.Values;
+    public IEnumerable<WorldObject> AllKnownObjects()
+    {
+        lock (_gate)
+            return new List<WorldObject>(_byId.Values);
+    }
 
     /// <summary>
     /// Lightweight live inventory snapshot built from GetContainerContents.
@@ -877,6 +940,11 @@ public class WorldObjectCache
     /// </summary>
     public IReadOnlyList<WorldObject> GetDirectInventory(bool forceRefresh = false)
     {
+        // Whole-body lock: the rescan clears+rebuilds _directInventory*, and callers may
+        // arrive from the pump thread AND Avalonia button handlers. Each exit returns a
+        // snapshot copy so the caller never iterates the live list a later call will clear.
+        lock (_gate)
+        {
         DateTime now = DateTime.Now;
 
         if (!_host.HasGetContainerContents)
@@ -887,17 +955,17 @@ public class WorldObjectCache
                 foreach (var item in GetInventory())
                     _directInventory.Add(item);
             }
-            return _directInventory;
+            return _directInventory.ToList();
         }
 
         double scanAgeMs = (now - _lastDirectInventoryScan).TotalMilliseconds;
         if (_directInventory.Count > 0)
         {
             if (!forceRefresh && scanAgeMs < DirectInventoryCooldownMs)
-                return _directInventory;
+                return _directInventory.ToList();
 
             if (forceRefresh && scanAgeMs < DirectInventoryForceRefreshMinMs)
-                return _directInventory;
+                return _directInventory.ToList();
         }
 
         _lastDirectInventoryScan = now;
@@ -907,7 +975,7 @@ public class WorldObjectCache
 
         uint playerId = _host.GetPlayerId();
         if (playerId == 0)
-            return _directInventory;
+            return _directInventory.ToList();
 
         _host.TryGetObjectPosition(playerId, out _, out _, out _, out _);
 
@@ -949,53 +1017,69 @@ public class WorldObjectCache
                 UpsertDirectInventoryItem(cachedItem);
         }
 
-        return _directInventory;
+        return _directInventory.ToList();
+        }
     }
 
     public IEnumerable<WorldObject> GetContainedItems(int containerId)
     {
         if (containerId == 0)
-            yield break;
+            return Array.Empty<WorldObject>();
 
-        foreach (int id in _inventory)
+        // Snapshot candidates under the lock (pure collection reads); resolve container
+        // ownership outside the lock — GetContainerId is a host-only read, no cache access.
+        List<WorldObject> candidates;
+        lock (_gate)
         {
-            if (!_byId.TryGetValue(id, out var wo))
-                continue;
-            if (GetContainerId(id) != containerId)
-                continue;
-            yield return wo;
+            candidates = new List<WorldObject>(_inventory.Count);
+            foreach (int id in _inventory)
+                if (_byId.TryGetValue(id, out var wo))
+                    candidates.Add(wo);
+
+            // Quest items and items with dynamic (0x80000000+) GUIDs are classified
+            // as landscape rather than inventory. Check landscape too so they appear
+            // as corpse contents when an open corpse is scanned.
+            foreach (int id in _landscape)
+            {
+                if (_inventory.Contains(id)) continue; // already added above
+                if (_creatures.Contains(id)) continue; // it's a live creature, not a container item
+                if (_byId.TryGetValue(id, out var wo))
+                    candidates.Add(wo);
+            }
         }
 
-        // Quest items and items with dynamic (0x80000000+) GUIDs are classified
-        // as landscape rather than inventory. Check landscape too so they appear
-        // as corpse contents when an open corpse is scanned.
-        foreach (int id in _landscape)
-        {
-            if (_inventory.Contains(id)) continue; // already yielded above
-            if (_creatures.Contains(id)) continue; // it's a live creature, not a container item
-            if (!_byId.TryGetValue(id, out var wo)) continue;
-            if (GetContainerId(id) != containerId) continue;
-            yield return wo;
-        }
+        var result = new List<WorldObject>();
+        foreach (var wo in candidates)
+            if (GetContainerId(wo.Id) == containerId)
+                result.Add(wo);
+        return result;
     }
 
     /// <summary>Enumerate landscape creatures (received health updates or TYPE_CREATURE).</summary>
     public IEnumerable<WorldObject> GetLandscape()
     {
-        foreach (int id in _creatures)
+        // Copy-under-lock — the Avalonia radar poll enumerates this cross-thread (see GetInventory).
+        lock (_gate)
         {
-            if (_byId.TryGetValue(id, out var wo))
-                yield return wo;
+            var snapshot = new List<WorldObject>(_creatures.Count);
+            foreach (int id in _creatures)
+                if (_byId.TryGetValue(id, out var wo))
+                    snapshot.Add(wo);
+            return snapshot;
         }
     }
 
     /// <summary>Enumerate all world objects with a valid landscape position, including corpses.</summary>
     public IEnumerable<WorldObject> GetLandscapeObjects()
     {
-        foreach (int id in _landscape)
+        // Copy-under-lock — the Avalonia radar poll enumerates this cross-thread (see GetInventory).
+        lock (_gate)
         {
-            if (_byId.TryGetValue(id, out var wo))
-                yield return wo;
+            var snapshot = new List<WorldObject>(_landscape.Count);
+            foreach (int id in _landscape)
+                if (_byId.TryGetValue(id, out var wo))
+                    snapshot.Add(wo);
+            return snapshot;
         }
     }
 
@@ -1020,9 +1104,18 @@ public class WorldObjectCache
 
     private readonly HashSet<uint> _hazardCells = new();
 
-    public bool IsHazardCell(uint cellId) => _hazardCells.Contains(cellId);
+    public bool IsHazardCell(uint cellId)
+    {
+        lock (_gate)
+            return _hazardCells.Contains(cellId);
+    }
 
-    public IReadOnlySet<uint> GetHazardCells() => _hazardCells;
+    public IReadOnlySet<uint> GetHazardCells()
+    {
+        // Snapshot — consumers (DungeonPathfinder) want a point-in-time set per path call.
+        lock (_gate)
+            return new HashSet<uint>(_hazardCells);
+    }
 
     private static bool IsHazardName(string? name)
     {
@@ -1054,6 +1147,8 @@ public class WorldObjectCache
     /// </summary>
     public int ScanFullInventory()
     {
+        lock (_gate)
+        {
         if (!_host.HasGetContainerContents) return -1;
         uint playerId = _host.GetPlayerId();
         if (playerId == 0) return -1;
@@ -1096,24 +1191,28 @@ public class WorldObjectCache
             _host.Log($"[RynthAi] ScanFullInventory: discovered {discovered} new item(s) across {packIds.Count + 1} container(s)");
 
         return discovered;
+        }
     }
 
     private int EnsureInCache(uint uid)
     {
-        int id = (int)uid;
-        // Use the indexer for lazy lookup (reads name, classifies, adds to cache)
-        if (_byId.ContainsKey(id) || this[id] != null)
+        lock (_gate)
         {
-            // Item is known to be inside a container — force into _inventory
-            // even if the indexer classified it as landscape (equipped items have positions)
-            if (!_inventory.Contains(id))
+            int id = (int)uid;
+            // Use the indexer for lazy lookup (reads name, classifies, adds to cache)
+            if (_byId.ContainsKey(id) || this[id] != null)
             {
-                _inventory.Add(id);
-                _landscape.Remove(id);
+                // Item is known to be inside a container — force into _inventory
+                // even if the indexer classified it as landscape (equipped items have positions)
+                if (!_inventory.Contains(id))
+                {
+                    _inventory.Add(id);
+                    _landscape.Remove(id);
+                }
+                return _byId.ContainsKey(id) ? 1 : 0;
             }
-            return _byId.ContainsKey(id) ? 1 : 0;
+            return 0;
         }
-        return 0;
     }
 
     private bool TryAddDirectInventoryItem(uint uid, uint playerId, out bool isContainer)
@@ -1196,7 +1295,10 @@ public class WorldObjectCache
 
     /// <summary>Cache statistics for diagnostics.</summary>
     public (int Total, int Creatures, int Inventory, int Landscape, int Pending) GetStats()
-        => (_byId.Count, _creatures.Count, _inventory.Count, _landscape.Count, _pending.Count);
+    {
+        lock (_gate)
+            return (_byId.Count, _creatures.Count, _inventory.Count, _landscape.Count, _pending.Count);
+    }
 
     // ── Factory ───────────────────────────────────────────────────────────
 
