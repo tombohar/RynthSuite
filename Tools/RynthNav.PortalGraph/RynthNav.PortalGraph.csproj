@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>RynthNav.PortalGraph</RootNamespace>
+    <AssemblyName>RynthNav.PortalGraph</AssemblyName>
+  </PropertyGroup>
+
+  <!-- Vendor the source location DB so the parser always has its input, even offline.
+       Copied to output so a published exe is fully self-contained. -->
+  <ItemGroup>
+    <None Include="Data\GAlocations.xml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
