@@ -948,8 +948,14 @@ public class CombatManager : IDisposable
         if (!isRanged && !useNative)
             ClearCombatTurnMotions();
 
+        // Attack magic uses its OWN interval (AttackSpellIntervalMs, default
+        // 1500ms) so war/void combat casts can be spaced ~1-2s without slowing
+        // buff chains — buffs keep the faster SpellCastIntervalMs. Spacing the
+        // offensive casts stops back-to-back "You're too busy!" refusals that
+        // silently drop casts and cost kills. ≤0 (e.g. a pre-existing settings
+        // file saved before this field existed) falls back to 1500ms.
         double attackCmdIntervalMs = CurrentCombatMode == CombatMode.Magic
-            ? _settings.SpellCastIntervalMs
+            ? (_settings.AttackSpellIntervalMs > 0 ? _settings.AttackSpellIntervalMs : 1500)
             : 1000.0;
         if ((DateTime.Now - lastAttackCmd).TotalMilliseconds >= attackCmdIntervalMs)
         {

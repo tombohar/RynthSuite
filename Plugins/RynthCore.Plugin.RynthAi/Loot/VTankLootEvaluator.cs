@@ -200,10 +200,20 @@ public static class VTankLootEvaluator
 
     // ── Matchers needing more than a one-liner ───────────────────────────────
 
+    // NOTE: all three regex matchers go through Meta.RegexCache rather than
+    // `new Regex(...)`. ClassifyItemAgainstProfile runs this evaluator against
+    // every loot rule for every corpse item on the plugin tick thread, and a
+    // loot-snob profile has hundreds of spell-name / string regex rules. Compiling
+    // each pattern per match (the old code) cost hundreds of regex *compilations*
+    // per item — the dominant cost of "scanning which items to keep", and it
+    // stalled the shared tick (combat/nav) while looting. The cache reuses the
+    // constructed interpreter instance; match semantics are identical (a bad
+    // pattern caches null ⇒ no match, same as the old throw→outer-catch→false).
     private static bool MatchSpellNameMatch(uint itemId, VTankLootContext? ctx, IList<string> d)
     {
         if (ctx is null) return true;
-        Regex rx = new(d[0], RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        Regex? rx = Meta.RegexCache.Get(d[0], RegexOptions.IgnoreCase);
+        if (rx is null) return false;
         foreach (string n in ctx.GetItemSpellNames(itemId))
             if (!string.IsNullOrEmpty(n) && rx.IsMatch(n)) return true;
         return false;
@@ -214,7 +224,7 @@ public static class VTankLootEvaluator
         string pattern = d[0];
         int key = ReadInt(d, 1);
         string value = item.Values((StringValueKey)key, string.Empty);
-        return Regex.IsMatch(value, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        return Meta.RegexCache.IsMatch(value, pattern, RegexOptions.IgnoreCase);
     }
 
     private static bool MatchSpellMatch(uint itemId, VTankLootContext? ctx, IList<string> d)
@@ -223,10 +233,11 @@ public static class VTankLootEvaluator
         string pos = d[0];
         string neg = d[1];
         int count = ReadInt(d, 2);
-        Regex rxPos = new(pos, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        Regex? rxPos = Meta.RegexCache.Get(pos, RegexOptions.IgnoreCase);
+        if (rxPos is null) return false;
         Regex? rxNeg = string.IsNullOrWhiteSpace(neg)
             ? null
-            : new Regex(neg, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            : Meta.RegexCache.Get(neg, RegexOptions.IgnoreCase);
         int c = 0;
         foreach (string name in ctx.GetItemSpellNames(itemId))
         {

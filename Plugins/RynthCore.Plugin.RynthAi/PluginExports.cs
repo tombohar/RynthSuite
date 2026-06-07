@@ -293,12 +293,35 @@ public static unsafe class PluginExports
             string? json = Marshal.PtrToStringAnsi(ansiJson);
             if (string.IsNullOrEmpty(json)) return;
             var cmd = JsonSerializer.Deserialize(json, RynthAiJsonContext.Default.NavCommand);
-            if (cmd?.Cmd == "dunPatrol")
-                Runtime.Plugin?.HandleDungeonNavPatrol();
-            else
-                Runtime.Plugin?.DashboardRenderer?.HandleNavCommand(json);
+            switch (cmd?.Cmd)
+            {
+                case "dunPatrol":       Runtime.Plugin?.HandleDungeonNavPatrol();              break;
+                case "clearHazards":    Runtime.Plugin?.ClearDungeonHazards(cmd.NavName);      break;
+                case "clearHazardsAll": Runtime.Plugin?.ClearAllDungeonHazards();              break;
+                default:                Runtime.Plugin?.DashboardRenderer?.HandleNavCommand(json); break;
+            }
         }
         catch { }
+    }
+
+    private static IntPtr _patrolInfoPtr = IntPtr.Zero;
+
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetPatrolInfoJson", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr GetPatrolInfoJson()
+    {
+        try
+        {
+            string json = Runtime.Plugin?.BuildPatrolInfoJson() ?? "{}";
+            IntPtr newPtr = Marshal.StringToHGlobalAnsi(json);
+            IntPtr oldPtr = Interlocked.Exchange(ref _patrolInfoPtr, newPtr);
+            if (oldPtr != IntPtr.Zero)
+                Marshal.FreeHGlobal(oldPtr);
+            return newPtr;
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
     }
 
     // ── Items bridge (engine-side Avalonia ItemsPanel) ──────────────────────

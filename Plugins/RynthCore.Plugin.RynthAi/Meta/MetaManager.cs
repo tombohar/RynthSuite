@@ -295,6 +295,11 @@ internal sealed class MetaManager
             {
             if (rule.HasFired) continue;
 
+            // Chat-capture groups are scoped to the rule that captured them:
+            // clear before each rule so a ChatMessageCapture match can't bleed
+            // its {0}/{1} groups into a later rule's action (or the next tick).
+            _lastChatMatch = null;
+
             if (EvaluateCondition(rule, secondsInState))
             {
                 rule.HasFired = true;

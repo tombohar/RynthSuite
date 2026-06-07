@@ -1379,9 +1379,8 @@ internal sealed class ExpressionEngine
     private string EvalWobjectFindInInventoryByNameRx(string pattern)
     {
         if (_worldObjectCache == null || string.IsNullOrEmpty(pattern)) return "0";
-        Regex re;
-        try { re = new Regex(pattern, RegexOptions.IgnoreCase); }
-        catch { return "0"; }
+        var re = RegexCache.Get(pattern, RegexOptions.IgnoreCase);
+        if (re == null) return "0";
 
         foreach (var wo in _worldObjectCache.GetDirectInventory(forceRefresh: true))
         {
@@ -1394,9 +1393,8 @@ internal sealed class ExpressionEngine
     private string EvalWobjectFindAllInventoryByNameRx(string pattern)
     {
         if (_worldObjectCache == null || string.IsNullOrEmpty(pattern)) return "[]";
-        Regex re;
-        try { re = new Regex(pattern, RegexOptions.IgnoreCase); }
-        catch { return "[]"; }
+        var re = RegexCache.Get(pattern, RegexOptions.IgnoreCase);
+        if (re == null) return "[]";
 
         var items = new List<string>();
         foreach (var wo in _worldObjectCache.GetDirectInventory(forceRefresh: true))
@@ -1474,9 +1472,8 @@ internal sealed class ExpressionEngine
     private string EvalWobjectFindAllByNameRx(string pattern)
     {
         if (_worldObjectCache == null || string.IsNullOrEmpty(pattern)) return "[]";
-        Regex re;
-        try { re = new Regex(pattern, RegexOptions.IgnoreCase); }
-        catch { return "[]"; }
+        var re = RegexCache.Get(pattern, RegexOptions.IgnoreCase);
+        if (re == null) return "[]";
 
         var items = new List<string>();
         var seen = new System.Collections.Generic.HashSet<int>();
@@ -1587,9 +1584,8 @@ internal sealed class ExpressionEngine
     private string EvalWobjectFindAllLandscapeByNameRx(string pattern)
     {
         if (_worldObjectCache == null || string.IsNullOrEmpty(pattern)) return "[]";
-        Regex re;
-        try { re = new Regex(pattern, RegexOptions.IgnoreCase); }
-        catch { return "[]"; }
+        var re = RegexCache.Get(pattern, RegexOptions.IgnoreCase);
+        if (re == null) return "[]";
 
         var items = new List<string>();
         foreach (var wo in _worldObjectCache.GetLandscapeObjects())
@@ -1832,9 +1828,8 @@ internal sealed class ExpressionEngine
         if (!int.TryParse(classArg.Trim(), out int targetClass)) return "0";
         if (string.IsNullOrEmpty(pattern)) return "0";
 
-        Regex re;
-        try { re = new Regex(pattern, RegexOptions.IgnoreCase); }
-        catch { return "0"; }
+        var re = RegexCache.Get(pattern, RegexOptions.IgnoreCase);
+        if (re == null) return "0";
 
         uint bestId = 0;
         string bestName = string.Empty;
@@ -2267,8 +2262,8 @@ internal sealed class ExpressionEngine
     private string EvalItemCountByNameRx(string pattern)
     {
         if (_worldObjectCache == null || string.IsNullOrEmpty(pattern)) return "0";
-        Regex? rx = null;
-        try { rx = new Regex(pattern, RegexOptions.IgnoreCase); } catch { return "0"; }
+        var rx = RegexCache.Get(pattern, RegexOptions.IgnoreCase);
+        if (rx == null) return "0";
         int total = 0;
         foreach (var wo in _worldObjectCache.GetDirectInventory())
             if (rx.IsMatch(wo.Name))

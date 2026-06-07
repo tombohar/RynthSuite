@@ -291,9 +291,18 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.SliderInt("Spell Interval (ms)", ref _settings.SpellCastIntervalMs, 100, 1500);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip(
-                        "Delay between spell casts (buffing and combat).\n" +
-                        "Lower = faster spell chains. 400ms is a good balance.\n" +
+                        "Delay between BUFF / utility spell casts (not combat).\n" +
+                        "Lower = faster buff chains. 400ms is a good balance.\n" +
                         "Below 200ms may cause fizzles or dropped casts on laggy servers.");
+
+                ImGui.SetNextItemWidth(180);
+                ImGui.SliderInt("Attack Spell Delay (ms)", ref _settings.AttackSpellIntervalMs, 250, 5000);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "Delay between offensive (war/void) COMBAT casts only.\n" +
+                        "Spacing casts ~1-2s (1500ms default) stops back-to-back\n" +
+                        "\"You're too busy!\" refusals that drop casts and cost kills.\n" +
+                        "Does NOT affect buffing speed.");
 
                 ImGui.Spacing();
                 ImGui.Checkbox("Cast Dispel Self", ref _settings.CastDispelSelf);

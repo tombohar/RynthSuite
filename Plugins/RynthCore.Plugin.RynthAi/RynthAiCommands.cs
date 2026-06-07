@@ -1976,37 +1976,49 @@ public sealed partial class RynthAiPlugin
     /// Builds a Circular hunt patrol covering every cell in the current dungeon landblock.
     /// Called from both /ra dunnav-patrol and the NavPanel "Dungeon Patrol" button.
     /// </summary>
-    public void HandleDungeonNavPatrol()
+    public void HandleDungeonNavPatrol() => BuildDunPatrol(isRebuild: false);
+
+    /// <summary>
+    /// Builds (or rebuilds) the circular dungeon patrol route from the player's current
+    /// cell, excluding all currently-known hazard cells, and installs it as the active
+    /// route. When <paramref name="isRebuild"/> is true this was triggered by OnTick
+    /// after a new hazard was sighted mid-patrol — it reroutes silently (no fresh
+    /// "patrol started" chatter, just a one-line note) and never flips IsMacroRunning.
+    /// </summary>
+    private void BuildDunPatrol(bool isRebuild)
     {
         var settings = _dashboard?.Settings;
-        if (settings == null) { ChatLine("[RynthAi] Settings not ready."); return; }
+        if (settings == null) { if (!isRebuild) ChatLine("[RynthAi] Settings not ready."); return; }
 
         if (!Host.TryGetPlayerPose(out uint playerCell, out float playerLocalX, out float playerLocalY,
                                    out float patrolWZ, out _, out _, out _, out _))
         {
-            ChatLine("[RynthAi] Cannot get player position."); return;
+            if (!isRebuild) ChatLine("[RynthAi] Cannot get player position."); return;
         }
 
         uint landblockKey = playerCell >> 16;
         bool isDungeon    = (playerCell & 0xFFFF) >= 0x0100;
         if (!isDungeon)
         {
-            ChatLine("[RynthAi] dunnav-patrol requires you to be inside a dungeon (cell >= 0x0100)."); return;
+            // Left the dungeon (e.g. portalled out) — stop tracking; nothing to rebuild.
+            _dunPatrolActive = false;
+            if (!isRebuild) ChatLine("[RynthAi] dunnav-patrol requires you to be inside a dungeon (cell >= 0x0100).");
+            return;
         }
 
         var cellDat = _raycast?.GeometryLoader.CellDat;
         if (cellDat == null || !cellDat.IsLoaded)
         {
-            ChatLine("[RynthAi] Cell dat not loaded — raycast system must be initialized first."); return;
+            if (!isRebuild) ChatLine("[RynthAi] Cell dat not loaded — raycast system must be initialized first."); return;
         }
 
         if (!NavCoordinateHelper.TryGetNavCoords(Host, out double playerNS, out double playerEW))
         {
-            ChatLine("[RynthAi] Cannot get player nav coordinates."); return;
+            if (!isRebuild) ChatLine("[RynthAi] Cannot get player nav coordinates."); return;
         }
 
         var graph = DungeonPathfinder.GetGraph(landblockKey, cellDat);
-        if (graph.Count == 0) { ChatLine("[RynthAi] DunNav-Patrol: dungeon graph is empty."); return; }
+        if (graph.Count == 0) { if (!isRebuild) ChatLine("[RynthAi] DunNav-Patrol: dungeon graph is empty."); return; }
 
         // Prefer the actual cell the player is standing in. NearestCell-by-distance can
         // pick a same-floor cell across an interior wall when the player is hugging a
@@ -2019,8 +2031,13 @@ public sealed partial class RynthAiPlugin
         else
         {
             startCell = DungeonPathfinder.NearestCell(graph, playerNS, playerEW, patrolWZ);
-            if (startCell == 0) { ChatLine("[RynthAi] DunNav-Patrol: cannot find starting cell."); return; }
+            if (startCell == 0) { if (!isRebuild) ChatLine("[RynthAi] DunNav-Patrol: cannot find starting cell."); return; }
         }
+
+        // Pull in hazards discovered on previous visits to this dungeon so the route avoids
+        // them from the first waypoint — hazards are static, so a dungeon we've already
+        // explored is built clean without having to re-sight and reroute.
+        _objectCache?.SeedHazardsFromStore(landblockKey);
 
         var hazards = _objectCache?.GetHazardCells();
         var route = DungeonPathfinder.BuildPatrolRoute(graph, startCell, hazards);
@@ -2033,15 +2050,164 @@ public sealed partial class RynthAiPlugin
         // "patrol immediately runs into a wall on login" failure mode.
         int startIdx = FindFirstLineOfSightWaypoint(route, playerCell, playerLocalX, playerLocalY, patrolWZ);
 
-        settings.IsMacroRunning   = true;
+        if (!isRebuild)
+            settings.IsMacroRunning = true;
         settings.CurrentNavPath   = string.Empty;
         settings.CurrentRoute     = route;
         settings.ActiveNavIndex   = startIdx;
         settings.EnableNavigation = true;
 
-        string hazardNote = (hazards != null && hazards.Count > 0) ? $", {hazards.Count} hazard cell(s) avoided" : "";
-        string skipNote   = startIdx > 0 ? $", skipped {startIdx} blocked waypoint(s)" : "";
-        ChatLine($"[RynthAi] DunNav-Patrol: {graph.Count} cells, {route.Points.Count} waypoints → circular patrol started{skipNote}{hazardNote}");
+        // Arm mid-patrol hazard rerouting: remember which dungeon this route belongs to
+        // and the hazard generation it already accounts for. OnTick rebuilds when a newer
+        // hazard is sighted in this same landblock.
+        _dunPatrolActive        = true;
+        _dunPatrolLandblock     = landblockKey;
+        _dunPatrolHazardVersion = _objectCache?.HazardVersion ?? 0;
+
+        int hazardCount = hazards?.Count ?? 0;
+        string hazardNote = hazardCount > 0 ? $", {hazardCount} hazard cell(s) avoided" : "";
+        if (isRebuild)
+        {
+            ChatLine($"[RynthAi] DunNav-Patrol: new hazard sighted → rerouted around it ({hazardCount} hazard cell(s) avoided).");
+        }
+        else
+        {
+            string skipNote = startIdx > 0 ? $", skipped {startIdx} blocked waypoint(s)" : "";
+            ChatLine($"[RynthAi] DunNav-Patrol: {graph.Count} cells, {route.Points.Count} waypoints → circular patrol started{skipNote}{hazardNote}");
+        }
+    }
+
+    /// <summary>
+    /// Called once per OnTick while logged in. If a dunnav-patrol is running and a new
+    /// hazard (lava/acid hotspot) has been sighted since the route was built, rebuilds the
+    /// route so the hotspot is treated as a wall the bot turns around at. No-op otherwise.
+    /// </summary>
+    private void TickDunPatrolHazardReroute()
+    {
+        if (!_dunPatrolActive) return;
+        if (_objectCache == null) return;
+
+        var settings = _dashboard?.Settings;
+        // Patrol stopped, navigation disabled, or a different (recorded) route was loaded —
+        // stand down; we only own the auto-generated, file-less circular patrol.
+        if (settings == null || !settings.IsMacroRunning || !settings.EnableNavigation
+            || !string.IsNullOrEmpty(settings.CurrentNavPath)
+            || settings.CurrentRoute?.RouteType != NavRouteType.Circular)
+        {
+            _dunPatrolActive = false;
+            return;
+        }
+
+        if (_objectCache.HazardVersion == _dunPatrolHazardVersion) return; // nothing new sighted
+
+        // Only reroute if still in the dungeon this patrol was built for. A portal to a new
+        // landblock means BuildDunPatrol would (correctly) re-home, but that should happen via
+        // an explicit /ra dunnav-patrol, not a hazard tick — so just resync and skip.
+        if (!Host.TryGetPlayerPose(out uint playerCell, out _, out _, out _, out _, out _, out _, out _)
+            || (playerCell >> 16) != _dunPatrolLandblock)
+        {
+            _dunPatrolHazardVersion = _objectCache.HazardVersion;
+            return;
+        }
+
+        BuildDunPatrol(isRebuild: true);
+    }
+
+    // ── Patrol-management info / actions (engine-side right-click flyout) ──────
+
+    /// <summary>
+    /// JSON for the engine Avalonia patrol flyout: the player's current dungeon + the set of
+    /// dungeons that have persisted hazard cells. Built by hand (NativeAOT-friendly, no
+    /// reflection). All values are plain ints / hex strings, so no escaping is needed.
+    /// </summary>
+    public string BuildPatrolInfoJson()
+    {
+        bool inDungeon = false;
+        uint landblock = 0;
+        if (Host.TryGetPlayerPose(out uint cell, out _, out _, out _, out _, out _, out _, out _))
+        {
+            landblock = cell >> 16;
+            inDungeon = (cell & 0xFFFF) >= 0x0100;
+        }
+
+        var sb = new System.Text.StringBuilder(256);
+        sb.Append('{');
+        sb.Append("\"inDungeon\":").Append(inDungeon ? "true" : "false").Append(',');
+        sb.Append("\"currentLandblock\":\"").Append(landblock.ToString("X4")).Append("\",");
+        sb.Append("\"currentHazards\":").Append(inDungeon ? DungeonHazardStore.Count(landblock) : 0).Append(',');
+        sb.Append("\"liveHazards\":").Append(_objectCache?.HazardCellCount ?? 0).Append(',');
+        sb.Append("\"dungeons\":[");
+        var lbs = DungeonHazardStore.ListLandblocks();
+        for (int i = 0; i < lbs.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append("{\"landblock\":\"").Append(lbs[i].ToString("X4"))
+              .Append("\",\"cells\":").Append(DungeonHazardStore.Count(lbs[i])).Append('}');
+        }
+        sb.Append("],");
+        sb.Append("\"routes\":[");
+        try
+        {
+            const string navFolder = @"C:\Games\RynthSuite\RynthAi\NavProfiles";
+            if (System.IO.Directory.Exists(navFolder))
+            {
+                var files = System.IO.Directory.GetFiles(navFolder, "*.nav");
+                Array.Sort(files);
+                for (int i = 0; i < files.Length; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    string nm = System.IO.Path.GetFileNameWithoutExtension(files[i]);
+                    sb.Append('"').Append(JsonEscape(nm)).Append('"');
+                }
+            }
+        }
+        catch { }
+        sb.Append("]}");
+        return sb.ToString();
+    }
+
+    // Minimal JSON string escaper for route names (which can contain user-chosen chars).
+    private static string JsonEscape(string s)
+    {
+        var sb = new System.Text.StringBuilder(s.Length + 8);
+        foreach (char c in s)
+        {
+            switch (c)
+            {
+                case '"':  sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\n': sb.Append("\\n");  break;
+                case '\r': sb.Append("\\r");  break;
+                case '\t': sb.Append("\\t");  break;
+                default:
+                    if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("x4"));
+                    else sb.Append(c);
+                    break;
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Clears persisted + live hazards for one landblock (hex string, e.g. "AB12").</summary>
+    public void ClearDungeonHazards(string landblockHex)
+    {
+        if (string.IsNullOrWhiteSpace(landblockHex)) return;
+        string h = landblockHex.Trim();
+        if (h.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) h = h.Substring(2);
+        if (!uint.TryParse(h, System.Globalization.NumberStyles.HexNumber,
+                           System.Globalization.CultureInfo.InvariantCulture, out uint lb))
+            return;
+        DungeonHazardStore.Clear(lb);
+        _objectCache?.ClearLiveHazards(lb);
+        ChatLine($"[RynthAi] Cleared recorded hazards for dungeon 0x{lb:X4}.");
+    }
+
+    /// <summary>Clears every persisted + live hazard cell across all dungeons.</summary>
+    public void ClearAllDungeonHazards()
+    {
+        DungeonHazardStore.ClearAll();
+        _objectCache?.ClearAllLiveHazards();
+        ChatLine("[RynthAi] Cleared all recorded dungeon hazards.");
     }
 
     /// <summary>

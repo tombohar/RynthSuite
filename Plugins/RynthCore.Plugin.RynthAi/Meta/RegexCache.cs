@@ -17,7 +17,10 @@ namespace RynthCore.Plugin.RynthAi.Meta;
 /// </summary>
 internal static class RegexCache
 {
-    private const int MaxEntries = 256;
+    // Sized to hold every distinct pattern in a large VTank loot-snob profile
+    // (1600+ rules, many with spell-name / string regexes) so the loot evaluator
+    // never thrashes the cache mid-corpse. Interpreter Regex instances are small.
+    private const int MaxEntries = 2048;
     private static readonly ConcurrentDictionary<(string Pattern, RegexOptions Options), Regex?> _cache = new();
 
     public static Regex? Get(string pattern, RegexOptions options = RegexOptions.None)

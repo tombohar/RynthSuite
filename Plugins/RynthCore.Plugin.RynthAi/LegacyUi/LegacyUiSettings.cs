@@ -166,6 +166,15 @@ public sealed class LegacyUiSettings
 
     public int SpellCastIntervalMs = 400;
 
+    /// <summary>
+    /// Minimum delay between offensive (war/void) COMBAT spell casts, in ms.
+    /// Combat magic uses this instead of <see cref="SpellCastIntervalMs"/> so
+    /// attack pacing can be slowed (~1-2s) without slowing buff chains. Default
+    /// 1500ms ("a second or two") — spacing offensive casts stops back-to-back
+    /// "You're too busy!" refusals that drop casts and cost kills. ≤0 ⇒ 1500.
+    /// </summary>
+    public int AttackSpellIntervalMs = 1500;
+
     public int MeleeAttackPower = -1;
     public int MissileAttackPower = -1;
     public bool UseNativeAttack = true;
@@ -539,6 +548,7 @@ public sealed class SettingsBridgePayload
 
     // Spell Combat
     public int SpellCastIntervalMs { get; set; }
+    public int AttackSpellIntervalMs { get; set; }
     public bool CastDispelSelf { get; set; }
     public int MinRingTargets { get; set; }
     public int MinSkillLevelTier1 { get; set; }

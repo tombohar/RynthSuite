@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <OutputType>Library</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IlcOptimizationPreference>Size</IlcOptimizationPreference>
+    <StripSymbols>false</StripSymbols>
+    <RootNamespace>RynthCore.Plugin.RynthJuice</RootNamespace>
+    <AssemblyName>RynthCore.Plugin.RynthJuice</AssemblyName>
+    <Platforms>x86</Platforms>
+    <!-- Publish straight into the launcher-registered deploy home so a bare
+         `dotnet publish` lands where the engine hot-reloads it (mirrors
+         RynthVision). Deploy-RynthCore.ps1 points its copy step here too and
+         detects source == dest to skip the redundant self-copy. -->
+    <PublishDir>C:\Games\RynthSuite\RynthJuice\</PublishDir>
+  </PropertyGroup>
+
+  <!-- No ImGui.NET: RynthJuice draws purely through the engine's Nav3D world-
+       space renderer (lines/rings/triangles), which has its own
+       DrawIndexedPrimitive hook independent of the ImGui shell. That keeps the
+       plugin alive in EnableImGuiShell=false mode and off the fragile ImGui
+       path entirely. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+    <!-- Shared DAT reader (same lib RynthVision uses; carries NO RynthAi
+         dependency) — used to read per-EnvCell transforms from cell.dat for
+         dungeon (indoor) damage-number placement. -->
+    <ProjectReference Include="..\..\Shared\RynthCore.TerrainData\RynthCore.TerrainData.csproj" />
+  </ItemGroup>
+
+</Project>

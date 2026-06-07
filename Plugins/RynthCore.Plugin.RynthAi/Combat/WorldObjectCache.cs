@@ -1104,10 +1104,53 @@ public class WorldObjectCache
 
     private readonly HashSet<uint> _hazardCells = new();
 
+    // Bumped every time a NEW hazard cell is registered. The patrol controller
+    // snapshots this when it builds a route and compares each tick: a change means
+    // a lava/acid hotspot was sighted that the current route doesn't yet avoid, so
+    // the route must be rebuilt around it. Cheaper than diffing the set every tick.
+    private int _hazardVersion;
+
+    public int HazardVersion
+    {
+        get { lock (_gate) return _hazardVersion; }
+    }
+
     public bool IsHazardCell(uint cellId)
     {
         lock (_gate)
             return _hazardCells.Contains(cellId);
+    }
+
+    public int HazardCellCount
+    {
+        get { lock (_gate) return _hazardCells.Count; }
+    }
+
+    /// <summary>
+    /// Drops live hazard cells for one landblock (cellId &gt;&gt; 16 == landblockKey) and
+    /// re-arms seeding for it, so a later patrol of that dungeon reloads from disk fresh.
+    /// Bumps <see cref="HazardVersion"/> so an active patrol there rebuilds without the
+    /// cleared cells. The caller is responsible for clearing the on-disk store separately.
+    /// </summary>
+    public void ClearLiveHazards(uint landblockKey)
+    {
+        lock (_gate)
+        {
+            _hazardCells.RemoveWhere(c => (c >> 16) == landblockKey);
+            if (_hazardsSeededLandblock == landblockKey) _hazardsSeededLandblock = 0;
+            _hazardVersion++;
+        }
+    }
+
+    /// <summary>Drops every live hazard cell and re-arms seeding. Bumps HazardVersion.</summary>
+    public void ClearAllLiveHazards()
+    {
+        lock (_gate)
+        {
+            _hazardCells.Clear();
+            _hazardsSeededLandblock = 0;
+            _hazardVersion++;
+        }
     }
 
     public IReadOnlySet<uint> GetHazardCells()
@@ -1115,6 +1158,37 @@ public class WorldObjectCache
         // Snapshot — consumers (DungeonPathfinder) want a point-in-time set per path call.
         lock (_gate)
             return new HashSet<uint>(_hazardCells);
+    }
+
+    // Landblock whose persisted hazards have already been merged in, so SeedHazardsFromStore
+    // is a cheap no-op when the patrol builder calls it every (re)build for the same dungeon.
+    private uint _hazardsSeededLandblock;
+
+    /// <summary>
+    /// Merges the on-disk hazard cells recorded for <paramref name="landblockKey"/> on prior
+    /// visits into the live set, so a patrol route built right after entering a known dungeon
+    /// avoids them from the start instead of having to re-sight and reroute. Cheap no-op once
+    /// per landblock. Bumps <see cref="HazardVersion"/> if it adds anything (so an already-
+    /// running patrol reroutes around the loaded cells too).
+    /// </summary>
+    public void SeedHazardsFromStore(uint landblockKey)
+    {
+        lock (_gate)
+        {
+            if (_hazardsSeededLandblock == landblockKey) return;
+            _hazardsSeededLandblock = landblockKey;
+
+            var persisted = DungeonHazardStore.Load(landblockKey);
+            int added = 0;
+            foreach (uint cell in persisted)
+                if (_hazardCells.Add(cell)) added++;
+
+            if (added > 0)
+            {
+                _hazardVersion++;
+                _host.Log($"[Hazard] seeded {added} persisted hazard cell(s) for landblock 0x{landblockKey:X4}");
+            }
+        }
     }
 
     private static bool IsHazardName(string? name)
@@ -1137,7 +1211,14 @@ public class WorldObjectCache
         if (!_host.TryGetObjectPosition(uid, out uint cellId, out _, out _, out _)) return;
         if (cellId == 0) return;
         if (_hazardCells.Add(cellId))
-            _host.Log($"[Hazard] 0x{uid:X8} '{name}' → cell 0x{cellId:X8}");
+        {
+            _hazardVersion++;
+            // Persist so future visits to this dungeon avoid the cell from the first
+            // waypoint. Keyed by landblock (cellId >> 16) — hazards are static world
+            // geometry, identical for every character.
+            DungeonHazardStore.Append(cellId >> 16, cellId);
+            _host.Log($"[Hazard] 0x{uid:X8} '{name}' → cell 0x{cellId:X8} (persisted)");
+        }
     }
 
     /// <summary>

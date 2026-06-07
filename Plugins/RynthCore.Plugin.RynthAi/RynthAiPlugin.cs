@@ -48,6 +48,17 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private bool _initialized;
     private bool _loginComplete;
     private bool _patrolOnLoginPending;
+    // ── Dungeon-patrol hazard tracking ───────────────────────────────────────
+    // A dunnav-patrol route is built once from the hazard cells known at that
+    // instant — but lava/acid hotspots are usually sighted only as the bot walks
+    // up to them, after the route is already running. These fields let OnTick
+    // notice a newly-sighted hazard (HazardVersion bumped) and rebuild the patrol
+    // around it, so the route treats the hotspot as a wall instead of looping
+    // through it. _dunPatrolLandblock guards against rebuilding after the bot has
+    // portalled to a different dungeon.
+    private bool _dunPatrolActive;
+    private uint _dunPatrolLandblock;
+    private int  _dunPatrolHazardVersion;
     private DateTime _notInWorldSince = DateTime.MinValue;
     private bool _windowVisible;
     private int _tickDiag;
@@ -514,6 +525,11 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     _patrolOnLoginPending = false;
                     HandleDungeonNavPatrol();
                 }
+
+                // Reroute the active dungeon patrol around any lava/acid hotspot sighted
+                // since the route was built — treats the hotspot as a wall instead of
+                // looping through it. Cheap no-op unless a new hazard cell was registered.
+                TickDunPatrolHazardReroute();
 
                 // ── Activity arbiter — STEP 2: AUTHORITATIVE for Combat↔Nav ──
                 // The arbiter is now the SOLE writer of the "Combat" /

@@ -122,11 +122,20 @@ public sealed partial class RynthAiPlugin
         {
             long elapsed = CorpseNowMs - _busyCountBecamePositiveAt;
             bool combatUrgent = _combatManager?.HasTargets == true;
-            long threshold = combatUrgent ? BUSY_TIMEOUT_COMBAT_URGENT_MS : BUSY_TIMEOUT_MS;
+            // Also treat the corpse approach/open phase as urgent: offensive/buff casts
+            // leak m_cBusy (off-thread CastSpell increments but never pairs a decrement),
+            // and a lingering phantom count makes TickCorpseOpening sit on OpenBusyWaitMaxMs
+            // before opening the next corpse — ~8s of dead time per corpse between kills,
+            // when HasTargets is false so the 10s fallback applied. Scoped to "corpse
+            // claimed but not yet open" so it never interrupts an in-flight item pickup
+            // (no pickup is pending until a container is open).
+            bool lootOpenUrgent = _targetCorpseId != 0 && _openedContainerId == 0;
+            bool urgent = combatUrgent || lootOpenUrgent;
+            long threshold = urgent ? BUSY_TIMEOUT_COMBAT_URGENT_MS : BUSY_TIMEOUT_MS;
 
             if (elapsed > threshold)
             {
-                Log($"[RynthAi] Busy count stuck at {_busyCount} for >{elapsed}ms (combatUrgent={combatUrgent}) — force-clearing.");
+                Log($"[RynthAi] Busy count stuck at {_busyCount} for >{elapsed}ms (combatUrgent={combatUrgent} lootOpenUrgent={lootOpenUrgent}) — force-clearing.");
                 // Reset pending loot item BEFORE zeroing AC's m_cBusy. If we have an
                 // in-flight UseObject, ForceResetBusyCount zeros m_cBusy under it; the
                 // retry in TickPendingCorpsePickup would then hit a freed AC object and crash.
@@ -490,11 +499,13 @@ public sealed partial class RynthAiPlugin
     }
 
     private long _corpseOpenBusyWaitSince;
-    // Wait for busy to genuinely clear before opening the next corpse. The long
-    // backstop only exists so a leaked/desynced count can't permanently freeze
-    // looting — the busy watchdog force-clears a real leak at ~10s, so by then
-    // busy is 0 and the open proceeds normally rather than stacking into a wedge.
-    private const long OpenBusyWaitMaxMs = 8000;
+    // Wait for busy to genuinely clear before opening the next corpse. The backstop
+    // only exists so a leaked/desynced count can't freeze looting — CheckBusyTimeout
+    // now force-clears a leak in 2s during the corpse approach/open phase (lootOpenUrgent),
+    // so this sits just above that: by the time we'd give up waiting, the watchdog has
+    // already zeroed the phantom count and the open proceeds cleanly. Was 8000ms, which
+    // cost ~8s of dead time per corpse whenever a cast had leaked the busy count.
+    private const long OpenBusyWaitMaxMs = 2500;
 
     private bool ShouldDriveCorpseOpening(LegacyUiSettings settings)
     {
@@ -822,12 +833,18 @@ public sealed partial class RynthAiPlugin
 
         long openAge = now - _openedContainerAt;
 
+        // Snapshot the corpse's contents ONCE per tick and reuse it everywhere below.
+        // GetContainedItems scans the entire landscape+inventory set (200+ objects) with
+        // a native ownership probe per object; this path used to call it up to 3× per tick
+        // (fast-path probe, ID-request loop, eval loop) on the shared plugin tick thread.
+        List<WorldObject> containedItems = _objectCache.GetContainedItems(corpseId).ToList();
+
         // Fast path: items for this corpse are already in the cache. AC's CreateObject
         // burst populates the corpse's contents during the landscape sweep that precedes
         // the ViewContents packet, so OnUpdateObjectInventory effectively never fires for
         // corpses — leaving the settle+probe gates below as pure dead time (~400ms/corpse).
         // When the cache already has contents, mark observed and proceed immediately.
-        if (_openedContainerInventoryObservedAt == 0 && _objectCache.GetContainedItems(corpseId).Any())
+        if (_openedContainerInventoryObservedAt == 0 && containedItems.Count > 0)
         {
             _openedContainerInventoryObservedAt = now;
             LootDiag($"[RynthAi] Corpse loot: cache pre-populated for 0x{(uint)corpseId:X8} at {openAge}ms; skipping inv-wait.");
@@ -871,7 +888,7 @@ public sealed partial class RynthAiPlugin
             int requested = 0;
             int preClassified = 0;
 
-            foreach (WorldObject item in _objectCache.GetContainedItems(corpseId))
+            foreach (WorldObject item in containedItems)
             {
                 if (_processedCorpseItems.Contains(item.Id)) continue;
 
@@ -922,7 +939,7 @@ public sealed partial class RynthAiPlugin
         string matchRuleLabel   = string.Empty;
         bool   matchIsSalvage   = false;
 
-        foreach (WorldObject item in _objectCache.GetContainedItems(corpseId))
+        foreach (WorldObject item in containedItems)
         {
             visibleItemCount++;
             if (_processedCorpseItems.Contains(item.Id))
@@ -931,16 +948,27 @@ public sealed partial class RynthAiPlugin
             bool hasAppraisalData = Host.HasHasAppraisalData && Host.HasAppraisalData(unchecked((uint)item.Id));
             bool hasName = !string.IsNullOrWhiteSpace(item.Name);
 
-            if (!hasAppraisalData && !hasName)
+            // Hold an item until we can judge it correctly. Stat properties
+            // (ArmorLevel, damage, total ratings, spells) arrive in the appraisal/
+            // RequestId response, NOT the basic create — before that, item.Values(...)
+            // reads 0, so a stat-gated loot-snob rule fails and the item would be marked
+            // processed and left on the corpse: a silent loot miss. So wait while the item
+            // lacks appraisal AND either has no name yet OR the profile needs appraisal to
+            // classify its class — bounded by the assess window, then best-effort below.
+            if (!hasAppraisalData && (!hasName || ItemNeedsAppraisalForLoot(item)))
             {
                 if (!assessTimedOut)
                 {
                     pendingDataCount++;
                     continue;
                 }
-                // Timed out waiting for data — skip this item
-                _processedCorpseItems.Add(item.Id);
-                continue;
+                if (!hasName)
+                {
+                    // Timed out with nothing usable — skip this item.
+                    _processedCorpseItems.Add(item.Id);
+                    continue;
+                }
+                // Timed out but we have a name — fall through and classify best-effort.
             }
 
             // Evaluate against loot profile — pure classification, no UseObject.

@@ -57,7 +57,7 @@ internal sealed class LegacyDashboardRenderer
     private readonly List<string> _lootFiles = new();
     private readonly List<string> _metaFiles = new();
     // Guards the four profile-name lists above against the cross-thread race
-    // between BuildSnapshotJson (Avalonia panel poll thread, ~10 Hz) and the
+    // between BuildSnapshotJson (Avalonia panel poll thread, ~30 Hz) and the
     // Refresh*Files mutators (AC pump thread). Enumerating a List<string> while
     // another thread Clear()s it throws InvalidOperationException; when that
     // escaped the snapshot poll's reverse-P/Invoke boundary it fail-fasted the
@@ -612,6 +612,7 @@ internal sealed class LegacyDashboardRenderer
                 PetMinMonsters             = s.PetMinMonsters,
                 // Spell Combat
                 SpellCastIntervalMs        = s.SpellCastIntervalMs,
+                AttackSpellIntervalMs      = s.AttackSpellIntervalMs,
                 CastDispelSelf             = s.CastDispelSelf,
                 MinRingTargets             = s.MinRingTargets,
                 MinSkillLevelTier1         = s.MinSkillLevelTier1,
@@ -763,6 +764,7 @@ internal sealed class LegacyDashboardRenderer
             s.PetMinMonsters             = p.PetMinMonsters;
             // Spell Combat
             s.SpellCastIntervalMs        = p.SpellCastIntervalMs;
+            s.AttackSpellIntervalMs      = p.AttackSpellIntervalMs;
             s.CastDispelSelf             = p.CastDispelSelf;
             s.MinRingTargets             = p.MinRingTargets;
             s.MinSkillLevelTier1         = p.MinSkillLevelTier1;
@@ -1255,6 +1257,7 @@ internal sealed class LegacyDashboardRenderer
         dst.ShowTerrainPassability   = tmp.ShowTerrainPassability;
         dst.GiveQueueIntervalMs      = tmp.GiveQueueIntervalMs;
         dst.SpellCastIntervalMs      = tmp.SpellCastIntervalMs;
+        dst.AttackSpellIntervalMs    = tmp.AttackSpellIntervalMs;
         dst.EmbeddedNavs             = tmp.EmbeddedNavs;
         dst.SuppressRetailRadar      = tmp.SuppressRetailRadar;
         dst.ShowRynthRadar           = tmp.ShowRynthRadar;
@@ -2133,7 +2136,7 @@ internal sealed class LegacyDashboardRenderer
 
     // ── Snapshot bridge (read by the engine-side Avalonia RynthAi panel) ────
     // The Avalonia panel mirrors this dashboard. It pulls a JSON snapshot via
-    // RynthPluginGetSnapshotJson every ~250ms and renders the same fields.
+    // RynthPluginGetSnapshotJson every ~33ms and renders the same fields.
 
     public string BuildSnapshotJson()
     {
@@ -2350,7 +2353,8 @@ internal sealed class LegacyDashboardRenderer
         sb.Append("],");
 
         var states = _settings.MetaRules.Select(r => r.State).Distinct().ToList();
-        if (!states.Contains("Default")) states.Insert(0, "Default");
+        if (!states.Contains("Default")) states.Add("Default");
+        states = states.OrderBy(s => s, System.StringComparer.OrdinalIgnoreCase).ToList();
         AppendStringArray(sb, "states", states); sb.Append(',');
 
         AppendStringArray(sb, "navFiles", _navFiles); sb.Append(',');
