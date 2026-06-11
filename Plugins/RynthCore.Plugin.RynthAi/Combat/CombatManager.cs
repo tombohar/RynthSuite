@@ -999,6 +999,11 @@ public class CombatManager : IDisposable
         _fightAppraiseRequested = false;
         _predictKillSwap = false;
         _predictKillSwapArmed = false;
+        // Clear the stance-stuck timer — it arms during the normal NonCombat→Magic
+        // window at fight start, and if the target drops in that window a surviving
+        // timer makes the NEXT engagement's first equip tick see minutes of "stuck"
+        // and fire a spurious recovery (busy force-clear + UseObject on a wielded wand).
+        _stanceStuckSince = DateTime.MinValue;
         ClearCombatTurnMotions();
     }
 
@@ -1847,7 +1852,13 @@ public class CombatManager : IDisposable
                 _stanceStuckSince = DateTime.Now;
             double stuckMs = (DateTime.Now - _stanceStuckSince).TotalMilliseconds;
             if (stuckMs > StanceStuckRecoverMs
-                && (DateTime.Now - _lastStanceRecoverAt).TotalMilliseconds > StanceStuckRecoverMs)
+                && (DateTime.Now - _lastStanceRecoverAt).TotalMilliseconds > StanceStuckRecoverMs
+                // Recovery equips like any other path — must hold the swap gate or
+                // it can collide with a buff wand-equip inside the ±3s window (the
+                // "one item action at a time" AV class the gate exists to prevent).
+                // On refusal the && short-circuits: fall through to the throttled
+                // ChangeCombatMode below and retry the recovery next tick.
+                && (_weaponSwapGate == null || _weaponSwapGate.TryBeginSwap("stance-recovery")))
             {
                 _lastStanceRecoverAt = DateTime.Now;
                 _host.Log($"[EquipDiag] STANCE STUCK {stuckMs:0}ms mode={CurrentCombatMode}≠{desiredMode} (wielded reads true) — recovering: clear + re-equip 0x{targetWeaponId:X8}");
@@ -1878,7 +1889,10 @@ public class CombatManager : IDisposable
         //    so trust it. Calling UseObject on an already-wielded wand is a no-op in AC
         //    (it opens the wand's properties), so we must NOT call it here.
         if (CurrentCombatMode == desiredMode)
+        {
+            _stanceStuckSince = DateTime.MinValue; // reached the stance — clear the stuck timer
             return true;
+        }
 
         // B) Mode doesn't match. Either the weapon genuinely isn't wielded, or CurrentCombatMode
         //    is stale (e.g. hot-reload didn't re-fire OnCombatModeChange). Request both a mode
