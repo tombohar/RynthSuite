@@ -66,7 +66,27 @@ public class CombatManager : IDisposable
     private DateTime _stanceStuckSince   = DateTime.MinValue;
     private DateTime _lastStanceRecoverAt = DateTime.MinValue;
     private const double StanceStuckRecoverMs = 8000;
+    // Re-equip attempts spent in the CURRENT deadlock episode. ⚠ UseObject on an
+    // ALREADY-WIELDED wand is treated by AC as an unwield/MOVE — spamming it
+    // every 8s for ~17 min (2026-06-11) jammed AC's item-action queue into a
+    // permanent "you can only move one item at a time" state (character
+    // unusable, no recovery but relog). The re-equip only helps the rare
+    // stale-wield read, so it's capped; past the cap the recovery is
+    // mode-change-only and warns once.
+    private int _stanceReEquipAttempts;
+    private const int StanceReEquipMaxAttempts = 2;
+    private bool _stanceWedgeWarned;
     private DateTime _lastPeaceAttempt = DateTime.MinValue;
+
+    // Clear all stance-deadlock episode state. Called wherever the stance is
+    // reached or the target drops, so the next episode starts fresh.
+    private void ResetStanceRecovery()
+    {
+        _stanceStuckSince = DateTime.MinValue;
+        _stanceReEquipAttempts = 0;
+        _stanceWedgeWarned = false;
+        ResetStanceFlipBackoff();
+    }
 
     // ── Face-before-attack state ─────────────────────────────────────────
     // For ranged/magic attacks, face the target with smooth turn before firing.
@@ -1044,8 +1064,7 @@ public class CombatManager : IDisposable
         // window at fight start, and if the target drops in that window a surviving
         // timer makes the NEXT engagement's first equip tick see minutes of "stuck"
         // and fire a spurious recovery (busy force-clear + UseObject on a wielded wand).
-        _stanceStuckSince = DateTime.MinValue;
-        ResetStanceFlipBackoff();
+        ResetStanceRecovery();
         ClearCombatTurnMotions();
     }
 
@@ -1885,7 +1904,7 @@ public class CombatManager : IDisposable
 
             if (CurrentCombatMode == desiredMode)
             {
-                _stanceStuckSince = DateTime.MinValue; ResetStanceFlipBackoff(); // reached the stance — clear stuck timer + flip backoff
+                ResetStanceRecovery(); // reached the stance — clear the whole episode
                 return true;
             }
 
@@ -1898,22 +1917,37 @@ public class CombatManager : IDisposable
             if (_stanceStuckSince == DateTime.MinValue)
                 _stanceStuckSince = DateTime.Now;
             double stuckMs = (DateTime.Now - _stanceStuckSince).TotalMilliseconds;
-            if (stuckMs > StanceStuckRecoverMs
+            // RE-EQUIP recovery — only for the first couple of attempts in an
+            // episode (handles a stale "wielded reads true" on a wand that
+            // actually isn't wielded). Capped: UseObject on a genuinely wielded
+            // wand is a MOVE to AC, and unbounded re-equip jams the item queue.
+            if (_stanceReEquipAttempts < StanceReEquipMaxAttempts
+                && stuckMs > StanceStuckRecoverMs
                 && (DateTime.Now - _lastStanceRecoverAt).TotalMilliseconds > StanceStuckRecoverMs
                 // Recovery equips like any other path — must hold the swap gate or
-                // it can collide with a buff wand-equip inside the ±3s window (the
-                // "one item action at a time" AV class the gate exists to prevent).
+                // it can collide with a buff wand-equip inside the ±3s window.
                 // On refusal the && short-circuits: fall through to the throttled
-                // ChangeCombatMode below and retry the recovery next tick.
+                // ChangeCombatMode below and retry next tick.
                 && (_weaponSwapGate == null || _weaponSwapGate.TryBeginSwap("stance-recovery")))
             {
                 _lastStanceRecoverAt = DateTime.Now;
-                _host.Log($"[EquipDiag] STANCE STUCK {stuckMs:0}ms mode={CurrentCombatMode}≠{desiredMode} (wielded reads true) — recovering: clear + re-equip 0x{targetWeaponId:X8}");
+                _stanceReEquipAttempts++;
+                _host.Log($"[EquipDiag] STANCE STUCK {stuckMs:0}ms mode={CurrentCombatMode}≠{desiredMode} (wielded reads true) — re-equip attempt {_stanceReEquipAttempts}/{StanceReEquipMaxAttempts} 0x{targetWeaponId:X8}");
                 if (_host.HasForceResetBusyCount) _host.ForceResetBusyCount();
                 _host.UseObject((uint)targetWeaponId);
                 _lastEquipTime = DateTime.Now;
                 lastStanceAttempt = DateTime.MinValue; // let ChangeCombatMode re-fire next tick
                 return false;
+            }
+            // Past the re-equip cap: the wand really is wielded and AC just
+            // won't flip the mode. Do NOT keep UseObject-ing (that's what jams
+            // the item queue) — fall through to mode-change-only, and warn once
+            // so a genuinely wedged stance is visible instead of silent.
+            if (_stanceReEquipAttempts >= StanceReEquipMaxAttempts && !_stanceWedgeWarned
+                && stuckMs > StanceStuckRecoverMs * 3)
+            {
+                _stanceWedgeWarned = true;
+                _host.WriteToChat($"[RynthAi] Stance wedged: wand wielded but AC won't enter {(desiredMode == CombatMode.Magic ? "Magic" : "combat")} mode after {stuckMs / 1000:0}s. Re-equip stopped (was jamming item actions). Try /ra clearbusy, or relog if it persists.", 2);
             }
 
             if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
