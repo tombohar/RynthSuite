@@ -54,6 +54,7 @@ public sealed class RynthJuicePlugin : RynthPluginBase
     private const int CritWindowMs = 450;
     private const int ExactWindowMs = 600;  // pair a combat-log amount with its health packet
     private const int HealMinDelta = 8;     // filters small regen ticks
+    private const long DeleteKillRecentDamageMs = 8_000; // delete counts as a kill only if we hit it this recently
     private const long ForgetMs = 60_000;   // prune untouched health entries
 
     // An exact combat-log amount whose health packet hasn't arrived yet (reverse order).
@@ -138,7 +139,9 @@ public sealed class RynthJuicePlugin : RynthPluginBase
                     _pending.Has = false;
                 }
 
-                Reply("[RynthJuice] *** KILL ***");
+                // Verification scaffolding — chat only in debug mode, or every
+                // kill spams the chat window once this goes live.
+                if (_debugChat) Reply("[RynthJuice] *** KILL ***");
 
                 // Anchor: live position → last cached → player (so it ALWAYS fires).
                 uint kc; float ke, kn, ku;
@@ -313,28 +316,37 @@ public sealed class RynthJuicePlugin : RynthPluginBase
 
     public override void OnDeleteObject(uint objectId)
     {
-        _health.Remove(objectId);
         _tracked.Remove(objectId);
+        // Capture state BEFORE removing it — LastDmgMs is the recent-damage
+        // gate below; the old order destroyed it first.
+        bool hadState = _health.TryGetValue(objectId, out HState? st);
+        _health.Remove(objectId);
         if (!_loginComplete || !_cfg.Enabled) return;
 
         // An appraised mob already got its effect from the health=0 path — don't double.
         if (_killedIds.Remove(objectId)) return;
         if (_killedIds.Count > 1024) _killedIds.Clear();
 
-        // For one-shot / unappraised mobs the health path can't detect death
-        // (currentHealth reads 0 always), so the authoritative kill signal is the
-        // creature object being removed. Fire if it was an attackable creature.
+        // AC sends deletes for range-out / teleport / despawn too — only treat
+        // a delete as a DEATH if we damaged the creature recently. Without this
+        // gate, walking out of a spawn field or portaling fired a burst per
+        // nearby mob (anchored at the PLAYER via the old pose fallback, since
+        // the position cache was already empty).
+        long now = Environment.TickCount64;
+        if (!hadState || st!.LastDmgMs == 0 || now - st.LastDmgMs > DeleteKillRecentDamageMs)
+            return;
+
         if (!Host.ObjectIsAttackable(objectId)) return;
 
-        long now = Environment.TickCount64;
+        // Anchor at the mob's live or last-cached position only — never the
+        // player. A delete with no known position gives a wrong-place burst.
         uint kc; float ke, kn, ku;
         if (!Host.TryGetObjectPosition(objectId, out kc, out ke, out kn, out ku))
         {
-            // Object already gone from the position cache — anchor the effect at the player.
-            if (!Host.TryGetPlayerPose(out kc, out ke, out kn, out ku, out _, out _, out _, out _))
-                return;
+            if ((st.Cell >> 16) == 0) return;
+            kc = st.Cell; ke = st.E; kn = st.N; ku = st.U;
         }
-        Reply("[RynthJuice] *** KILL ***");
+        if (_debugChat) Reply("[RynthJuice] *** KILL ***");
         _fx.SpawnKillBurst(kc, ke, kn, ku, crit: false, now);
     }
 
@@ -484,7 +496,7 @@ public sealed class RynthJuicePlugin : RynthPluginBase
             {
                 if (_killedIds.Add(id))
                 {
-                    Reply("[RynthJuice] *** KILL ***");
+                    if (_debugChat) Reply("[RynthJuice] *** KILL ***");
                     _fx.SpawnKillBurst(cell, e, n, u, crit: false, now);
                     Host.Log($"[RynthJuice] KILL(poll) tgt=0x{id:X8} cell=0x{cell:X8}");
                 }
