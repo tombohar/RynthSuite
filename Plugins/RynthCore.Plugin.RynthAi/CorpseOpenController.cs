@@ -30,6 +30,11 @@ public sealed partial class RynthAiPlugin
     private readonly HashSet<int> _processedCorpseItems = new();
     private readonly Dictionary<int, int> _corpseItemAttempts = new();
     private readonly Dictionary<int, long> _corpseCooldownUntil = new();
+    // Never-opened abandon tally per corpse: a timeout on a corpse we never got
+    // open earns a retry cooldown (not the 30-min completed mark); after 3 such
+    // abandons the corpse is treated as unreachable and completed for real.
+    private readonly Dictionary<int, int> _corpseAbandonCounts = new();
+    private const int NeverOpenedAbandonRetryMs = 30_000;
     private readonly HashSet<int> _ownershipSkipLogged = new();
     private readonly HashSet<int> _corpseIdRequested = new(); // corpses whose LongDesc ID was already requested
     private int _busyCount;
@@ -397,7 +402,10 @@ public sealed partial class RynthAiPlugin
 
         // ── Buffing: halt loot work but retain target so looting resumes immediately ──
         if (string.Equals(settings.BotAction, "Buffing", StringComparison.OrdinalIgnoreCase))
+        {
+            FreezeCorpseTimeout(CorpseNowMs);
             return;
+        }
 
         // ── Combat takes priority over claiming NEW corpses ───────────────
         // But if we already have an opened container, finish looting it
@@ -407,8 +415,12 @@ public sealed partial class RynthAiPlugin
             && !settings.BoostLootPriority
             && _openedContainerId == 0)
         {
+            FreezeCorpseTimeout(CorpseNowMs);
             return; // Keep our target, just wait — don't ResetCorpseTarget
         }
+
+        // Loot work is actually running this tick — the timeout clock counts again.
+        _corpseHoldFrozenAge = -1;
 
         // ── Active corpse work — pause navigation ────────────────────────
         if (_openedContainerId != 0 || _targetCorpseId != 0)
@@ -1879,6 +1891,27 @@ public sealed partial class RynthAiPlugin
             && now - _corpseTargetSince >= GetCorpseTimeoutMs(settings);
     }
 
+    // ── Loot-timeout clock freeze during buff/combat holds ────────────────
+    // The holds in TickCorpseOpening early-return while a corpse is claimed;
+    // without this, _corpseTargetSince kept aging through any fight/buff cycle
+    // longer than LootCorpseTimeoutMs, and the first tick after the hold lifted
+    // abandoned a never-opened corpse (completed-marked → loot lost) and fed
+    // the wedge detector a phantom timeout. Re-pinning the age each held tick
+    // keeps (now − _corpseTargetSince) constant; the clock resumes when work does.
+    private long _corpseHoldFrozenAge = -1;
+
+    private void FreezeCorpseTimeout(long now)
+    {
+        if (_targetCorpseId == 0 || _corpseTargetSince == 0)
+        {
+            _corpseHoldFrozenAge = -1;
+            return;
+        }
+        if (_corpseHoldFrozenAge < 0)
+            _corpseHoldFrozenAge = now - _corpseTargetSince;
+        _corpseTargetSince = now - _corpseHoldFrozenAge;
+    }
+
     private void AbandonCurrentCorpse(long now, string reason)
     {
         int corpseId = _targetCorpseId != 0 ? _targetCorpseId : _openedContainerId;
@@ -1888,8 +1921,26 @@ public sealed partial class RynthAiPlugin
         long ageMs = _corpseTargetSince != 0 ? now - _corpseTargetSince : 0;
         LootDiag($"[RynthAi] Corpse loot: abandoning corpse 0x{(uint)corpseId:X8} after {ageMs}ms ({reason}).");
         ChatLine($"[RynthAi] Corpse timeout: giving up on 0x{(uint)corpseId:X8} after {ageMs}ms.");
-        _completedCorpses[corpseId] = now;
-        _corpseCooldownUntil.Remove(corpseId);
+
+        // Only a corpse we actually OPENED earns the completed mark (30-min
+        // do-not-touch — its loot is permanently skipped). A never-opened
+        // abandon (approach failed, open refused) gets a short retry cooldown
+        // instead; after a few never-opened abandons, give up for real so an
+        // unreachable corpse can't cycle forever.
+        bool wasOpened = _openedContainerId == corpseId;
+        int abandons = _corpseAbandonCounts.TryGetValue(corpseId, out int n) ? n + 1 : 1;
+        _corpseAbandonCounts[corpseId] = abandons;
+        if (wasOpened || abandons >= 3)
+        {
+            _completedCorpses[corpseId] = now;
+            _corpseCooldownUntil.Remove(corpseId);
+            _corpseAbandonCounts.Remove(corpseId);
+        }
+        else
+        {
+            _corpseCooldownUntil[corpseId] = now + NeverOpenedAbandonRetryMs;
+            LootDiag($"[RynthAi] Corpse loot: 0x{(uint)corpseId:X8} was never opened (abandon #{abandons}) — retry in {NeverOpenedAbandonRetryMs / 1000}s instead of completed-marking.");
+        }
 
         // Force-clear container state — don't try UseObject to close.
         // The server will auto-close when we open the next corpse or move away.

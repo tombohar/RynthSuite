@@ -460,7 +460,14 @@ public class CombatManager : IDisposable
             // Dead but not yet reclassified as corpse — skip
             if (_worldFilter.GetHealthRatio(wo.Id) == 0f) continue;
 
-            if (dist > maxDist) continue;
+            // Allow the currently-engaged target out to DisengageDistance: AC's
+            // combat-mode step-back routinely pushes the active target just past
+            // MonsterRange, and dropping it from the scan defeated the disengage
+            // hysteresis — it vanished from _scannedTargets and was dropped after
+            // the 1.5s scan grace despite the distance gate intending to keep
+            // attacking out to DisengageDistance.
+            bool isEngaged = wo.Id != 0 && (wo.Id == activeTargetId || wo.Id == _lockedTargetId);
+            if (dist > (isEngaged ? Math.Max(maxDist, DisengageDistance) : maxDist)) continue;
 
             bool losBlocked = false;
             if (_settings.EnableRaycasting && RaycastInitialized && _raycastSystem != null)
@@ -717,6 +724,13 @@ public class CombatManager : IDisposable
         // MAGIC-ONLY: melee/missile get the structured 0x01B1 event (OnCombatDamage),
         // so parsing chat for them too would double-count.
         if (CurrentCombatMode != CombatMode.Magic || wcid == 0) return;
+
+        // Feed the kill-shot predictor. War magic gets no 0x01B1, so this chat
+        // line is the ONLY damage signal for casters — without accumulating it,
+        // _fightDamage stayed 0: EvaluateKillShot path B always saw a full-HP
+        // target and RecordKill(totalDamage:0) never learned HP pools.
+        if (cur)
+            _fightDamage += amount;
 
         uint   weapon = cur ? _lastCastWeaponId : _lastFightWeaponId;
         string nm     = cur ? _fightTargetName  : _lastFightName;
