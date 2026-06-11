@@ -222,6 +222,10 @@ internal sealed class PetManager
 
     private void IssueSummon(int deviceId, int charges)
     {
+        // Don't fire the essence-use while a cast gesture is animating — AC
+        // refuses item use mid-gesture, which would burn the 8s timeout and a
+        // 30s device park for nothing. No state change; caller retries next tick.
+        if (!_host.CanCastNow) return;
         _state            = PetState.Summoning;
         _activeDeviceId   = deviceId;
         _activeSpiritId   = 0;
@@ -234,6 +238,7 @@ internal sealed class PetManager
     private void IssueRefill(int deviceId, int spiritId)
     {
         if (!_host.HasUseObjectOn) return;
+        if (!_host.CanCastNow) return; // same gesture gate as IssueSummon
         _state          = PetState.Refilling;
         _activeDeviceId = deviceId;
         _activeSpiritId = spiritId;

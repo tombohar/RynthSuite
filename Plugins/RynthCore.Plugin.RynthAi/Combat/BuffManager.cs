@@ -1221,6 +1221,7 @@ public class BuffManager : IDisposable
     {
         string n = spell.Name;
         if (n.StartsWith("Incantation")) return 8;
+        if (n.Contains(" VIII")) return 8;  // must precede " VII" — "X VIII".Contains(" VII") is true
         if (n.Contains(" VII")) return 7;
         if (n.Contains(" VI")) return 6;
         if (n.Contains(" V")) return 5;

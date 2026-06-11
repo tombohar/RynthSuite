@@ -32,6 +32,33 @@ public class CombatManager : IDisposable
     private int _activeTargetId;
     private DateTime lastAttackCmd = DateTime.MinValue;
     private DateTime lastStanceAttempt = DateTime.MinValue;
+    // Exponential backoff for stance flips. A persistent wedge used to re-send
+    // ChangeCombatMode every second forever — the 2026-05-25 stance-spam crash
+    // class (256 consecutive sends before the client died); BuffManager got
+    // backoff then, combat never did. Delay doubles every 4 failed sends,
+    // capped at 15s, with a one-shot warning once clearly wedged. Reset
+    // wherever the stance is reached or the target drops.
+    private int _stanceFlipAttempts;
+    private bool _stanceFlipWarned;
+
+    private double StanceRetryDelayMs()
+        => Math.Min(15_000, 1000 * Math.Pow(2, Math.Min(4, _stanceFlipAttempts / 4)));
+
+    private void NoteStanceFlipSent()
+    {
+        _stanceFlipAttempts++;
+        if (_stanceFlipAttempts == 16 && !_stanceFlipWarned)
+        {
+            _stanceFlipWarned = true;
+            _host.Log($"[EquipDiag] WARNING: {_stanceFlipAttempts} consecutive ChangeCombatMode sends without reaching the stance — wedge persists despite recovery; backing off to {StanceRetryDelayMs() / 1000:0}s retries.");
+        }
+    }
+
+    private void ResetStanceFlipBackoff()
+    {
+        _stanceFlipAttempts = 0;
+        _stanceFlipWarned = false;
+    }
     // Stuck-stance deadlock recovery (2026-06-10). When the wand reads as wielded
     // client-side but AC refuses to complete the NonCombat→Magic stance change, the
     // equip path would only re-send ChangeCombatMode forever (it never re-equips a
@@ -1018,6 +1045,7 @@ public class CombatManager : IDisposable
         // timer makes the NEXT engagement's first equip tick see minutes of "stuck"
         // and fire a spurious recovery (busy force-clear + UseObject on a wielded wand).
         _stanceStuckSince = DateTime.MinValue;
+        ResetStanceFlipBackoff();
         ClearCombatTurnMotions();
     }
 
@@ -1050,6 +1078,11 @@ public class CombatManager : IDisposable
                 DateTime.Now.AddSeconds(5)));
         }
         _host.Log($"[RynthAi] Predicted kill shot 0x{swapId:X8} '{_worldFilter[swapId]?.Name}' (cast#{_fightCastCount} hp~{_fightTargetMaxHp:0} dealt~{_fightDamage:0}) — confirmed accepted, swapping to next target.");
+        // The pending-offensive judge state belongs to the mob being dropped —
+        // clearing it stops JudgePendingOffensiveCast from recording this cast
+        // against the dead target on the next attack block.
+        _pendingOffensiveSpellId = 0;
+        _pendingOffensiveTargetId = 0;
         DropTarget("predicted kill — swap (confirmed)");
     }
 
@@ -1852,7 +1885,7 @@ public class CombatManager : IDisposable
 
             if (CurrentCombatMode == desiredMode)
             {
-                _stanceStuckSince = DateTime.MinValue; // reached the stance — clear the stuck timer
+                _stanceStuckSince = DateTime.MinValue; ResetStanceFlipBackoff(); // reached the stance — clear stuck timer + flip backoff
                 return true;
             }
 
@@ -1883,11 +1916,12 @@ public class CombatManager : IDisposable
                 return false;
             }
 
-            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > 1000)
+            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
             {
                 if (diagNow) { _lastEquipDiagAt = DateTime.Now; _host.Log($"[EquipDiag] wielded=true mode={CurrentCombatMode}→{desiredMode} (weapon=0x{targetWeaponId:X8} '{weaponObj.Name}' src={weaponSource}) — sending ChangeCombatMode"); }
                 _host.ChangeCombatMode(desiredMode);
                 lastStanceAttempt = DateTime.Now;
+                NoteStanceFlipSent();
             }
             else if (diagNow)
             {
@@ -1904,7 +1938,7 @@ public class CombatManager : IDisposable
         //    (it opens the wand's properties), so we must NOT call it here.
         if (CurrentCombatMode == desiredMode)
         {
-            _stanceStuckSince = DateTime.MinValue; // reached the stance — clear the stuck timer
+            _stanceStuckSince = DateTime.MinValue; ResetStanceFlipBackoff(); // reached the stance — clear stuck timer + flip backoff
             return true;
         }
 
@@ -1913,11 +1947,12 @@ public class CombatManager : IDisposable
         //    change and an equip. ChangeCombatMode succeeds if the wand is already wielded
         //    (OnCombatModeChange fires → fixes hot-reload next tick). UseObject equips it if
         //    it truly isn't wielded yet.
-        if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > 1000)
+        if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
         {
             if (diagNow) { _lastEquipDiagAt = DateTime.Now; _host.Log($"[EquipDiag] wielded=FALSE mode={CurrentCombatMode}→{desiredMode} (weapon=0x{targetWeaponId:X8} '{weaponObj.Name}' src={weaponSource} class={weaponObj.ObjectClass}) — ChangeCombatMode"); }
             _host.ChangeCombatMode(desiredMode);
             lastStanceAttempt = DateTime.Now;
+            NoteStanceFlipSent();
         }
         if ((DateTime.Now - _lastEquipTime).TotalMilliseconds > 2000
             && (_weaponSwapGate == null || _weaponSwapGate.TryBeginSwap("combat-equip")))
@@ -1947,21 +1982,23 @@ public class CombatManager : IDisposable
 
         if (alreadyWielded)
         {
-            if (CurrentCombatMode == CombatMode.Magic) return true;
-            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > 1000)
+            if (CurrentCombatMode == CombatMode.Magic) { ResetStanceFlipBackoff(); return true; }
+            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
             {
                 _host.ChangeCombatMode(CombatMode.Magic);
                 lastStanceAttempt = DateTime.Now;
+                NoteStanceFlipSent();
             }
             return false;
         }
 
-        if (CurrentCombatMode == CombatMode.Magic) return true;
+        if (CurrentCombatMode == CombatMode.Magic) { ResetStanceFlipBackoff(); return true; }
 
-        if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > 1000)
+        if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
         {
             _host.ChangeCombatMode(CombatMode.Magic);
             lastStanceAttempt = DateTime.Now;
+            NoteStanceFlipSent();
         }
         if ((DateTime.Now - _lastEquipTime).TotalMilliseconds > 2000
             && (_weaponSwapGate == null || _weaponSwapGate.TryBeginSwap("combat-magicready-wand")))
@@ -2380,6 +2417,8 @@ public class CombatManager : IDisposable
         }
     }
 
+    private int _autoElemDiagCount;
+
     private string GetPreferredElement(WorldObject? target, MonsterRule? rule)
     {
         if (rule != null && !string.IsNullOrEmpty(rule.DamageType) &&
@@ -2390,6 +2429,37 @@ public class CombatManager : IDisposable
             foreach (var entry in _monsterWeaknesses)
                 if (target.Name.IndexOf(entry.Key, StringComparison.OrdinalIgnoreCase) >= 0)
                     return entry.Value;
+
+        // Learned-resist auto element: CreatureProfileStore has been recording
+        // per-creature resists all along — use the weakest one when no rule or
+        // static mapping names an element. Resist 1.0 = no data. Only swap when
+        // the configured shape actually resolves a castable spell of that
+        // element for this character (otherwise a learned weakness the char
+        // has no spells for would leave the mob unattacked — keep Fire then).
+        if (target != null && rule != null && _creatureStore != null && !string.IsNullOrEmpty(target.Name))
+        {
+            CreatureProfile? prof = null;
+            bool got = _fightTargetWcid != 0 && target.Id == _fightTargetId
+                ? _creatureStore.TryGet(target.Name, _fightTargetWcid, out prof)
+                : _creatureStore.TryGetByName(target.Name, out prof);
+            if (got && prof != null)
+            {
+                var (weakType, resist) = CreatureProfileStore.GetWeakest(prof);
+                if (resist < 1.0 && !string.IsNullOrEmpty(weakType))
+                {
+                    string elem = char.ToUpperInvariant(weakType[0]) + weakType.Substring(1);
+                    if (FindBestShapedSpell(elem, rule, out _) != 0)
+                    {
+                        if (_autoElemDiagCount < 20)
+                        {
+                            _autoElemDiagCount++;
+                            _host.Log($"[CombatCast] auto-element '{target.Name}': learned weakest={elem} (resist {resist:0.00})");
+                        }
+                        return elem;
+                    }
+                }
+            }
+        }
 
         return "Fire";
     }
