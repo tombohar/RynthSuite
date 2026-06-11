@@ -118,9 +118,13 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _initialized = true;
         _loginComplete = false;
         _windowVisible = false;
+        // ⚠ Wording matters: this branch keys on ImGuiContext==0, which is true
+        // for the normal EnableImGuiBackend=false config — it does NOT mean
+        // Decal is present. The old "Decal coexistence mode" text here misled
+        // two crash investigations (2026-06-11) and weeks of session notes.
         Log(hasImGui
             ? "RynthAi: legacy ImGui dashboard initialized."
-            : "RynthAi: initialized in Decal coexistence mode (ImGui rendering disabled, Avalonia panels remain).");
+            : "RynthAi: initialized in ImGui-less mode (no ImGui context — Avalonia panels drive the UI). NOTE: this does not imply Decal is present.");
         return 0;
     }
 
