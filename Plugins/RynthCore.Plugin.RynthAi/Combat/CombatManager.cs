@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using RynthCore.PluginSdk;
 using RynthCore.Plugin.RynthAi.Combat;
+using RynthCore.Plugin.RynthAi.CreatureData;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.Plugin.RynthAi.Raycasting;
 
@@ -31,6 +32,13 @@ public class CombatManager : IDisposable
     private int _activeTargetId;
     private DateTime lastAttackCmd = DateTime.MinValue;
     private DateTime lastStanceAttempt = DateTime.MinValue;
+    // Stuck-stance deadlock recovery (2026-06-10). When the wand reads as wielded
+    // client-side but AC refuses to complete the NonCombat→Magic stance change, the
+    // equip path would only re-send ChangeCombatMode forever (it never re-equips a
+    // "wielded" wand) — a hours-long wedge with NO m_cBusy pin so no watchdog fires.
+    private DateTime _stanceStuckSince   = DateTime.MinValue;
+    private DateTime _lastStanceRecoverAt = DateTime.MinValue;
+    private const double StanceStuckRecoverMs = 8000;
     private DateTime _lastPeaceAttempt = DateTime.MinValue;
 
     // ── Face-before-attack state ─────────────────────────────────────────
@@ -116,6 +124,79 @@ public class CombatManager : IDisposable
     private bool _damageSincePendingCast;
     private DateTime _targetLockedAt     = DateTime.MinValue;
     private DateTime _lastDamageDealtAt  = DateTime.MinValue;
+
+    // Ids to skip in the scanner for a short window — both confirmed kills
+    // (KillerNotification 0x01AD) and predicted kill-shot swaps. Value = the
+    // EXPIRY time, so the longer confirmed window and the shorter predicted
+    // window can coexist. The death signal reaches us at the lethal hit —
+    // before the mob's health reads 0 or it reclassifies to a corpse (ACE
+    // delays CreateCorpse by the full death-animation length) — so without this
+    // the scanner would re-lock the dead-but-not-yet-corpse mob and burn another
+    // cast on it. Self-prunes at the top of ScanNearbyTargets.
+    private readonly Dictionary<int, DateTime> _recentlyKilled = new();
+    private readonly List<int> _killPruneScratch = new();
+    private const double RECENTLY_KILLED_SUPPRESS_MS = 4000.0;  // confirmed kill
+    private const double PREDICTED_SWAP_SUPPRESS_MS  = 2000.0;  // predicted kill (re-acquirable if it survived)
+
+    // ── Kill-shot prediction (damage-based, selection-free) ──────────────────
+    // Combat can't read an unselected mob's live health (ACE only pushes vitals
+    // for the SELECTED target, and combat is selection-free). Instead we learn
+    // from the EXACT per-hit damage the engine pushes (AttackerNotification
+    // 0x01B1): accumulate damage dealt this fight, compare to the mob's HP
+    // (appraised MaxHealth from the shared CreatureProfileStore, else learned
+    // damage-to-kill per wcid), and when the cast we just fired is expected to
+    // finish it, swap to the next target instead of wasting the following cast
+    // during this projectile's flight.
+    private CreatureProfileStore? _creatureStore;   // shared: MaxHealth + resists by wcid
+    private MonsterDamageStore?   _damageStore;     // per-character: avg damage + learned HP by wcid
+    private int    _fightTargetId;          // the id _fightDamage is being accumulated for
+    private uint   _fightTargetWcid;        // its weenie-class id (stable monster-type key)
+    private string _fightTargetName = "";   // its name (stored in the learning file for readability)
+    private double _fightTargetMaxHp;       // 0 = not yet known
+    private double _fightDamage;            // cumulative confirmed damage dealt this fight
+    private int    _fightCastCount;         // offensive casts fired this fight (for casts-to-kill learning)
+    private bool   _fightAppraiseRequested; // one appraisal attempt per fight to fill unknown HP
+
+    // Predicted one-shots are swapped away BEFORE their own KillerNotification
+    // arrives, so OnKillNotification (which keys off the CURRENT target) can't
+    // attribute them — they'd go uncounted and bias casts-to-kill HIGH (the
+    // recorded average ends up built only from the messier non-swap kills).
+    // Stash each predicted kill here; record it to the store only when its death
+    // is CONFIRMED (so a wrong prediction expires unrecorded), and consume the
+    // matching death-notification so it doesn't drop the (different) live target.
+    private readonly List<PendingKill> _predictedKillPending = new();
+    private readonly record struct PendingKill(
+        string Name, uint Wcid, int CastCount, uint WeaponId, string Element, int Tier, double Damage, DateTime Expiry);
+
+    // Persistent snapshot of the most-recently-cast-at fight — survives DropTarget
+    // (which zeroes _fightTarget*). When a kill arrives after the bot has already
+    // dropped/advanced (common when one-shotting fast: the corpse's KillerNotification
+    // lands a beat after we moved on), this lets the kill still be credited by name.
+    private uint   _lastFightWcid;
+    private string _lastFightName = "";
+    private uint   _lastFightWeaponId;
+    private string _lastFightElement = "";
+    private int    _lastFightTier;
+    private int    _lastFightCount;
+    private int    _killDbgCount;
+    private string _lastCastElement = "Fire"; // element of the most recent offensive cast
+    private int    _lastCastTier;             // tier (spell level) of the most recent offensive cast
+    private uint   _lastCastWeaponId;         // weapon (wand) guid the most recent cast used — damage varies by weapon
+    private bool   _predictKillSwap;          // set by AttackWithMagic, consumed in Think after the cast
+    // Predicted kill shot is ARMED here but only executed once the cast is
+    // CONFIRMED accepted (ACE: no "You're too busy!" within the refusal window).
+    // The old code dropped the target 1ms after issuing the cast — so a REFUSED
+    // cast still abandoned a live mob and advanced to the next, churning the
+    // swarm and pinning AC's m_cBusy (the "can't enter combat mode" wedge).
+    private bool   _predictKillSwapArmed;
+    private const double KILL_CONFIDENCE = 0.80; // predict kill if remaining HP <= avg cast damage * this
+    private const int    KILL_MIN_SAMPLES = 3;    // need this many learned hits before trusting the avg
+
+    internal void SetDamageStores(CreatureProfileStore? creatures, MonsterDamageStore? damage)
+    {
+        _creatureStore = creatures;
+        _damageStore = damage;
+    }
 
     public int RaycastBlockCount { get; private set; }
     public int RaycastCheckCount { get; private set; }
@@ -322,6 +403,20 @@ public class CombatManager : IDisposable
             _host.Log("[RynthAi] Raycast ready — combat clean slate (blacklist cleared, target timers reset).");
         }
 
+        // Drop expired kill-suppression entries so the set can't grow unbounded
+        // over a long session (a suppressed id may never re-enter scan to be
+        // cleared lazily). Allocation-free: scratch list is reused.
+        if (_recentlyKilled.Count > 0)
+        {
+            DateTime now = DateTime.Now;
+            _killPruneScratch.Clear();
+            foreach (var kv in _recentlyKilled)
+                if (now >= kv.Value)            // Value = expiry time
+                    _killPruneScratch.Add(kv.Key);
+            for (int i = 0; i < _killPruneScratch.Count; i++)
+                _recentlyKilled.Remove(_killPruneScratch[i]);
+        }
+
         _scannedTargets.Clear();
         _nearbyNoLos = 0;
         int playerId = (int)_playerId;
@@ -355,6 +450,10 @@ public class CombatManager : IDisposable
             double dist = _worldFilter.Distance(playerId, wo.Id);
 
             if (_blacklistManager.IsBlacklisted(wo.Id)) continue;
+
+            // Just killed (KillerNotification) but not yet a corpse — skip so we
+            // don't re-lock and cast at it during its death animation.
+            if (_recentlyKilled.ContainsKey(wo.Id)) continue;
 
             if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable((uint)wo.Id)) continue;
 
@@ -577,6 +676,83 @@ public class CombatManager : IDisposable
         catch { RaycastInitialized = false; }
     }
 
+    // Crit detection: AC may send the crit indicator inline ("...critically...")
+    // or as a separate line just before the damage line — track the last crit
+    // line so a damage line arriving within the window is credited as a crit.
+    private DateTime _lastCritChatAt = DateTime.MinValue;
+    private const double CRIT_WINDOW_MS = 600;
+    private int _dmgDbgCount;
+
+    /// <summary>
+    /// Parse OUR outgoing damage out of the combat-log chat and feed it to the
+    /// per-monster crit/non-crit learning. War magic sends NO AttackerNotification
+    /// (0x01B1), so the chat line "You blast X for N points of fire damage!" is the
+    /// only damage source for casters — this is what fills the Crit/NonCrit columns.
+    /// MAGIC-ONLY: melee/missile get the structured 0x01B1 event (OnCombatDamage),
+    /// so parsing chat for them too would double-count.
+    /// </summary>
+    public void HandleChatForDamage(string text)
+    {
+        if (string.IsNullOrEmpty(text) || _damageStore == null) return;
+
+        DateTime now = DateTime.Now;
+        bool critLine = text.IndexOf("critical", StringComparison.OrdinalIgnoreCase) >= 0;
+        if (critLine) _lastCritChatAt = now;
+
+        if (!TryParseOutgoingDamage(text, out int amount)) return;
+        bool crit = critLine || (now - _lastCritChatAt).TotalMilliseconds <= CRIT_WINDOW_MS;
+
+        // Attribute to the current fight; if it's already cleared (we one-shot and
+        // moved on before the damage line landed), fall back to the last-fight
+        // snapshot — same wcid as the bolt, so the crit/non-crit average is right.
+        bool cur  = _fightTargetWcid != 0;
+        uint wcid = cur ? _fightTargetWcid : _lastFightWcid;
+
+        if (_dmgDbgCount < 15)
+        {
+            _dmgDbgCount++;
+            _host.Log($"[DmgDbg] amt={amount} crit={crit} wcid={wcid} mode={CurrentCombatMode} text='{text}'");
+        }
+
+        // MAGIC-ONLY: melee/missile get the structured 0x01B1 event (OnCombatDamage),
+        // so parsing chat for them too would double-count.
+        if (CurrentCombatMode != CombatMode.Magic || wcid == 0) return;
+
+        uint   weapon = cur ? _lastCastWeaponId : _lastFightWeaponId;
+        string nm     = cur ? _fightTargetName  : _lastFightName;
+        string elem   = cur ? _lastCastElement  : _lastFightElement;
+        int    tier   = cur ? _lastCastTier     : _lastFightTier;
+        _damageStore.RecordHit(weapon, wcid, nm, elem, tier, amount, crit);
+    }
+
+    /// <summary>
+    /// Extract our outgoing damage amount from a combat-log line, e.g.
+    /// "You blast the Olthoi Swarm Harvester for 153 points of fire damage!".
+    /// Returns false for incoming ("... you for N points ...") and non-damage
+    /// "points of" lines (heals/mana/stamina). Allocation-free (hot path).
+    /// </summary>
+    private static bool TryParseOutgoingDamage(string text, out int amount)
+    {
+        amount = 0;
+        int pts = text.IndexOf("points of", StringComparison.OrdinalIgnoreCase);
+        if (pts < 0) return false;
+        if (text.IndexOf("damage", pts, StringComparison.OrdinalIgnoreCase) < 0) return false;
+        // Incoming (we got hit) lines read "... you for N points ..." — not our damage.
+        if (text.IndexOf("you for", StringComparison.OrdinalIgnoreCase) >= 0) return false;
+
+        int i = pts - 1;
+        while (i >= 0 && text[i] == ' ') i--;
+        long val = 0, mult = 1; bool any = false;
+        while (i >= 0 && (char.IsDigit(text[i]) || text[i] == ','))
+        {
+            if (text[i] != ',') { val += (text[i] - '0') * mult; mult *= 10; any = true; }
+            i--;
+        }
+        if (!any || val <= 0 || val > 1_000_000) return false;
+        amount = (int)val;
+        return true;
+    }
+
     public void HandleChatForDebuffs(string text)
     {
         if (string.IsNullOrEmpty(text)) return;
@@ -599,6 +775,15 @@ public class CombatManager : IDisposable
             {
                 _pendingOffensiveSpellId   = 0;
                 _pendingOffensiveTargetId  = 0;
+                // The cast was REFUSED (a prior gesture is still animating) — it
+                // never fired, so undo the casts-to-kill increment that issuance
+                // optimistically added. The blacklist counter already excludes
+                // refusals; without this, casts-to-kill reads >1 on pure one-shots.
+                if (_fightCastCount > 0) _fightCastCount--;
+                // Cancel any armed predicted kill-shot swap — the cast that armed
+                // it was refused, so the mob is still alive: keep + retry it
+                // instead of advancing. This is the core of the anti-wedge fix.
+                _predictKillSwapArmed = false;
             }
             // Hard reject: no components / unknown / no target. Same phrases the
             // buff path treats as a hard rejection. Mark unresolvable so the
@@ -646,6 +831,7 @@ public class CombatManager : IDisposable
                 else if (lo.Contains("fizzle") || lo.Contains("resists your spell"))
                 {
                     _pendingOffensiveSpellId = 0;
+                    _predictKillSwapArmed = false; // cast didn't land — don't swap off a live mob
                 }
             }
         }
@@ -803,7 +989,286 @@ public class CombatManager : IDisposable
         _targetLostScanTime = DateTime.MinValue;
         _pendingJudgeCastAt = DateTime.MinValue;
         _consecutiveCastMisses = 0;
+        // Reset kill-shot fight tracking — the next acquired target starts fresh.
+        _fightTargetId = 0;
+        _fightTargetWcid = 0;
+        _fightTargetName = "";
+        _fightTargetMaxHp = 0;
+        _fightDamage = 0;
+        _fightCastCount = 0;
+        _fightAppraiseRequested = false;
+        _predictKillSwap = false;
+        _predictKillSwapArmed = false;
         ClearCombatTurnMotions();
+    }
+
+    /// <summary>
+    /// Execute a predicted kill-shot swap that was ARMED at cast time and is now
+    /// CONFIRMED accepted (ACE: refusal window elapsed with no "You're too
+    /// busy!"). Deferring the drop until confirmation is what stops a refused
+    /// cast from abandoning a live mob and churning the swarm — the behaviour
+    /// that pinned AC's m_cBusy and wedged combat-mode / cast input. Body is the
+    /// old immediate-swap path, unchanged.
+    /// </summary>
+    private void ExecuteDeferredKillSwap()
+    {
+        _predictKillSwapArmed = false;
+        int swapId = activeTargetId;
+        if (swapId == 0) return;
+
+        _recentlyKilled[swapId] = DateTime.Now.AddMilliseconds(PREDICTED_SWAP_SUPPRESS_MS);
+        // Queue this predicted one-shot so it's CREDITED when its death confirms —
+        // we may swap away before its KillerNotification. Capture the name LIVE
+        // from the world filter (_fightTargetName is often empty this early).
+        string pkName = _worldFilter[swapId]?.Name ?? _fightTargetName;
+        if (_fightTargetWcid != 0 && _fightCastCount > 0 && !string.IsNullOrEmpty(pkName))
+        {
+            DateTime nowSwap = DateTime.Now;
+            _predictedKillPending.RemoveAll(p => p.Expiry < nowSwap);
+            _predictedKillPending.Add(new PendingKill(
+                pkName, _fightTargetWcid, _fightCastCount,
+                _lastCastWeaponId, _lastCastElement, _lastCastTier, _fightDamage,
+                DateTime.Now.AddSeconds(5)));
+        }
+        _host.Log($"[RynthAi] Predicted kill shot 0x{swapId:X8} '{_worldFilter[swapId]?.Name}' (cast#{_fightCastCount} hp~{_fightTargetMaxHp:0} dealt~{_fightDamage:0}) — confirmed accepted, swapping to next target.");
+        DropTarget("predicted kill — swap (confirmed)");
+    }
+
+    /// <summary>
+    /// Handle ACE's KillerNotification (GameEvent 0x01AD), forwarded by the
+    /// engine with the formatted death message. The server sends it to the
+    /// killer at the lethal hit — earlier than the health=0 update and the
+    /// Monster→Corpse flip combat otherwise waits on (ACE delays CreateCorpse
+    /// by the death-animation length, so those land 1–3s later). If the death
+    /// message names our active target — or we can't read its name — drop it
+    /// now and briefly suppress re-acquiring that id, so combat advances to the
+    /// next target instead of firing a second full cast at a corpse-to-be.
+    /// The notification is sent ONLY to the killer, so receiving it means WE
+    /// killed something; combat engages one target at a time, so the active
+    /// target is the victim. A non-matching name means a different creature
+    /// died (AoE/DoT) — we leave the live target alone.
+    /// Runs on the same pump thread as Think()/ScanNearbyTargets (no locking).
+    /// </summary>
+    public void OnKillNotification(string deathMessage)
+    {
+        // Record EXACTLY ONE kill per death message, attributed by name (→ correct
+        // wcid) from the best available source, so rapid one-shots aren't lost when
+        // the fight state has already been cleared/advanced by the time the corpse's
+        // KillerNotification lands. Three tiers, most-specific first.
+        if (_damageStore == null) return;
+        DateTime nowKill = DateTime.Now;
+        _predictedKillPending.RemoveAll(p => p.Expiry < nowKill);
+
+        bool recorded = false;
+        string how = "miss";
+
+        // (1) A predicted one-shot we swapped away from — captured wcid + cast count.
+        for (int i = 0; i < _predictedKillPending.Count; i++)
+        {
+            if (!string.IsNullOrEmpty(_predictedKillPending[i].Name)
+                && deathMessage.IndexOf(_predictedKillPending[i].Name, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                PendingKill pk = _predictedKillPending[i];
+                _predictedKillPending.RemoveAt(i);
+                _damageStore.RecordKill(pk.WeaponId, pk.Wcid, pk.Name, pk.Element, pk.Tier, pk.CastCount, pk.Damage);
+                recorded = true; how = "pending";
+                break;
+            }
+        }
+
+        int tid = activeTargetId;
+        string curName = tid != 0 ? (_worldFilter[tid]?.Name ?? "") : "";
+        bool curMatches = curName.Length > 0
+                          && deathMessage.IndexOf(curName, StringComparison.OrdinalIgnoreCase) >= 0;
+
+        // (2) The current target died (its name is in the message).
+        if (!recorded && curMatches && _fightTargetWcid != 0 && _fightCastCount > 0)
+        {
+            _damageStore.RecordKill(_lastCastWeaponId, _fightTargetWcid, curName, _lastCastElement, _lastCastTier,
+                                    _fightCastCount, _fightDamage);
+            recorded = true; how = "current";
+        }
+
+        // (3) A mob we cast at then moved on from (state already cleared) — credit
+        //     it from the persistent snapshot when the name matches. This is the
+        //     fix for the rapid-kill under-count.
+        if (!recorded && _lastFightWcid != 0 && _lastFightName.Length > 0
+            && deathMessage.IndexOf(_lastFightName, StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            _damageStore.RecordKill(_lastFightWeaponId, _lastFightWcid, _lastFightName, _lastFightElement, _lastFightTier,
+                                    _lastFightCount > 0 ? _lastFightCount : 1, 0);
+            recorded = true; how = "snapshot";
+        }
+
+        if (_killDbgCount < 40)
+        {
+            _killDbgCount++;
+            _host.Log($"[KillDbg] how={how} curMatch={curMatches} tid=0x{(uint)tid:X8} fightWcid={_fightTargetWcid} cnt={_fightCastCount} lastWcid={_lastFightWcid} pend={_predictedKillPending.Count} msg='{deathMessage}'");
+        }
+
+        // Drop the current target only if IT is the one that died.
+        if (tid != 0 && curMatches)
+        {
+            _recentlyKilled[tid] = nowKill.AddMilliseconds(RECENTLY_KILLED_SUPPRESS_MS);
+            DropTarget("killed (KillerNotification)");
+        }
+    }
+
+    /// <summary>
+    /// Exact per-hit damage from the engine (AttackerNotification 0x01B1),
+    /// attributed to the active target (combat engages one mob at a time). This
+    /// is the only selection-free source of real damage numbers: ACE pushes
+    /// creature health only for the SELECTED target, so combat — which never
+    /// selects — otherwise can't see how hurt a mob is. Feeds kill-shot
+    /// prediction and doubles as reliable blacklist damage feedback.
+    /// </summary>
+    public void OnCombatDamage(double damage, bool crit, bool isAttacker)
+    {
+        if (!isAttacker || damage <= 0) return;
+        int tid = activeTargetId;
+        if (tid == 0 || tid != _fightTargetId) return;
+
+        _fightDamage += damage;
+        // Don't learn per-cast damage from ring/AoE casts — they hit multiple
+        // mobs, so the damage can't be attributed to this single target.
+        if (_damageStore != null && _fightTargetWcid != 0 && !_lastCastWasRing)
+            _damageStore.RecordHit(_lastCastWeaponId, _fightTargetWcid, _fightTargetName, _lastCastElement, _lastCastTier, damage, crit);
+
+        ReportDamageOnTarget(tid); // clears the blacklist miss streak + stamps last-damage time
+    }
+
+    /// <summary>Start tracking a fresh fight against <paramref name="targetId"/>: zero the damage tally, capture its wcid, resolve its HP.</summary>
+    private void BeginFight(int targetId)
+    {
+        _fightTargetId = targetId;
+        _fightDamage = 0;
+        _fightCastCount = 0;
+        _fightTargetWcid = 0;
+        _fightTargetMaxHp = 0;
+        _fightAppraiseRequested = false;
+        _predictKillSwap = false;
+        _fightTargetName = "";
+        if (targetId == 0) return;
+        _fightTargetName = _worldFilter[targetId]?.Name ?? "";
+        if (_host.HasGetObjectWcid && _host.TryGetObjectWcid((uint)targetId, out uint wcid))
+            _fightTargetWcid = wcid;
+        ResolveFightHp();
+    }
+
+    /// <summary>
+    /// Resolve the active target's HP pool for prediction. Priority:
+    ///   1) appraised MaxHealth from the shared creature store (instant once any
+    ///      character has assessed this monster type; persists across sessions),
+    ///   2) learned damage-to-kill for this wcid (per character),
+    ///   3) one appraisal request to populate (1) for next time (best-effort).
+    /// Re-called each tick until HP is known (the appraisal lands async).
+    /// </summary>
+    private void ResolveFightHp()
+    {
+        if (_fightTargetId == 0) return;
+
+        // Once per fight, query the live target's health. The 0x01C0 response is
+        // handled on AC's main thread, where the engine reads the creature's REAL
+        // MaxHealth from its qualities (SEH-guarded) and corrects the bogus
+        // appraisal stub in creatures.json. Fire this EVEN when we already have a
+        // cached (stub) value — otherwise the stub suppresses the query and the
+        // real number never gets read.
+        if (!_fightAppraiseRequested)
+        {
+            _fightAppraiseRequested = true;
+            try { if (_host.HasQueryHealth) _host.QueryHealth((uint)_fightTargetId); } catch { }
+        }
+
+        if (_fightTargetMaxHp > 0) return;
+
+        // User-entered HP override (set in the Damage panel) is authoritative —
+        // it's the manual fix for ACE's skill-gated appraisal reading low.
+        if (_damageStore != null && _fightTargetWcid != 0)
+        {
+            double manual = _damageStore.GetManualHp(_fightTargetWcid);
+            if (manual > 0) { _fightTargetMaxHp = manual; return; }
+        }
+
+        var obj = _worldFilter[_fightTargetId];
+        string name = obj?.Name ?? "";
+
+        if (_creatureStore != null && !string.IsNullOrEmpty(name))
+        {
+            CreatureProfile? prof = null;
+            bool found = _fightTargetWcid != 0
+                ? _creatureStore.TryGet(name, _fightTargetWcid, out prof)
+                : _creatureStore.TryGetByName(name, out prof);
+            if (found && prof != null && prof.MaxHealth > 0)
+            {
+                _fightTargetMaxHp = prof.MaxHealth;
+                return;
+            }
+        }
+
+        if (_damageStore != null && _fightTargetWcid != 0)
+        {
+            double hp = _damageStore.GetLearnedHp(_fightTargetWcid);
+            if (hp > 0) { _fightTargetMaxHp = hp; return; }
+        }
+
+        // Unknown — appraise once so the shared store fills for next time. Costs
+        // one busy-count tick; only the first encounter of a wcid pays it.
+        if (!_fightAppraiseRequested)
+        {
+            _fightAppraiseRequested = true;
+            try { if (_host.HasRequestId)  _host.RequestId((uint)_fightTargetId); }  catch { }
+            try { if (_host.HasQueryHealth) _host.QueryHealth((uint)_fightTargetId); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// After firing an offensive cast at the active target, decide whether that
+    /// cast is expected to finish the mob. If so — and another target is in
+    /// range — flag a swap so Think drops this mob instead of wasting the next
+    /// cast during the projectile's flight. Ring/AoE casts are excluded (their
+    /// damage hits multiple mobs, so single-target accounting doesn't apply).
+    /// </summary>
+    private void EvaluateKillShot(uint weaponId, string element, int tier, bool isRing)
+    {
+        _predictKillSwap = false;
+        if (isRing || _damageStore == null || _fightTargetWcid == 0) return;
+        if (activeTargetId == 0 || activeTargetId != _fightTargetId) return;
+        if (!HasAlternateTarget(activeTargetId)) return; // nothing to swap to — keep casting
+
+        // (A) Casts-to-kill: we've fired the number of casts this wcid typically
+        //     takes to die from this weapon+spell. Catches ONE-SHOTS (avg≈1 → swap
+        //     right after cast 1), which the damage math below can't — nothing has
+        //     landed when we predict, so it has no remaining-HP signal yet.
+        double avgCasts = _damageStore.GetAvgCastsToKill(weaponId, _fightTargetWcid, element, tier, out int killSamples);
+        if (killSamples >= KILL_MIN_SAMPLES && avgCasts > 0
+            && _fightCastCount >= (int)Math.Round(avgCasts))
+        {
+            _predictKillSwap = true;
+            return;
+        }
+
+        // (B) Damage-based: remaining HP is within one comfortable cast. Precise
+        //     for multi-cast fights once some damage has landed.
+        if (_fightTargetMaxHp > 0)
+        {
+            double expected = _damageStore.GetAvgDamage(weaponId, _fightTargetWcid, element, tier, out int dmgSamples);
+            double remaining = _fightTargetMaxHp - _fightDamage;
+            if (dmgSamples >= KILL_MIN_SAMPLES && expected > 0 && remaining <= expected * KILL_CONFIDENCE)
+                _predictKillSwap = true;
+        }
+    }
+
+    /// <summary>True if a scanned, non-suppressed target other than <paramref name="excludeId"/> is available to swap to.</summary>
+    private bool HasAlternateTarget(int excludeId)
+    {
+        for (int i = 0; i < _scannedTargets.Count; i++)
+        {
+            int id = _scannedTargets[i].Id;
+            if (id == excludeId) continue;
+            if (_recentlyKilled.ContainsKey(id)) continue;
+            return true;
+        }
+        return false;
     }
 
     public bool Think()
@@ -832,6 +1297,22 @@ public class CombatManager : IDisposable
             fsm.CrossbowArcVelocity   = _settings.CrossbowArcVelocity;
             fsm.AtlatlArcVelocity     = _settings.AtlatlArcVelocity;
             fsm.MagicArcVelocity      = _settings.MagicArcVelocity;
+        }
+
+        // Deferred predicted kill-shot swap: a cast that armed it is confirmed
+        // accepted once OffensiveRefusalWindowMs elapses with no "You're too
+        // busy!" (ACE has no positive "You cast X" for war magic). Run BEFORE the
+        // scan so the dropped mob is suppressed this same tick and acquisition
+        // picks the next target — preserving the old swap cadence on real kills,
+        // while a REFUSED cast (which cleared the arm) now keeps + retries its
+        // target instead of churning the swarm and pinning AC's busy count.
+        if (_predictKillSwapArmed)
+        {
+            if (activeTargetId == 0 || _pendingOffensiveTargetId != activeTargetId)
+                _predictKillSwapArmed = false; // target already advanced/dropped — stale arm
+            else if (_pendingOffensiveSpellId != 0
+                     && (DateTime.Now - _pendingOffensiveCastAt).TotalMilliseconds >= OffensiveRefusalWindowMs)
+                ExecuteDeferredKillSwap();
         }
 
         // Update the pre-scanned target list (distance, attackable, LOS — no selection)
@@ -904,6 +1385,22 @@ public class CombatManager : IDisposable
 
         var targetObj = _worldFilter[activeTargetId];
         if (targetObj == null) return true; // transient miss — skip tick, keep lock
+
+        // Pin kill-shot fight tracking to the active target (covers initial lock,
+        // target switches, and lock-restore after a transient miss), and keep
+        // trying to resolve its HP until known (the appraisal lands async).
+        if (activeTargetId != _fightTargetId)
+            BeginFight(activeTargetId);
+        else if (_fightTargetMaxHp <= 0)
+            ResolveFightHp();
+        // Keep trying to capture the mob's name (the world filter fills it in
+        // asynchronously, so it's often empty at lock time) — by kill time the
+        // learning file then has a real name, not a blank.
+        if (_fightTargetName.Length == 0)
+        {
+            string? nm = _worldFilter[activeTargetId]?.Name;
+            if (!string.IsNullOrEmpty(nm)) _fightTargetName = nm;
+        }
 
         // Time-based blacklist: if we've been engaged with this target for longer than
         // TargetNoProgressTimeoutSec without dealing any damage, give up and blacklist it.
@@ -1086,6 +1583,21 @@ public class CombatManager : IDisposable
             if (!_lastCastWasRing && (!magicMode || _offensiveCastThisCycle))
                 RecordOffensiveCast(activeTargetId);
             lastAttackCmd = DateTime.Now;
+
+            // Predicted kill shot (set in AttackWithMagic): the cast we just fired
+            // is expected to finish this mob. DON'T swap yet — on ACE a war cast is
+            // only confirmed accepted ~OffensiveRefusalWindowMs later (the absence
+            // of "You're too busy!"). Dropping the target 1ms after issuing meant a
+            // REFUSED cast still abandoned a live mob and advanced to the next,
+            // churning the whole swarm and pinning AC's busy count (the wedge).
+            // Arm it; the deferred-swap check at the top of Think executes it once
+            // the cast is confirmed, and the "too busy"/fizzle handlers cancel it.
+            if (_predictKillSwap)
+            {
+                _predictKillSwap = false;
+                if (activeTargetId != 0)
+                    _predictKillSwapArmed = true;
+            }
         }
         return true;
     }
@@ -1319,19 +1831,45 @@ public class CombatManager : IDisposable
             if (desiredMode == CombatMode.Missile && !HasWieldedAmmo())
                 return false;
 
-            if (CurrentCombatMode != desiredMode &&
-                (DateTime.Now - lastStanceAttempt).TotalMilliseconds > 1000)
+            if (CurrentCombatMode == desiredMode)
+            {
+                _stanceStuckSince = DateTime.MinValue; // reached the stance — clear the stuck timer
+                return true;
+            }
+
+            // Deadlock recovery: AC is refusing the stance change despite the wand
+            // reading as wielded. After a stuck window, STOP trusting the stale wield
+            // read — flush any jammed command interpreter (no m_cBusy pin → the
+            // watchdog won't) and RE-EQUIP the wand (UseObject resyncs the wield; on a
+            // truly-unwielded wand it wields it, which is the actual fix). Without this
+            // the bot sat in NonCombat for 5h, buffs expired, never fighting (2026-06-10).
+            if (_stanceStuckSince == DateTime.MinValue)
+                _stanceStuckSince = DateTime.Now;
+            double stuckMs = (DateTime.Now - _stanceStuckSince).TotalMilliseconds;
+            if (stuckMs > StanceStuckRecoverMs
+                && (DateTime.Now - _lastStanceRecoverAt).TotalMilliseconds > StanceStuckRecoverMs)
+            {
+                _lastStanceRecoverAt = DateTime.Now;
+                _host.Log($"[EquipDiag] STANCE STUCK {stuckMs:0}ms mode={CurrentCombatMode}≠{desiredMode} (wielded reads true) — recovering: clear + re-equip 0x{targetWeaponId:X8}");
+                if (_host.HasForceResetBusyCount) _host.ForceResetBusyCount();
+                _host.UseObject((uint)targetWeaponId);
+                _lastEquipTime = DateTime.Now;
+                lastStanceAttempt = DateTime.MinValue; // let ChangeCombatMode re-fire next tick
+                return false;
+            }
+
+            if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > 1000)
             {
                 if (diagNow) { _lastEquipDiagAt = DateTime.Now; _host.Log($"[EquipDiag] wielded=true mode={CurrentCombatMode}→{desiredMode} (weapon=0x{targetWeaponId:X8} '{weaponObj.Name}' src={weaponSource}) — sending ChangeCombatMode"); }
                 _host.ChangeCombatMode(desiredMode);
                 lastStanceAttempt = DateTime.Now;
             }
-            else if (diagNow && CurrentCombatMode != desiredMode)
+            else if (diagNow)
             {
                 _lastEquipDiagAt = DateTime.Now;
                 _host.Log($"[EquipDiag] wielded=true mode={CurrentCombatMode}≠{desiredMode} throttled (weapon=0x{targetWeaponId:X8} '{weaponObj.Name}') — waiting for mode change");
             }
-            return CurrentCombatMode == desiredMode;
+            return false;
         }
 
         // Wield-location probe hasn't confirmed this item yet. Two cases:
@@ -1782,6 +2320,26 @@ public class CombatManager : IDisposable
                 _pendingOffensiveSpellId   = offensiveSpellId;
                 _pendingOffensiveCastAt    = DateTime.Now;
                 _pendingOffensiveTargetId  = activeTargetId;
+
+                // Tag this cast's weapon + element + tier so the pushed damage event
+                // can be attributed to it, count it for casts-to-kill learning, then
+                // decide if it's a predicted kill shot.
+                _lastCastWeaponId = unchecked((uint)FindWandInItems());
+                _lastCastElement  = element;
+                _lastCastTier     = Math.Max(warTier, voidTier);
+                _fightCastCount++;
+                // Snapshot this fight so a kill that lands after we've dropped/advanced
+                // can still be credited by name (see OnKillNotification step 3).
+                if (_fightTargetWcid != 0)
+                {
+                    _lastFightWcid     = _fightTargetWcid;
+                    _lastFightName     = _worldFilter[activeTargetId]?.Name ?? _fightTargetName;
+                    _lastFightWeaponId = _lastCastWeaponId;
+                    _lastFightElement  = _lastCastElement;
+                    _lastFightTier     = _lastCastTier;
+                    _lastFightCount    = _fightCastCount;
+                }
+                EvaluateKillShot(_lastCastWeaponId, element, _lastCastTier, isRing);
             }
             catch { }
         }

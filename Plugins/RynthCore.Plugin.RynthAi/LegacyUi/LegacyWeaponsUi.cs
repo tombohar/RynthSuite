@@ -16,7 +16,7 @@ internal sealed class LegacyWeaponsUi
         { "Slash", "Pierce", "Bludgeon", "Fire", "Cold", "Lightning", "Acid", "Nether" };
 
     private static readonly string[] ConsumableTypes =
-        { "General", "Lockpick", "HealthKit", "ManaStone", "Stamina" };
+        { "General", "Lockpick", "HealthKit", "ManaStone", "Stamina", "Pet" };
 
     public LegacyWeaponsUi(LegacyUiSettings settings, RynthCoreHost host)
     {
@@ -313,6 +313,10 @@ internal sealed class LegacyWeaponsUi
         if (name.Contains("Lockpick", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("Lock Pick", StringComparison.OrdinalIgnoreCase))
             return "Lockpick";
+
+        // Combat-pet summoning essences (PetDevices) — consumed by PetManager.
+        if (name.Contains("Essence", StringComparison.OrdinalIgnoreCase))
+            return "Pet";
 
         return "General";
     }

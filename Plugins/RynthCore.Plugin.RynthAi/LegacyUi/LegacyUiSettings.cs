@@ -122,6 +122,7 @@ public sealed class LegacyUiSettings
     public bool SummonPets;
     public int CustomPetRange = 5;
     public int PetMinMonsters = 1;
+    public bool PetAutoRefill = true;   // auto-consume Encapsulated Spirits to recharge empty essences
     public bool AdvancedOptions;
     public bool MineOnly = true;
     public bool ShowEditor;

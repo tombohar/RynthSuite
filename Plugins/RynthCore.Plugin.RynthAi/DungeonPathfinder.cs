@@ -323,6 +323,7 @@ internal static class DungeonPathfinder
         // Final destination — the user's exact target, not just a cell centre.
         route.Points.Add(new NavPoint { Type = NavPointType.Point, NS = destNS, EW = destEW });
 
+        SimplifyRoute(route);
         return route;
     }
 
@@ -351,6 +352,38 @@ internal static class DungeonPathfinder
             EW   = a.EW  + dEW  * 0.5,
             Z    = navZA + (dZ  / 240.0) * 0.5,
         });
+    }
+
+    // Removes intermediate Point waypoints that lie within thresholdYards of the
+    // straight line through their neighbours. Runs repeatedly until stable.
+    // Control points (Pause/Chat/Recall/PortalNPC) are always preserved.
+    private static void SimplifyRoute(NavRouteParser route, double thresholdYards = 1.5)
+    {
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            for (int i = 1; i + 1 < route.Points.Count; i++)
+            {
+                if (route.Points[i].Type != NavPointType.Point) continue;
+                if (SegDistYards(route.Points[i - 1], route.Points[i + 1], route.Points[i]) < thresholdYards)
+                {
+                    route.Points.RemoveAt(i--);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    // Perpendicular distance (yards) from p to the line through a and b.
+    private static double SegDistYards(NavPoint a, NavPoint b, NavPoint p)
+    {
+        double acNS = b.NS - a.NS, acEW = b.EW - a.EW;
+        double len  = Math.Sqrt(acNS * acNS + acEW * acEW);
+        if (len < 1e-9)
+            return Math.Sqrt((p.NS - a.NS) * (p.NS - a.NS) + (p.EW - a.EW) * (p.EW - a.EW)) * 240.0;
+        double abNS = p.NS - a.NS, abEW = p.EW - a.EW;
+        return Math.Abs(abNS * acEW - abEW * acNS) / len * 240.0;
     }
 
     // ── Patrol route ────────────────────────────────────────────────────────
@@ -504,6 +537,7 @@ internal static class DungeonPathfinder
             AddPortalWaypoints(route, a, b);
         }
 
+        SimplifyRoute(route);
         return route;
     }
 

@@ -76,6 +76,25 @@ internal static class DungeonHazardStore
     /// <summary>Number of hazard cells recorded for a landblock (0 if none). Never throws.</summary>
     public static int Count(uint landblockKey) => Load(landblockKey).Count;
 
+    /// <summary>Removes a single cell from a landblock's persisted set. Never throws.</summary>
+    public static void RemoveCell(uint landblockKey, uint cellId)
+    {
+        try
+        {
+            var existing = Load(landblockKey);
+            if (!existing.Remove(cellId)) return;
+            if (existing.Count == 0) { Clear(landblockKey); return; }
+            var lines = new List<string>(existing.Count);
+            foreach (uint c in existing) lines.Add($"0x{c:X8}");
+            string path = PathFor(landblockKey);
+            string tmp  = path + ".tmp";
+            File.WriteAllLines(tmp, lines);
+            File.Copy(tmp, path, overwrite: true);
+            File.Delete(tmp);
+        }
+        catch { }
+    }
+
     /// <summary>Deletes the persisted hazards for one landblock. Never throws.</summary>
     public static void Clear(uint landblockKey)
     {

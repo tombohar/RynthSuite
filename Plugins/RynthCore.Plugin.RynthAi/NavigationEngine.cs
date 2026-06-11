@@ -734,6 +734,37 @@ internal sealed class NavigationEngine
 
             if (skipped > 0)
                 _host.Log($"Nav: skipped {skipped} dense waypoint(s) within {arrival:F1}yd → now on [{_settings.ActiveNavIndex}]");
+
+            // Collinear-waypoint skip: if current target lies nearly on the straight
+            // line from the player to the waypoint after it, skip it. Handles straight
+            // dungeon corridors and outdoor paths with too many recorded points.
+            const double CollinearThreshYards = 2.0;
+            const int    ColSkipBudget        = 64;
+            int          colSkipped           = 0;
+            while (colSkipped < ColSkipBudget && IndexValid(_settings.ActiveNavIndex, route))
+            {
+                var curr = route.Points[_settings.ActiveNavIndex];
+                if (curr.Type != NavPointType.Point) break;
+
+                int ni = PeekNext(_settings.ActiveNavIndex, route);
+                if (ni < 0 || ni == _settings.ActiveNavIndex) break;
+                var next = route.Points[ni];
+                if (next.Type != NavPointType.Point) break;
+
+                // Only skip if next is farther from player than curr (don't skip past a turn)
+                double dCurrNS = curr.NS - curNs, dCurrEW = curr.EW - curEw;
+                double dNextNS = next.NS - curNs, dNextEW = next.EW - curEw;
+                if (dNextNS * dNextNS + dNextEW * dNextEW <= dCurrNS * dCurrNS + dCurrEW * dCurrEW) break;
+
+                if (CrossDistYards(curNs, curEw, curr.NS, curr.EW, next.NS, next.EW) >= CollinearThreshYards) break;
+
+                int beforeCol = _settings.ActiveNavIndex;
+                AdvanceOneIndex(route);
+                if (_settings.ActiveNavIndex == beforeCol) break;
+                colSkipped++;
+            }
+            if (colSkipped > 0)
+                _host.Log($"Nav: skipped {colSkipped} collinear waypoint(s) → now on [{_settings.ActiveNavIndex}]");
         }
 
         if (_settings.ActiveNavIndex != oldIdx && IndexValid(_settings.ActiveNavIndex, route))
@@ -1372,4 +1403,14 @@ internal sealed class NavigationEngine
     }
 
     private static double Lerp(double a, double b, double t) => a + (b - a) * t;
+
+    // Perpendicular distance (yards) from point B to the infinite line through A and C.
+    private static double CrossDistYards(double aNS, double aEW, double bNS, double bEW, double cNS, double cEW)
+    {
+        double acNS = cNS - aNS, acEW = cEW - aEW;
+        double acLen = Math.Sqrt(acNS * acNS + acEW * acEW);
+        if (acLen < 1e-9) return 0.0;
+        double abNS = bNS - aNS, abEW = bEW - aEW;
+        return Math.Abs(abNS * acEW - abEW * acNS) / acLen * 240.0;
+    }
 }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -40,6 +41,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private InventoryManager? _inventoryManager;
     private SalvageManager? _salvageManager;
     private ManaStoneManager? _manaStoneManager;
+    private PetManager? _petManager;
     private Jumper? _jumper;
     private ActivityArbiter? _arbiter; // STEP 1: shadow-mode only (ACTIVITY_ARBITER_PLAN.md)
     private PlayerVitalsCache _vitals = new();
@@ -78,6 +80,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
     private CreatureData.CreatureProfileStore? _creatureStore;
     internal CreatureData.CreatureProfileStore? CreatureStore => _creatureStore;
+    // Per-character learned combat damage (avg damage by wcid/element/tier +
+    // learned HP-to-kill), used by CombatManager for kill-shot prediction.
+    private CreatureData.MonsterDamageStore? _damageStore;
     private int _creatureSaveTickCounter;
     private int _settingsSaveTickCounter;
     private int _settingsLoadRetryCounter;
@@ -102,6 +107,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _objectCache = new WorldObjectCache(Host); // must exist before CreateObject events fire during login
         _creatureStore = new CreatureData.CreatureProfileStore();
         try { _creatureStore.Load(); } catch { }
+        _damageStore = new CreatureData.MonsterDamageStore();
         Func<string, CreatureData.CreatureProfile?> lookup = ruleName =>
         {
             if (_creatureStore == null || string.IsNullOrEmpty(ruleName)) return null;
@@ -126,8 +132,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         TeardownSession();
         long tAfterTeardown = Environment.TickCount64;
         try { _creatureStore?.SaveIfDirty(); } catch { }
+        try { _damageStore?.SaveIfDirty(); } catch { }
         long tAfterStore = Environment.TickCount64;
         _creatureStore = null;
+        _damageStore = null;
         _objectCache = null;
         _initialized = false;
         _dashboard = null;
@@ -175,6 +183,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _inventoryManager = null;
         _salvageManager = null;
         _manaStoneManager = null;
+        _petManager = null;
         _buffManager?.Dispose();
         _buffManager = null;
         _spellManager = null;
@@ -289,7 +298,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         // Use the same per-character folder as the dashboard settings so all
         // character data lives in one place and the directory is guaranteed to exist.
         if (!string.IsNullOrEmpty(_dashboard.CharFolder))
+        {
             _buffManager.SetTimerPath(_dashboard.CharFolder);
+            _damageStore?.SetCharacter(_dashboard.CharFolder);
+        }
 
         _dashboard.OnForceRebuffRequested       = () => _buffManager?.ForceFullRebuff();
         _dashboard.OnCancelForceRebuffRequested = () => _buffManager?.CancelBuffing();
@@ -309,6 +321,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _combatManager.SetWeaponSwapGate(_weaponSwapGate);
         _combatManager.SetCharacterSkills(_charSkills);
         _combatManager.SetPlayerId(_playerId);
+        _combatManager.SetDamageStores(_creatureStore, _damageStore);
         _navigationEngine?.SetCombatManager(_combatManager);
         // BuffManager.CheckVitals consults CombatManager.HasCloseThreat to pick
         // between in-combat and idle top-off recharge thresholds. Wire here
@@ -342,6 +355,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         {
             _inventoryManager  = new InventoryManager(Host, _dashboard.Settings, _objectCache);
             _manaStoneManager  = new ManaStoneManager(Host, _dashboard.Settings, _objectCache);
+            _petManager        = new PetManager(Host, _dashboard.Settings, _objectCache, _combatManager, _charSkills);
         }
 
         _salvageManager = new SalvageManager(Host, _dashboard.Settings, _objectCache);
@@ -405,6 +419,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             {
                 _creatureSaveTickCounter = 0;
                 _creatureStore?.SaveIfDirty();
+                _damageStore?.SaveIfDirty();
             }
 
             // Deferred per-character settings load. OnLoginComplete tries
@@ -430,6 +445,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     if (!string.IsNullOrEmpty(_dashboard.CharFolder))
                     {
                         _buffManager?.SetTimerPath(_dashboard.CharFolder);
+                        _damageStore?.SetCharacter(_dashboard.CharFolder);
                         _patrolOnLoginPending = _dashboard.Settings.PatrolOnLogin;
                         Log($"RynthAi: per-character settings established late for '{lateName}' (early OnLoginComplete read had failed).");
                     }
@@ -647,6 +663,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
                 // Mana stone tapping — runs after salvage, independent of looting state.
                 _manaStoneManager?.OnHeartbeat(_busyCount);
+                _petManager?.OnHeartbeat(_busyCount);
                 if (diag) Host.Log("[RynthAi] OnTick: before combatManager");
 
                 // Missile crafting runs before combat — blocks everything while active.
@@ -849,10 +866,22 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _dashboard?.PushChatLine(text, chatType);
         _buffManager?.OnChatWindowText(text, chatType);
         _manaStoneManager?.OnChatWindowText(text);
+        _petManager?.OnChatWindowText(text);
         _combatManager?.HandleChatForDebuffs(text);
+        _combatManager?.HandleChatForDamage(text);
         _missileCraftingManager?.HandleChat(text);
         _metaManager?.HandleChat(text);
         _questTracker?.OnChatLine(text);
+    }
+
+    // ACE sends GameEventKillerNotification (0x01AD) to the killer at the
+    // lethal hit — earlier than the health=0 / corpse signals combat otherwise
+    // waits on. The engine parses the death string out of the packet and hands
+    // it here so combat can drop the dead target before burning another cast.
+    public override void OnKillNotification(string? deathMessage)
+    {
+        if (string.IsNullOrEmpty(deathMessage)) return;
+        _combatManager?.OnKillNotification(deathMessage);
     }
 
     public override void OnCreateObject(uint objectId)
@@ -897,6 +926,171 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         // we have authoritative max vitals + resists.
         if (targetId != _playerId && maxHealth > 0)
             CaptureCreatureSample(targetId, maxHealth);
+    }
+
+    // Exact per-hit damage from the engine (AttackerNotification 0x01B1). This is
+    // the only selection-free source of real damage numbers — combat uses it to
+    // learn per-monster damage and predict kill shots. isAttacker==true = our hit.
+    public override void OnCombatDamage(uint damage, uint damageType, bool crit, bool isAttacker)
+    {
+        if (isAttacker)
+            _combatManager?.OnCombatDamage(damage, crit, isAttacker);
+    }
+
+    /// <summary>Human-readable table of the learned per-monster casts-to-kill data
+    /// (joined with creatures.json for names + appraised HP). Polled live by the
+    /// engine-side MonsterDamagePanel via RynthPluginGetMonsterDamageText.</summary>
+    public string BuildMonsterDamageText()
+    {
+        var store = _damageStore;
+        if (store == null) return "Monster-damage learning not ready.";
+        var rows = store.Snapshot();
+        if (rows.Count == 0)
+            return "No kills recorded yet.\n\nFight monsters with magic and this fills in:\n"
+                 + "one row per monster type + spell, with the average\n"
+                 + "number of casts it takes to kill them.";
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append("Monster                      Elem   Tier  Casts/Kill  Kills    HP*\n");
+        sb.Append("-----------------------------------------------------------------\n");
+        foreach (var r in rows.OrderByDescending(x => x.KillSamples)
+                               .ThenBy(x => x.Element, StringComparer.OrdinalIgnoreCase))
+        {
+            string name = "wcid " + r.Wcid.ToString();
+            double hp = 0;
+            if (_creatureStore != null && _creatureStore.TryGetByWcid(r.Wcid, out var prof) && prof != null)
+            {
+                if (!string.IsNullOrEmpty(prof.Name)) name = prof.Name;
+                hp = prof.MaxHealth;
+            }
+            if (name.Length > 28) name = name.Substring(0, 28);
+            string hpStr = hp > 0 ? hp.ToString("0") : "?";
+            sb.Append(name.PadRight(28)).Append(' ')
+              .Append((r.Element ?? "").PadRight(6)).Append(' ')
+              .Append(r.Tier.ToString().PadLeft(3)).Append("   ")
+              .Append(r.AvgCastsToKill.ToString("0.00").PadLeft(8)).Append("  ")
+              .Append(r.KillSamples.ToString().PadLeft(5)).Append("  ")
+              .Append(hpStr.PadLeft(5)).Append('\n');
+        }
+        sb.Append("\n* HP = appraised; skill-gated on ACE, often reads low.\n");
+        sb.Append("  Casts/Kill is measured from real kills — that's the reliable number.\n");
+        return sb.ToString();
+    }
+
+    /// <summary>Structured per-monster learning for the interactive Damage panel.
+    /// One JSON object per (monster, weapon, spell) row. Polled live by the engine
+    /// MonsterDamagePanel via RynthPluginGetMonsterDamageJson.</summary>
+    public string BuildMonsterDamageJson()
+    {
+        var store = _damageStore;
+        if (store == null) return "[]";
+        var rows = store.Snapshot();
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append('[');
+        bool first = true;
+        // STABLE order (by name/weapon/spell, NOT by kill count) so the engine
+        // panel's rows don't reshuffle every time a counter ticks — that lets it
+        // update cells in place and keep the HP edit box alive/typable.
+        foreach (var r in rows.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                              .ThenBy(x => x.WeaponId)
+                              .ThenBy(x => x.Element, StringComparer.OrdinalIgnoreCase)
+                              .ThenBy(x => x.Tier))
+        {
+            // Name + DB HP from the shared creature store.
+            string name = r.Name;
+            double dbHp = 0;
+            if (_creatureStore != null && _creatureStore.TryGetByWcid(r.Wcid, out var prof) && prof != null)
+            {
+                if (string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(prof.Name)) name = prof.Name;
+                dbHp = prof.MaxHealth;
+            }
+            if (string.IsNullOrEmpty(name)) name = "wcid " + r.Wcid;
+
+            // HP precedence: manual override > creatures.json > learned damage-to-kill.
+            bool hpManual = r.HpManual > 0;
+            double hp = hpManual ? r.HpManual : (dbHp > 0 ? dbHp : r.HpPool);
+
+            // Weapon name (equipped weapon resolves; otherwise show the id).
+            string weaponName = "";
+            if (r.WeaponId != 0 && Host.HasGetObjectName)
+            {
+                try { Host.TryGetObjectName(r.WeaponId, out weaponName); } catch { weaponName = ""; }
+            }
+            if (string.IsNullOrEmpty(weaponName)) weaponName = "Weapon " + r.WeaponId;
+
+            string key = r.Wcid + ":" + r.WeaponId + ":" + (r.Element ?? "") + ":" + r.Tier;
+
+            if (!first) sb.Append(',');
+            first = false;
+            sb.Append('{')
+              .Append("\"wcid\":").Append(r.Wcid).Append(',')
+              .Append("\"name\":").Append(JsonStr(name)).Append(',')
+              .Append("\"wid\":").Append(r.WeaponId).Append(',')
+              .Append("\"weapon\":").Append(JsonStr(weaponName)).Append(',')
+              .Append("\"elem\":").Append(JsonStr(r.Element ?? "")).Append(',')
+              .Append("\"tier\":").Append(r.Tier).Append(',')
+              .Append("\"hp\":").Append((int)Math.Round(hp)).Append(',')
+              .Append("\"hpManual\":").Append(hpManual ? "true" : "false").Append(',')
+              .Append("\"crit\":").Append(JsonNum(r.AvgCritDamage)).Append(',')
+              .Append("\"critN\":").Append(r.CritSamples).Append(',')
+              .Append("\"noncrit\":").Append(JsonNum(r.AvgNonCritDamage)).Append(',')
+              .Append("\"noncritN\":").Append(r.NonCritSamples).Append(',')
+              .Append("\"casts\":").Append(JsonNum(r.AvgCastsToKill)).Append(',')
+              .Append("\"kills\":").Append(r.KillSamples).Append(',')
+              .Append("\"key\":").Append(JsonStr(key))
+              .Append('}');
+        }
+        sb.Append(']');
+        return sb.ToString();
+    }
+
+    /// <summary>Set (or clear, hp&lt;=0) the manual HP override for a wcid, then persist.</summary>
+    public void SetMonsterHp(uint wcid, int hp)
+    {
+        if (_damageStore == null) return;
+        _damageStore.SetManualHp(wcid, hp);
+        _damageStore.SaveIfDirty();
+    }
+
+    /// <summary>Delete one learned row. key = "wcid:weaponId:element:tier" (from the JSON). Persists.</summary>
+    public bool DeleteMonsterRow(string key)
+    {
+        if (_damageStore == null || string.IsNullOrEmpty(key)) return false;
+        string[] p = key.Split(':');
+        if (p.Length < 4) return false;
+        if (!uint.TryParse(p[0], out uint wcid)) return false;
+        if (!uint.TryParse(p[1], out uint wid)) return false;
+        if (!int.TryParse(p[3], out int tier)) return false;
+        bool ok = _damageStore.DeleteRow(wcid, wid, p[2], tier);
+        _damageStore.SaveIfDirty();
+        return ok;
+    }
+
+    private static string JsonNum(double d) => d.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static string JsonStr(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return "\"\"";
+        var sb = new System.Text.StringBuilder(s.Length + 2);
+        sb.Append('"');
+        foreach (char c in s)
+        {
+            switch (c)
+            {
+                case '"':  sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                default:
+                    if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("x4"));
+                    else sb.Append(c);
+                    break;
+            }
+        }
+        sb.Append('"');
+        return sb.ToString();
     }
 
 
@@ -1125,6 +1319,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "addnavpt":     HandleAddNavPointCommand(); break;
             case "dunnav":        HandleDungeonNavCommand(parts); break;
             case "dunnav-patrol": HandleDungeonNavPatrolCommand(parts); break;
+            case "hazard":        HandleHazardCommand(parts); break;
             case "lootparse":    HandleLootParseCommand(trimmed); break;
             case "lootcheckinv": HandleLootCheckInventoryCommand(trimmed); break;
             case "lootcheck":    HandleLootCheckSelectedCommand(parts); break;

@@ -1126,6 +1126,52 @@ public class WorldObjectCache
         get { lock (_gate) return _hazardCells.Count; }
     }
 
+    /// <summary>Live hazard cells for a landblock (cellId &gt;&gt; 16 == landblockKey).</summary>
+    public List<uint> GetHazardCellsForLandblock(uint landblockKey)
+    {
+        lock (_gate)
+        {
+            var list = new List<uint>();
+            foreach (uint c in _hazardCells)
+                if ((c >> 16) == landblockKey) list.Add(c);
+            list.Sort();
+            return list;
+        }
+    }
+
+    /// <summary>
+    /// Manually marks a cell as a hazard (user "this is lava" command / UI button). Adds to
+    /// the live set, persists it, and bumps <see cref="HazardVersion"/> so an active patrol
+    /// reroutes around it. Returns true if it was newly added.
+    /// </summary>
+    public bool AddHazardCell(uint cellId)
+    {
+        if (cellId == 0) return false;
+        lock (_gate)
+        {
+            if (!_hazardCells.Add(cellId)) return false;
+            _hazardVersion++;
+            DungeonHazardStore.Append(cellId >> 16, cellId);
+            _host.Log($"[Hazard] manually marked cell 0x{cellId:X8}");
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Removes a manually- or auto-marked hazard cell from the live set and the on-disk store.
+    /// Bumps <see cref="HazardVersion"/>. Returns true if it was present.
+    /// </summary>
+    public bool RemoveHazardCell(uint cellId)
+    {
+        lock (_gate)
+        {
+            bool removed = _hazardCells.Remove(cellId);
+            DungeonHazardStore.RemoveCell(cellId >> 16, cellId);
+            if (removed) _hazardVersion++;
+            return removed;
+        }
+    }
+
     /// <summary>
     /// Drops live hazard cells for one landblock (cellId &gt;&gt; 16 == landblockKey) and
     /// re-arms seeding for it, so a later patrol of that dungeon reloads from disk fresh.

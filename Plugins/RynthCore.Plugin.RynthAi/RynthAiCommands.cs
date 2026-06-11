@@ -55,6 +55,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra addnavpt      — append a waypoint at current location to loaded nav");
         ChatLine("[RynthAi] /ra dunnav <NS> <EW>  — navigate to NS/EW coords through dungeon (no nav file needed)");
         ChatLine("[RynthAi] /ra dunnav-patrol      — circular hunt patrol through the whole dungeon (no nav file needed)");
+        ChatLine("[RynthAi] /ra hazard add|del|list|near — mark current cell as lava/acid so patrol avoids it");
         ChatLine("[RynthAi] /ra jump[swzxc] [heading] [holdtime] — jump with optional face/direction (s=run w=fwd x=back z=strafeL c=strafeR)");
         ChatLine("[RynthAi] /ra corpseinfo    — show corpse range/open diagnostics");
         ChatLine("[RynthAi] /ra corpsecheck   — explain whether a corpse would be looted");
@@ -2208,6 +2209,111 @@ public sealed partial class RynthAiPlugin
         DungeonHazardStore.ClearAll();
         _objectCache?.ClearAllLiveHazards();
         ChatLine("[RynthAi] Cleared all recorded dungeon hazards.");
+    }
+
+    // ── Manual hazard marking (/ra hazard …) ─────────────────────────────────
+    //
+    // AC dungeon lava/acid is usually baked into the EnvCell environment, NOT a named
+    // world object, so the name-pattern auto-detector can't see it. Manual marking lets
+    // the user stand on (or next to) a hazard and flag that cell directly; it then feeds
+    // the exact same persistence + route-exclusion path as an auto-detected hazard.
+
+    public void HandleHazardCommand(string[] parts)
+    {
+        string sub = parts.Length > 1 ? parts[1].ToLowerInvariant() : "help";
+        switch (sub)
+        {
+            case "add":
+            case "mark":   MarkCurrentCellHazard();   break;
+            case "del":
+            case "rm":
+            case "remove":
+            case "unmark": UnmarkCurrentCellHazard(); break;
+            case "list":   ListDungeonHazardCells();  break;
+            case "near":
+            case "scan":   ScanNearbyLandscape();     break;
+            default:
+                ChatLine("[RynthAi] /ra hazard add|del|list|near");
+                ChatLine("[RynthAi]   add  — mark the cell you're standing in as a hazard (patrol turns around at it)");
+                ChatLine("[RynthAi]   del  — unmark the current cell");
+                ChatLine("[RynthAi]   list — recorded hazard cells in this dungeon");
+                ChatLine("[RynthAi]   near — list nearby landscape object names + cells (diagnostic)");
+                break;
+        }
+    }
+
+    private bool TryGetCurrentDungeonCell(out uint cell)
+    {
+        cell = 0;
+        if (!Host.TryGetPlayerPose(out uint c, out _, out _, out _, out _, out _, out _, out _))
+        {
+            ChatLine("[RynthAi] Cannot read player position."); return false;
+        }
+        if ((c & 0xFFFF) < 0x0100)
+        {
+            ChatLine("[RynthAi] You must be inside a dungeon (cell >= 0x0100) to mark hazards."); return false;
+        }
+        cell = c;
+        return true;
+    }
+
+    /// <summary>Public entry for the engine patrol flyout "Mark this cell" button.</summary>
+    public void MarkCurrentCellHazardFromUi() => MarkCurrentCellHazard();
+    /// <summary>Public entry for the engine patrol flyout "Unmark this cell" button.</summary>
+    public void UnmarkCurrentCellHazardFromUi() => UnmarkCurrentCellHazard();
+
+    private void MarkCurrentCellHazard()
+    {
+        if (!TryGetCurrentDungeonCell(out uint cell)) return;
+        bool added = _objectCache?.AddHazardCell(cell) ?? false;
+        if (added)
+            ChatLine($"[RynthAi] Marked cell 0x{cell:X8} as a hazard — patrol will avoid it (saved). Re-run /ra dunnav-patrol to rebuild now.");
+        else
+            ChatLine($"[RynthAi] Cell 0x{cell:X8} was already marked as a hazard.");
+    }
+
+    private void UnmarkCurrentCellHazard()
+    {
+        if (!TryGetCurrentDungeonCell(out uint cell)) return;
+        bool removed = _objectCache?.RemoveHazardCell(cell) ?? false;
+        ChatLine(removed
+            ? $"[RynthAi] Unmarked hazard cell 0x{cell:X8}."
+            : $"[RynthAi] Cell 0x{cell:X8} was not marked as a hazard.");
+    }
+
+    private void ListDungeonHazardCells()
+    {
+        if (!Host.TryGetPlayerPose(out uint c, out _, out _, out _, out _, out _, out _, out _))
+        {
+            ChatLine("[RynthAi] Cannot read player position."); return;
+        }
+        uint lb = c >> 16;
+        var cells = _objectCache?.GetHazardCellsForLandblock(lb) ?? new System.Collections.Generic.List<uint>();
+        if (cells.Count == 0)
+        {
+            ChatLine($"[RynthAi] No hazard cells recorded for dungeon 0x{lb:X4}.");
+            return;
+        }
+        ChatLine($"[RynthAi] Hazard cells in dungeon 0x{lb:X4} ({cells.Count}):");
+        foreach (uint cell in cells)
+            ChatLine($"[RynthAi]   0x{cell:X8}{(cell == c ? "  ← you are here" : "")}");
+    }
+
+    private void ScanNearbyLandscape()
+    {
+        if (_objectCache == null) { ChatLine("[RynthAi] Object cache not ready."); return; }
+        int shown = 0;
+        ChatLine("[RynthAi] Nearby landscape objects (name → cell):");
+        foreach (var wo in _objectCache.GetLandscape())
+        {
+            uint uid = (uint)wo.Id;
+            string name = string.IsNullOrEmpty(wo.Name) ? "(no name)" : wo.Name;
+            string cellStr = Host.TryGetObjectPosition(uid, out uint cell, out _, out _, out _)
+                ? $"0x{cell:X8}" : "(no pos)";
+            ChatLine($"[RynthAi]   {name} → {cellStr}  (0x{uid:X8})");
+            if (++shown >= 20) { ChatLine("[RynthAi]   … (truncated at 20)"); break; }
+        }
+        if (shown == 0) ChatLine("[RynthAi]   (none in cache)");
     }
 
     /// <summary>

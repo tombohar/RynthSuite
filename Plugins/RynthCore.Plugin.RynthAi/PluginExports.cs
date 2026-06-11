@@ -91,6 +91,12 @@ public static unsafe class PluginExports
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnUpdateHealth", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth) => Runtime.OnUpdateHealth(targetId, healthRatio, currentHealth, maxHealth);
 
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnCombatDamage", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void OnCombatDamage(uint damage, uint damageType, uint crit, uint isAttacker) => Runtime.OnCombatDamage(damage, damageType, crit, isAttacker);
+
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnKillNotification", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void OnKillNotification(IntPtr textUtf16) => Runtime.OnKillNotification(textUtf16);
+
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnEnchantmentAdded", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnEnchantmentAdded(uint spellId, double durationSeconds) => Runtime.OnEnchantmentAdded(spellId, durationSeconds);
 
@@ -191,6 +197,69 @@ public static unsafe class PluginExports
     // ── Monsters bridge (engine-side Avalonia MonstersPanel) ────────────────
 
     private static IntPtr _monstersPtr = IntPtr.Zero;
+    private static IntPtr _monsterDamagePtr = IntPtr.Zero;
+
+    // Live per-monster casts-to-kill table (engine MonsterDamagePanel polls this).
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetMonsterDamageText", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr GetMonsterDamageText()
+    {
+        try
+        {
+            string text = Runtime.Plugin?.BuildMonsterDamageText() ?? "";
+            IntPtr newPtr = Marshal.StringToHGlobalAnsi(text);
+            IntPtr oldPtr = Interlocked.Exchange(ref _monsterDamagePtr, newPtr);
+            if (oldPtr != IntPtr.Zero)
+                Marshal.FreeHGlobal(oldPtr);
+            return newPtr;
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    private static IntPtr _monsterDamageJsonPtr = IntPtr.Zero;
+
+    // Structured per-monster rows for the interactive Damage panel (UTF-8/ANSI JSON).
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetMonsterDamageJson", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr GetMonsterDamageJson()
+    {
+        try
+        {
+            string json = Runtime.Plugin?.BuildMonsterDamageJson() ?? "[]";
+            IntPtr newPtr = Marshal.StringToHGlobalAnsi(json);
+            IntPtr oldPtr = Interlocked.Exchange(ref _monsterDamageJsonPtr, newPtr);
+            if (oldPtr != IntPtr.Zero)
+                Marshal.FreeHGlobal(oldPtr);
+            return newPtr;
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    // Manual HP override from the Damage panel (hp <= 0 clears it).
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginSetMonsterHp", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void SetMonsterHp(uint wcid, int hp)
+    {
+        try { Runtime.Plugin?.SetMonsterHp(wcid, hp); } catch { }
+    }
+
+    // Delete one learned row. keyUtf8 = ANSI "wcid:weaponId:element:tier". Returns 1 on success.
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginDeleteMonsterRow", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int DeleteMonsterRow(IntPtr keyUtf8)
+    {
+        try
+        {
+            string? key = Marshal.PtrToStringAnsi(keyUtf8);
+            return (Runtime.Plugin?.DeleteMonsterRow(key ?? "") ?? false) ? 1 : 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetMonstersJson", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static IntPtr GetMonstersJson()
@@ -298,6 +367,8 @@ public static unsafe class PluginExports
                 case "dunPatrol":       Runtime.Plugin?.HandleDungeonNavPatrol();              break;
                 case "clearHazards":    Runtime.Plugin?.ClearDungeonHazards(cmd.NavName);      break;
                 case "clearHazardsAll": Runtime.Plugin?.ClearAllDungeonHazards();              break;
+                case "markHazardHere":  Runtime.Plugin?.MarkCurrentCellHazardFromUi();         break;
+                case "unmarkHazardHere":Runtime.Plugin?.UnmarkCurrentCellHazardFromUi();       break;
                 default:                Runtime.Plugin?.DashboardRenderer?.HandleNavCommand(json); break;
             }
         }

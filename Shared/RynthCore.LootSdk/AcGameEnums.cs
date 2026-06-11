@@ -71,9 +71,11 @@ public enum AcIntProperty
     LootTier          = 263,  // RESISTANCE_MODIFIER_TYPE — loot tier 1–7
     MaterialType      = 131,  // MATERIAL_TYPE
     MaxMana           = 108,  // ITEM_MAX_MANA
+    MaxStructure      = 91,   // MAX_STRUCTURE      — item max charges (pet-device essence)
     NumSockets        = 177,  // GEM_COUNT
     NumTimesTinkered  = 171,  // NUM_TIMES_TINKERED
     Spellcraft        = 106,  // ITEM_SPELLCRAFT
+    Structure         = 92,   // STRUCTURE          — item remaining charges (pet-device essence)
     Value             = 19,   // VALUE              — pyreal sell value
     WeaponSkill       = 48,   // WEAPON_SKILL       — skill enum used to wield
     WieldDifficulty   = 160,  // WIELD_DIFFICULTY   — skill level required

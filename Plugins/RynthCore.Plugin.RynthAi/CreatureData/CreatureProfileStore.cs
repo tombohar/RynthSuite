@@ -116,6 +116,21 @@ internal sealed class CreatureProfileStore
         }
     }
 
+    /// <summary>Lookup by wcid (for UI joins). Returns the first profile with this Wcid.</summary>
+    public bool TryGetByWcid(uint wcid, out CreatureProfile? profile)
+    {
+        profile = null;
+        if (wcid == 0) return false;
+        lock (_lock)
+        {
+            foreach (var kv in _byKey)
+            {
+                if (kv.Value.Wcid == wcid) { profile = kv.Value; return true; }
+            }
+        }
+        return false;
+    }
+
     /// <summary>
     /// Merge a new observation into the store. Fields with value 0 / empty are
     /// ignored so partial samples don't clobber better data.

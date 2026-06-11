@@ -133,9 +133,24 @@ public sealed partial class RynthAiPlugin
             bool urgent = combatUrgent || lootOpenUrgent;
             long threshold = urgent ? BUSY_TIMEOUT_COMBAT_URGENT_MS : BUSY_TIMEOUT_MS;
 
+            // Don't abort a legitimately in-progress cast. The explicit-target war
+            // cast (FreeHandsAndCastSpell readies the wand THEN casts, so m_cBusy
+            // often climbs to 2) holds busy for >2s on high tiers — longer than the
+            // combat-urgent threshold. Force-clearing at 2s aborted the cast before
+            // its projectile launched (dealt~0, the mob survived) and churned AC's
+            // action state via ForceResetBusyCount — a prime driver of the
+            // "can't enter combat mode" wedge. CanCastNow is the engine's
+            // CMotionInterp gesture gate (the SAME signal BuffManager casts on);
+            // while a gesture animates, the count is REAL, so extend to the 10s
+            // absolute backstop (a truly stuck count still self-heals). No-ops on
+            // an engine without the gate (HasGetCastBusyState false → unchanged).
+            bool castGestureInProgress = Host.HasGetCastBusyState && !Host.CanCastNow;
+            if (castGestureInProgress && threshold < BUSY_TIMEOUT_MS)
+                threshold = BUSY_TIMEOUT_MS;
+
             if (elapsed > threshold)
             {
-                Log($"[RynthAi] Busy count stuck at {_busyCount} for >{elapsed}ms (combatUrgent={combatUrgent} lootOpenUrgent={lootOpenUrgent}) — force-clearing.");
+                Log($"[RynthAi] Busy count stuck at {_busyCount} for >{elapsed}ms (combatUrgent={combatUrgent} lootOpenUrgent={lootOpenUrgent} castGesture={castGestureInProgress}) — force-clearing.");
                 // Reset pending loot item BEFORE zeroing AC's m_cBusy. If we have an
                 // in-flight UseObject, ForceResetBusyCount zeros m_cBusy under it; the
                 // retry in TickPendingCorpsePickup would then hit a freed AC object and crash.
