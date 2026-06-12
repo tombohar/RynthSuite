@@ -120,7 +120,13 @@ public sealed partial class RynthAiPlugin
     /// new increments cannot keep refreshing the window indefinitely.
     /// When combat has live targets, drops to a much shorter threshold — stale busy
     /// from salvage retries shouldn't lock the bot out of fighting for 10s.</summary>
-    private const long BUSY_TIMEOUT_COMBAT_URGENT_MS = 2_000;
+    // 5s, deliberately ABOVE the engine reconciler's 4s no-gesture timeout
+    // (BusyCountHooks.CastBusyReconcileTimeoutMs): the reconciler's clean
+    // deterministic decrement must win this race. At the old 2s, this clear
+    // fired first on every corpse open — force-clears (with their mid-flight
+    // busy-zero churn) paced the whole loot grind, and the 2026-06-12 09:33
+    // storm of them latched the variant-2 stance/item deadlock.
+    private const long BUSY_TIMEOUT_COMBAT_URGENT_MS = 5_000;
     private void CheckBusyTimeout()
     {
         if (_busyCount > 0 && _busyCountBecamePositiveAt != 0)
@@ -174,12 +180,17 @@ public sealed partial class RynthAiPlugin
         PruneCorpseCollections();
     }
 
-    // Off-thread ClientMagicSystem::CastSpell makes AC increment its busy-count
-    // but the matching decrement never pairs, so busy stays stuck +1 after every
-    // cast and only the 10s CheckBusyTimeout watchdog clears it → ~10s/buff.
-    // BuffManager calls this the instant a cast RESOLVES in chat (the proven-
-    // reliable signal): run the same busy-only reset the watchdog performs, now,
-    // so the next buff fires immediately. No-op when nothing is stuck.
+    // BuffManager calls this the instant a cast RESOLVES in chat: reset the
+    // plugin's SHADOW busy counter so the next buff isn't gated on a stale
+    // mirror. ⚠ This no longer touches the REAL m_cBusy: the engine's
+    // delta-reconciler (e70ac92/9611af8) owns the real field now, decrementing
+    // exactly what each direct cast/item-action added once its gesture ends.
+    // The old Host.ForceResetBusyCount() here fired on EVERY cast resolution —
+    // during the 2026-06-12 buff no-show storm that was a blind real-field
+    // zero every ~2.5s, which (a) beat the reconciler to the decrement so it
+    // never ran (rec frozen while fcl climbed), and (b) destroyed AC's own
+    // item-action serialization, feeding the "one item at a time" latch. The
+    // CheckBusyTimeout watchdog above remains the real-field backstop.
     private void OnBuffCastResolved(string reason)
     {
         if (_busyCount <= 0) return;
@@ -189,8 +200,7 @@ public sealed partial class RynthAiPlugin
         _busyCountBecamePositiveAt = 0;
         if (_combatManager != null) _combatManager.BusyCount = 0;
         if (_buffManager != null) _buffManager.BusyCount = 0;
-        if (Host.HasForceResetBusyCount) Host.ForceResetBusyCount();
-        Log($"[RynthAi] busy-reset on cast resolve (was {was}, {reason})");
+        Log($"[RynthAi] shadow busy-reset on cast resolve (was {was}, {reason}) — real field left to the engine reconciler");
     }
 
     private long _lastCorpsePruneAt;

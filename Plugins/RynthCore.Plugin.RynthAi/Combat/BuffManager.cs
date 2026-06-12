@@ -1864,6 +1864,21 @@ public class BuffManager : IDisposable
         return AcSkillType.CreatureEnchantment;
     }
 
+    // Stance-deadlock episode state for THIS path. ⚠ EnsureMagicMode is the
+    // stance path that owns the bot whenever Buffing holds priority — and on
+    // 2026-06-12 it silently retried ChangeCombatMode for 107 MINUTES (zero
+    // log lines, no recovery) while the variant-2 wand/stance deadlock kept
+    // the character unbuffed and standing in a spawn field. CombatManager's
+    // capped recovery never ran because Buffing starves the combat tick.
+    // Mirror that recovery here: visible retries, ≤2 capped re-equips per
+    // episode, one-shot chat warn when wedged.
+    private DateTime _buffStanceStuckSince = DateTime.MinValue;
+    private DateTime _buffStanceLastRecoverAt = DateTime.MinValue;
+    private int _buffStanceReEquips;
+    private bool _buffStanceWedgeWarned;
+    private const double BuffStanceStuckRecoverMs = 8000;
+    private const int BuffStanceReEquipMax = 2;
+
     private bool EnsureMagicMode()
     {
         if (CurrentCombatMode == CombatMode.Magic)
@@ -1876,6 +1891,10 @@ public class BuffManager : IDisposable
             // Reset the exponential-backoff counter so the next problem starts
             // at the fast 1s cadence again. See field comment for rationale.
             _buffStanceConsecutiveFails = 0;
+            // Episode over — clear the deadlock-recovery state too.
+            _buffStanceStuckSince = DateTime.MinValue;
+            _buffStanceReEquips = 0;
+            _buffStanceWedgeWarned = false;
             return true;
         }
 
@@ -1962,6 +1981,37 @@ public class BuffManager : IDisposable
             _pendingWieldId = 0;
             _wieldCooldownUntil = DateTime.MinValue;
         }
+
+        // Deadlock episode tracking: wand wielded but mode refuses to flip.
+        if (_buffStanceStuckSince == DateTime.MinValue)
+            _buffStanceStuckSince = DateTime.Now;
+        double stuckMs = (DateTime.Now - _buffStanceStuckSince).TotalMilliseconds;
+
+        // Capped re-equip recovery (mirrors CombatManager): handles the rare
+        // stale "wielded reads true" by resyncing the wield once or twice.
+        // HARD-CAPPED — UseObject on a genuinely wielded wand is a MOVE to AC,
+        // and unbounded re-equip jams the item-action queue permanently.
+        if (_buffStanceReEquips < BuffStanceReEquipMax
+            && stuckMs > BuffStanceStuckRecoverMs
+            && (DateTime.Now - _buffStanceLastRecoverAt).TotalMilliseconds > BuffStanceStuckRecoverMs
+            && (_weaponSwapGate == null || _weaponSwapGate.TryBeginSwap("buff-stance-recovery")))
+        {
+            _buffStanceLastRecoverAt = DateTime.Now;
+            _buffStanceReEquips++;
+            _host.Log($"[BuffStance] STUCK {stuckMs:0}ms (wielded, mode={CurrentCombatMode}≠Magic) — re-equip attempt {_buffStanceReEquips}/{BuffStanceReEquipMax} 0x{(uint)wandId:X8}");
+            _host.UseObject((uint)wandId);
+            _lastCastAttempt = DateTime.Now;
+            return false;
+        }
+        // Past the cap and clearly wedged: warn ONCE so a multi-hour silent
+        // coma can never happen again, then keep mode-change-only retries.
+        if (_buffStanceReEquips >= BuffStanceReEquipMax && !_buffStanceWedgeWarned
+            && stuckMs > BuffStanceStuckRecoverMs * 3)
+        {
+            _buffStanceWedgeWarned = true;
+            _host.WriteToChat($"[RynthAi] Buff stance wedged: wand wielded but AC won't enter Magic mode after {stuckMs / 1000:0}s. Buffs cannot cast. Try /ra clearbusy, or relog if it persists.", 2);
+        }
+
         // Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s cap. Counter
         // increments only when this branch fires AND the previous flip didn't
         // stick (we got back here with mode != Magic). Reset to 0 at the top
@@ -1976,6 +2026,9 @@ public class BuffManager : IDisposable
             _lastBuffStanceAttempt = DateTime.Now;
             _lastCastAttempt = DateTime.Now;
             if (_buffStanceConsecutiveFails < 6) _buffStanceConsecutiveFails++;
+            // Visible retry line (throttled by the backoff itself): the
+            // 2026-06-12 coma produced ZERO log output from this path.
+            _host.Log($"[BuffStance] ChangeCombatMode(Magic) retry #{_buffStanceConsecutiveFails} (stuck {stuckMs / 1000:0}s, next retry in {gateMs / 1000:0}s)");
         }
         return false; // Yield — let stance animation finish
     }

@@ -381,6 +381,13 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private bool _buffingPausedNav;
     private bool _combatPausedNav;
     private bool _corpsePausedNav;
+    // Buffing-coma watchdog (see the Priority-1 block): how long BotAction has
+    // been continuously 'Buffing', and the once-per-interval recovery bypass.
+    private DateTime _buffingHeldSince = DateTime.MinValue;
+    private DateTime _lastBuffComaBypassAt = DateTime.MinValue;
+    private bool _buffComaWarned;
+    private const double BuffComaThresholdMs = 5 * 60_000;  // 5 min continuous Buffing = pathological
+    private const double BuffComaBypassEveryMs = 10_000;    // let recovery tick through every ~10s
     private long _combatEndedAt;       // Timestamp when combat stopped blocking
     private const long LootGraceMs = 2000; // Hold nav after combat ends so corpses can spawn
 
@@ -591,19 +598,53 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 if (settings.IsMacroRunning
                     && string.Equals(settings.BotAction, "Buffing", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (!_buffingPausedNav)
+                    // Buffing-coma watchdog. Buffing stays TOP priority — but on
+                    // 2026-06-12 a stance deadlock made NeedsAnyBuff() hold
+                    // Buffing for 1h54m while BuffManager silently retried mode
+                    // flips: the bot stood unbuffed and dormant, and the ONE
+                    // component with stance recovery (CombatManager) never got a
+                    // tick. A normal full rebuff cycle is 1-2 min; >5 min of
+                    // CONTINUOUS Buffing is pathological regardless of cause.
+                    // Past that, warn once and let one tick per ~10s fall
+                    // through to the combat heartbeat so its stance recovery can
+                    // run. Buffing reclaims priority on the very next tick.
+                    if (_buffingHeldSince == DateTime.MinValue)
+                        _buffingHeldSince = DateTime.Now;
+                    double heldMs = (DateTime.Now - _buffingHeldSince).TotalMilliseconds;
+                    bool comaBypass = heldMs > BuffComaThresholdMs
+                        && (DateTime.Now - _lastBuffComaBypassAt).TotalMilliseconds > BuffComaBypassEveryMs;
+                    if (comaBypass)
                     {
-                        _navigationEngine?.Stop();
-                        if (Host.HasStopCompletely) Host.StopCompletely();
-                        _buffingPausedNav   = true;
-                        _combatPausedNav    = false;
-                        _corpsePausedNav    = false;
-                        _combatEndedAt      = 0;
+                        _lastBuffComaBypassAt = DateTime.Now;
+                        if (!_buffComaWarned)
+                        {
+                            _buffComaWarned = true;
+                            Host.Log($"[RynthAi] BUFFING COMA: BotAction has been 'Buffing' continuously for {heldMs / 60000:0.0} min with buffs still needed — letting combat/stance recovery tick through every ~10s. Check for a stance wedge.");
+                            Host.WriteToChat($"[RynthAi] Buffing has been stuck for {heldMs / 60000:0} min (stance wedge?) — engaging recovery. /ra clearbusy or relog if it persists.", 2);
+                        }
+                        // fall through — combat heartbeat below gets one shot
                     }
-                    _metaManager?.Think();
-                    return;
+                    else
+                    {
+                        if (!_buffingPausedNav)
+                        {
+                            _navigationEngine?.Stop();
+                            if (Host.HasStopCompletely) Host.StopCompletely();
+                            _buffingPausedNav   = true;
+                            _combatPausedNav    = false;
+                            _corpsePausedNav    = false;
+                            _combatEndedAt      = 0;
+                        }
+                        _metaManager?.Think();
+                        return;
+                    }
                 }
-                _buffingPausedNav = false;
+                else
+                {
+                    _buffingPausedNav = false;
+                    _buffingHeldSince = DateTime.MinValue;
+                    _buffComaWarned = false;
+                }
 
                 // AutoCram / AutoStack — only while idle (not looting a corpse, not crafting).
                 // Gated on busy count inside the manager so it won't move items mid-cast.
