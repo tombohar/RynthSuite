@@ -236,6 +236,8 @@ public class CombatManager : IDisposable
     // cast still abandoned a live mob and advanced to the next, churning the
     // swarm and pinning AC's m_cBusy (the "can't enter combat mode" wedge).
     private bool   _predictKillSwapArmed;
+    private bool   _predictSwapGestureSeen;       // observed the cast windup since arming (gate the swap on it)
+    private const double PredictKillSwapMaxWaitMs = 3000; // hard cap: a tier-8 cast fully resolves well within this
     private const double KILL_CONFIDENCE = 0.80; // predict kill if remaining HP <= avg cast damage * this
     private const int    KILL_MIN_SAMPLES = 3;    // need this many learned hits before trusting the avg
 
@@ -1379,11 +1381,32 @@ public class CombatManager : IDisposable
         // target instead of churning the swarm and pinning AC's busy count.
         if (_predictKillSwapArmed)
         {
+            // Observe the cast WINDUP: CanCastNow goes false while the cast
+            // gesture animates ([CMI+0x80] non-empty), true once it releases.
+            bool gestureInFlight = _host.HasGetCastBusyState && !_host.CanCastNow;
+            if (gestureInFlight)
+                _predictSwapGestureSeen = true;
+
             if (activeTargetId == 0 || _pendingOffensiveTargetId != activeTargetId)
                 _predictKillSwapArmed = false; // target already advanced/dropped — stale arm
             else if (_pendingOffensiveSpellId != 0
                      && (DateTime.Now - _pendingOffensiveCastAt).TotalMilliseconds >= OffensiveRefusalWindowMs)
-                ExecuteDeferredKillSwap();
+            {
+                // ⚠ Do NOT drop the target while the cast gesture is still
+                // animating. A high-tier cast (Force Arc VII) winds up ~2s,
+                // FAR longer than the 500ms refusal window — swapping at 500ms
+                // dropped the target mid-windup and ABORTED the cast before it
+                // reached the server (full gesture + bolt played, but no
+                // "You cast", zero damage; two mobs ping-ponged, nothing died —
+                // 2026-06-13). Wait until the windup has been SEEN and then
+                // completed (released): then the cast has actually landed its
+                // damage and the predicted swap is correct. Bounded by a
+                // timeout so a missing/forever gesture can't arm-lock combat.
+                bool released = _predictSwapGestureSeen && (!_host.HasGetCastBusyState || _host.CanCastNow);
+                bool timedOut = (DateTime.Now - _pendingOffensiveCastAt).TotalMilliseconds >= PredictKillSwapMaxWaitMs;
+                if (released || timedOut)
+                    ExecuteDeferredKillSwap();
+            }
         }
 
         // Update the pre-scanned target list (distance, attackable, LOS — no selection)
@@ -1667,7 +1690,10 @@ public class CombatManager : IDisposable
             {
                 _predictKillSwap = false;
                 if (activeTargetId != 0)
+                {
                     _predictKillSwapArmed = true;
+                    _predictSwapGestureSeen = false; // must observe the cast windup before swapping
+                }
             }
         }
         return true;
