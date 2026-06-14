@@ -8,6 +8,10 @@ on:
         description: 'Version number (e.g. 1.0) — creates tag v<version>'
         required: true
         default: '1.0'
+      rynthcore_ref:
+        description: 'RynthCore ref to build against (tag/branch/SHA). Blank = matching version tag, else default branch.'
+        required: false
+        default: ''
   push:
     tags:
       - 'v*'
@@ -26,14 +30,31 @@ jobs:
     - name: Checkout RynthSuite
       uses: actions/checkout@v4
 
-    - name: Checkout RynthCore (sibling)
+    # Pin the sibling to the matching version tag so a tagged release is
+    # REPRODUCIBLE (otherwise the plugin builds against whatever RynthCore main
+    # is at build time). Falls back to the default branch (with a CI warning)
+    # if the matching tag doesn't exist yet.
+    - name: Checkout RynthCore (sibling, pinned)
       shell: pwsh
       run: |
         $parent = Split-Path "$env:GITHUB_WORKSPACE" -Parent
         $dest   = "$parent\RynthCore"
-        Write-Host "Cloning RynthCore to: $dest"
+        if ("${{ github.event_name }}" -eq "push") { $want = "${{ github.ref_name }}" }
+        else { $want = "v${{ github.event.inputs.version }}" }
+        $override = "${{ github.event.inputs.rynthcore_ref }}"
+        if ($override) { $want = $override }
+        Write-Host "Cloning RynthCore to: $dest (pin target: $want)"
         git clone https://github.com/tombohar/RynthCore.git $dest
         if ($LASTEXITCODE -ne 0) { throw "git clone RynthCore failed" }
+        git -C $dest fetch --tags --quiet
+        if ($want -and (git -C $dest rev-parse --verify --quiet "$want^{commit}")) {
+          git -C $dest checkout --quiet $want
+          if ($LASTEXITCODE -ne 0) { throw "checkout RynthCore $want failed" }
+          Write-Host "RynthCore pinned to: $want"
+        } else {
+          Write-Host "::warning::RynthCore ref '$want' not found; building against default branch HEAD (NOT reproducible)"
+        }
+        Write-Host "RynthCore at commit: $(git -C $dest rev-parse HEAD)"
 
     # ── Toolchain ─────────────────────────────────────────────────────────────
     - name: Setup .NET 10
@@ -54,6 +75,15 @@ jobs:
         echo "version=$v" >> $env:GITHUB_OUTPUT
         echo "tag=v$v"    >> $env:GITHUB_OUTPUT
         Write-Host "Building version: $v"
+
+    # ── Validation gate (fail the release before building if it trips) ─────────
+    # LootSdk golden tests: 60+ assertions on the loot-profile parser/SDK that
+    # backs the LootEditor and the bundled plugin. Self-contained in this repo.
+    - name: Validation gate — LootSdk golden tests
+      shell: pwsh
+      run: |
+        dotnet run --project "$env:GITHUB_WORKSPACE\Tools\RynthCore.LootSdkTests\RynthCore.LootSdkTests.csproj" -c Release
+        if ($LASTEXITCODE -ne 0) { throw "LootSdk golden tests FAILED" }
 
     # ── Build LootEditor ───────────────────────────────────────────────────────
     - name: Build LootEditor
