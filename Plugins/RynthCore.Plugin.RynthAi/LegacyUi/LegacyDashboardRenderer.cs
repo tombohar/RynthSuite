@@ -109,21 +109,12 @@ internal sealed class LegacyDashboardRenderer
     private uint _playerMana;
     private uint _playerMaxMana;
 
-    // ── Session stats for the status feed (kills/xp/lum per hour, vitae, deaths) ──
-    // The property reads are live AC native calls (main-thread only), so they run in the
-    // plugin's OnTick (PollPlayerStatsMainThread) and the snapshot just reads these caches.
+    // ── Session kills for the status feed (kills/hour). The other stats (xp/lum/deaths/vitae)
+    // are read engine-side (PrefetchPlayerStats) and written to the status file directly — the
+    // off-thread plugin pump can't do those main-thread AC reads. ──
     private DateTime _sessionStartUtc = DateTime.UtcNow;
-    private DateTime _lastStatPoll = DateTime.MinValue;
-    private long _xpBaseline = -1;   // -1 = not captured yet
-    private long _lumBaseline = -1;
-    private long _xpRaw;             // last-good total XP / luminance reads
-    private long _lumRaw;
-    private long _sessionKills;       // Interlocked: incremented on the pump thread, read on the poll thread
-    private int _deaths;              // NumDeaths (all-time)
-    private double _vitaePct;         // 0 = no penalty
+    private long _sessionKills;       // Interlocked: incremented on the pump thread, read in the snapshot
     private double _killsPerHour;
-    private double _xpPerHour;
-    private double _lumPerHour;
 
     // ── Monster editor (external process) ────────────────────────────────────
     private FileSystemWatcher? _monsterWatcher;
@@ -1883,51 +1874,18 @@ internal sealed class LegacyDashboardRenderer
     private void ResetSessionStats()
     {
         _sessionStartUtc = DateTime.UtcNow;
-        _xpBaseline = -1;
-        _lumBaseline = -1;
         System.Threading.Interlocked.Exchange(ref _sessionKills, 0);
     }
 
     /// Called from the plugin's OnKillNotification (pump thread) for each kill — feeds kills/hour.
     public void RecordKill() => System.Threading.Interlocked.Increment(ref _sessionKills);
 
-    /// MAIN-THREAD ONLY — call from the plugin's OnTick. The host property reads are live AC
-    /// native calls that refuse to run off the main thread (return false off-thread), so the
-    /// off-thread snapshot poll can't do them; it reads the caches these set. Throttled to ~1/s.
-    /// Failed reads keep the last-good value so a transient miss doesn't zero the displayed stat.
-    public void PollPlayerStatsMainThread()
+    /// Whole-session kills/hour from the kill counter — a pure counter + clock, safe to compute
+    /// on the off-thread snapshot poll (no AC read).
+    private void RefreshKillsPerHour()
     {
-        var now = DateTime.UtcNow;
-        if ((now - _lastStatPoll).TotalMilliseconds < 1000) return;
-        _lastStatPoll = now;
-
-        uint pid = _host.HasGetPlayerId ? _host.GetPlayerId() : 0u;
-        if (pid == 0) return;
-
-        // Total XP: PropertyInt64.TotalExperience (1, holds >int32); legacy PropertyInt (21) fallback.
-        if (_host.HasGetObjectQuadProperty && _host.TryGetObjectQuadProperty(pid, 1u, out long q1) && q1 > 0) _xpRaw = q1;
-        else if (_host.HasGetObjectIntProperty && _host.TryGetObjectIntProperty(pid, 21u, out int i21) && i21 > 0) _xpRaw = i21;
-
-        // Available Luminance: PropertyInt64.AvailableLuminance (6) — stays 0 on servers without luminance.
-        if (_host.HasGetObjectQuadProperty && _host.TryGetObjectQuadProperty(pid, 6u, out long q6) && q6 > 0) _lumRaw = q6;
-
-        // Deaths: PropertyInt.NumDeaths (43), all-time. Only updated on a successful read.
-        if (_host.HasGetObjectIntProperty && _host.TryGetObjectIntProperty(pid, 43u, out int d)) _deaths = d;
-
-        // Vitae: host float (1.0 = no penalty); report the penalty percent.
-        if (_host.HasGetVitae) _vitaePct = Math.Clamp((1.0 - _host.GetVitae(pid)) * 100.0, 0.0, 100.0);
-
-        // Capture session baselines lazily on the first valid read after login.
-        if (_xpRaw > 0 && _xpBaseline < 0) _xpBaseline = _xpRaw;
-        if (_lumRaw > 0 && _lumBaseline < 0) _lumBaseline = _lumRaw;
-
-        double hours = (now - _sessionStartUtc).TotalHours;
-        if (hours > 1.0 / 3600.0)   // wait ~1s before reporting a rate
-        {
-            _killsPerHour = System.Threading.Interlocked.Read(ref _sessionKills) / hours;
-            _xpPerHour    = _xpBaseline  >= 0 ? Math.Max(0, _xpRaw  - _xpBaseline)  / hours : 0;
-            _lumPerHour   = _lumBaseline >= 0 ? Math.Max(0, _lumRaw - _lumBaseline) / hours : 0;
-        }
+        double hours = (DateTime.UtcNow - _sessionStartUtc).TotalHours;
+        _killsPerHour = hours > 1.0 / 3600.0 ? System.Threading.Interlocked.Read(ref _sessionKills) / hours : 0;
     }
 
     private static float ToRatio(uint value, uint maxValue)
@@ -2270,8 +2228,7 @@ internal sealed class LegacyDashboardRenderer
         // returned zero — but the next OnUpdateHealth event or live qualities
         // read will fix that within a tick or two.
         RefreshPlayerVitals();
-        // Session stats are polled on the main thread (OnTick → PollPlayerStatsMainThread);
-        // here we just read the cached values.
+        RefreshKillsPerHour();   // pure counter/clock — safe off-thread
 
         var sb = new System.Text.StringBuilder(2048);
         sb.Append('{');
@@ -2330,12 +2287,8 @@ internal sealed class LegacyDashboardRenderer
         AppendBool(sb, "isLocked", _isLocked); sb.Append(',');
         AppendBool(sb, "isMinimized", _isMinimized); sb.Append(',');
         AppendFloat(sb, "bgOpacity", _bgOpacity); sb.Append(',');
-        // Session stats (status feed): deaths all-time; rates are whole-session averages.
-        AppendInt(sb, "deaths", _deaths); sb.Append(',');
-        AppendFloat(sb, "vitaePct", (float)_vitaePct); sb.Append(',');
-        AppendFloat(sb, "killsPerHour", (float)_killsPerHour); sb.Append(',');
-        AppendFloat(sb, "xpPerHour", (float)_xpPerHour); sb.Append(',');
-        AppendFloat(sb, "luminancePerHour", (float)_lumPerHour);
+        // kills/hour is bot-derived (kill counter); the rest of the stats are engine top-level.
+        AppendFloat(sb, "killsPerHour", (float)_killsPerHour);
         sb.Append('}');
         return sb.ToString();
     }

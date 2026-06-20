@@ -401,7 +401,6 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         try
         {
             _dashboard?.DrainMetaCommands();   // apply queued meta edits on this (plugin-tick) thread
-            _dashboard?.PollPlayerStatsMainThread();   // main-thread AC reads for the status feed (xp/lum/deaths/vitae)
 
             // ── Push settings to engine each tick ──────────────────────
             // OnRender only runs when the engine has an active ImGui pipeline
