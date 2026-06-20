@@ -770,22 +770,20 @@ internal static class AfFileParser
 
     private static int CountNavPoints(List<string> navFileLines)
     {
+        // Mirror NavRouteParser exactly via its shared trailer table so the two
+        // counters cannot drift (the drift — type 6 counted as +12 here but read
+        // as 6 trailer lines there — is what corrupted Portal routes pre-fix).
         int count = 0;
         int i = 0;
         while (i < navFileLines.Count)
         {
-            if (!int.TryParse(navFileLines[i], out int pointType)) { i++; continue; }
+            if (!int.TryParse(navFileLines[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out int pointType))
+                break; // desync / trailing data — stop counting
+            if (!NavRouteParser.IsKnownType(pointType))
+                break; // unknown type: trailer length unknown, stop (matches NavRouteParser)
 
             count++;
-            i += 5; // type + EW + NS + Z + flag
-
-            switch (pointType)
-            {
-                case 2: i += 1; break; // Recall: +spellId
-                case 3: i += 1; break; // Pause: +ms
-                case 4: i += 1; break; // Chat: +command
-                case 6: i += 12; break; // PortalNPC: +name+class+tie+exitEW+NS+Z+0+landEW+NS+Z+0
-            }
+            i += 5 + NavRouteParser.TrailerLineCount((NavPointType)pointType); // type+EW+NS+Z+flag + trailer
         }
         return count;
     }
