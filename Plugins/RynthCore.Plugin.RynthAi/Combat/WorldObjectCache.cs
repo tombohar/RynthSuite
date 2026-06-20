@@ -1237,6 +1237,30 @@ public class WorldObjectCache
         }
     }
 
+    /// <summary>
+    /// Detector C: marks EnvCells flagged by their lava/acid surface texture as live hazard cells.
+    /// Unlike <see cref="AddHazardCell"/> these are NOT persisted to DungeonHazardStore — they are
+    /// re-derived from the cell.dat surface palette + the hazard-texture set on every patrol build,
+    /// so the texture set stays the single source of truth (re-running with a smaller texture set
+    /// must drop them). Bumps <see cref="HazardVersion"/> if it adds anything. Never throws.
+    /// </summary>
+    public void SeedSurfaceHazards(IEnumerable<uint> cells)
+    {
+        if (cells == null) return;
+        lock (_gate)
+        {
+            int added = 0;
+            foreach (uint c in cells)
+                if (c != 0 && _hazardCells.Add(c)) added++;
+
+            if (added > 0)
+            {
+                _hazardVersion++;
+                _host.Log($"[Hazard] Detector C: {added} EnvCell-surface hazard cell(s) seeded from floor textures");
+            }
+        }
+    }
+
     private static bool IsHazardName(string? name)
     {
         if (string.IsNullOrEmpty(name)) return false;
