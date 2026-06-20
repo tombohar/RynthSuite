@@ -110,9 +110,14 @@ internal sealed class LegacyDashboardRenderer
     private uint _playerMaxMana;
 
     // ── Session stats for the status feed (kills/xp/lum per hour, vitae, deaths) ──
+    // The property reads are live AC native calls (main-thread only), so they run in the
+    // plugin's OnTick (PollPlayerStatsMainThread) and the snapshot just reads these caches.
     private DateTime _sessionStartUtc = DateTime.UtcNow;
+    private DateTime _lastStatPoll = DateTime.MinValue;
     private long _xpBaseline = -1;   // -1 = not captured yet
     private long _lumBaseline = -1;
+    private long _xpRaw;             // last-good total XP / luminance reads
+    private long _lumRaw;
     private long _sessionKills;       // Interlocked: incremented on the pump thread, read on the poll thread
     private int _deaths;              // NumDeaths (all-time)
     private double _vitaePct;         // 0 = no penalty
@@ -1886,39 +1891,42 @@ internal sealed class LegacyDashboardRenderer
     /// Called from the plugin's OnKillNotification (pump thread) for each kill — feeds kills/hour.
     public void RecordKill() => System.Threading.Interlocked.Increment(ref _sessionKills);
 
-    /// Read XP / luminance / deaths / vitae (same host + thread as RefreshPlayerVitals) and
-    /// derive the whole-session per-hour rates. Cheap cached-table reads; safe to call per poll.
-    private void RefreshSessionStats()
+    /// MAIN-THREAD ONLY — call from the plugin's OnTick. The host property reads are live AC
+    /// native calls that refuse to run off the main thread (return false off-thread), so the
+    /// off-thread snapshot poll can't do them; it reads the caches these set. Throttled to ~1/s.
+    /// Failed reads keep the last-good value so a transient miss doesn't zero the displayed stat.
+    public void PollPlayerStatsMainThread()
     {
+        var now = DateTime.UtcNow;
+        if ((now - _lastStatPoll).TotalMilliseconds < 1000) return;
+        _lastStatPoll = now;
+
         uint pid = _host.HasGetPlayerId ? _host.GetPlayerId() : 0u;
         if (pid == 0) return;
 
         // Total XP: PropertyInt64.TotalExperience (1, holds >int32); legacy PropertyInt (21) fallback.
-        long xp = 0;
-        if (_host.HasGetObjectQuadProperty && _host.TryGetObjectQuadProperty(pid, 1u, out long q1) && q1 > 0) xp = q1;
-        else if (_host.HasGetObjectIntProperty && _host.TryGetObjectIntProperty(pid, 21u, out int i21) && i21 > 0) xp = i21;
+        if (_host.HasGetObjectQuadProperty && _host.TryGetObjectQuadProperty(pid, 1u, out long q1) && q1 > 0) _xpRaw = q1;
+        else if (_host.HasGetObjectIntProperty && _host.TryGetObjectIntProperty(pid, 21u, out int i21) && i21 > 0) _xpRaw = i21;
 
-        // Available Luminance: PropertyInt64.AvailableLuminance (6) — 0 on servers without luminance.
-        long lum = 0;
-        if (_host.HasGetObjectQuadProperty && _host.TryGetObjectQuadProperty(pid, 6u, out long q6) && q6 > 0) lum = q6;
+        // Available Luminance: PropertyInt64.AvailableLuminance (6) — stays 0 on servers without luminance.
+        if (_host.HasGetObjectQuadProperty && _host.TryGetObjectQuadProperty(pid, 6u, out long q6) && q6 > 0) _lumRaw = q6;
 
-        // Deaths: PropertyInt.NumDeaths (43), all-time on the character.
+        // Deaths: PropertyInt.NumDeaths (43), all-time. Only updated on a successful read.
         if (_host.HasGetObjectIntProperty && _host.TryGetObjectIntProperty(pid, 43u, out int d)) _deaths = d;
 
         // Vitae: host float (1.0 = no penalty); report the penalty percent.
-        float vitae = _host.HasGetVitae ? _host.GetVitae(pid) : 1.0f;
-        _vitaePct = Math.Clamp((1.0 - vitae) * 100.0, 0.0, 100.0);
+        if (_host.HasGetVitae) _vitaePct = Math.Clamp((1.0 - _host.GetVitae(pid)) * 100.0, 0.0, 100.0);
 
         // Capture session baselines lazily on the first valid read after login.
-        if (xp > 0 && _xpBaseline < 0) _xpBaseline = xp;
-        if (lum > 0 && _lumBaseline < 0) _lumBaseline = lum;
+        if (_xpRaw > 0 && _xpBaseline < 0) _xpBaseline = _xpRaw;
+        if (_lumRaw > 0 && _lumBaseline < 0) _lumBaseline = _lumRaw;
 
-        double hours = (DateTime.UtcNow - _sessionStartUtc).TotalHours;
+        double hours = (now - _sessionStartUtc).TotalHours;
         if (hours > 1.0 / 3600.0)   // wait ~1s before reporting a rate
         {
             _killsPerHour = System.Threading.Interlocked.Read(ref _sessionKills) / hours;
-            _xpPerHour    = _xpBaseline  >= 0 ? Math.Max(0, xp  - _xpBaseline)  / hours : 0;
-            _lumPerHour   = _lumBaseline >= 0 ? Math.Max(0, lum - _lumBaseline) / hours : 0;
+            _xpPerHour    = _xpBaseline  >= 0 ? Math.Max(0, _xpRaw  - _xpBaseline)  / hours : 0;
+            _lumPerHour   = _lumBaseline >= 0 ? Math.Max(0, _lumRaw - _lumBaseline) / hours : 0;
         }
     }
 
@@ -2262,7 +2270,8 @@ internal sealed class LegacyDashboardRenderer
         // returned zero — but the next OnUpdateHealth event or live qualities
         // read will fix that within a tick or two.
         RefreshPlayerVitals();
-        RefreshSessionStats();
+        // Session stats are polled on the main thread (OnTick → PollPlayerStatsMainThread);
+        // here we just read the cached values.
 
         var sb = new System.Text.StringBuilder(2048);
         sb.Append('{');
