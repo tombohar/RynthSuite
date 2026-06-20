@@ -25,6 +25,21 @@ public sealed partial class RynthAiPlugin
             return true;
         }
 
+        // Most remaining /ub verbs (use / usep / uselp / useip / face / give /
+        // givep / combatstate / cast …) share semantics with the natively
+        // implemented /mt verbs, which talk to host primitives (UseObject /
+        // TurnToHeading / settings) — NOT to Mag-Tools or Decal. Translate the
+        // prefix and reuse that handler so the command works with no external
+        // plugin loaded. Verbs /mt doesn't know (mexec, ig, prepclick, …) fall
+        // through to HandleMtCommand returning false → "Unrecognized /ub".
+        int sp = fullCommand.IndexOf(' ');
+        if (sp > 0)
+        {
+            string translated = "/mt" + fullCommand.Substring(sp);   // "/ub use X" → "/mt use X"
+            if (HandleMtCommand(translated))
+                return true;
+        }
+
         return false;
     }
 }

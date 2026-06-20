@@ -1002,6 +1002,44 @@ public sealed partial class RynthAiPlugin
         _jumper.Start(letters, heading, holdMs);
     }
 
+    // /ra follow [on|off|status] — track the fellowship leader's live position
+    // instead of a route. Opt-in; off by default each session.
+    private void HandleFollowCommand(string[] parts)
+    {
+        var settings = _dashboard?.Settings;
+        if (settings == null) { ChatLine("[RynthAi] Settings not ready."); return; }
+
+        string arg = parts.Length >= 3
+            ? parts[2].ToLowerInvariant()
+            : (settings.FollowMode ? "off" : "on");
+
+        switch (arg)
+        {
+            case "on":
+            case "leader":
+                settings.FollowMode = true;
+                settings.EnableNavigation = true;   // follow is a nav activity
+                ChatLine(settings.IsMacroRunning
+                    ? "[RynthAi] Follow ON — tracking the fellowship leader."
+                    : "[RynthAi] Follow ON — start the bot to begin moving.");
+                break;
+            case "off":
+                settings.FollowMode = false;
+                settings.FollowTargetId = 0;
+                ChatLine("[RynthAi] Follow OFF.");
+                break;
+            case "status":
+                ChatLine($"[RynthAi] Follow: {(settings.FollowMode ? "ON" : "off")}  " +
+                         $"targetId=0x{settings.FollowTargetId:X8}  " +
+                         $"inFellow={(_fellowshipTracker?.IsInFellowship ?? false)}  " +
+                         $"isLeader={(_fellowshipTracker?.IsLeader ?? false)}");
+                break;
+            default:
+                ChatLine("[RynthAi] Usage: /ra follow [on|off|status]");
+                break;
+        }
+    }
+
     private void HandleAddNavPointCommand()
     {
         var settings = _dashboard?.Settings;
@@ -2040,8 +2078,49 @@ public sealed partial class RynthAiPlugin
         // explored is built clean without having to re-sight and reroute.
         _objectCache?.SeedHazardsFromStore(landblockKey);
 
+        // Detector C: offline EnvCell-surface hazard cells (lava/acid floor textures). Catches the
+        // invisible-HotSpot majority the live weenie scan can't see — pure dat reads, cached per
+        // landblock. No-op unless the user has flagged hazard textures (/ra hazard learnhere|texture).
+        var portalDat = _raycast?.GeometryLoader?.PortalDat;
+        if (portalDat != null)
+        {
+            var surfaceHazards = DungeonHazardSurfaces.ComputeHazardCells(landblockKey, cellDat, portalDat);
+            if (surfaceHazards.Count > 0) _objectCache?.SeedSurfaceHazards(surfaceHazards);
+        }
+
         var hazards = _objectCache?.GetHazardCells();
+
+        // Start-in-hazard evacuation: if the player is standing on an excluded (acid/lava) cell, build
+        // the patrol from the nearest SAFE cell and prepend a lead-in waypoint so the first move walks
+        // out of the hazard onto safe ground — instead of producing an empty, hazard-locked route.
+        bool   evacuate = false;
+        double evacNS = 0, evacEW = 0, evacZ = 0;
+        if (hazards != null && hazards.Contains(startCell))
+        {
+            uint safeCell = DungeonPathfinder.NearestSafeCell(graph, startCell, hazards, patrolWZ);
+            if (safeCell != 0 && graph.TryGetValue(safeCell, out var safeNode))
+            {
+                evacuate = true;
+                evacNS = safeNode.NS; evacEW = safeNode.EW; evacZ = safeNode.Z / 240.0;
+                startCell = safeCell;
+            }
+        }
+
         var route = DungeonPathfinder.BuildPatrolRoute(graph, startCell, hazards);
+
+        // Lead the bot out of the hazard first.
+        if (evacuate)
+            route.Points.Insert(0, new NavPoint { Type = NavPointType.Point, NS = evacNS, EW = evacEW, Z = evacZ });
+
+        // Empty-route guard: a single-cell / hazard-locked start yields no waypoints. Do NOT claim the
+        // patrol started or enable nav — the bot would just stand in place (in the hazard) taking damage.
+        if (route.Points.Count == 0)
+        {
+            _dunPatrolActive = false;
+            if (!isRebuild)
+                ChatLine("[RynthAi] DunNav-Patrol: no walkable route from here — you're standing in or surrounded by a hazard. Move to safe ground and retry.");
+            return;
+        }
 
         // Pick the first waypoint with a clear line of sight from the player. The patrol
         // builder emits its first waypoints at the doorway between startCell and its DFS-
@@ -2220,7 +2299,9 @@ public sealed partial class RynthAiPlugin
 
     public void HandleHazardCommand(string[] parts)
     {
-        string sub = parts.Length > 1 ? parts[1].ToLowerInvariant() : "help";
+        // parts = ["ra", "hazard", <sub>, <args...>] — the dispatcher splits the whole command,
+        // so the hazard subcommand is parts[2] (matches HandleSettingsCommand's parts[2] convention).
+        string sub = parts.Length > 2 ? parts[2].ToLowerInvariant() : "help";
         switch (sub)
         {
             case "add":
@@ -2232,14 +2313,124 @@ public sealed partial class RynthAiPlugin
             case "list":   ListDungeonHazardCells();  break;
             case "near":
             case "scan":   ScanNearbyLandscape();     break;
+            case "surf":
+            case "surfaces": DumpCurrentCellSurfaces();  break;
+            case "learnhere":
+            case "learn":    LearnHazardTextureHere();   break;
+            case "texture":
+            case "tex":      HandleHazardTextureCommand(parts); break;
             default:
-                ChatLine("[RynthAi] /ra hazard add|del|list|near");
-                ChatLine("[RynthAi]   add  — mark the cell you're standing in as a hazard (patrol turns around at it)");
-                ChatLine("[RynthAi]   del  — unmark the current cell");
-                ChatLine("[RynthAi]   list — recorded hazard cells in this dungeon");
-                ChatLine("[RynthAi]   near — list nearby landscape object names + cells (diagnostic)");
+                ChatLine("[RynthAi] /ra hazard add|del|list|near|surfaces|learnhere|texture");
+                ChatLine("[RynthAi]   add       — mark the cell you're standing in as a hazard (patrol turns around at it)");
+                ChatLine("[RynthAi]   del       — unmark the current cell");
+                ChatLine("[RynthAi]   list      — recorded hazard cells in this dungeon");
+                ChatLine("[RynthAi]   near      — list nearby landscape object names + cells (diagnostic)");
+                ChatLine("[RynthAi]   surfaces  — dump the current cell's surface texture ids (Detector C diagnostic)");
+                ChatLine("[RynthAi]   learnhere — stand on lava/acid: auto-flag its floor texture (precision-guarded)");
+                ChatLine("[RynthAi]   texture add|del|list 0x<id> — manage Detector C lava/acid floor textures");
                 break;
         }
+    }
+
+    // ── Detector C: EnvCell-surface hazard textures (lava/acid floors) ─────────
+
+    /// <summary>Dumps the current EnvCell's surface palette → OrigTextureId, flagging known-hazard textures.</summary>
+    private void DumpCurrentCellSurfaces()
+    {
+        if (!TryGetCurrentDungeonCell(out uint cell)) return;
+        var cellDat   = _raycast?.GeometryLoader?.CellDat;
+        var portalDat = _raycast?.GeometryLoader?.PortalDat;
+        if (cellDat == null || portalDat == null || !cellDat.IsLoaded)
+        {
+            ChatLine("[RynthAi] Geometry not loaded — raycast must be initialized first."); return;
+        }
+
+        var surfaces = DungeonHazardSurfaces.GetCellSurfaces(cellDat, portalDat, cell);
+        if (surfaces.Count == 0) { ChatLine($"[RynthAi] EnvCell 0x{cell:X8}: no readable surfaces."); return; }
+
+        ChatLine($"[RynthAi] EnvCell 0x{cell:X8} surfaces ({surfaces.Count}) — texId is the Detector C hazard key:");
+        foreach (var (surfIdx, texId) in surfaces)
+        {
+            string texStr = texId == 0 ? "(solid color)" : $"0x{texId:X8}";
+            string tag    = texId != 0 && DungeonHazardSurfaces.IsHazardTexture(texId) ? "  ← HAZARD" : "";
+            ChatLine($"[RynthAi]   surf 0x{surfIdx:X4}  tex {texStr}{tag}");
+        }
+        ChatLine("[RynthAi] On a lava/acid floor, run /ra hazard learnhere (auto) or /ra hazard texture add 0x<texId>.");
+    }
+
+    /// <summary>Stand on a hazard floor: flags the texture(s) rare across this landblock (the lava texture).</summary>
+    private void LearnHazardTextureHere()
+    {
+        if (!TryGetCurrentDungeonCell(out uint cell)) return;
+        var cellDat   = _raycast?.GeometryLoader?.CellDat;
+        var portalDat = _raycast?.GeometryLoader?.PortalDat;
+        if (cellDat == null || portalDat == null || !cellDat.IsLoaded)
+        {
+            ChatLine("[RynthAi] Geometry not loaded — raycast must be initialized first."); return;
+        }
+
+        var learned = DungeonHazardSurfaces.LearnFromCell(cell, cellDat, portalDat);
+        DungeonPathfinder.InvalidateCache();
+        if (learned.Count == 0)
+        {
+            ChatLine("[RynthAi] No rare floor texture found here to flag. If this IS lava, use /ra hazard surfaces then texture add 0x<id>.");
+            return;
+        }
+        foreach (uint t in learned) ChatLine($"[RynthAi] Flagged hazard texture 0x{t:X8}.");
+        ChatLine("[RynthAi] Re-run /ra dunnav-patrol to rebuild the route avoiding every cell with that floor.");
+    }
+
+    private void HandleHazardTextureCommand(string[] parts)
+    {
+        // parts = ["ra", "hazard", "texture", <sub>, <id>] — sub at parts[3], id at parts[4].
+        string sub = parts.Length > 3 ? parts[3].ToLowerInvariant() : "list";
+        switch (sub)
+        {
+            case "add":
+            {
+                if (parts.Length < 5 || !TryParseHexUint(parts[4], out uint tex))
+                { ChatLine("[RynthAi] Usage: /ra hazard texture add 0x<OrigTextureId>"); return; }
+                bool added = DungeonHazardSurfaces.AddHazardTexture(tex);
+                DungeonPathfinder.InvalidateCache();
+                ChatLine(added
+                    ? $"[RynthAi] Added hazard texture 0x{tex:X8}. Re-run /ra dunnav-patrol to rebuild around it."
+                    : $"[RynthAi] Texture 0x{tex:X8} was already flagged.");
+                break;
+            }
+            case "del":
+            case "rm":
+            case "remove":
+            {
+                if (parts.Length < 5 || !TryParseHexUint(parts[4], out uint tex))
+                { ChatLine("[RynthAi] Usage: /ra hazard texture del 0x<OrigTextureId>"); return; }
+                bool removed = DungeonHazardSurfaces.RemoveHazardTexture(tex);
+                DungeonPathfinder.InvalidateCache();
+                ChatLine(removed ? $"[RynthAi] Removed hazard texture 0x{tex:X8}." : $"[RynthAi] Texture 0x{tex:X8} was not flagged.");
+                break;
+            }
+            default:
+            {
+                var list = DungeonHazardSurfaces.ListHazardTextures();
+                if (list.Count == 0)
+                {
+                    ChatLine("[RynthAi] No hazard textures flagged. Stand on lava and use /ra hazard learnhere (or surfaces + texture add).");
+                    return;
+                }
+                ChatLine($"[RynthAi] Detector C hazard textures ({list.Count}):");
+                foreach (uint t in list) ChatLine($"[RynthAi]   0x{t:X8}");
+                break;
+            }
+        }
+    }
+
+    private static bool TryParseHexUint(string s, out uint value)
+    {
+        value = 0;
+        if (string.IsNullOrWhiteSpace(s)) return false;
+        s = s.Trim();
+        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s.Substring(2);
+        return uint.TryParse(s, System.Globalization.NumberStyles.HexNumber,
+                             System.Globalization.CultureInfo.InvariantCulture, out value);
     }
 
     private bool TryGetCurrentDungeonCell(out uint cell)

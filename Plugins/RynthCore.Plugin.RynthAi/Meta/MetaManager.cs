@@ -890,7 +890,7 @@ internal sealed class MetaManager
     /// Intercepts /vt commands from VTank metas and translates them to
     /// equivalent RynthAi settings changes. Returns true if handled.
     /// </summary>
-    private bool TryHandleVtCommand(string cmd)
+    internal bool TryHandleVtCommand(string cmd)
     {
         if (!cmd.StartsWith("/vt ", StringComparison.OrdinalIgnoreCase))
             return false;
@@ -972,6 +972,16 @@ internal sealed class MetaManager
             string name = string.Join(" ", parts, 3, parts.Length - 3);
             _settings.CurrentLootPath = name;
             _host.WriteToChat($"[RynthAi] Loot profile set: {name}", 1);
+            return true;
+        }
+
+        // /vt setmetastate <state> — switch the active meta state
+        if (sub == "setmetastate" && parts.Length >= 3)
+        {
+            string state = string.Join(" ", parts, 2, parts.Length - 2);
+            _settings.CurrentState = state;
+            _settings.ForceStateReset = true;
+            _host.WriteToChat($"[RynthAi] Meta state set: {state}", 1);
             return true;
         }
 
