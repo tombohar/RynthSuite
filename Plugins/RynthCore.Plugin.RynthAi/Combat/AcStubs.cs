@@ -118,11 +118,17 @@ public class SpellInfo
     /// </summary>
     public int Family { get; }
 
+    /// <summary>Spell LEVEL 1-8 (the roman-numeral tier of THIS spell), or 0 if not derivable.
+    /// Roman suffix (e.g. "... VII"=7) first; else "Incantation of ..."=8 and tier-7 lore names=7.
+    /// This is the spell's own level — distinct from the caster's highest castable tier.</summary>
+    public int Level { get; }
+
     public SpellInfo(int id, string name)
     {
         Id = id;
         Name = name ?? "";
         Family = ComputeFamily(Name);
+        Level = ComputeLevel(Name);
     }
 
     private static readonly string[] TierSuffixes =
@@ -206,6 +212,31 @@ public class SpellInfo
         { "Astyrrian's Bane", "Lightning Bane" },
         { "Archer's Bane", "Piercing Bane" },
     };
+
+    // Derive the spell's own level (1-8). Roman suffix wins; else an "Incantation of ..."
+    // form is level 8 and a recognized tier-7 lore name is level 7. 0 = not derivable.
+    private static int ComputeLevel(string spellName)
+    {
+        if (string.IsNullOrEmpty(spellName)) return 0;
+        int sp = spellName.TrimEnd().LastIndexOf(' ');
+        if (sp >= 0)
+        {
+            switch (spellName.Trim()[(sp + 1)..].ToUpperInvariant())
+            {
+                case "I":    return 1;
+                case "II":   return 2;
+                case "III":  return 3;
+                case "IV":   return 4;
+                case "V":    return 5;
+                case "VI":   return 6;
+                case "VII":  return 7;
+                case "VIII": return 8;
+            }
+        }
+        if (spellName.StartsWith("Incantation of ", StringComparison.OrdinalIgnoreCase)) return 8;
+        if (LoreToBase.ContainsKey(spellName.Trim())) return 7;
+        return 0;
+    }
 
     private static int ComputeFamily(string spellName)
     {

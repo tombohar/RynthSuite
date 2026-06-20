@@ -102,8 +102,29 @@ public class CombatManager : IDisposable
     // a perfectly good target in ~3 ticks (~1.2s at SpellCastIntervalMs=400).
     private bool _offensiveCastThisCycle;
     private DateTime _faceStartTime = DateTime.MinValue;
-    private const double FACE_TIMEOUT_MS = 1000.0; // give up waiting and fire anyway
+    private const double FACE_TIMEOUT_MS = 1000.0; // give up waiting and fire anyway (MISSILE only)
     private const double FACE_TOLERANCE_DEG = 15.0; // heading error threshold to fire
+
+    // ── Magic targeted-cast settle gate (root-cause fix 2026-06-19) ──────────
+    // On the ACE server a TARGETED (combat) cast defers its windup behind a
+    // turn-to-face; a turn/stop MoveToState that lands during that deferred
+    // windup ORPHANS the cast (DoSpellWords/CreatePlayerSpell never runs) → the
+    // gesture animates but 0 damage / "You're too busy!" forever. Self-buffs are
+    // immune (untargeted → synchronous, no turn). Fix: for MAGIC, never cast
+    // mid-turn — keep turning until actually within angle, then release the turn
+    // motions and let the stop reach the server (settle tick) BEFORE the cast.
+    private DateTime _faceSettledAt = DateTime.MinValue;
+    private const double FACE_MAX_WAIT_MS = 2500.0;  // safety: heading never converges (jittery point-blank pose) → cast anyway rather than wedge
+    private const double FACE_SETTLE_MS   = 140.0;   // let the turn-stop reach the server (≥ one 30Hz tick) before the cast packet
+
+    // ── Magic cast cadence guard ────────────────────────────────────────────
+    // Don't issue the next combat cast until the previous one's server windup
+    // has resolved (a UseDone arrived, or a hard timeout). Re-casting into the
+    // window makes the next cast's stop-thunk/turn orphan the prior cast.
+    private bool _awaitingCastResolution;
+    private DateTime _castResolutionDeadline = DateTime.MinValue;
+    private int _useDoneSeqAtCast;
+    private const double CAST_RESOLUTION_TIMEOUT_MS = 2500.0; // covers a tier-7/8 war windup+recoil; also the sole gate on an engine without UseDone observation
 
     // Smooth turn motions — same codes as NavigationEngine
     private const uint MotionTurnRight = 0x6500000D;
@@ -215,6 +236,21 @@ public class CombatManager : IDisposable
     private readonly record struct PendingKill(
         string Name, uint Wcid, int CastCount, uint WeaponId, string Element, int Tier, double Damage, DateTime Expiry);
 
+    // Ring of recently-fought objects (by id). The single _lastFight* slot only credits a kill
+    // that lands one-back; when we've advanced PAST the dying mob (rapid multi-mob melee) its
+    // death message matches neither the current target nor _lastFight, and the kill is lost
+    // (KillDbg how=miss). This ring credits it by name across the last few fights.
+    private readonly List<(int Id, PendingKill Pk)> _recentFights = new();
+    private const int RecentFightsCap = 12;
+    private const double RecentFightTtlMs = 8000.0;
+
+    // name -> wcid for monsters seen by the scanner this session. AOE/area casts kill mobs we
+    // never directly fought (ACE streams health only for the selected target, so tiers 1-4 never
+    // saw them) — tier 5 credits those kills by matching the death message against these names.
+    // Same pump thread as the scanner and OnKillNotification, so no lock needed.
+    private readonly Dictionary<string, uint> _seenMonsterNameToWcid =
+        new(StringComparer.OrdinalIgnoreCase);
+
     // Persistent snapshot of the most-recently-cast-at fight — survives DropTarget
     // (which zeroes _fightTarget*). When a kill arrives after the bot has already
     // dropped/advanced (common when one-shotting fast: the corpse's KillerNotification
@@ -229,6 +265,7 @@ public class CombatManager : IDisposable
     private string _lastCastElement = "Fire"; // element of the most recent offensive cast
     private int    _lastCastTier;             // tier (spell level) of the most recent offensive cast
     private uint   _lastCastWeaponId;         // weapon (wand) guid the most recent cast used — damage varies by weapon
+    private int    _equippedWeaponId;         // weapon EquipWeaponAndSetStance last wielded (any mode) — drives melee/missile damage learning
     private bool   _predictKillSwap;          // set by AttackWithMagic, consumed in Think after the cast
     // Predicted kill shot is ARMED here but only executed once the cast is
     // CONFIRMED accepted (ACE: no "You're too busy!" within the refusal window).
@@ -336,12 +373,13 @@ public class CombatManager : IDisposable
         int    weaponWieldLoc    = -1;
         if (targetObj != null)
         {
-            var rule = _settings.MonsterRules.FirstOrDefault(
-                r => targetObj.Name.IndexOf(r.Name, StringComparison.OrdinalIgnoreCase) >= 0)
-                ?? _settings.MonsterRules.FirstOrDefault(m => m.Name.Equals("Default", StringComparison.OrdinalIgnoreCase));
-
-            if (rule != null && rule.WeaponId != 0)
-                pickedWeaponId = rule.WeaponId;
+            // Mirror EquipWeaponAndSetStance: per-wcid Damage-tab weapon (override > best),
+            // else first configured weapon, else any wand. (rule.WeaponId is no longer consulted.)
+            uint dwcid = 0;
+            if (_host.HasGetObjectWcid && _host.TryGetObjectWcid((uint)targetObj.Id, out uint dw)) dwcid = dw;
+            uint deff = (dwcid != 0 && _damageStore != null) ? _damageStore.GetEffectiveWeapon(dwcid) : 0;
+            if (deff != 0)
+                pickedWeaponId = (int)deff;
             else
             {
                 var bestWeapon = _settings.ItemRules.FirstOrDefault();
@@ -495,6 +533,13 @@ public class CombatManager : IDisposable
             // Monster, no health record). A real monster is never named
             // "Flame Bolt"/"Frost Streak"/etc.
             if (IsSpellProjectileName(wo.Name)) continue;
+
+            // Cache name->wcid (once per type) for AOE kill attribution (tier 5): a mob wiped
+            // by an area cast we never directly fought is credited by matching its death message.
+            if (!string.IsNullOrEmpty(wo.Name) && _seenMonsterNameToWcid.Count < 256
+                && !_seenMonsterNameToWcid.ContainsKey(wo.Name)
+                && _host.HasGetObjectWcid && _host.TryGetObjectWcid((uint)wo.Id, out uint scanWcid) && scanWcid != 0)
+                _seenMonsterNameToWcid[wo.Name] = scanWcid;
 
             double dist = _worldFilter.Distance(playerId, wo.Id);
 
@@ -789,17 +834,35 @@ public class CombatManager : IDisposable
     }
 
     /// <summary>
-    /// Extract our outgoing damage amount from a combat-log line, e.g.
-    /// "You blast the Olthoi Swarm Harvester for 153 points of fire damage!".
+    /// Extract our outgoing damage amount from a combat-log line. Two wordings reach us:
+    ///   • Retail combat log:  "You blast X for 153 points of fire damage!"
+    ///   • ACE war/void magic: "You blast X for 153 points with Whirling Blade VII."
+    ///       (ACEmulator's SpellProjectile.DamageTarget emits "for {amount} points with
+    ///        {Spell.Name}" — NOT "points of <element> damage" — so the old retail-only
+    ///        parser matched nothing on ACE and the Crit/NonCrit columns stayed empty.)
     /// Returns false for incoming ("... you for N points ...") and non-damage
-    /// "points of" lines (heals/mana/stamina). Allocation-free (hot path).
+    /// "points of &lt;vital&gt;" lines (heals / mana / stamina drains). Allocation-free (hot path).
     /// </summary>
     private static bool TryParseOutgoingDamage(string text, out int amount)
     {
         amount = 0;
-        int pts = text.IndexOf("points of", StringComparison.OrdinalIgnoreCase);
+
+        // Anchor on the word "points" (shared by both wordings). The number is the run
+        // of digits immediately before it; the word right AFTER it disambiguates:
+        //   "points with ..."             → ACE damage cast (only the projectile msg uses this)
+        //   "points of ... damage"        → retail damage
+        //   "points of mana/stamina/..."  → vital drain/heal (no "damage") → reject
+        int pts = text.IndexOf("points", StringComparison.OrdinalIgnoreCase);
         if (pts < 0) return false;
-        if (text.IndexOf("damage", pts, StringComparison.OrdinalIgnoreCase) < 0) return false;
+
+        int w = pts + 6;                                   // first char after "points"
+        while (w < text.Length && text[w] == ' ') w++;
+        bool nextWith = WordAt(text, w, "with");
+        bool nextOf   = WordAt(text, w, "of");
+        bool isDamage = nextWith
+                     || (nextOf && text.IndexOf("damage", w, StringComparison.OrdinalIgnoreCase) >= 0);
+        if (!isDamage) return false;
+
         // Incoming (we got hit) lines read "... you for N points ..." — not our damage.
         if (text.IndexOf("you for", StringComparison.OrdinalIgnoreCase) >= 0) return false;
 
@@ -814,6 +877,18 @@ public class CombatManager : IDisposable
         if (!any || val <= 0 || val > 1_000_000) return false;
         amount = (int)val;
         return true;
+    }
+
+    /// <summary>Case-insensitive whole-word match of <paramref name="word"/> (passed lowercase)
+    /// at <paramref name="pos"/> in <paramref name="text"/>, bounded by end-of-string or a
+    /// non-letter. Allocation-free.</summary>
+    private static bool WordAt(string text, int pos, string word)
+    {
+        if (pos < 0 || pos + word.Length > text.Length) return false;
+        for (int k = 0; k < word.Length; k++)
+            if (char.ToLowerInvariant(text[pos + k]) != word[k]) return false;
+        int end = pos + word.Length;
+        return end >= text.Length || !char.IsLetter(text[end]);
     }
 
     public void HandleChatForDebuffs(string text)
@@ -1173,7 +1248,51 @@ public class CombatManager : IDisposable
             recorded = true; how = "snapshot";
         }
 
-        if (_killDbgCount < 40)
+        // (4) A mob fought further back than one-ago (advanced past several targets) — the
+        //     recent-fights ring credits it by name. Closes the post-advance under-count that
+        //     the single _lastFight slot drops (KillDbg how=miss). Consumes the matched entry.
+        if (!recorded)
+        {
+            _recentFights.RemoveAll(e => e.Pk.Expiry < nowKill);
+            for (int i = _recentFights.Count - 1; i >= 0; i--)
+            {
+                PendingKill pk = _recentFights[i].Pk;
+                if (!string.IsNullOrEmpty(pk.Name)
+                    && deathMessage.IndexOf(pk.Name, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    _recentFights.RemoveAt(i);
+                    _damageStore.RecordKill(pk.WeaponId, pk.Wcid, pk.Name, pk.Element, pk.Tier,
+                                            pk.CastCount > 0 ? pk.CastCount : 1, 0);
+                    recorded = true; how = "recent";
+                    break;
+                }
+            }
+        }
+
+        // (5) AOE/area kill: a mob wiped by a splash cast we never directly fought (tiers 1-4
+        //     have no record of it). Credit by matching its death message against the names of
+        //     monsters the scanner has seen this session. Longest name wins (most specific), so
+        //     "Olthoi Swarm Soldier" isn't mis-credited to a shorter overlapping name.
+        if (!recorded && _seenMonsterNameToWcid.Count > 0)
+        {
+            uint bestWcid = 0; string bestName = ""; int bestLen = 0;
+            foreach (var kv in _seenMonsterNameToWcid)
+            {
+                if (kv.Key.Length > bestLen
+                    && deathMessage.IndexOf(kv.Key, StringComparison.OrdinalIgnoreCase) >= 0)
+                { bestWcid = kv.Value; bestName = kv.Key; bestLen = kv.Key.Length; }
+            }
+            if (bestWcid != 0)
+            {
+                // Attribute to the last cast's shape (the AOE/ring that wiped the pack) so these
+                // kills group under that tier (e.g. "R2") instead of an unattributed row. Per-cast
+                // damage/casts-to-kill stays meaningless for AOE — we only count the kill.
+                _damageStore.RecordKill(_lastCastWeaponId, bestWcid, bestName, _lastCastElement, _lastCastTier, 1, 0);
+                recorded = true; how = "aoe";
+            }
+        }
+
+        if (_killDbgCount < 1000)
         {
             _killDbgCount++;
             _host.Log($"[KillDbg] how={how} curMatch={curMatches} tid=0x{(uint)tid:X8} fightWcid={_fightTargetWcid} cnt={_fightCastCount} lastWcid={_lastFightWcid} pend={_predictedKillPending.Count} msg='{deathMessage}'");
@@ -1187,6 +1306,23 @@ public class CombatManager : IDisposable
         }
     }
 
+    /// <summary>Record the just-stamped _lastFight* context into the recent-fights ring,
+    /// keyed by the live object id (refreshed per hit, capped, TTL-pruned). Lets a kill that
+    /// lands after we've advanced past the dying mob still be credited by name (tier 4).</summary>
+    private void StampRecentFight()
+    {
+        if (_lastFightWcid == 0) return;
+        int id = activeTargetId;
+        if (id == 0) return;
+        var pk = new PendingKill(_lastFightName, _lastFightWcid, _lastFightCount > 0 ? _lastFightCount : 1,
+                                 _lastFightWeaponId, _lastFightElement, _lastFightTier, 0,
+                                 DateTime.Now.AddMilliseconds(RecentFightTtlMs));
+        for (int i = _recentFights.Count - 1; i >= 0; i--)
+            if (_recentFights[i].Id == id) _recentFights.RemoveAt(i);
+        _recentFights.Add((id, pk));
+        if (_recentFights.Count > RecentFightsCap) _recentFights.RemoveAt(0);
+    }
+
     /// <summary>
     /// Exact per-hit damage from the engine (AttackerNotification 0x01B1),
     /// attributed to the active target (combat engages one mob at a time). This
@@ -1195,19 +1331,61 @@ public class CombatManager : IDisposable
     /// selects — otherwise can't see how hurt a mob is. Feeds kill-shot
     /// prediction and doubles as reliable blacklist damage feedback.
     /// </summary>
-    public void OnCombatDamage(double damage, bool crit, bool isAttacker)
+    public void OnCombatDamage(double damage, uint damageType, bool crit, bool isAttacker)
     {
         if (!isAttacker || damage <= 0) return;
         int tid = activeTargetId;
         if (tid == 0 || tid != _fightTargetId) return;
 
         _fightDamage += damage;
+
+        // War magic sends NO 0x01B1 (its damage comes from the chat parse), so a structured
+        // hit event in a NON-magic mode is a MELEE or MISSILE hit. Magic sets its cast context
+        // in AttackWithMagic; for melee/missile derive the per-hit context here so the Damage
+        // tab keys it correctly: weapon = the equipped weapon, element = the packet damage type
+        // (accurate per hit), tier = 0 (no spell tier). The packet crit flag is reliable too.
+        if (CurrentCombatMode != CombatMode.Magic)
+        {
+            _lastCastWeaponId = unchecked((uint)_equippedWeaponId);
+            _lastCastElement  = ElementFromDamageType(damageType);
+            _lastCastTier     = 0;
+            _lastCastWasRing  = false;   // melee/missile are single-target
+            _fightCastCount++;           // landed hits → "casts/attacks to kill" learning
+            // Snapshot the fight so a kill landing after we've advanced is still credited
+            // (OnKillNotification path 3) with the right melee/missile weapon/element.
+            if (_fightTargetWcid != 0)
+            {
+                _lastFightWcid     = _fightTargetWcid;
+                _lastFightName     = _fightTargetName;
+                _lastFightWeaponId = _lastCastWeaponId;
+                _lastFightElement  = _lastCastElement;
+                _lastFightTier     = _lastCastTier;
+                _lastFightCount    = _fightCastCount;
+                StampRecentFight();
+            }
+        }
+
         // Don't learn per-cast damage from ring/AoE casts — they hit multiple
         // mobs, so the damage can't be attributed to this single target.
         if (_damageStore != null && _fightTargetWcid != 0 && !_lastCastWasRing)
             _damageStore.RecordHit(_lastCastWeaponId, _fightTargetWcid, _fightTargetName, _lastCastElement, _lastCastTier, damage, crit);
 
         ReportDamageOnTarget(tid); // clears the blacklist miss streak + stamps last-damage time
+    }
+
+    // Map an AC DAMAGE_TYPE flag (from the 0x01B1 packet) to the Damage-tab element string.
+    // A weapon hit carries one primary type; if multiple bits are set, prefer the physical base.
+    private static string ElementFromDamageType(uint dt)
+    {
+        if ((dt & 0x1)   != 0) return "Slash";
+        if ((dt & 0x2)   != 0) return "Pierce";
+        if ((dt & 0x4)   != 0) return "Bludgeon";
+        if ((dt & 0x10)  != 0) return "Fire";
+        if ((dt & 0x8)   != 0) return "Cold";
+        if ((dt & 0x40)  != 0) return "Lightning";   // DamageType.Electric
+        if ((dt & 0x20)  != 0) return "Acid";
+        if ((dt & 0x400) != 0) return "Nether";
+        return "Physical";                            // Undef / vital drains
     }
 
     /// <summary>Start tracking a fresh fight against <paramref name="targetId"/>: zero the damage tally, capture its wcid, resolve its HP.</summary>
@@ -1561,28 +1739,75 @@ public class CombatManager : IDisposable
             if (BusyCount > 0)
                 return true;
 
-            // Native attack handles facing internally — skip manual facing
-            if (!useNative)
+            // Magic cadence guard: while a previous combat cast is still
+            // resolving on the ACE server, do NOT turn or issue another cast.
+            // A turn/stop MoveToState (or the next cast's free-hands stop-thunk)
+            // landing during the server's deferred targeted-cast windup orphans
+            // the prior cast → 0 damage. Resolves on a server UseDone (poll) or
+            // a hard timeout. Magic only; melee/missile are AC-paced.
+            if (CurrentCombatMode == CombatMode.Magic && IsAwaitingCastResolution())
+                return true;
+
+            // MAGIC: settle-before-cast facing gate. Never cast mid-turn and
+            // never let a turn-stop ride alongside the cast packet — both orphan
+            // the ACE server's deferred targeted-cast windup (root cause of
+            // "animates but 0 damage / too busy"). Makes combat behave like the
+            // working self-buff path. Applies regardless of UseNativeAttack
+            // (native attack is a physical swing; in Magic mode the bot always
+            // casts, so the facing race is the same with or without it).
+            if (CurrentCombatMode == CombatMode.Magic)
             {
-                // For ranged/magic attacks, confirm we're facing the target before firing.
-                // Melee turn motions are already cleared above every tick.
-                if (isRanged)
+                double facingError = GetFacingError(activeTargetId);
+                if (facingError > FACE_TOLERANCE_DEG)
                 {
-                    double facingError = GetFacingError(activeTargetId);
-                    if (facingError > FACE_TOLERANCE_DEG)
+                    FaceTarget(activeTargetId);
+                    if (!_facingTarget)
                     {
-                        FaceTarget(activeTargetId);
-                        if (!_facingTarget)
-                        {
-                            _facingTarget = true;
-                            _faceStartTime = DateTime.Now;
-                        }
-                        if ((DateTime.Now - _faceStartTime).TotalMilliseconds < FACE_TIMEOUT_MS)
-                            return true; // not facing yet, keep waiting
+                        _facingTarget = true;
+                        _faceStartTime = DateTime.Now;
                     }
-                    _facingTarget = false;
-                    ClearCombatTurnMotions();
+                    // Keep turning until actually within angle. Do NOT "fire
+                    // anyway" while still turning (that was the bug). Only a long
+                    // safety timeout falls through, so a jittery point-blank pose
+                    // can't wedge combat forever.
+                    if ((DateTime.Now - _faceStartTime).TotalMilliseconds < FACE_MAX_WAIT_MS)
+                        return true;
+                    _host.Log($"[CombatCast] facing did not converge in {FACE_MAX_WAIT_MS:0}ms (err={facingError:0.0}°) — releasing turn + casting anyway");
                 }
+
+                // Within angle (or safety-timed-out). If we were turning, release
+                // the turn motions and give the stop ONE settle tick to reach the
+                // server BEFORE the cast packet.
+                if (_facingTarget)
+                {
+                    ClearCombatTurnMotions();
+                    _facingTarget = false;
+                    _faceSettledAt = DateTime.Now;
+                    return true; // settle tick
+                }
+                if ((DateTime.Now - _faceSettledAt).TotalMilliseconds < FACE_SETTLE_MS)
+                    return true; // let the turn-stop settle on the server first
+            }
+            // Native attack handles facing internally — skip manual facing.
+            // MISSILE only (melee turn motions are cleared above every tick);
+            // AC paces the missile attack itself so the windup orphaning doesn't
+            // apply here — behaviour unchanged.
+            else if (!useNative && isRanged)
+            {
+                double facingError = GetFacingError(activeTargetId);
+                if (facingError > FACE_TOLERANCE_DEG)
+                {
+                    FaceTarget(activeTargetId);
+                    if (!_facingTarget)
+                    {
+                        _facingTarget = true;
+                        _faceStartTime = DateTime.Now;
+                    }
+                    if ((DateTime.Now - _faceStartTime).TotalMilliseconds < FACE_TIMEOUT_MS)
+                        return true; // not facing yet, keep waiting
+                }
+                _facingTarget = false;
+                ClearCombatTurnMotions();
             }
 
             // Don't attack in missile mode without ammo
@@ -1871,13 +2096,19 @@ public class CombatManager : IDisposable
         string desired = (rule != null && rule.DamageType != "Auto") ? rule.DamageType : monsterWeakness;
 
         string weaponSource = "none";
-        if (rule != null && rule.WeaponId != 0)
+        // Per-monster weapon now comes from the Damage tab (per-wcid override > learned best),
+        // NOT the Monsters-tab rule.WeaponId (that selection was removed — hard cut). Resolve the
+        // target's wcid the same way BeginFight does.
+        uint targetWcid = 0;
+        if (_host.HasGetObjectWcid && _host.TryGetObjectWcid((uint)target.Id, out uint tw)) targetWcid = tw;
+        if (targetWcid != 0 && _damageStore != null)
         {
-            targetWeaponId = rule.WeaponId;
-            weaponSource = "rule.WeaponId";
+            uint eff = _damageStore.GetEffectiveWeapon(targetWcid);
+            if (eff != 0) { targetWeaponId = (int)eff; weaponSource = "DamageTab"; }
         }
-        else
+        if (targetWeaponId == 0)
         {
+            // No Damage-tab choice yet → element/wand auto (element from rule.DamageType or weakness).
             var bestWeapon = _settings.ItemRules.FirstOrDefault(i => i.Element.Equals(desired, StringComparison.OrdinalIgnoreCase))
                              ?? _settings.ItemRules.FirstOrDefault();
             if (bestWeapon != null) { targetWeaponId = bestWeapon.Id; weaponSource = "ItemRules"; }
@@ -1908,6 +2139,10 @@ public class CombatManager : IDisposable
             }
             return true;
         }
+
+        // Remember the weapon in hand (now confirmed in-world) so melee/missile damage
+        // (0x01B1) learns under the real weapon, not a resolved-but-unwielded id.
+        _equippedWeaponId = targetWeaponId;
 
         // Use IsWandObject (ObjectClass + name fallback) so wands with
         // ObjectClass=Unknown (stale WorldFilter classification) still get
@@ -2145,6 +2380,39 @@ public class CombatManager : IDisposable
     {
         _host.SetMotion(MotionTurnRight, false);
         _host.SetMotion(MotionTurnLeft,  false);
+    }
+
+    /// <summary>
+    /// True while a previously-issued combat cast is still resolving on the ACE
+    /// server. Serializes magic casts so the next cast's turn/stop motion can't
+    /// orphan the prior cast's deferred windup. Cleared when a server UseDone
+    /// (0x1C7) is observed since the cast (the server finished the action —
+    /// completed or refused) or a hard timeout elapses. On an engine without
+    /// UseDone observation (HasUseDoneSeq == false) the timeout is the sole gate.
+    /// </summary>
+    private bool IsAwaitingCastResolution()
+    {
+        if (!_awaitingCastResolution) return false;
+        if (_host.HasUseDoneSeq && _host.GetUseDoneSeq() != _useDoneSeqAtCast)
+        {
+            _awaitingCastResolution = false;
+            return false;
+        }
+        if (DateTime.Now >= _castResolutionDeadline)
+        {
+            _awaitingCastResolution = false;
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>Record that a targeted combat cast was just issued, so the next
+    /// cast waits for it to resolve on the server (see IsAwaitingCastResolution).</summary>
+    private void MarkCombatCastIssued()
+    {
+        _awaitingCastResolution = true;
+        _castResolutionDeadline = DateTime.Now.AddMilliseconds(CAST_RESOLUTION_TIMEOUT_MS);
+        _useDoneSeqAtCast = _host.HasUseDoneSeq ? _host.GetUseDoneSeq() : 0;
     }
 
     /// <summary>
@@ -2402,6 +2670,7 @@ public class CombatManager : IDisposable
                 try
                 {
                     _host.CastSpell((uint)activeTargetId, spellId);
+                    MarkCombatCastIssued();
                     _lastSpellCast = DateTime.Now;
                     _lastCastWasRing = false;
                     _pendingDebuffKey = debuffKey;
@@ -2435,6 +2704,7 @@ public class CombatManager : IDisposable
             try
             {
                 _host.CastSpell((uint)activeTargetId, offensiveSpellId);
+                MarkCombatCastIssued();
                 _lastSpellCast = DateTime.Now;
                 _lastCastWasRing = isRing;
                 // _offensiveCastThisCycle is NOT set here anymore — a cast
@@ -2451,7 +2721,17 @@ public class CombatManager : IDisposable
                 // decide if it's a predicted kill shot.
                 _lastCastWeaponId = unchecked((uint)FindWandInItems());
                 _lastCastElement  = element;
-                _lastCastTier     = Math.Max(warTier, voidTier);
+                // Tier = the LEVEL of the spell actually cast (1-8), not the caster's highest
+                // castable tier (which made every magic kill record tier 8). Fall back to the
+                // old max-tier only if the level can't be derived, so it never regresses to blank.
+                int castLevel = SpellTableStub.GetById(offensiveSpellId)?.Level ?? 0;
+                int castTierMag = castLevel > 0 ? castLevel : Math.Max(warTier, voidTier);
+                // Ring spells are stored as a NEGATIVE tier so the Damage tab can render them as
+                // "R<level>" (e.g. a level-2 ring = -2 -> "R2"); non-ring stays positive; 0 = none.
+                _lastCastTier     = isRing ? -castTierMag : castTierMag;
+                // Record the latest tier used vs this monster so the Damage tab's collapsed row
+                // reflects it immediately (covers ring casts, which skip RecordHit).
+                if (_fightTargetWcid != 0) _damageStore?.NoteCast(_fightTargetWcid, _lastCastTier, _fightTargetName);
                 _fightCastCount++;
                 // Snapshot this fight so a kill that lands after we've dropped/advanced
                 // can still be credited by name (see OnKillNotification step 3).
@@ -2463,6 +2743,7 @@ public class CombatManager : IDisposable
                     _lastFightElement  = _lastCastElement;
                     _lastFightTier     = _lastCastTier;
                     _lastFightCount    = _fightCastCount;
+                    StampRecentFight();
                 }
                 EvaluateKillShot(_lastCastWeaponId, element, _lastCastTier, isRing);
             }

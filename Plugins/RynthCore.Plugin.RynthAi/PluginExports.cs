@@ -261,6 +261,56 @@ public static unsafe class PluginExports
         }
     }
 
+    private static IntPtr _combatWeaponsPtr = IntPtr.Zero;
+
+    // Selectable weapons for the Damage-panel weapon/offhand pickers (ANSI JSON array [{id,name}]).
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetCombatWeaponsJson", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr GetCombatWeaponsJson()
+    {
+        try
+        {
+            string json = Runtime.Plugin?.BuildCombatWeaponsJson() ?? "[]";
+            IntPtr newPtr = Marshal.StringToHGlobalAnsi(json);
+            IntPtr oldPtr = Interlocked.Exchange(ref _combatWeaponsPtr, newPtr);
+            if (oldPtr != IntPtr.Zero)
+                Marshal.FreeHGlobal(oldPtr);
+            return newPtr;
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    // Per-monster weapon override from the Damage panel (weaponId == 0 clears → use learned best).
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginSetMonsterWeapon", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void SetMonsterWeapon(uint wcid, uint weaponId)
+    {
+        try { Runtime.Plugin?.SetMonsterWeapon(wcid, weaponId); } catch { }
+    }
+
+    // Per-monster offhand override from the Damage panel (offhandId == 0 clears). Stored only.
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginSetMonsterOffhand", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void SetMonsterOffhand(uint wcid, uint offhandId)
+    {
+        try { Runtime.Plugin?.SetMonsterOffhand(wcid, offhandId); } catch { }
+    }
+
+    // Per-character DEFAULT weapon from the Damage panel's Default line (weaponId == 0 clears →
+    // monsters on Default fall through to learned-best). Sweeping fallback for all Default monsters.
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginSetDefaultWeapon", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void SetDefaultWeapon(uint weaponId)
+    {
+        try { Runtime.Plugin?.SetDefaultWeapon(weaponId); } catch { }
+    }
+
+    // Master reset: zero all learned damage stats, keep monster names + manual overrides.
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginClearMonsterStats", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void ClearMonsterStats()
+    {
+        try { Runtime.Plugin?.ClearMonsterStats(); } catch { }
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetMonstersJson", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static IntPtr GetMonstersJson()
     {

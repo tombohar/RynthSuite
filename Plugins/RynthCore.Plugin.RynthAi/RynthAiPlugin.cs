@@ -83,6 +83,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     // Per-character learned combat damage (avg damage by wcid/element/tier +
     // learned HP-to-kill), used by CombatManager for kill-shot prediction.
     private CreatureData.MonsterDamageStore? _damageStore;
+    // wcids appraised this session (AutoId of nearby mobs). Surfaced as bare rows in the
+    // Damage table so monsters populate as you encounter them, before you've fought them.
+    private readonly HashSet<uint> _seenMonstersThisSession = new();
     private int _creatureSaveTickCounter;
     private int _settingsSaveTickCounter;
     private int _settingsLoadRetryCounter;
@@ -305,6 +308,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         {
             _buffManager.SetTimerPath(_dashboard.CharFolder);
             _damageStore?.SetCharacter(_dashboard.CharFolder);
+            lock (_seenMonstersThisSession) _seenMonstersThisSession.Clear();
         }
 
         _dashboard.OnForceRebuffRequested       = () => _buffManager?.ForceFullRebuff();
@@ -420,6 +424,20 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     Host.SetRadarSuppressed(pushSettings.SuppressRetailRadar);
                 if (Host.HasSetPowerbarSuppressed)
                     Host.SetPowerbarSuppressed(pushSettings.SuppressRetailPowerbar);
+
+                // Fellowship-follow: publish the leader's object id so the nav
+                // engine can steer toward their live position. 0 = idle (not in a
+                // fellowship, or we ARE the leader — a leader shouldn't follow itself).
+                if (pushSettings.FollowMode && _fellowshipTracker != null)
+                {
+                    int leader = _fellowshipTracker.LeaderId;
+                    pushSettings.FollowTargetId =
+                        (leader != 0 && !_fellowshipTracker.IsLeader) ? unchecked((uint)leader) : 0u;
+                }
+                else
+                {
+                    pushSettings.FollowTargetId = 0;
+                }
             }
 
             _objectCache?.Tick();
@@ -979,7 +997,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     public override void OnCombatDamage(uint damage, uint damageType, bool crit, bool isAttacker)
     {
         if (isAttacker)
-            _combatManager?.OnCombatDamage(damage, crit, isAttacker);
+            _combatManager?.OnCombatDamage((double)damage, damageType, crit, isAttacker);
     }
 
     /// <summary>Human-readable table of the learned per-monster casts-to-kill data
@@ -1031,61 +1049,176 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         if (store == null) return "[]";
         var rows = store.Snapshot();
 
+        // Per-wcid weapon recommendation is identical for every row of a monster — memoize it.
+        var bestCache = new Dictionary<uint, uint>();
+        uint BestFor(uint w)
+        {
+            if (!bestCache.TryGetValue(w, out uint b)) { b = store.GetBestWeapon(w); bestCache[w] = b; }
+            return b;
+        }
+        string NameOf(uint id, string prefix)
+        {
+            if (id == 0) return "";
+            string n = "";
+            if (Host.HasGetObjectName) { try { Host.TryGetObjectName(id, out n); } catch { n = ""; } }
+            return string.IsNullOrEmpty(n) ? prefix + " " + id : n;
+        }
+
+        // Group the per-(weapon,element,tier) stat rows by MONSTER (wcid). The Damage tab now
+        // shows ONE collapsed row per monster (latest tier used + total kills); the per-tier
+        // breakdown rides along in a nested "tiers" array for the expand drawer.
+        var byWcid = new Dictionary<uint, List<CreatureData.MonsterDamageStore.DamageRow>>();
+        var order = new List<uint>();
+        foreach (var r in rows)
+        {
+            if (!byWcid.TryGetValue(r.Wcid, out var glist)) { glist = new(); byWcid[r.Wcid] = glist; order.Add(r.Wcid); }
+            glist.Add(r);
+        }
+
+        string ResolveName(uint wcid, string rowName)
+        {
+            string name = rowName;
+            if (string.IsNullOrEmpty(name) && _creatureStore != null
+                && _creatureStore.TryGetByWcid(wcid, out var prof) && prof != null && !string.IsNullOrEmpty(prof.Name))
+                name = prof.Name;
+            return string.IsNullOrEmpty(name) ? "wcid " + wcid : name;
+        }
+        double DbHp(uint wcid) =>
+            (_creatureStore != null && _creatureStore.TryGetByWcid(wcid, out var p) && p != null) ? p.MaxHealth : 0;
+
         var sb = new System.Text.StringBuilder();
         sb.Append('[');
         bool first = true;
-        // STABLE order (by name/weapon/spell, NOT by kill count) so the engine
-        // panel's rows don't reshuffle every time a counter ticks — that lets it
-        // update cells in place and keep the HP edit box alive/typable.
-        foreach (var r in rows.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
-                              .ThenBy(x => x.WeaponId)
-                              .ThenBy(x => x.Element, StringComparer.OrdinalIgnoreCase)
-                              .ThenBy(x => x.Tier))
+        var emittedWcids = new HashSet<uint>();
+
+        // The DEFAULT line (top row). Carries the per-character default weapon; the panel renders
+        // it specially (weapon picker + chevron → the Default debuff/shape rule). isDefault=true.
+        uint defWeapon = store.GetDefaultWeapon();
+        sb.Append('{')
+          .Append("\"wcid\":0,\"isDefault\":true,\"name\":\"Default\",")
+          .Append("\"wid\":").Append(defWeapon).Append(',')
+          .Append("\"weapon\":").Append(JsonStr(NameOf(defWeapon, "Weapon"))).Append(',')
+          .Append("\"elem\":\"\",\"tier\":0,\"hp\":0,\"hpManual\":false,")
+          .Append("\"crit\":0,\"critN\":0,\"noncrit\":0,\"noncritN\":0,\"casts\":0,\"kills\":0,")
+          .Append("\"assignedWid\":").Append(defWeapon).Append(',')
+          .Append("\"assignedWeapon\":").Append(JsonStr(NameOf(defWeapon, "Weapon"))).Append(',')
+          .Append("\"bestWid\":0,\"bestWeapon\":\"\",\"assignedOff\":0,\"assignedOffName\":\"\",")
+          .Append("\"key\":\"__default__\",\"tiers\":[]")
+          .Append('}');
+        first = false;
+
+        // STABLE order by monster name (then wcid) so rows don't reshuffle as counters tick.
+        foreach (uint wcid in order.OrderBy(w => ResolveName(w, byWcid[w].Count > 0 ? byWcid[w][0].Name : ""),
+                                            StringComparer.OrdinalIgnoreCase).ThenBy(w => w))
         {
-            // Name + DB HP from the shared creature store.
-            string name = r.Name;
-            double dbHp = 0;
-            if (_creatureStore != null && _creatureStore.TryGetByWcid(r.Wcid, out var prof) && prof != null)
-            {
-                if (string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(prof.Name)) name = prof.Name;
-                dbHp = prof.MaxHealth;
-            }
-            if (string.IsNullOrEmpty(name)) name = "wcid " + r.Wcid;
+            var glist = byWcid[wcid];
+            emittedWcids.Add(wcid);
+            string name = ResolveName(wcid, glist.Count > 0 ? glist[0].Name : "");
+            double dbHp = DbHp(wcid);
 
-            // HP precedence: manual override > creatures.json > learned damage-to-kill.
-            bool hpManual = r.HpManual > 0;
-            double hp = hpManual ? r.HpManual : (dbHp > 0 ? dbHp : r.HpPool);
+            double manual = store.GetManualHp(wcid);
+            bool hpManual = manual > 0;
+            double poolHp = 0; foreach (var x in glist) if (x.HpPool > poolHp) poolHp = x.HpPool;
+            double hp = hpManual ? manual : (dbHp > 0 ? dbHp : poolHp);
 
-            // Weapon name (equipped weapon resolves; otherwise show the id).
-            string weaponName = "";
-            if (r.WeaponId != 0 && Host.HasGetObjectName)
-            {
-                try { Host.TryGetObjectName(r.WeaponId, out weaponName); } catch { weaponName = ""; }
-            }
-            if (string.IsNullOrEmpty(weaponName)) weaponName = "Weapon " + r.WeaponId;
+            int latestTier = store.GetLastTier(wcid);          // negative = ring
+            int totalKills = 0; foreach (var x in glist) totalKills += x.KillSamples;
 
-            string key = r.Wcid + ":" + r.WeaponId + ":" + (r.Element ?? "") + ":" + r.Tier;
+            // Representative entry for the collapsed row's crit/casts = the latest-tier one,
+            // else the most-killed one.
+            CreatureData.MonsterDamageStore.DamageRow m = default; bool haveM = false;
+            foreach (var x in glist) if (x.Tier == latestTier) { m = x; haveM = true; break; }
+            if (!haveM) { int bk = -1; foreach (var x in glist) if (x.KillSamples > bk) { bk = x.KillSamples; m = x; haveM = true; } }
+
+            uint assignedWid = store.GetManualWeapon(wcid);
+            uint bestWid     = BestFor(wcid);
+            uint assignedOff = store.GetManualOffhand(wcid);
 
             if (!first) sb.Append(',');
             first = false;
             sb.Append('{')
-              .Append("\"wcid\":").Append(r.Wcid).Append(',')
+              .Append("\"wcid\":").Append(wcid).Append(',')
               .Append("\"name\":").Append(JsonStr(name)).Append(',')
-              .Append("\"wid\":").Append(r.WeaponId).Append(',')
-              .Append("\"weapon\":").Append(JsonStr(weaponName)).Append(',')
-              .Append("\"elem\":").Append(JsonStr(r.Element ?? "")).Append(',')
-              .Append("\"tier\":").Append(r.Tier).Append(',')
+              .Append("\"wid\":").Append(haveM ? m.WeaponId : 0).Append(',')
+              .Append("\"weapon\":").Append(JsonStr(haveM ? NameOf(m.WeaponId, "Weapon") : "")).Append(',')
+              .Append("\"elem\":").Append(JsonStr(haveM ? (m.Element ?? "") : "")).Append(',')
+              .Append("\"tier\":").Append(latestTier).Append(',')
               .Append("\"hp\":").Append((int)Math.Round(hp)).Append(',')
               .Append("\"hpManual\":").Append(hpManual ? "true" : "false").Append(',')
-              .Append("\"crit\":").Append(JsonNum(r.AvgCritDamage)).Append(',')
-              .Append("\"critN\":").Append(r.CritSamples).Append(',')
-              .Append("\"noncrit\":").Append(JsonNum(r.AvgNonCritDamage)).Append(',')
-              .Append("\"noncritN\":").Append(r.NonCritSamples).Append(',')
-              .Append("\"casts\":").Append(JsonNum(r.AvgCastsToKill)).Append(',')
-              .Append("\"kills\":").Append(r.KillSamples).Append(',')
-              .Append("\"key\":").Append(JsonStr(key))
+              .Append("\"crit\":").Append(JsonNum(haveM ? m.AvgCritDamage : 0)).Append(',')
+              .Append("\"critN\":").Append(haveM ? m.CritSamples : 0).Append(',')
+              .Append("\"noncrit\":").Append(JsonNum(haveM ? m.AvgNonCritDamage : 0)).Append(',')
+              .Append("\"noncritN\":").Append(haveM ? m.NonCritSamples : 0).Append(',')
+              .Append("\"casts\":").Append(JsonNum(haveM ? m.AvgCastsToKill : 0)).Append(',')
+              .Append("\"kills\":").Append(totalKills).Append(',')
+              .Append("\"assignedWid\":").Append(assignedWid).Append(',')
+              .Append("\"assignedWeapon\":").Append(JsonStr(NameOf(assignedWid, "Weapon"))).Append(',')
+              .Append("\"bestWid\":").Append(bestWid).Append(',')
+              .Append("\"bestWeapon\":").Append(JsonStr(NameOf(bestWid, "Weapon"))).Append(',')
+              .Append("\"assignedOff\":").Append(assignedOff).Append(',')
+              .Append("\"assignedOffName\":").Append(JsonStr(NameOf(assignedOff, "Offhand"))).Append(',')
+              .Append("\"key\":").Append(JsonStr(wcid.ToString())).Append(',')
+              .Append("\"tiers\":[");
+            bool tf = true;
+            foreach (var x in glist.OrderByDescending(z => z.KillSamples).ThenByDescending(z => z.Tier))
+            {
+                if (!tf) sb.Append(',');
+                tf = false;
+                sb.Append('{')
+                  .Append("\"tier\":").Append(x.Tier).Append(',')
+                  .Append("\"elem\":").Append(JsonStr(x.Element ?? "")).Append(',')
+                  .Append("\"weapon\":").Append(JsonStr(NameOf(x.WeaponId, "Weapon"))).Append(',')
+                  .Append("\"crit\":").Append(JsonNum(x.AvgCritDamage)).Append(',')
+                  .Append("\"critN\":").Append(x.CritSamples).Append(',')
+                  .Append("\"noncrit\":").Append(JsonNum(x.AvgNonCritDamage)).Append(',')
+                  .Append("\"noncritN\":").Append(x.NonCritSamples).Append(',')
+                  .Append("\"casts\":").Append(JsonNum(x.AvgCastsToKill)).Append(',')
+                  .Append("\"kills\":").Append(x.KillSamples)
+                  .Append('}');
+            }
+            sb.Append("]}");
+        }
+
+        // Bare rows for monsters appraised this session but not yet fought (one per wcid), so the
+        // table populates as you ID nearby mobs. HP from creatures.json (appraised); empty tiers.
+        uint[] seen;
+        lock (_seenMonstersThisSession) seen = System.Linq.Enumerable.ToArray(_seenMonstersThisSession);
+        foreach (uint wcid in seen)
+        {
+            if (emittedWcids.Contains(wcid)) continue;
+            emittedWcids.Add(wcid);
+
+            string name = ResolveName(wcid, "");
+            double dbHp = DbHp(wcid);
+            double manual = store.GetManualHp(wcid);
+            bool hpManual = manual > 0;
+            double hp = hpManual ? manual : dbHp;
+            uint assignedWid = store.GetManualWeapon(wcid);
+            uint bestWid     = BestFor(wcid);
+            uint assignedOff = store.GetManualOffhand(wcid);
+            int latestTier = store.GetLastTier(wcid);
+
+            if (!first) sb.Append(',');
+            first = false;
+            sb.Append('{')
+              .Append("\"wcid\":").Append(wcid).Append(',')
+              .Append("\"name\":").Append(JsonStr(name)).Append(',')
+              .Append("\"wid\":0,\"weapon\":\"\",\"elem\":\"\",")
+              .Append("\"tier\":").Append(latestTier).Append(',')
+              .Append("\"hp\":").Append((int)Math.Round(hp)).Append(',')
+              .Append("\"hpManual\":").Append(hpManual ? "true" : "false").Append(',')
+              .Append("\"crit\":0,\"critN\":0,\"noncrit\":0,\"noncritN\":0,\"casts\":0,\"kills\":0,")
+              .Append("\"assignedWid\":").Append(assignedWid).Append(',')
+              .Append("\"assignedWeapon\":").Append(JsonStr(NameOf(assignedWid, "Weapon"))).Append(',')
+              .Append("\"bestWid\":").Append(bestWid).Append(',')
+              .Append("\"bestWeapon\":").Append(JsonStr(NameOf(bestWid, "Weapon"))).Append(',')
+              .Append("\"assignedOff\":").Append(assignedOff).Append(',')
+              .Append("\"assignedOffName\":").Append(JsonStr(NameOf(assignedOff, "Offhand"))).Append(',')
+              .Append("\"key\":").Append(JsonStr(wcid.ToString())).Append(',')
+              .Append("\"tiers\":[]")
               .Append('}');
         }
+
         sb.Append(']');
         return sb.ToString();
     }
@@ -1097,6 +1230,43 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _damageStore.SetManualHp(wcid, hp);
         _damageStore.SaveIfDirty();
     }
+
+    /// <summary>Set (or clear, wid==0) the per-monster weapon override from the Damage panel, then persist.</summary>
+    public void SetMonsterWeapon(uint wcid, uint weaponId)
+    {
+        if (_damageStore == null) return;
+        _damageStore.SetManualWeapon(wcid, weaponId);
+        _damageStore.SaveIfDirty();
+    }
+
+    /// <summary>Set (or clear, wid==0) the per-character DEFAULT weapon — the sweeping fallback every
+    /// monster without its own weapon override uses. From the Damage panel's Default line. Persists.</summary>
+    public void SetDefaultWeapon(uint weaponId)
+    {
+        if (_damageStore == null) return;
+        _damageStore.SetDefaultWeapon(weaponId);
+        _damageStore.SaveIfDirty();
+    }
+
+    /// <summary>Set (or clear, off==0) the per-monster offhand override from the Damage panel, then persist.</summary>
+    public void SetMonsterOffhand(uint wcid, uint offhandId)
+    {
+        if (_damageStore == null) return;
+        _damageStore.SetManualOffhand(wcid, offhandId);
+        _damageStore.SaveIfDirty();
+    }
+
+    /// <summary>Master reset from the Damage panel: zero all learned stats, keep names + manual overrides. Persists.</summary>
+    public void ClearMonsterStats()
+    {
+        if (_damageStore == null) return;
+        _damageStore.ClearAllStats();
+        _damageStore.SaveIfDirty();
+    }
+
+    /// <summary>Selectable weapons for the Damage-panel weapon/offhand pickers, as a JSON array
+    /// [{"id":..,"name":..}], from the same configured-weapons (ItemRules) source the Monsters tab uses.</summary>
+    public string BuildCombatWeaponsJson() => DashboardRenderer?.BuildCombatWeaponsJson() ?? "[]";
 
     /// <summary>Delete one learned row. key = "wcid:weaponId:element:tier" (from the JSON). Persists.</summary>
     public bool DeleteMonsterRow(string key)
@@ -1201,6 +1371,11 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             }
 
             _creatureStore.Upsert(sample);
+
+            // Remember this monster type so the Damage table shows it (as a bare row with
+            // its appraised HP) even before we've fought it — populated as nearby mobs are ID'd.
+            if (wcid != 0)
+                lock (_seenMonstersThisSession) _seenMonstersThisSession.Add(wcid);
         }
         catch (Exception ex)
         {
@@ -1241,6 +1416,19 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             eat = 1;
             if (!HandleUbCommand(trimmed))
                 ChatLine("[RynthAi] Unrecognized /ub command.");
+            return;
+        }
+
+        // VirindiTank /vt command compatibility — option toggles (combat/doors/
+        // looting/navboost), meta/nav/loot load, setmetastate. Translated
+        // natively to RynthAi settings; no VTank/Decal required. Previously only
+        // reachable from meta execution, so /vt chat WAYPOINTS silently no-op'd.
+        if (trimmed.StartsWith("/vt ", StringComparison.OrdinalIgnoreCase)
+            || trimmed.Equals("/vt", StringComparison.OrdinalIgnoreCase))
+        {
+            eat = 1;
+            if (!(_metaManager?.TryHandleVtCommand(trimmed) ?? false))
+                ChatLine("[RynthAi] Unrecognized /vt command.");
             return;
         }
 
@@ -1362,6 +1550,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "buildinfo":    HandleBuildInfoCommand(); break;
             case "navdebug":     HandleNavDebugCommand(); break;
             case "addnavpt":     HandleAddNavPointCommand(); break;
+            case "follow":       HandleFollowCommand(parts); break;
             case "dunnav":        HandleDungeonNavCommand(parts); break;
             case "dunnav-patrol": HandleDungeonNavPatrolCommand(parts); break;
             case "hazard":        HandleHazardCommand(parts); break;
