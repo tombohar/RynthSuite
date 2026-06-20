@@ -520,6 +520,53 @@ internal sealed class LegacyDashboardRenderer
         }
     }
 
+    /// <summary>Selectable weapons for the Damage-panel weapon/offhand pickers, as a JSON array
+    /// [{"id":..,"name":..}] from _settings.ItemRules — the same configured-weapons source the
+    /// Monsters tab's picker uses. Manual JSON (NativeAOT-trivial, no extra JsonContext type).</summary>
+    public string BuildCombatWeaponsJson()
+    {
+        try
+        {
+            var items = _settings.ItemRules ?? new List<ItemRule>();
+            var sb = new System.Text.StringBuilder();
+            sb.Append('[');
+            bool first = true;
+            foreach (var it in items)
+            {
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append("{\"id\":").Append(it.Id).Append(",\"name\":").Append(JsonString(it.Name)).Append('}');
+            }
+            sb.Append(']');
+            return sb.ToString();
+        }
+        catch { return "[]"; }
+    }
+
+    private static string JsonString(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return "\"\"";
+        var sb = new System.Text.StringBuilder(s.Length + 2);
+        sb.Append('"');
+        foreach (char c in s)
+        {
+            switch (c)
+            {
+                case '"':  sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                default:
+                    if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("x4"));
+                    else sb.Append(c);
+                    break;
+            }
+        }
+        sb.Append('"');
+        return sb.ToString();
+    }
+
     /// <summary>Set by RynthAiPlugin so the snapshot can decorate rules with captured profile data.</summary>
     public Func<string, CreatureData.CreatureProfile?>? CreatureLookupForRules { get; set; }
 
@@ -545,7 +592,9 @@ internal sealed class LegacyDashboardRenderer
             {
                 var existingDefault = _settings.MonsterRules
                     .FirstOrDefault(r => r.Name.Equals("Default", StringComparison.OrdinalIgnoreCase));
-                if (existingDefault != null) incoming.Insert(0, existingDefault);
+                // Synthesize one if neither incoming nor existing has a Default — combat's
+                // GetRuleForTarget fallback assumes it always exists, so never leave it absent.
+                incoming.Insert(0, existingDefault ?? new MonsterRule { Name = "Default" });
             }
 
             _settings.MonsterRules = incoming;
@@ -1961,6 +2010,11 @@ internal sealed class LegacyDashboardRenderer
         string filePath = Path.Combine(_navFolder, selection + ".nav");
         _settings.CurrentNavPath = filePath;
         _settings.CurrentRoute = NavRouteParser.Load(filePath);
+        if (_settings.CurrentRoute.LoadWarning != null)
+        {
+            _host.Log(_settings.CurrentRoute.LoadWarning);
+            _host.WriteToChat($"[RynthAi] {_settings.CurrentRoute.LoadWarning}", 4);
+        }
         // Follow and Once routes start from the top so opening Recall/Portal/Chat
         // actions always fire. Circular and Linear routes jump in at the nearest point.
         _settings.ActiveNavIndex =

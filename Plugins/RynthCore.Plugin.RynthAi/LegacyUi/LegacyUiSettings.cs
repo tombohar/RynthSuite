@@ -350,6 +350,23 @@ public sealed class LegacyUiSettings
     [JsonIgnore]
     public bool NavIsStuck = false;
 
+    // Runtime-only: the object id of the portal/NPC the nav engine is actively
+    // using (resolved by FirePortalNpcUse), or 0 when not using one. Lets the
+    // marker renderer draw a ring + line to the portal's REAL position, since
+    // the PortalNPC waypoint's stored coordinate is an unreliable placeholder.
+    [JsonIgnore]
+    public uint ActivePortalObjId = 0;
+
+    // Fellowship-follow: when on, nav steers toward the live target instead of a
+    // route. Runtime-only (off each session; enable via /ra follow on).
+    [JsonIgnore]
+    public bool FollowMode = false;
+
+    // Resolved object id of the follow target (the fellowship leader), published
+    // by the plugin each tick; 0 when not in a fellowship / target not loaded.
+    [JsonIgnore]
+    public uint FollowTargetId = 0;
+
     public LegacyUiSettings()
     {
     }
