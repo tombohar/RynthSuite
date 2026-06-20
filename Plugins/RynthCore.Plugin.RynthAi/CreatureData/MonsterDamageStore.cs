@@ -54,15 +54,23 @@ internal sealed class MonsterDamageStore
         public double HpPool;     // 0 = unknown (learned total damage to kill)
         public int    HpSamples;
         public double HpManual;   // 0 = unset; user-entered HP override (UI), authoritative when > 0
+        public uint   WeaponManual;  // 0 = unset; user-picked weapon override for this wcid (Damage panel)
+        public uint   OffhandManual; // 0 = unset; user-picked offhand override for this wcid (Damage panel; stored only)
+        public int    LastTier = NoTier; // most-recent cast tier (negative = ring); NoTier = unset this session
         // key = "weaponId|element|tier"
         public readonly Dictionary<string, CastStat> Casts =
             new(StringComparer.OrdinalIgnoreCase);
     }
 
+    private const int NoTier = int.MinValue; // sentinel: no cast observed for this wcid yet
+
     private readonly object _lock = new();
     private readonly Dictionary<uint, WcidProfile> _byWcid = new();
     private string _filePath = string.Empty;
     private bool _dirty;
+    // Per-character DEFAULT weapon: the fallback every monster without its own weapon override uses,
+    // so editing it sweeps all "Default" monsters at once. 0 = unset (fall through to learned-best).
+    private uint _defaultWeapon;
 
     private static string CastKey(uint weaponId, string element, int tier) =>
         weaponId.ToString(CultureInfo.InvariantCulture) + "|" + (element ?? "") + "|" +
@@ -80,6 +88,7 @@ internal sealed class MonsterDamageStore
         lock (_lock)
         {
             _byWcid.Clear();
+            _defaultWeapon = 0;
             _dirty = false;
             _filePath = string.IsNullOrWhiteSpace(charFolder)
                 ? string.Empty
@@ -93,6 +102,7 @@ internal sealed class MonsterDamageStore
         lock (_lock)
         {
             _byWcid.Clear();
+            _defaultWeapon = 0;
             if (string.IsNullOrEmpty(_filePath) || !File.Exists(_filePath)) return;
 
             try
@@ -103,7 +113,13 @@ internal sealed class MonsterDamageStore
                     if (line.Length == 0 || line[0] == '#') continue;
                     string[] f = line.Split('|');
 
-                    if (f.Length >= 4 && f[0] == "H")
+                    if (f.Length >= 2 && f[0] == "DEF")
+                    {
+                        // DEF|weaponId — per-character default weapon (sweeping fallback)
+                        if (uint.TryParse(f[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out uint dw))
+                            _defaultWeapon = dw;
+                    }
+                    else if (f.Length >= 4 && f[0] == "H")
                     {
                         // New: H|wcid|name|hp|samples ;  Old: H|wcid|hp|samples
                         bool hasName = f.Length >= 5;
@@ -126,6 +142,28 @@ internal sealed class MonsterDamageStore
                         {
                             var p = Get(mw);
                             p.HpManual = mhp < 0 ? 0 : mhp;
+                            if (f[2].Length > 0) p.Name = f[2];
+                        }
+                    }
+                    else if (f.Length >= 4 && f[0] == "W")
+                    {
+                        // W|wcid|name|weaponId  — per-monster weapon override (Damage panel)
+                        if (uint.TryParse(f[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out uint ww)
+                            && uint.TryParse(f[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out uint wid))
+                        {
+                            var p = Get(ww);
+                            p.WeaponManual = wid;
+                            if (f[2].Length > 0) p.Name = f[2];
+                        }
+                    }
+                    else if (f.Length >= 4 && f[0] == "O")
+                    {
+                        // O|wcid|name|offhandId  — per-monster offhand override (Damage panel; stored only)
+                        if (uint.TryParse(f[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out uint ow)
+                            && uint.TryParse(f[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out uint oid))
+                        {
+                            var p = Get(ow);
+                            p.OffhandManual = oid;
                             if (f[2].Length > 0) p.Name = f[2];
                         }
                     }
@@ -185,7 +223,12 @@ internal sealed class MonsterDamageStore
                 sb.Append("# RynthAi per-character monster damage learning (auto-generated).\n");
                 sb.Append("# H|wcid|name|hpToKill|samples\n");
                 sb.Append("# M|wcid|name|hp   (manual HP override, set in the Damage panel)\n");
+                sb.Append("# W|wcid|name|weaponId   (per-monster weapon override, set in the Damage panel)\n");
+                sb.Append("# O|wcid|name|offhandId  (per-monster offhand override, set in the Damage panel)\n");
                 sb.Append("# D|wcid|name|weaponId|element|tier|avgDamage|dmgSamples|avgCastsToKill|killSamples|critAvg|critSamples|nonCritAvg|nonCritSamples\n");
+                sb.Append("# DEF|weaponId   (per-character default weapon — fallback for every monster without its own override)\n");
+                if (_defaultWeapon != 0)
+                    sb.Append("DEF|").Append(_defaultWeapon).Append('\n');
                 foreach (var kv in _byWcid)
                 {
                     var p = kv.Value;
@@ -196,6 +239,12 @@ internal sealed class MonsterDamageStore
                     if (p.HpManual > 0)
                         sb.Append("M|").Append(kv.Key).Append('|').Append(name).Append('|')
                           .Append(Num(p.HpManual)).Append('\n');
+                    if (p.WeaponManual != 0)
+                        sb.Append("W|").Append(kv.Key).Append('|').Append(name).Append('|')
+                          .Append(p.WeaponManual).Append('\n');
+                    if (p.OffhandManual != 0)
+                        sb.Append("O|").Append(kv.Key).Append('|').Append(name).Append('|')
+                          .Append(p.OffhandManual).Append('\n');
                     foreach (var c in p.Casts)
                     {
                         string[] kp = c.Key.Split('|'); // weaponId|element|tier
@@ -232,6 +281,7 @@ internal sealed class MonsterDamageStore
         lock (_lock)
         {
             SetNameLocked(wcid, name);
+            Get(wcid).LastTier = tier;
             var s = GetCast(wcid, weaponId, element, tier);
             s.Avg = s.Samples == 0 ? damage : s.Avg + Alpha * (damage - s.Avg);
             s.Samples++;
@@ -262,6 +312,7 @@ internal sealed class MonsterDamageStore
         {
             var p = Get(wcid);
             SetNameLocked(wcid, name);
+            p.LastTier = tier;
             if (totalDamage > 0)
             {
                 p.HpPool = p.HpSamples == 0 ? totalDamage : p.HpPool + Alpha * (totalDamage - p.HpPool);
@@ -274,6 +325,42 @@ internal sealed class MonsterDamageStore
                 s.KillSamples++;
             }
             _dirty = true;
+        }
+    }
+
+    /// <summary>Note the tier of the most-recent cast at a wcid (negative = ring) so the Damage tab's
+    /// collapsed row shows the LATEST tier used. In-memory only (not persisted) — resets per session.</summary>
+    public void NoteCast(uint wcid, int tier, string? name = null)
+    {
+        if (wcid == 0) return;
+        lock (_lock)
+        {
+            var p = Get(wcid);
+            p.LastTier = tier;
+            if (!string.IsNullOrEmpty(name)) SetNameLocked(wcid, name);
+        }
+    }
+
+    /// <summary>The latest tier used against this wcid (negative = ring). Falls back to the tier of the
+    /// most-killed cast entry when nothing was cast this session; 0 if unknown.</summary>
+    public int GetLastTier(uint wcid)
+    {
+        lock (_lock)
+        {
+            if (!_byWcid.TryGetValue(wcid, out var p)) return 0;
+            if (p.LastTier != NoTier) return p.LastTier;
+            int bestTier = 0, bestKills = -1;
+            foreach (var c in p.Casts)
+            {
+                if (c.Value.KillSamples > bestKills)
+                {
+                    bestKills = c.Value.KillSamples;
+                    string[] kp = c.Key.Split('|'); // weaponId|element|tier
+                    if (kp.Length >= 3 && int.TryParse(kp[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out int t))
+                        bestTier = t;
+                }
+            }
+            return bestTier;
         }
     }
 
@@ -338,6 +425,122 @@ internal sealed class MonsterDamageStore
         }
     }
 
+    /// <summary>User-picked weapon override for this wcid (0 = none, fall back to GetBestWeapon).</summary>
+    public uint GetManualWeapon(uint wcid)
+    {
+        if (wcid == 0) return 0;
+        lock (_lock)
+            return _byWcid.TryGetValue(wcid, out var p) ? p.WeaponManual : 0;
+    }
+
+    /// <summary>Set (0 clears) the per-monster weapon override. Persists on next save.</summary>
+    public void SetManualWeapon(uint wcid, uint weaponId, string? name = null)
+    {
+        if (wcid == 0) return;
+        lock (_lock)
+        {
+            var p = Get(wcid);
+            p.WeaponManual = weaponId;
+            if (!string.IsNullOrEmpty(name)) SetNameLocked(wcid, name);
+            _dirty = true;
+        }
+    }
+
+    /// <summary>User-picked offhand override for this wcid (0 = none). Stored only — combat does not equip it.</summary>
+    public uint GetManualOffhand(uint wcid)
+    {
+        if (wcid == 0) return 0;
+        lock (_lock)
+            return _byWcid.TryGetValue(wcid, out var p) ? p.OffhandManual : 0;
+    }
+
+    /// <summary>Set (0 clears) the per-monster offhand override. Persists on next save.</summary>
+    public void SetManualOffhand(uint wcid, uint offhandId, string? name = null)
+    {
+        if (wcid == 0) return;
+        lock (_lock)
+        {
+            var p = Get(wcid);
+            p.OffhandManual = offhandId;
+            if (!string.IsNullOrEmpty(name)) SetNameLocked(wcid, name);
+            _dirty = true;
+        }
+    }
+
+    /// <summary>
+    /// The weapon the system "thinks is best" for this wcid, from learned data:
+    /// fewest average casts-to-kill (weapons with KillSamples ≥ 2), else highest
+    /// average damage-per-cast (weapons with Samples ≥ 3). Aggregated per weaponId
+    /// across the wcid's element/tier rows. Returns 0 when there isn't enough data.
+    /// Fewest-casts naturally captures element effectiveness empirically (the wand
+    /// that kills a fire-weak mob fastest tends to be the fire wand).
+    /// </summary>
+    public uint GetBestWeapon(uint wcid)
+    {
+        if (wcid == 0) return 0;
+        lock (_lock)
+        {
+            if (!_byWcid.TryGetValue(wcid, out var p) || p.Casts.Count == 0) return 0;
+
+            // Aggregate per weaponId (sample-weighted) across element/tier rows.
+            var byWeapon = new Dictionary<uint, (double castsW, int kills, double dmgW, int dmg)>();
+            foreach (var c in p.Casts)
+            {
+                string[] kp = c.Key.Split('|'); // weaponId|element|tier
+                if (kp.Length < 1
+                    || !uint.TryParse(kp[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out uint wid)
+                    || wid == 0) continue;
+                var v = c.Value;
+                byWeapon.TryGetValue(wid, out var a);
+                a.castsW += v.AvgCastsToKill * v.KillSamples;
+                a.kills  += v.KillSamples;
+                a.dmgW   += v.Avg * v.Samples;
+                a.dmg    += v.Samples;
+                byWeapon[wid] = a;
+            }
+
+            uint bestByCasts = 0; double bestCasts = double.MaxValue;
+            uint bestByDmg   = 0; double bestDmg   = 0;
+            foreach (var kv in byWeapon)
+            {
+                var a = kv.Value;
+                if (a.kills >= 2)
+                {
+                    double avgCasts = a.castsW / a.kills;
+                    if (avgCasts > 0 && avgCasts < bestCasts) { bestCasts = avgCasts; bestByCasts = kv.Key; }
+                }
+                if (a.dmg >= 3)
+                {
+                    double avgDmg = a.dmgW / a.dmg;
+                    if (avgDmg > bestDmg) { bestDmg = avgDmg; bestByDmg = kv.Key; }
+                }
+            }
+            return bestByCasts != 0 ? bestByCasts : bestByDmg;
+        }
+    }
+
+    /// <summary>The per-character default weapon (0 = unset). Every monster without its own
+    /// override falls back to this, so editing it sweeps all "Default" monsters at once.</summary>
+    public uint GetDefaultWeapon()
+    {
+        lock (_lock) return _defaultWeapon;
+    }
+
+    public void SetDefaultWeapon(uint weaponId)
+    {
+        lock (_lock) { if (_defaultWeapon == weaponId) return; _defaultWeapon = weaponId; _dirty = true; }
+    }
+
+    /// <summary>Weapon combat should wield for this wcid: per-monster override if set, else the
+    /// per-character default weapon, else the learned best (0 = none of those).</summary>
+    public uint GetEffectiveWeapon(uint wcid)
+    {
+        uint manual = GetManualWeapon(wcid);
+        if (manual != 0) return manual;
+        uint def; lock (_lock) def = _defaultWeapon;
+        return def != 0 ? def : GetBestWeapon(wcid);
+    }
+
     /// <summary>Delete one learned (weapon, element, tier) row for a wcid. Drops the wcid entirely if nothing's left.</summary>
     public bool DeleteRow(uint wcid, uint weaponId, string element, int tier)
     {
@@ -347,7 +550,8 @@ internal sealed class MonsterDamageStore
             bool removed = p.Casts.Remove(CastKey(weaponId, element, tier));
             if (removed)
             {
-                if (p.Casts.Count == 0 && p.HpSamples == 0 && p.HpManual <= 0)
+                if (p.Casts.Count == 0 && p.HpSamples == 0 && p.HpManual <= 0 && p.HpPool <= 0
+                    && p.WeaponManual == 0 && p.OffhandManual == 0)
                     _byWcid.Remove(wcid);
                 _dirty = true;
             }
@@ -363,6 +567,32 @@ internal sealed class MonsterDamageStore
             bool removed = _byWcid.Remove(wcid);
             if (removed) _dirty = true;
             return removed;
+        }
+    }
+
+    /// <summary>
+    /// Master reset: zero every LEARNED statistic (damage averages, crit/non-crit,
+    /// casts-to-kill, kills, learned HP pool) while KEEPING monster names, the cast
+    /// rows themselves (so the table still lists the monsters), and the user's manual
+    /// overrides (HpManual, WeaponManual, OffhandManual). Re-fighting re-learns from scratch.
+    /// </summary>
+    public void ClearAllStats()
+    {
+        lock (_lock)
+        {
+            foreach (var p in _byWcid.Values)
+            {
+                p.HpPool = 0;
+                p.HpSamples = 0;
+                foreach (var c in p.Casts.Values)
+                {
+                    c.Avg = 0; c.Samples = 0;
+                    c.AvgCastsToKill = 0; c.KillSamples = 0;
+                    c.CritAvg = 0; c.CritSamples = 0;
+                    c.NonCritAvg = 0; c.NonCritSamples = 0;
+                }
+            }
+            _dirty = true;
         }
     }
 
