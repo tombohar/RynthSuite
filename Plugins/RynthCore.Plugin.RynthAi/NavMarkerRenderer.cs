@@ -17,9 +17,10 @@ namespace RynthCore.Plugin.RynthAi;
 internal sealed class NavMarkerRenderer
 {
     // Colors — ARGB format for D3D9 (0xAARRGGBB)
-    private const uint ColorCyan3D = 0xFF00FFFF;
-    private const uint ColorRed3D  = 0xFFFF4444;
-    private const uint ColorLine3D = 0xFF0088FF;
+    private const uint ColorCyan3D   = 0xFF00FFFF;
+    private const uint ColorRed3D    = 0xFFFF4444;
+    private const uint ColorLine3D   = 0xFF0088FF;
+    private const uint ColorPortal3D = 0xFFFF44FF;  // magenta — live portal target
 
     // Colors — ABGR format for ImGui fallback
     private const uint ColorCyanImGui = 0xFFFFFF00;
@@ -199,9 +200,12 @@ internal sealed class NavMarkerRenderer
         {
             int i = WindowAbsIdx(winStart, k, n);
             var pt = route.Points[i];
-            if (pt.Type != NavPointType.Point &&
-                pt.Type != NavPointType.Recall &&
-                pt.Type != NavPointType.PortalNPC)
+            // Only draw markers at real travel Points. Action waypoints
+            // (PortalNPC / Recall / Chat / Pause) fire in place and carry
+            // placeholder coordinates (a PortalNPC coord pointing "to the
+            // abyss" is the recurring case), so a ring drawn there floats far
+            // off in empty space.
+            if (pt.Type != NavPointType.Point)
                 continue;
 
             // D3D coords: X=EW, Y=height(up), Z=NS
@@ -220,7 +224,13 @@ internal sealed class NavMarkerRenderer
 
         }
 
-        // ── Pass 2: Submit connecting lines ──────────────────────────
+        // ── Pass 2: Submit connecting lines (consecutive Points only) ──
+        // validArr is true only for Point waypoints, so a non-Point between two
+        // Points (portal / recall / chat / pause) leaves the next slot invalid
+        // and BREAKS the line there. That is correct: you teleport across a
+        // portal, you don't walk — so no segment should span it (this is what
+        // produced the "line to the abyss", whether to the portal's placeholder
+        // coord or onward to the post-teleport destination point).
         for (int k = 0; k < count; k++)
         {
             if (!validArr[k]) continue;
@@ -232,6 +242,24 @@ internal sealed class NavMarkerRenderer
                                lineThick, ColorLine3D);
         }
 
+        // ── Pass 3: live portal marker + line ────────────────────────
+        // While the engine is actively using a portal/NPC it publishes the
+        // resolved object id (the waypoint's own coord is a placeholder, so we
+        // can't use it). Draw a distinct magenta ring at the portal's REAL
+        // position plus a line from the player to it — a visible "walk in here".
+        uint portalId = _settings.ActivePortalObjId;
+        if (portalId != 0 &&
+            _host.HasGetObjectPosition &&
+            _host.TryGetObjectPosition(portalId, out uint pcell, out float ppx, out float ppy, out float ppz) &&
+            NavCoordinateHelper.TryConvertPoseToCoords(pcell, ppx, ppy, out double portNS, out double portEW))
+        {
+            float pwx = px + (float)((portEW - playerEW) * 240.0);
+            float pwz = py + (float)((portNS - playerNS) * 240.0);
+            float pwy = ppz + heightOffset;   // portal ground height (same frame as marker Z)
+
+            _host.Nav3DAddRing(pwx, pwy, pwz, ringRadius, ringThick * 1.4f, ColorPortal3D);
+            _host.Nav3DAddLine(px, pwy, py, pwx, pwy, pwz, lineThick, ColorPortal3D);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -284,9 +312,12 @@ internal sealed class NavMarkerRenderer
             var pt = route.Points[i];
             _centerVis[k] = false;
 
-            if (pt.Type != NavPointType.Point &&
-                pt.Type != NavPointType.Recall &&
-                pt.Type != NavPointType.PortalNPC)
+            // Only draw markers at real travel Points. Action waypoints
+            // (PortalNPC / Recall / Chat / Pause) fire in place and carry
+            // placeholder coordinates (a PortalNPC coord pointing "to the
+            // abyss" is the recurring case), so a ring drawn there floats far
+            // off in empty space.
+            if (pt.Type != NavPointType.Point)
                 continue;
 
             float wx = px + (float)((pt.EW - playerEW) * 240.0);
@@ -304,7 +335,9 @@ internal sealed class NavMarkerRenderer
             }
         }
 
-        // ── Pass 2: connecting lines ─────────────────────────────────
+        // ── Pass 2: connecting lines (consecutive Points only) ───────
+        // _centerVis is set only for Point waypoints, so a non-Point between two
+        // Points breaks the line there (no segment spans a teleport).
         float baseLineThick = Math.Max(1f, _settings.NavLineThickness);
         for (int k = 0; k < count; k++)
         {
@@ -327,9 +360,12 @@ internal sealed class NavMarkerRenderer
         {
             int i = WindowAbsIdx(winStart, k, n);
             var pt = route.Points[i];
-            if (pt.Type != NavPointType.Point &&
-                pt.Type != NavPointType.Recall &&
-                pt.Type != NavPointType.PortalNPC)
+            // Only draw markers at real travel Points. Action waypoints
+            // (PortalNPC / Recall / Chat / Pause) fire in place and carry
+            // placeholder coordinates (a PortalNPC coord pointing "to the
+            // abyss" is the recurring case), so a ring drawn there floats far
+            // off in empty space.
+            if (pt.Type != NavPointType.Point)
                 continue;
 
             float cx = px + (float)((pt.EW - playerEW) * 240.0);

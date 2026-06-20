@@ -220,6 +220,50 @@ internal static class DungeonPathfinder
         return (useZ && bestZ != 0) ? bestZ : best2d;
     }
 
+    /// <summary>
+    /// Nearest non-hazard cell to evacuate to when the patrol start cell is itself a hazard
+    /// (player standing in acid/lava). Prefers a directly-connected, walkable (non-drop) neighbor —
+    /// guaranteed reachable through a doorway — and only falls back to the geometrically nearest
+    /// safe cell anywhere when the player is surrounded (deep in a pool with no safe neighbor).
+    /// Returns 0 if the graph has no non-hazard cell at all.
+    /// </summary>
+    public static uint NearestSafeCell(
+        Dictionary<uint, DungeonNavNode> graph, uint fromCell,
+        IReadOnlySet<uint> hazards, float z = float.NaN)
+    {
+        if (!graph.TryGetValue(fromCell, out var from)) return 0;
+
+        // 1) Prefer a walkable non-hazard doorway neighbor (closest by distance).
+        uint   bestNb     = 0;
+        double bestNbDist = double.MaxValue;
+        foreach (uint nb in from.Neighbors)
+        {
+            if (hazards != null && hazards.Contains(nb)) continue;
+            if (!graph.TryGetValue(nb, out var nbNode)) continue;
+            if (IsDropEdge(from, nbNode)) continue;
+            double dN = nbNode.NS - from.NS, dE = nbNode.EW - from.EW;
+            double d = dN * dN + dE * dE;
+            if (d < bestNbDist) { bestNbDist = d; bestNb = nb; }
+        }
+        if (bestNb != 0) return bestNb;
+
+        // 2) Fall back to the geometrically nearest safe cell anywhere (same-floor preferred).
+        const float zBand = 8f;
+        uint   best2d = 0; double best2dDist = double.MaxValue;
+        uint   bestZ  = 0; double bestZDist  = double.MaxValue;
+        bool   useZ   = !float.IsNaN(z);
+        foreach (var node in graph.Values)
+        {
+            if (node.CellId == fromCell) continue;
+            if (hazards != null && hazards.Contains(node.CellId)) continue;
+            double dN = node.NS - from.NS, dE = node.EW - from.EW;
+            double d = dN * dN + dE * dE;
+            if (d < best2dDist) { best2dDist = d; best2d = node.CellId; }
+            if (useZ && Math.Abs(node.Z - z) <= zBand && d < bestZDist) { bestZDist = d; bestZ = node.CellId; }
+        }
+        return (useZ && bestZ != 0) ? bestZ : best2d;
+    }
+
     // ── A* ───────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -473,9 +517,15 @@ internal static class DungeonPathfinder
     }
 
     /// <summary>
-    /// Generates a Circular patrol route covering the dungeon's main route.
-    /// Dead-end spurs shorter than <see cref="PatrolDeadEndPruneDepth"/> cells are
-    /// skipped; only corridors and rooms that connect to the trunk are visited.
+    /// Generates a Circular patrol route over the dungeon's main route (the cells from
+    /// <see cref="GetMainRouteNodes"/>).
+    ///
+    /// Uses a route-inspection (Chinese-postman-style) closed walk rather than a DFS tree
+    /// traversal: it covers every corridor once and — crucially — TAKES loop-closing edges,
+    /// so a cycle is walked once and the bot continues forward instead of running to the end
+    /// of a loop and backtracking the way it came. Only true dead-ends and bridges are
+    /// re-tread (the unavoidable in-and-out), via the shortest reconnecting path. The walk is
+    /// closed back to the start so the Circular route returns home.
     /// </summary>
     public static NavRouteParser BuildPatrolRoute(
         Dictionary<uint, DungeonNavNode> graph,
@@ -484,61 +534,174 @@ internal static class DungeonPathfinder
     {
         var mainRoute = GetMainRouteNodes(graph, startCell, hazardCells);
 
-        var visited  = new HashSet<uint>();
-        var walkPath = new List<uint>();
-
-        var stack = new Stack<(uint cell, int nbIdx)>();
-        stack.Push((startCell, 0));
-        visited.Add(startCell);
-        walkPath.Add(startCell);
-
-        while (stack.Count > 0)
+        // Undirected walkable subgraph over mainRoute (portal-adjacent, non-drop). mainRoute is
+        // already hazard-filtered, so membership there implies non-hazard.
+        var adj   = new Dictionary<uint, List<uint>>();
+        var edges = new HashSet<ulong>();
+        foreach (uint c in mainRoute)
         {
-            var (cell, nbIdx) = stack.Peek();
-            if (!graph.TryGetValue(cell, out var node))
+            if (!graph.TryGetValue(c, out var cn)) continue;
+            foreach (uint nb in cn.Neighbors)
             {
-                stack.Pop();
-                if (stack.Count > 0) walkPath.Add(stack.Peek().cell);
-                continue;
-            }
-
-            int nextNb = nbIdx;
-            while (nextNb < node.Neighbors.Count)
-            {
-                uint nb = node.Neighbors[nextNb];
-                // mainRoute is already hazard-filtered (via GetMainRouteNodes), so
-                // membership there implies non-hazard — no separate hazard check needed.
-                if (!visited.Contains(nb) && mainRoute.Contains(nb) &&
-                    graph.ContainsKey(nb) && !IsDropEdge(node, graph[nb])) break;
-                nextNb++;
-            }
-
-            if (nextNb >= node.Neighbors.Count)
-            {
-                stack.Pop();
-                if (stack.Count > 0) walkPath.Add(stack.Peek().cell);
-            }
-            else
-            {
-                stack.Pop();
-                stack.Push((cell, nextNb + 1));
-                uint nb = node.Neighbors[nextNb];
-                visited.Add(nb);
-                walkPath.Add(nb);
-                stack.Push((nb, 0));
+                if (!mainRoute.Contains(nb) || !graph.TryGetValue(nb, out var nbn)) continue;
+                if (IsDropEdge(cn, nbn)) continue;
+                if (!adj.TryGetValue(c, out var list)) { list = new List<uint>(); adj[c] = list; }
+                list.Add(nb);
+                edges.Add(EdgeKey(c, nb));
             }
         }
 
         var route = new NavRouteParser { RouteType = NavRouteType.Circular };
-        for (int i = 0; i + 1 < walkPath.Count; i++)
+
+        // Euler start: the player's cell if it borders a corridor, else the nearest cell that does.
+        uint walkStart = (adj.TryGetValue(startCell, out var sList) && sList.Count > 0)
+            ? startCell
+            : NearestCellWithEdges(graph, adj, startCell);
+        if (walkStart == 0 || edges.Count == 0)
         {
-            if (!graph.TryGetValue(walkPath[i],     out var a)) continue;
-            if (!graph.TryGetValue(walkPath[i + 1], out var b)) continue;
+            SimplifyRoute(route);
+            return route; // nothing walkable — caller's empty-route guard handles it
+        }
+
+        // Greedy edge-covering closed walk.
+        var walk      = new List<uint> { walkStart };
+        var remaining = new HashSet<ulong>(edges);
+        uint cur      = walkStart;
+        // Hard bound: every edge is consumed once and each exhausted vertex triggers at most one
+        // reconnection (which is itself followed by an edge consumption), so this can't spin forever.
+        int guard = edges.Count * 4 + mainRoute.Count + 16;
+
+        while (remaining.Count > 0 && guard-- > 0)
+        {
+            uint next = 0; bool found = false;
+            if (adj.TryGetValue(cur, out var nbrs))
+            {
+                foreach (uint nb in nbrs)
+                    if (remaining.Contains(EdgeKey(cur, nb))) { next = nb; found = true; break; }
+            }
+
+            if (found)
+            {
+                remaining.Remove(EdgeKey(cur, next));
+                walk.Add(next);
+                cur = next;
+            }
+            else
+            {
+                // Out of fresh corridors here — hop (shortest path) to the nearest cell that still
+                // has one. These re-tread edges are the unavoidable dead-end/bridge repeats.
+                var path = BfsToUnusedEdge(adj, cur, remaining);
+                if (path == null) break; // remaining edges unreachable (disconnected) — stop
+                for (int i = 1; i < path.Count; i++) walk.Add(path[i]);
+                cur = path[path.Count - 1];
+            }
+        }
+
+        // Close the loop back to the start so the Circular route returns home.
+        if (cur != walkStart)
+        {
+            var back = BfsPath(adj, cur, walkStart);
+            if (back != null) for (int i = 1; i < back.Count; i++) walk.Add(back[i]);
+        }
+
+        for (int i = 0; i + 1 < walk.Count; i++)
+        {
+            if (!graph.TryGetValue(walk[i],     out var a)) continue;
+            if (!graph.TryGetValue(walk[i + 1], out var b)) continue;
             AddPortalWaypoints(route, a, b);
         }
 
         SimplifyRoute(route);
         return route;
+    }
+
+    // Canonical undirected-edge key (order-independent).
+    private static ulong EdgeKey(uint a, uint b)
+        => a < b ? ((ulong)a << 32) | b : ((ulong)b << 32) | a;
+
+    // Nearest subgraph cell that has at least one corridor edge (for an Euler start when the player
+    // stands on an edge-less cell, e.g. a stripped spur). 0 if the subgraph has no edges.
+    private static uint NearestCellWithEdges(
+        Dictionary<uint, DungeonNavNode> graph, Dictionary<uint, List<uint>> adj, uint fromCell)
+    {
+        if (!graph.TryGetValue(fromCell, out var from))
+        {
+            foreach (var kv in adj) if (kv.Value.Count > 0) return kv.Key;
+            return 0;
+        }
+        uint best = 0; double bestD = double.MaxValue;
+        foreach (var kv in adj)
+        {
+            if (kv.Value.Count == 0) continue;
+            if (!graph.TryGetValue(kv.Key, out var n)) continue;
+            double dN = n.NS - from.NS, dE = n.EW - from.EW;
+            double d = dN * dN + dE * dE;
+            if (d < bestD) { bestD = d; best = kv.Key; }
+        }
+        return best;
+    }
+
+    // Shortest hop-path src→dst over the subgraph (inclusive endpoints), or null if unreachable.
+    private static List<uint>? BfsPath(Dictionary<uint, List<uint>> adj, uint src, uint dst)
+    {
+        if (src == dst) return new List<uint> { src };
+        var prev = new Dictionary<uint, uint>();
+        var seen = new HashSet<uint> { src };
+        var q = new Queue<uint>();
+        q.Enqueue(src);
+        while (q.Count > 0)
+        {
+            uint c = q.Dequeue();
+            if (!adj.TryGetValue(c, out var ns)) continue;
+            foreach (uint nb in ns)
+            {
+                if (!seen.Add(nb)) continue;
+                prev[nb] = c;
+                if (nb == dst) return RebuildPath(prev, src, dst);
+                q.Enqueue(nb);
+            }
+        }
+        return null;
+    }
+
+    // Shortest hop-path from src to the nearest cell that still has an unused edge, or null.
+    private static List<uint>? BfsToUnusedEdge(
+        Dictionary<uint, List<uint>> adj, uint src, HashSet<ulong> remaining)
+    {
+        var prev = new Dictionary<uint, uint>();
+        var seen = new HashSet<uint> { src };
+        var q = new Queue<uint>();
+        q.Enqueue(src);
+        while (q.Count > 0)
+        {
+            uint c = q.Dequeue();
+            if (c != src && HasUnusedEdge(adj, c, remaining))
+                return RebuildPath(prev, src, c);
+            if (!adj.TryGetValue(c, out var ns)) continue;
+            foreach (uint nb in ns)
+            {
+                if (!seen.Add(nb)) continue;
+                prev[nb] = c;
+                q.Enqueue(nb);
+            }
+        }
+        return null;
+    }
+
+    private static bool HasUnusedEdge(Dictionary<uint, List<uint>> adj, uint cell, HashSet<ulong> remaining)
+    {
+        if (!adj.TryGetValue(cell, out var ns)) return false;
+        foreach (uint nb in ns) if (remaining.Contains(EdgeKey(cell, nb))) return true;
+        return false;
+    }
+
+    private static List<uint> RebuildPath(Dictionary<uint, uint> prev, uint src, uint dst)
+    {
+        var path = new List<uint> { dst };
+        uint c = dst;
+        while (c != src && prev.TryGetValue(c, out uint p)) { path.Add(p); c = p; }
+        path.Reverse();
+        return path;
     }
 
     // ── Convenience entry point ──────────────────────────────────────────────

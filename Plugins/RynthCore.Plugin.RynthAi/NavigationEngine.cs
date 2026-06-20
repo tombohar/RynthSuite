@@ -79,6 +79,7 @@ internal sealed class NavigationEngine
     public bool IsInPortalAction => _portalState != PortalState.None;
     private double _prePortalNS = double.NaN;
     private double _prePortalEW = double.NaN;
+    private uint   _prePortalLb;     // landblock (objCellId>>16) at the cast/use site; 0 = unknown
     private bool _wasInPortalSpace;  // tracks IsPortaling() edge for teleport detection
 
     // ── Stuck watchdog ───────────────────────────────────────────────────────
@@ -193,6 +194,17 @@ internal sealed class NavigationEngine
 
         _stopRequestedAt = long.MaxValue;
         _hasStopped      = false;
+
+        // Fellowship-follow takes priority over route nav while enabled: steer
+        // toward the leader's LIVE position instead of a fixed waypoint. Opt-in,
+        // so it never affects normal route running. No route required.
+        if (_settings.FollowMode && _settings.FollowTargetId != 0)
+        {
+            if (_settings.BotAction == "Default" || _settings.BotAction == "Navigating")
+                _settings.BotAction = "Following";
+            FollowTarget();
+            return;
+        }
 
         var route = _settings.CurrentRoute;
         if (route == null || route.Points.Count == 0) { StopMovement(); return; }
@@ -426,7 +438,14 @@ internal sealed class NavigationEngine
         if (dist < LookaheadYards)
         {
             int ni = PeekNext(idx, route);
-            if (ni >= 0)
+            // Only blend toward the NEXT waypoint when it is a real travel target
+            // (a Point). Action waypoints (PortalNPC / Recall / Chat / Pause) are
+            // never navigated to — they fire in place once the index reaches them —
+            // and their stored coordinate is frequently a placeholder far from the
+            // actual spot (a PortalNPC whose coord points off "to the abyss" is the
+            // recurring case). Blending toward it swung the avatar to face that
+            // bogus direction on arrival, right before using the portal.
+            if (ni >= 0 && route.Points[ni].Type == NavPointType.Point)
             {
                 var np = route.Points[ni];
                 double t = 1.0 - dist / LookaheadYards;
@@ -993,36 +1012,47 @@ internal sealed class NavigationEngine
             }
         }
 
-        // Tier 3 fallback: cache-bypass ID-range probe. WorldObjectCache
-        // misses some static portal entities entirely — the engine's
-        // OnCreateObject hook doesn't fire for certain ID ranges (e.g.
-        // 0x70007xxx Town Network portal devices), so the object exists in
-        // AC's data and is visible/clickable in-game but never makes it
-        // into _byId. TryGetObjectName reads AC's object table directly,
-        // not our cache, so it returns names regardless of hook coverage.
-        // The stale entry at log 19:28:52 (0x70007095 'Portal to Nanto')
-        // proves this range carries the portals we need; we re-probe it
-        // on demand. Distance gate prevents matching stale-position
-        // entries from prior landblocks.
+        // Tier 3 fallback: cache-bypass probe of the CURRENT landblock's
+        // static-object id range. AC static GUIDs are laid out as
+        //   0x70000000 | (landblock << 12) | index
+        // so every static object (portals, NPCs, signs) in the player's
+        // landblock lives in [base, base+0xFFF]. WorldObjectCache's
+        // OnCreateObject hook misses some of these entirely — Town Network
+        // portals are the recurring case: the object is visible/clickable
+        // in-game but never lands in _byId (confirmed live 2026-06-15: a
+        // 'Portal to Town Network' at 0x7F682018 used fine when cached at
+        // 12:08, then the same portal was absent from every cache bucket at
+        // 14:12 and the bot retried forever). TryGetObjectName reads AC's
+        // object table directly, so it finds the portal regardless of hook
+        // coverage. Landblock-scoping replaces the old hardcoded
+        // 0x70007000-0x700070FF range (that range only covered one town's
+        // devices and held creatures, not portals, in the live logs — it
+        // never matched the real 0x7Exxxxxx/0x7Fxxxxxx portal ids). Every
+        // candidate is in the player's landblock by construction, so a name
+        // match is the right object; distance only breaks ties (and a match
+        // is kept even when its position can't be read).
         if (bestId == 0 && pid != 0)
         {
-            const uint StaticPortalRangeStart = 0x70007000u;
-            const uint StaticPortalRangeEnd   = 0x700070FFu;
-            for (uint candidateId = StaticPortalRangeStart; candidateId <= StaticPortalRangeEnd; candidateId++)
+            uint lb = CurrentLandblock();
+            if (lb != 0)
             {
-                probeChecked++;
-                if (!_host.TryGetObjectName(candidateId, out string probeName) || string.IsNullOrEmpty(probeName))
-                    continue;
-                probeNamed++;
-                if (!probeName.Equals(target, StringComparison.OrdinalIgnoreCase) &&
-                    probeName.IndexOf(target, StringComparison.OrdinalIgnoreCase) < 0)
-                    continue;
-                probeHits++;
+                uint probeBase = 0x70000000u | (lb << 12);
+                for (uint offset = 0; offset <= 0xFFFu; offset++)
+                {
+                    uint candidateId = probeBase + offset;
+                    probeChecked++;
+                    if (!_host.TryGetObjectName(candidateId, out string probeName) || string.IsNullOrEmpty(probeName))
+                        continue;
+                    probeNamed++;
+                    if (!probeName.Equals(target, StringComparison.OrdinalIgnoreCase) &&
+                        probeName.IndexOf(target, StringComparison.OrdinalIgnoreCase) < 0)
+                        continue;
+                    probeHits++;
 
-                int candidateSid = unchecked((int)candidateId);
-                double d = _objectCache.Distance(pid, candidateSid);
-                if (d > FallbackMaxDistYd) continue;
-                if (d < bestDist) { bestDist = d; bestId = candidateSid; fallbackSource = "id-probe"; }
+                    int candidateSid = unchecked((int)candidateId);
+                    double d = _objectCache.Distance(pid, candidateSid);
+                    if (bestId == 0 || d < bestDist) { bestDist = d; bestId = candidateSid; fallbackSource = "id-probe-lb"; }
+                }
             }
         }
 
@@ -1049,6 +1079,9 @@ internal sealed class NavigationEngine
         }
 
         _host.UseObject((uint)bestId);
+        // Publish the resolved object so the marker renderer can draw a ring +
+        // line to the portal's real position (the waypoint coord is a placeholder).
+        _settings.ActivePortalObjId = (uint)bestId;
         _host.Log($"Nav: UseObject portal '{target}' (dist={bestDist:F1}yd src={fallbackSource}) → 0x{bestId:X8}");
         return true;
     }
@@ -1165,12 +1198,20 @@ internal sealed class NavigationEngine
                     // Re-record position right before we start trying to cast,
                     // so teleport detection is relative to the cast site.
                     TryGetPos(out _prePortalNS, out _prePortalEW);
+                    _prePortalLb = CurrentLandblock();
                 }
                 break;
 
             case PortalState.FiringAction:
-                // Keep motions clear — UseObject/recall cast handles its own movement
-                ClearTurnMotions();
+                // Keep our injected turn motions clear while we settle / cast /
+                // search for the object — but once a PortalNPC UseObject has
+                // fired, STOP clearing so AC's native use-walk can turn the
+                // avatar toward the portal smoothly. Clearing every tick after
+                // the use was cancelling that auto-walk turn and produced the
+                // awkward swing-away-then-enter. (Recall never sets
+                // _portalNpcFired, so its cast still gets motions cleared.)
+                if (!(pt.Type == NavPointType.PortalNPC && _portalNpcFired))
+                    ClearTurnMotions();
 
                 // Teleport detection — two methods, same as meta system:
                 // 1) IsPortaling edge: entered portal space then exited = confirmed teleport
@@ -1188,10 +1229,20 @@ internal sealed class NavigationEngine
                     positionChanged = movedYd > 50.0;
                 }
 
-                if (portalExited || positionChanged)
+                // 3) Landblock change: a portal/recall that crosses a landblock
+                //    boundary is a confirmed teleport even when it moves the
+                //    player < 50 yards (short-hop dungeon/interior portals).
+                bool landblockChanged = false;
+                if (_prePortalLb != 0)
+                {
+                    uint lbNow = CurrentLandblock();
+                    landblockChanged = lbNow != 0 && lbNow != _prePortalLb;
+                }
+
+                if (portalExited || positionChanged || landblockChanged)
                 {
                     int busyNow = _host.HasGetBusyState ? _host.GetBusyState() : -1;
-                    _host.Log($"Nav: teleport detected (portalExit={portalExited} posChange={positionChanged}) busyState={busyNow}");
+                    _host.Log($"Nav: teleport detected (portalExit={portalExited} posChange={positionChanged} lbChange={landblockChanged}) busyState={busyNow}");
                     _portalState      = PortalState.PostTeleportSettle;
                     _portalStateStart = Now;
                     _settings.NavStatusLine = "Nav: teleported, settling...";
@@ -1274,11 +1325,92 @@ internal sealed class NavigationEngine
         }
     }
 
+    // ── Fellowship-follow ────────────────────────────────────────────────────
+    private const double FollowArrivalYd = 5.0;   // stop within this of the leader
+    private const double FollowResumeYd  = 8.0;   // resume moving once beyond this (hysteresis)
+    private bool _followMoving;
+
+    /// <summary>
+    /// Steer toward the LIVE position of _settings.FollowTargetId (the fellowship
+    /// leader). Self-contained — does NOT touch the route steering. Faces the
+    /// target and autoruns when beyond FollowResumeYd; stops within FollowArrivalYd.
+    /// </summary>
+    private void FollowTarget()
+    {
+        uint targetId = _settings.FollowTargetId;
+
+        if (!_host.HasGetObjectPosition ||
+            !_host.TryGetObjectPosition(targetId, out uint tcell, out float tx, out float ty, out _) ||
+            !NavCoordinateHelper.TryConvertPoseToCoords(tcell, tx, ty, out double tNS, out double tEW))
+        {
+            // Leader not loaded (different landblock / out of range) — hold.
+            StopMovement();
+            _followMoving = false;
+            _settings.NavStatusLine = "Follow: leader out of range";
+            return;
+        }
+
+        if (!TryGetPos(out double ns, out double ew)) return;
+
+        double dNS = tNS - ns, dEW = tEW - ew;
+        double distYd = Math.Sqrt(dNS * dNS + dEW * dEW) * 240.0;
+        _settings.NavStatusLine = $"Follow: {distYd:F0}yd";
+
+        // Hysteresis so we don't jitter at the boundary: start moving past
+        // FollowResumeYd, stop once inside FollowArrivalYd.
+        if (_followMoving) { if (distYd <= FollowArrivalYd) _followMoving = false; }
+        else               { if (distYd >  FollowResumeYd)  _followMoving = true;  }
+
+        if (!_followMoving)
+        {
+            StopMovement();
+            return;
+        }
+
+        double desiredDeg = Math.Atan2(tEW - ew, tNS - ns) * (180.0 / Math.PI);
+        if (desiredDeg < 0) desiredDeg += 360.0;
+
+        if (!_host.HasTurnToHeading)
+        {
+            StartForward();   // best-effort on a stale host
+            return;
+        }
+
+        if (TryGetQuaternionHeading(out float curDeg))
+        {
+            double err  = NormalizeAngle(desiredDeg - curDeg);
+            double step = Math.Clamp(err, -MaxStepDeg, MaxStepDeg);
+            double newHeading = curDeg + step;
+            if (newHeading >= 360.0) newHeading -= 360.0; else if (newHeading < 0.0) newHeading += 360.0;
+            _host.TurnToHeading((float)newHeading);
+            // Run only once roughly aligned, so we don't arc wide on a big turn.
+            if (Math.Abs(err) <= BigTurnEnter) StartForward(); else StopForward();
+        }
+        else
+        {
+            _host.TurnToHeading((float)desiredDeg);
+            StartForward();
+        }
+    }
+
+    /// <summary>
+    /// Current player landblock (objCellId &gt;&gt; 16), or 0 if unavailable. Used as
+    /// a teleport-confirmation signal: a portal/recall that crosses a landblock
+    /// boundary is confirmed even when it moves the player &lt; 50 yards (short-hop
+    /// dungeon/interior portals the planar-distance test misses).
+    /// </summary>
+    private uint CurrentLandblock() =>
+        _host.HasGetPlayerPose &&
+        _host.TryGetPlayerPose(out uint cell, out _, out _, out _, out _, out _, out _, out _)
+            ? cell >> 16
+            : 0u;
+
     private void ResetPortalState()
     {
         _portalState         = PortalState.None;
         _prePortalNS         = double.NaN;
         _prePortalEW         = double.NaN;
+        _prePortalLb         = 0;
         _wasInPortalSpace    = false;
         _trackingPortalSpace = false;
         _globalSettling      = false;
@@ -1286,6 +1418,7 @@ internal sealed class NavigationEngine
         _globalLastEW        = double.NaN;
         _portalNpcFired      = false;
         _portalNpcDiagLogged = false;
+        _settings.ActivePortalObjId = 0;   // stop drawing the portal marker/line
     }
 
     // ══════════════════════════════════════════════════════════════════════════
