@@ -109,6 +109,17 @@ internal sealed class LegacyDashboardRenderer
     private uint _playerMana;
     private uint _playerMaxMana;
 
+    // ── Session stats for the status feed (kills/xp/lum per hour, vitae, deaths) ──
+    private DateTime _sessionStartUtc = DateTime.UtcNow;
+    private long _xpBaseline = -1;   // -1 = not captured yet
+    private long _lumBaseline = -1;
+    private long _sessionKills;       // Interlocked: incremented on the pump thread, read on the poll thread
+    private int _deaths;              // NumDeaths (all-time)
+    private double _vitaePct;         // 0 = no penalty
+    private double _killsPerHour;
+    private double _xpPerHour;
+    private double _lumPerHour;
+
     // ── Monster editor (external process) ────────────────────────────────────
     private FileSystemWatcher? _monsterWatcher;
     private volatile bool _monsterFileChanged;
@@ -138,7 +149,11 @@ internal sealed class LegacyDashboardRenderer
         RefreshAllLists();
     }
 
-    public void OnLoginComplete() => RefreshAllLists();
+    public void OnLoginComplete()
+    {
+        RefreshAllLists();
+        ResetSessionStats();
+    }
 
     /// <summary>
     /// Returns the current per-character folder (set during LoadSettings).
@@ -1859,6 +1874,54 @@ internal sealed class LegacyDashboardRenderer
         }
     }
 
+    /// Reset the per-session counters at login so the per-hour rates measure THIS session.
+    private void ResetSessionStats()
+    {
+        _sessionStartUtc = DateTime.UtcNow;
+        _xpBaseline = -1;
+        _lumBaseline = -1;
+        System.Threading.Interlocked.Exchange(ref _sessionKills, 0);
+    }
+
+    /// Called from the plugin's OnKillNotification (pump thread) for each kill — feeds kills/hour.
+    public void RecordKill() => System.Threading.Interlocked.Increment(ref _sessionKills);
+
+    /// Read XP / luminance / deaths / vitae (same host + thread as RefreshPlayerVitals) and
+    /// derive the whole-session per-hour rates. Cheap cached-table reads; safe to call per poll.
+    private void RefreshSessionStats()
+    {
+        uint pid = _host.HasGetPlayerId ? _host.GetPlayerId() : 0u;
+        if (pid == 0) return;
+
+        // Total XP: PropertyInt64.TotalExperience (1, holds >int32); legacy PropertyInt (21) fallback.
+        long xp = 0;
+        if (_host.HasGetObjectQuadProperty && _host.TryGetObjectQuadProperty(pid, 1u, out long q1) && q1 > 0) xp = q1;
+        else if (_host.HasGetObjectIntProperty && _host.TryGetObjectIntProperty(pid, 21u, out int i21) && i21 > 0) xp = i21;
+
+        // Available Luminance: PropertyInt64.AvailableLuminance (6) — 0 on servers without luminance.
+        long lum = 0;
+        if (_host.HasGetObjectQuadProperty && _host.TryGetObjectQuadProperty(pid, 6u, out long q6) && q6 > 0) lum = q6;
+
+        // Deaths: PropertyInt.NumDeaths (43), all-time on the character.
+        if (_host.HasGetObjectIntProperty && _host.TryGetObjectIntProperty(pid, 43u, out int d)) _deaths = d;
+
+        // Vitae: host float (1.0 = no penalty); report the penalty percent.
+        float vitae = _host.HasGetVitae ? _host.GetVitae(pid) : 1.0f;
+        _vitaePct = Math.Clamp((1.0 - vitae) * 100.0, 0.0, 100.0);
+
+        // Capture session baselines lazily on the first valid read after login.
+        if (xp > 0 && _xpBaseline < 0) _xpBaseline = xp;
+        if (lum > 0 && _lumBaseline < 0) _lumBaseline = lum;
+
+        double hours = (DateTime.UtcNow - _sessionStartUtc).TotalHours;
+        if (hours > 1.0 / 3600.0)   // wait ~1s before reporting a rate
+        {
+            _killsPerHour = System.Threading.Interlocked.Read(ref _sessionKills) / hours;
+            _xpPerHour    = _xpBaseline  >= 0 ? Math.Max(0, xp  - _xpBaseline)  / hours : 0;
+            _lumPerHour   = _lumBaseline >= 0 ? Math.Max(0, lum - _lumBaseline) / hours : 0;
+        }
+    }
+
     private static float ToRatio(uint value, uint maxValue)
     {
         if (maxValue == 0)
@@ -2199,6 +2262,7 @@ internal sealed class LegacyDashboardRenderer
         // returned zero — but the next OnUpdateHealth event or live qualities
         // read will fix that within a tick or two.
         RefreshPlayerVitals();
+        RefreshSessionStats();
 
         var sb = new System.Text.StringBuilder(2048);
         sb.Append('{');
@@ -2256,7 +2320,13 @@ internal sealed class LegacyDashboardRenderer
         AppendBool(sb, "showTargetStaminaMana", _settings.ShowTargetStaminaMana); sb.Append(',');
         AppendBool(sb, "isLocked", _isLocked); sb.Append(',');
         AppendBool(sb, "isMinimized", _isMinimized); sb.Append(',');
-        AppendFloat(sb, "bgOpacity", _bgOpacity);
+        AppendFloat(sb, "bgOpacity", _bgOpacity); sb.Append(',');
+        // Session stats (status feed): deaths all-time; rates are whole-session averages.
+        AppendInt(sb, "deaths", _deaths); sb.Append(',');
+        AppendFloat(sb, "vitaePct", (float)_vitaePct); sb.Append(',');
+        AppendFloat(sb, "killsPerHour", (float)_killsPerHour); sb.Append(',');
+        AppendFloat(sb, "xpPerHour", (float)_xpPerHour); sb.Append(',');
+        AppendFloat(sb, "luminancePerHour", (float)_lumPerHour);
         sb.Append('}');
         return sb.ToString();
     }

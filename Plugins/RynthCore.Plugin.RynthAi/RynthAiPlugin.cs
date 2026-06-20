@@ -945,6 +945,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     {
         if (string.IsNullOrEmpty(deathMessage)) return;
         _combatManager?.OnKillNotification(deathMessage);
+        _dashboard?.RecordKill();   // feeds the kills/hour session stat
     }
 
     public override void OnCreateObject(uint objectId)
