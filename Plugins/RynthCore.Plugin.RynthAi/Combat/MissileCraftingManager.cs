@@ -491,6 +491,14 @@ public class MissileCraftingManager
         if (itemNorm == recipeNorm)
             return true;
 
+        // Recipe components are always "Wrapped Bundle of ..." — a finished arrow/quarrel/
+        // dart must never match a component slot. Its bare name (e.g. "arrow") is a substring
+        // of "...arrowshafts"/"...arrowheads", so the loose substring test below would otherwise
+        // pick up already-crafted ammo as a component, making the bot try to combine a finished
+        // arrow onto a bundle and stall forever.
+        if (!itemNorm.Contains("bundle"))
+            return false;
+
         return itemNorm.Contains(recipeNorm) || recipeNorm.Contains(itemNorm);
     }
 
