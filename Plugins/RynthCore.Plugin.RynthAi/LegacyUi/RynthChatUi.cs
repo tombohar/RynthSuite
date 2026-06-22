@@ -68,6 +68,20 @@ internal sealed class RynthChatUi
         _wantScrollToBottom = true;
     }
 
+    /// <summary>Snapshot the most recent lines (text + chat-type) for the remote status feed. Thread-safe.</summary>
+    public (string Text, int Type)[] SnapshotRecent(int max)
+    {
+        lock (_lock)
+        {
+            int n = Math.Min(Math.Max(0, max), _lines.Count);
+            var outArr = new (string, int)[n];
+            int start = _lines.Count - n;
+            for (int i = 0; i < n; i++)
+                outArr[i] = (_lines[start + i].Text, _lines[start + i].ChatType);
+            return outArr;
+        }
+    }
+
     public void Render()
     {
         if (!_settings.ShowRynthChat) return;

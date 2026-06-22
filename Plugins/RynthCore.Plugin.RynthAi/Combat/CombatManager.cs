@@ -534,6 +534,11 @@ public class CombatManager : IDisposable
             // "Flame Bolt"/"Frost Streak"/etc.
             if (IsSpellProjectileName(wo.Name)) continue;
 
+            // User-configured "never attack" list — excluded from acquisition
+            // entirely (an already-engaged match drops out of _scannedTargets
+            // here and is released by the scan-grace timer in Think).
+            if (IsUserBlacklistedName(wo.Name)) continue;
+
             // Cache name->wcid (once per type) for AOE kill attribution (tier 5): a mob wiped
             // by an area cast we never directly fought is credited by matching its death message.
             if (!string.IsNullOrEmpty(wo.Name) && _seenMonsterNameToWcid.Count < 256
@@ -1018,6 +1023,27 @@ public class CombatManager : IDisposable
     }
 
     /// <summary>
+    /// True if a monster's name matches the user-configured never-attack list
+    /// (case-insensitive substring, so "Drudge" excludes every drudge). Blank
+    /// entries are ignored. This is the manual do-not-attack list and is distinct
+    /// from the automatic no-damage blacklist.
+    /// </summary>
+    private bool IsUserBlacklistedName(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        var list = _settings.MonsterNameBlacklist;
+        if (list == null || list.Count == 0) return false;
+        for (int i = 0; i < list.Count; i++)
+        {
+            string entry = list[i];
+            if (!string.IsNullOrWhiteSpace(entry) &&
+                name.IndexOf(entry.Trim(), StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// True during the post-login window where raycasting is enabled but the
     /// DAT parse hasn't finished, so combat targeting runs degraded (no LOS,
     /// Linear attack-type fallback). Attacks miss for reasons unrelated to the
@@ -1054,10 +1080,11 @@ public class CombatManager : IDisposable
             _blacklistManager.ReportFailure(tid);
             if (_blacklistManager.IsBlacklisted(tid))
             {
-                _host.WriteToChat($"[RynthAi] {_consecutiveCastMisses} casts with no damage — blacklisting 0x{(uint)tid:X8}", 2);
+                string what = CurrentCombatMode == CombatMode.Magic ? "casts" : "attacks";
+                _host.WriteToChat($"[RynthAi] {_consecutiveCastMisses} {what} with no damage — blacklisting 0x{(uint)tid:X8}", 2);
                 _consecutiveCastMisses = 0;
                 if (tid == activeTargetId)
-                    DropTarget($"blacklisted after {_settings.BlacklistAttempts} no-damage casts");
+                    DropTarget($"blacklisted after {_settings.BlacklistAttempts} no-damage {what}");
             }
         }
     }
@@ -1092,10 +1119,16 @@ public class CombatManager : IDisposable
 
     /// <summary>
     /// Record that an attack (offensive spell cast / weapon swing) was just
-    /// issued at <paramref name="targetId"/>. The prior cast is judged first,
-    /// then this one is queued for judgement after the settle window. Counting
-    /// confirmed casts — not interval ticks — is what makes the blacklist
-    /// "N casts with no damage", not "N seconds".
+    /// issued at <paramref name="targetId"/>. The prior attack is judged first;
+    /// a new judgement window is then armed ONLY if none is still in flight.
+    /// Not clobbering an unsettled window is what makes melee/missile count at
+    /// all: those modes re-attack every 1000ms (attackCmdIntervalMs) while the
+    /// settle window is BlacklistCastSettleMs (default 1500ms), so resetting the
+    /// timer every cycle meant the pending attack never settled and the miss
+    /// streak never advanced — only magic (≥1500ms cadence) ever blacklisted.
+    /// Now each attack window runs to settle, so the blacklist is driven by
+    /// "N real attacks with no damage" for casts, missile shots, and melee
+    /// swings alike — never raw interval ticks.
     /// </summary>
     private void RecordOffensiveCast(int targetId)
     {
@@ -1107,7 +1140,12 @@ public class CombatManager : IDisposable
             _pendingJudgeCastAt = DateTime.MinValue;
         }
 
-        JudgePendingCast(); // verdict on the prior cast if its window elapsed
+        JudgePendingCast(); // verdict on the prior attack if its settle window elapsed
+
+        // An attack is still awaiting its verdict — let it settle instead of
+        // restarting the clock (the fast-cadence starvation fix). JudgePendingCast
+        // clears _pendingJudgeCastAt on settle, so the next attack re-arms here.
+        if (_pendingJudgeCastAt != DateTime.MinValue) return;
 
         _pendingJudgeCastAt   = DateTime.Now;
         _pendingJudgeTargetId = targetId;

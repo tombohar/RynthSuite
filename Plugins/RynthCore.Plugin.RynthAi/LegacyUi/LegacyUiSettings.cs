@@ -163,6 +163,15 @@ public sealed class LegacyUiSettings
     /// </summary>
     public int TargetNoProgressTimeoutSec = 0; // 0 = disabled; set to e.g. 120 to blacklist stuck targets
 
+    /// <summary>
+    /// User-configured "never attack" list. Any monster whose name CONTAINS one
+    /// of these entries (case-insensitive) is excluded from combat target
+    /// acquisition entirely — never scanned, faced, or attacked. This is a manual
+    /// do-not-attack list, separate from the automatic no-damage blacklist above.
+    /// Edited in Advanced → Combat → Monster Blacklist.
+    /// </summary>
+    public List<string> MonsterNameBlacklist { get; set; } = new();
+
     public int GiveQueueIntervalMs = 150;
 
     public int SpellCastIntervalMs = 400;

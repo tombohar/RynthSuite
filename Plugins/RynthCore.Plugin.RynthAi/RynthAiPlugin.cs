@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Threading;
 using ImGuiNET;
 using RynthCore.Plugin.RynthAi.LegacyUi;
@@ -10,9 +12,25 @@ using RynthCore.Plugin.RynthAi.Loot;
 using RynthCore.Plugin.RynthAi.Meta;
 using RynthCore.Plugin.RynthAi.Raycasting;
 using RynthCore.PluginCore;
+using RynthCore.Loot;
 using RynthCore.Loot.VTank;
 
 namespace RynthCore.Plugin.RynthAi;
+
+/// <summary>Full appraisal (Assess/Identify data) for one equipped item, read off the object cache.</summary>
+internal sealed class EquipAppraisal
+{
+    public string Name = "";
+    public uint Id;
+    public int Slot;
+    public int ArmorLevel;
+    public double[] Resist = System.Array.Empty<double>(); // 7: slash,pierce,bludgeon,cold,fire,acid,electric (armor only)
+    public int Damage; public int DamageType;
+    public double WeaponDef, MissileDef, MagicDef, Variance, ElementalMod;
+    public int Value, Burden, Workmanship, Material, MaxMana, CurMana;
+    public string[] Spells = System.Array.Empty<string>();
+    public string LongDesc = "";
+}
 
 public sealed partial class RynthAiPlugin : RynthPluginBase
 {
@@ -394,6 +412,312 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private const double BuffComaBypassEveryMs = 10_000;    // let recovery tick through every ~10s
     private long _combatEndedAt;       // Timestamp when combat stopped blocking
     private const long LootGraceMs = 2000; // Hold nav after combat ends so corpses can spawn
+    private DateTime _lastFreeSlotsPushAt = DateTime.MinValue; // throttle the status-feed pack-slots compute
+
+    // Remote control: the StatusAgent (a separate, token-gated process) drops command files here; we
+    // poll + apply them on THIS (pump) thread, the same thread the bot already drives every action from.
+    // Engine is untouched. The dir only ever has files when the user POSTs a command, so the idle poll
+    // is a no-op Directory.GetFiles. Matches the agent's default StatusDirectory + "\commands".
+    private static readonly string RemoteCommandDir = @"C:\Games\RynthCore\Logs\status\commands";
+    // Environment.TickCount64 of the last command poll. MUST default to 0 (= "never polled"), NOT
+    // long.MinValue: `TickCount64 - long.MinValue` overflows long after ~96 min of system uptime and wraps
+    // negative, so the `> 50` gate below would be permanently false and remote control would silently never
+    // run on any machine that's been up a while. With 0, `TickCount64 - 0` fires correctly on the first tick.
+    private long _lastCommandPollTick;
+    private bool _loggedCmdDirState;                      // one-shot init log of whether RemoteCommandDir exists
+    private bool _hideUi;   // remote "Hide UI": suppress vanilla radar/chat/powerbar (pushed each tick)
+
+    /// Drain any remote-control command files addressed to THIS client and apply them. Called from
+    /// OnTick (pump thread). Every command maps to an existing renderer/plugin method that is safe on
+    /// this thread (the same one the bot drives all its actions from). Files are deleted regardless of
+    /// outcome so a malformed file can never loop. Fully defensive — never throws into the pump.
+    private void DrainRemoteCommands()
+    {
+        try
+        {
+            bool exists = Directory.Exists(RemoteCommandDir);
+            if (!_loggedCmdDirState)   // one-shot: surface a path mismatch (agent writes elsewhere ⇒ silent no-op)
+            {
+                _loggedCmdDirState = true;
+                if (!exists) Host.Log($"[RynthAi] remote-command dir absent ({RemoteCommandDir}); phone commands no-op until it appears (check agent StatusDirectory)");
+            }
+            if (!exists) return;
+            string prefix = "RynthCore." + Environment.ProcessId + ".";
+            string[] files;
+            try { files = Directory.GetFiles(RemoteCommandDir, prefix + "*.cmd.json"); }
+            catch { return; }
+            if (files.Length == 0) return;
+            Array.Sort(files, StringComparer.Ordinal); // stable; agent stamps a sortable prefix
+            foreach (string f in files)
+            {
+                string action = string.Empty, value = string.Empty;
+                try
+                {
+                    string json = File.ReadAllText(f);
+                    using var doc = JsonDocument.Parse(json);
+                    var root = doc.RootElement;
+                    if (root.TryGetProperty("action", out var a) && a.ValueKind == JsonValueKind.String)
+                        action = a.GetString() ?? string.Empty;
+                    if (root.TryGetProperty("value", out var v))
+                        value = v.ValueKind == JsonValueKind.String ? (v.GetString() ?? string.Empty) : v.ToString();
+                }
+                catch { /* unreadable/garbage — fall through and delete it */ }
+                try { File.Delete(f); } catch { }
+                if (action.Length != 0)
+                {
+                    try { ApplyRemoteCommand(action, value); }
+                    catch (Exception ex) { Host.Log($"[RynthAi] remote command '{action}' failed: {ex.Message}"); }
+                }
+            }
+        }
+        catch { /* never let remote control destabilise the pump */ }
+    }
+
+    /// Map a remote command to the bot's existing control surface. All targets are SafeInvoke-grade
+    /// (managed flags / file I/O) or proven pump-safe (clearbusy = Host.ForceResetBusyCount, same call
+    /// the busy watchdog makes from this thread). Idempotent set-semantics for toggles.
+    private void ApplyRemoteCommand(string action, string value)
+    {
+        var dash = _dashboard;
+        if (dash == null) return;
+        bool on = value is "1" or "true" or "on" or "True" or "TRUE"
+                  || value.Equals("true", StringComparison.OrdinalIgnoreCase)
+                  || value.Equals("on", StringComparison.OrdinalIgnoreCase);
+        switch (action.ToLowerInvariant())
+        {
+            case "macro":
+                if (dash.Settings.IsMacroRunning != on) dash.TogglePanelMacro();
+                break;
+            case "combat":     dash.SetSubsystemEnabled(0, on); break;
+            case "buffing":    dash.SetSubsystemEnabled(1, on); break;
+            case "navigation": dash.SetSubsystemEnabled(2, on); break;
+            case "looting":    dash.SetSubsystemEnabled(3, on); break;
+            case "meta":       dash.SetSubsystemEnabled(4, on); break;
+            case "navprofile":      if (int.TryParse(value, out int ni)) dash.SelectProfileAtIndex(0, ni); break;
+            case "lootprofile":     if (int.TryParse(value, out int li)) dash.SelectProfileAtIndex(1, li); break;
+            case "metaprofile":     if (int.TryParse(value, out int mi)) dash.SelectProfileAtIndex(2, mi); break;
+            case "settingsprofile": if (int.TryParse(value, out int si)) dash.SelectProfileAtIndex(3, si); break;
+            case "forcerebuff":  dash.RequestForceRebuff(); break;
+            case "cancelrebuff": dash.RequestCancelForceRebuff(); break;
+            case "clearbusy":    HandleClearBusyCommand(); break;
+            case "hideui":       _hideUi = on; dash.SetUiHidden(on); break;  // applied each tick in OnTick
+            case "sendchat":     if (!string.IsNullOrEmpty(value)) HandleRynthChatSubmit(value); break;
+            case "movestart":    ApplyMove(value, true); break;
+            case "movestop":     ApplyMove(value, false); break;
+        }
+        Host.Log($"[RynthAi] applied remote command: {action}={value}");
+    }
+
+    // ── Remote manual movement (phone d-pad) ──────────────────────────────────────────────────────
+    // Hold-to-move: the app sends movestart on press, movestop on release. Forward = continuous
+    // autorun (SetAutoRun); back/turn = a held motion (SetMotion enabled until released). Both Host
+    // calls marshal onto the AC main thread and run after the cast drain, so they don't trip the
+    // anim-walk cast race. NOTE: while the macro's nav/combat-facing is active it will fight manual
+    // input — the app tells the user to stop the macro before driving.
+    // MotionTurnRight / MotionTurnLeft are already defined on this partial class (CorpseOpenController.cs).
+    private const uint MotionWalkBackward = 0x45000006u;
+
+    // Dead-man's switch: hold-to-move latches a continuous motion that ONLY a stop reverses, and every
+    // layer between finger and engine is lossy (pointercancel, app force-kill, Wi-Fi drop, page nav,
+    // card unmount). The app re-sends each held movestart on a ~300ms heartbeat (sends bounded to ~1s
+    // each, coalesced); if we don't hear one within this window we auto-stop everything. 2s gives clean
+    // margin over a stalled-then-recovered heartbeat while bounding an unintended run; the whole
+    // runaway-safety story no longer depends on a release packet that is the likeliest thing to be lost.
+    private const long ManualMoveDeadMs = 2000;
+    private bool _manualMoveActive;
+    private long _manualMoveDeadlineTick;   // Environment.TickCount64 (monotonic) past which we self-stop
+
+    private void ApplyMove(string dir, bool start)
+    {
+        switch ((dir ?? "").ToLowerInvariant())
+        {
+            case "forward": if (Host.HasSetAutoRun) Host.SetAutoRun(start); break;
+            case "back":    if (Host.HasSetMotion)  Host.SetMotion(MotionWalkBackward, start); break;
+            // On a turn RELEASE, clear BOTH turn channels — the bot's own FaceTarget/nav writes share
+            // these globals and may have latched the OPPOSITE turn on; releasing only the pressed
+            // direction would leave that bot-set turn spinning forever. (Press still sets just one.)
+            case "left":
+                if (Host.HasSetMotion)
+                {
+                    if (start) Host.SetMotion(MotionTurnLeft, true);
+                    else { Host.SetMotion(MotionTurnLeft, false); Host.SetMotion(MotionTurnRight, false); }
+                }
+                break;
+            case "right":
+                if (Host.HasSetMotion)
+                {
+                    if (start) Host.SetMotion(MotionTurnRight, true);
+                    else { Host.SetMotion(MotionTurnRight, false); Host.SetMotion(MotionTurnLeft, false); }
+                }
+                break;
+            case "stop":    // hard stop: kill autorun + every held motion (release-safety / panic stop)
+                if (Host.HasSetAutoRun) Host.SetAutoRun(false);
+                if (Host.HasSetMotion)
+                {
+                    Host.SetMotion(MotionWalkBackward, false);
+                    Host.SetMotion(MotionTurnLeft, false);
+                    Host.SetMotion(MotionTurnRight, false);
+                }
+                break;
+        }
+
+        // Maintain the dead-man's switch. Any start (incl. the heartbeat's repeated movestart) re-arms
+        // the deadline; an explicit "stop" disarms it. A per-direction release leaves it armed (other
+        // directions may still be held + fed); when the last release stops the heartbeat the watchdog
+        // fires once after the window and clears it (a redundant, harmless stop).
+        if (start) { _manualMoveActive = true; _manualMoveDeadlineTick = Environment.TickCount64 + ManualMoveDeadMs; }
+        else if (string.Equals(dir, "stop", StringComparison.OrdinalIgnoreCase)) _manualMoveActive = false;
+    }
+
+    /// Called every OnTick: if a manual hold went quiet (heartbeat lost) past the deadline, self-stop.
+    private void TickManualMoveWatchdog()
+    {
+        if (_manualMoveActive && Environment.TickCount64 > _manualMoveDeadlineTick)
+        {
+            _manualMoveActive = false;
+            ApplyMove("stop", false);
+            Host.Log("[RynthAi] manual-move dead-man: no keepalive — auto-stopped");
+        }
+    }
+
+    // ── Full item appraisal (the Assess/Identify data) for equipped gear ──────────────────────────
+    // The bot already auto-identifies objects (engine AutoIdService) and caches the 0xC9 appraisal;
+    // every field below is a cache-backed read, safe on the pump thread. Property IDs are ACE STypes.
+    private static readonly uint[] ResistStypes = { 13, 14, 15, 16, 17, 18, 19 }; // slash,pierce,bludgeon,cold,fire,acid,electric
+
+    // Equipped item ids we've already asked the server to appraise (once each; gear rarely changes).
+    private readonly HashSet<uint> _equipIdRequested = new();
+
+    /// Read the full appraisal for each equipped item (name/id/slot already known) off the object cache.
+    /// AutoIdService doesn't identify the player's OWN worn gear, so the appraisal cache is empty for it
+    /// until we ask: fire Host.RequestId() for un-appraised items (same marshalled path the loot eval uses
+    /// for corpse items). Capped per pass so we never burst the client busy-count.
+    private List<EquipAppraisal> AppraiseEquipment(List<(string Name, uint Id, int Slot)> equip)
+    {
+        var cache = _objectCache;
+        var outList = new List<EquipAppraisal>(equip?.Count ?? 0);
+        if (cache == null || equip == null) return outList;
+        int idRequests = 0;
+        foreach (var e in equip)
+        {
+            int id = unchecked((int)e.Id);
+            if (Host.HasRequestId && idRequests < 3
+                && (!Host.HasHasAppraisalData || !Host.HasAppraisalData(e.Id))
+                && _equipIdRequested.Add(e.Id))
+            {
+                Host.RequestId(e.Id);   // appraisal 0xC9 lands in the engine cache; read it next pass
+                idRequests++;
+            }
+            var a = new EquipAppraisal { Name = e.Name, Id = e.Id, Slot = e.Slot };
+            a.ArmorLevel  = cache.GetIntProperty(id, 28, 0);
+            a.Value       = cache.GetIntProperty(id, 19, 0);
+            a.Burden      = cache.GetIntProperty(id, 5, 0);
+            a.Workmanship = cache.GetIntProperty(id, 105, 0);
+            a.Material    = cache.GetIntProperty(id, 131, 0);
+            a.MaxMana     = cache.GetIntProperty(id, 108, 0);
+            a.CurMana     = cache.GetIntProperty(id, 107, 0);
+            a.Damage      = cache.GetIntProperty(id, 44, 0);
+            a.DamageType  = cache.GetIntProperty(id, 45, 0);
+            a.WeaponDef   = cache.GetDoubleProperty(id, 29, 0);
+            a.MissileDef  = cache.GetDoubleProperty(id, 149, 0);
+            a.MagicDef    = cache.GetDoubleProperty(id, 150, 0);
+            a.Variance    = cache.GetDoubleProperty(id, 22, 0);
+            a.ElementalMod = cache.GetDoubleProperty(id, 152, 0);
+            if (a.ArmorLevel > 0)
+            {
+                a.Resist = new double[7];
+                for (int i = 0; i < 7; i++) a.Resist[i] = cache.GetDoubleProperty(id, ResistStypes[i], 1.0);
+            }
+            a.LongDesc = cache.GetStringProperty(id, 16, string.Empty);
+            // Item enchantments (banes/Impen/etc.) by name.
+            if (Host.HasGetObjectSpellIds)
+            {
+                uint[] buf = new uint[64];
+                int n = Host.GetObjectSpellIds(e.Id, buf, buf.Length);
+                if (n > 0)
+                {
+                    int take = Math.Min(n, buf.Length);
+                    var names = new List<string>(take);
+                    for (int i = 0; i < take; i++)
+                    {
+                        var info = SpellTableStub.GetById((int)buf[i]);
+                        if (info != null && !string.IsNullOrEmpty(info.Name)) names.Add(info.Name);
+                    }
+                    a.Spells = names.ToArray();
+                }
+            }
+            outList.Add(a);
+        }
+        return outList;
+    }
+
+    // Core scarab tiers, seeded so a fully-depleted tier still reports 0 (the "you're OUT" alert the
+    // user wants) instead of silently vanishing. Any OTHER "...Scarab" stack (higher tier, Mana Scarab,
+    // etc.) is captured dynamically by its real in-game name, so the list is correct by construction.
+    private static readonly string[] CoreScarabTiers =
+        { "Lead Scarab", "Iron Scarab", "Copper Scarab", "Silver Scarab", "Gold Scarab", "Pyreal Scarab" };
+
+    /// One inventory-cache pass (no live AC read — safe on the off-thread pump) for the status feed:
+    ///   freeSlots = empty main-pack slots (same rule as VTankLootEvaluator.GetMainPackEmptySlots:
+    ///               direct main-pack items that aren't sub-containers, foci, or equipped; 102 = cap).
+    ///   scarabs/tapers = casting-component tallies anywhere in inventory (main + side packs), so the
+    ///               phone shows when a bot is about to run out of components and stop casting.
+    ///   scarabsByType = per-tier scarab counts (seeded core tiers + any others found), ordered.
+    ///   equipment = the gear the character is currently wearing/wielding (name + instance id + slot
+    ///               mask), so the phone can show the "suit" and the item ids. EquippedSlots>0 = worn.
+    private void ScanInventoryStatus(out int freeSlots, out int scarabs, out int tapers,
+                                     out List<KeyValuePair<string, int>> scarabsByType,
+                                     out List<(string Name, uint Id, int Slot)> equipment)
+    {
+        freeSlots = -1; scarabs = -1; tapers = -1; scarabsByType = null; equipment = null;
+        var cache = _objectCache;
+        if (cache == null || _playerId == 0) return;
+
+        // Ordered seed of the core tiers (0), then dynamic extras appended in first-seen order.
+        var byType = new List<KeyValuePair<string, int>>(CoreScarabTiers.Length + 4);
+        var index = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var tier in CoreScarabTiers) { index[tier] = byType.Count; byType.Add(new(tier, 0)); }
+        var equip = new List<(string Name, uint Id, int Slot)>(20);
+
+        int used = 0, scarabN = 0, taperN = 0;
+        int playerIdSigned = unchecked((int)_playerId);
+        foreach (var wo in cache.GetDirectInventory(forceRefresh: false))
+        {
+            string name = wo.Name ?? string.Empty;
+
+            // Equipment tally — any item with a wielded location (EquippedSlots>0) is currently worn,
+            // anywhere in the tree (armor/clothing/jewelry via container, weapons/foci via wielder).
+            int slot = wo.Values(LongValueKey.EquippedSlots, 0);
+            if (slot > 0)
+                equip.Add((name, unchecked((uint)wo.Id), slot));
+
+            // Component tally — count stacks anywhere in inventory.
+            if (name.IndexOf("Scarab", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                int qty = Math.Max(1, wo.Values(LongValueKey.StackCount, 1));
+                scarabN += qty;
+                if (index.TryGetValue(name, out int at)) byType[at] = new(byType[at].Key, byType[at].Value + qty);
+                else { index[name] = byType.Count; byType.Add(new(name, qty)); }
+            }
+            else if (name.IndexOf("Prismatic Taper", StringComparison.OrdinalIgnoreCase) >= 0)
+                taperN += Math.Max(1, wo.Values(LongValueKey.StackCount, 1));
+
+            // Main-pack free-slot count — direct children of the player only.
+            if (wo.Container != playerIdSigned) continue;
+            if (wo.ObjectClass == AcObjectClass.Container) continue;
+            if (wo.ObjectClass == AcObjectClass.Foci) continue;
+            if (slot > 0) continue;   // equipped items don't occupy a pack slot
+            used++;
+        }
+        // Stable display order: by slot mask (roughly head->feet->jewelry->weapon) then name.
+        equip.Sort((a, b) => a.Slot != b.Slot ? a.Slot.CompareTo(b.Slot)
+                                              : string.CompareOrdinal(a.Name, b.Name));
+        freeSlots = Math.Max(0, 102 - used);
+        scarabs = scarabN;
+        tapers = taperN;
+        scarabsByType = byType;
+        equipment = equip;
+    }
 
     public override void OnTick()
     {
@@ -401,6 +725,16 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         try
         {
             _dashboard?.DrainMetaCommands();   // apply queued meta edits on this (plugin-tick) thread
+
+            // Remote control: apply any phone-issued commands. ~50ms cadence so the movement d-pad
+            // feels responsive (press→move latency); a tiny dir glob is cheap. No-op when empty.
+            // Monotonic clock (TickCount64) — a wall-clock step must never stall this safety-critical poll.
+            if (Environment.TickCount64 - _lastCommandPollTick > 50)
+            {
+                _lastCommandPollTick = Environment.TickCount64;
+                DrainRemoteCommands();
+            }
+            TickManualMoveWatchdog();   // self-stop a manual hold whose keepalive went silent (every tick)
 
             // ── Push settings to engine each tick ──────────────────────
             // OnRender only runs when the engine has an active ImGui pipeline
@@ -420,10 +754,15 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 if (diag)
                     Host.Log($"[RynthAi] OnTick: pushSettings.SuppressRetailRadar={pushSettings.SuppressRetailRadar}, SuppressRetailPowerbar={pushSettings.SuppressRetailPowerbar}");
                 Host.SetFpsLimit(pushSettings.EnableFPSLimit, pushSettings.TargetFPSFocused, pushSettings.TargetFPSBackground);
+                // "Hide UI" (remote): blank the vanilla AC radar/chat/powerbar too. The RynthAi Avalonia
+                // panels are separate windows already excluded by the stream's PrintWindow capture.
+                bool hideUi = _hideUi;
                 if (Host.HasSetRadarSuppressed)
-                    Host.SetRadarSuppressed(pushSettings.SuppressRetailRadar);
+                    Host.SetRadarSuppressed(hideUi || pushSettings.SuppressRetailRadar);
                 if (Host.HasSetPowerbarSuppressed)
-                    Host.SetPowerbarSuppressed(pushSettings.SuppressRetailPowerbar);
+                    Host.SetPowerbarSuppressed(hideUi || pushSettings.SuppressRetailPowerbar);
+                if (Host.HasSetChatSuppressed)
+                    Host.SetChatSuppressed(hideUi);
 
                 // Fellowship-follow: publish the leader's object id so the nav
                 // engine can steer toward their live position. 0 = idle (not in a
@@ -678,6 +1017,19 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     && _targetCorpseId == 0)
                 {
                     _inventoryManager.OnHeartbeat(_busyCount);
+                }
+
+                // Status feed: main-pack empty slots (cache-based, off-thread-safe). Throttled to
+                // ~3s — it walks direct inventory, no need every tick. Mirrors VTankLootEvaluator
+                // .GetMainPackEmptySlots so the phone shows when a box is about to run out of room.
+                if (inventorySettled && _objectCache != null && _playerId != 0
+                    && (DateTime.Now - _lastFreeSlotsPushAt).TotalMilliseconds > 3000)
+                {
+                    _lastFreeSlotsPushAt = DateTime.Now;
+                    ScanInventoryStatus(out int freeSlots, out int scarabs, out int tapers, out var scarabsByType, out var equipment);
+                    _dashboard?.SetFreeSlots(freeSlots);
+                    _dashboard?.SetComponentCounts(scarabs, tapers, scarabsByType);
+                    _dashboard?.SetEquipment(AppraiseEquipment(equipment));
                 }
 
                 if (diag) Host.Log("[RynthAi] OnTick: before salvageManager");

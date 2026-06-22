@@ -1,3 +1,4 @@
+using System;
 using System.Numerics;
 using ImGuiNET;
 
@@ -7,6 +8,9 @@ internal sealed class LegacyAdvancedSettingsUi
 {
     private readonly LegacyUiSettings _settings;
     private MissileCraftingManager? _missileCraftingManager;
+
+    // Scratch buffer for the "never attack" name entry box.
+    private string _newBlacklistName = "";
 
     private static readonly string[] AttackHeights = { "Low", "Medium", "High" };
     private static readonly string[] LootOwnershipModes = { "My Kills Only", "Fellowship Kills", "All Corpses" };
@@ -182,6 +186,46 @@ internal sealed class LegacyAdvancedSettingsUi
                     ImGui.SetTooltip(
                         "Blacklist a target after being engaged this many seconds without dealing damage.\n" +
                         "0 = disabled. Default 60s. Useful for targets stuck in geometry or unreachable.");
+
+                ImGui.Spacing();
+                ImGui.Text("Never Attack (by name)");
+                ImGui.SetNextItemWidth(220);
+                bool addByEnter = ImGui.InputTextWithHint("##blacklistName", "Monster name (e.g. Drudge)",
+                    ref _newBlacklistName, 64, ImGuiInputTextFlags.EnterReturnsTrue);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "Monsters whose name CONTAINS this text (case-insensitive) are never\n" +
+                        "targeted, faced, or attacked. This manual do-not-attack list is\n" +
+                        "separate from the automatic no-damage blacklist above.");
+                ImGui.SameLine();
+                if ((ImGui.Button("Add##blacklist") || addByEnter) && !string.IsNullOrWhiteSpace(_newBlacklistName))
+                {
+                    string entry = _newBlacklistName.Trim();
+                    bool exists = false;
+                    for (int i = 0; i < _settings.MonsterNameBlacklist.Count; i++)
+                        if (string.Equals(_settings.MonsterNameBlacklist[i], entry, StringComparison.OrdinalIgnoreCase))
+                        { exists = true; break; }
+                    if (!exists) _settings.MonsterNameBlacklist.Add(entry);
+                    _newBlacklistName = "";
+                }
+
+                if (_settings.MonsterNameBlacklist.Count == 0)
+                {
+                    ImGui.TextDisabled("(empty — any monster may be attacked)");
+                }
+                else
+                {
+                    int removeIdx = -1;
+                    for (int i = 0; i < _settings.MonsterNameBlacklist.Count; i++)
+                    {
+                        ImGui.PushID(i);
+                        if (ImGui.SmallButton("X")) removeIdx = i;
+                        ImGui.SameLine();
+                        ImGui.TextUnformatted(_settings.MonsterNameBlacklist[i]);
+                        ImGui.PopID();
+                    }
+                    if (removeIdx >= 0) _settings.MonsterNameBlacklist.RemoveAt(removeIdx);
+                }
 
                 ImGui.Separator();
                 ImGui.Spacing();

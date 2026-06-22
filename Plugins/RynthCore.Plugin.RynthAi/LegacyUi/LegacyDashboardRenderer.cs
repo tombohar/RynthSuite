@@ -115,6 +115,18 @@ internal sealed class LegacyDashboardRenderer
     private DateTime _sessionStartUtc = DateTime.UtcNow;
     private long _sessionKills;       // Interlocked: incremented on the pump thread, read in the snapshot
     private double _killsPerHour;
+    private long _lastKillTicks;      // DateTime.UtcNow.Ticks of the last kill (0 = none yet this session)
+    // volatile: written on the pump thread (SetFreeSlots/SetComponentCounts), read on the snapshot-poll
+    // thread (BuildSnapshotJson). x86 int writes are atomic but give no visibility guarantee — without
+    // volatile the reader can see a stale value indefinitely. (_sessionKills uses Interlocked for the same reason.)
+    private volatile int _freeSlots = -1;      // main-pack empty slots; -1 = unknown. Pushed from the plugin tick.
+    private volatile int _scarabs = -1;        // total scarab spell components in inventory; -1 = unknown.
+    private volatile int _tapers = -1;         // total prismatic tapers in inventory; -1 = unknown.
+    // Per-tier scarab breakdown (name -> count), pushed from the pump thread as a fresh immutable array;
+    // volatile ref so the snapshot-poll thread always sees the latest (ref assignment is atomic).
+    private volatile KeyValuePair<string, int>[] _scarabsByType = System.Array.Empty<KeyValuePair<string, int>>();
+    // Equipped gear with full appraisal, pushed from the pump thread; volatile ref.
+    private volatile EquipAppraisal[] _equipment = System.Array.Empty<EquipAppraisal>();
 
     // ── Monster editor (external process) ────────────────────────────────────
     private FileSystemWatcher? _monsterWatcher;
@@ -1875,10 +1887,35 @@ internal sealed class LegacyDashboardRenderer
     {
         _sessionStartUtc = DateTime.UtcNow;
         System.Threading.Interlocked.Exchange(ref _sessionKills, 0);
+        System.Threading.Interlocked.Exchange(ref _lastKillTicks, 0);
     }
 
-    /// Called from the plugin's OnKillNotification (pump thread) for each kill — feeds kills/hour.
-    public void RecordKill() => System.Threading.Interlocked.Increment(ref _sessionKills);
+    /// Called from the plugin's OnKillNotification (pump thread) for each kill — feeds kills/hour
+    /// and the "time since last kill" liveness signal.
+    public void RecordKill()
+    {
+        System.Threading.Interlocked.Increment(ref _sessionKills);
+        System.Threading.Interlocked.Exchange(ref _lastKillTicks, DateTime.UtcNow.Ticks);
+    }
+
+    /// Pushed from the plugin tick (it owns the inventory cache) — main-pack empty slots. -1 = unknown.
+    public void SetFreeSlots(int slots) => _freeSlots = slots;
+
+    private volatile bool _uiHidden;   // remote "Hide UI" state, surfaced to the status feed
+    public void SetUiHidden(bool hidden) => _uiHidden = hidden;
+
+    /// Pushed from the plugin tick — casting-component tallies (scarabs / prismatic tapers) and the
+    /// per-tier scarab breakdown. -1 = unknown; byType may be null (treated as empty).
+    public void SetComponentCounts(int scarabs, int tapers, List<KeyValuePair<string, int>> byType)
+    {
+        _scarabs = scarabs;
+        _tapers = tapers;
+        _scarabsByType = byType != null ? byType.ToArray() : System.Array.Empty<KeyValuePair<string, int>>();
+    }
+
+    /// Pushed from the plugin tick — the gear the character is wearing/wielding, with full appraisal.
+    public void SetEquipment(List<EquipAppraisal> equipment)
+        => _equipment = equipment != null ? equipment.ToArray() : System.Array.Empty<EquipAppraisal>();
 
     /// Whole-session kills/hour from the kill counter — a pure counter + clock, safe to compute
     /// on the off-thread snapshot poll (no AC read).
@@ -2287,8 +2324,75 @@ internal sealed class LegacyDashboardRenderer
         AppendBool(sb, "isLocked", _isLocked); sb.Append(',');
         AppendBool(sb, "isMinimized", _isMinimized); sb.Append(',');
         AppendFloat(sb, "bgOpacity", _bgOpacity); sb.Append(',');
-        // kills/hour is bot-derived (kill counter); the rest of the stats are engine top-level.
-        AppendFloat(sb, "killsPerHour", (float)_killsPerHour);
+        // kills/hour, session kills, last-kill age, and free pack slots are bot-derived
+        // (kill counter + inventory cache); the rest of the player stats are engine top-level.
+        AppendFloat(sb, "killsPerHour", (float)_killsPerHour); sb.Append(',');
+        AppendInt(sb, "sessionKills", (int)System.Threading.Interlocked.Read(ref _sessionKills)); sb.Append(',');
+        long lastKillTicks = System.Threading.Interlocked.Read(ref _lastKillTicks);
+        int secsSinceLastKill = lastKillTicks == 0
+            ? -1
+            : (int)Math.Clamp((DateTime.UtcNow - new DateTime(lastKillTicks, DateTimeKind.Utc)).TotalSeconds, 0, int.MaxValue);
+        AppendInt(sb, "secsSinceLastKill", secsSinceLastKill); sb.Append(',');
+        AppendInt(sb, "freeSlots", _freeSlots); sb.Append(',');
+        AppendBool(sb, "uiHidden", _uiHidden); sb.Append(',');
+        AppendInt(sb, "scarabs", _scarabs); sb.Append(',');
+        AppendInt(sb, "tapers", _tapers); sb.Append(',');
+        // Per-tier scarab breakdown: [{"name":"Lead Scarab","count":N}, ...]
+        var byType = _scarabsByType;
+        sb.Append("\"scarabsByType\":[");
+        for (int i = 0; i < byType.Length; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append("{\"name\":\"");
+            AppendEscaped(sb, byType[i].Key ?? string.Empty);
+            sb.Append("\",\"count\":").Append(byType[i].Value).Append('}');
+        }
+        sb.Append("],");
+        // Equipped gear with full appraisal: name/id/slot + armor/resist/weapon/value/mana/spells/desc.
+        var equip = _equipment;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        sb.Append("\"equipment\":[");
+        for (int i = 0; i < equip.Length; i++)
+        {
+            var a = equip[i];
+            if (i > 0) sb.Append(',');
+            sb.Append("{\"name\":\"");
+            AppendEscaped(sb, a.Name ?? string.Empty);
+            sb.Append("\",\"id\":").Append(a.Id).Append(",\"slot\":").Append(a.Slot);
+            sb.Append(",\"armorLevel\":").Append(a.ArmorLevel);
+            if (a.Resist is { Length: 7 })
+            {
+                sb.Append(",\"resist\":[");
+                for (int r = 0; r < 7; r++) { if (r > 0) sb.Append(','); sb.Append(a.Resist[r].ToString("0.###", inv)); }
+                sb.Append(']');
+            }
+            sb.Append(",\"value\":").Append(a.Value).Append(",\"burden\":").Append(a.Burden)
+              .Append(",\"workmanship\":").Append(a.Workmanship).Append(",\"material\":").Append(a.Material)
+              .Append(",\"maxMana\":").Append(a.MaxMana).Append(",\"curMana\":").Append(a.CurMana)
+              .Append(",\"damage\":").Append(a.Damage).Append(",\"damageType\":").Append(a.DamageType)
+              .Append(",\"weaponDef\":").Append(a.WeaponDef.ToString("0.###", inv))
+              .Append(",\"missileDef\":").Append(a.MissileDef.ToString("0.###", inv))
+              .Append(",\"magicDef\":").Append(a.MagicDef.ToString("0.###", inv))
+              .Append(",\"variance\":").Append(a.Variance.ToString("0.###", inv))
+              .Append(",\"elementalMod\":").Append(a.ElementalMod.ToString("0.###", inv));
+            sb.Append(",\"spells\":[");
+            for (int s = 0; s < a.Spells.Length; s++) { if (s > 0) sb.Append(','); sb.Append('"'); AppendEscaped(sb, a.Spells[s] ?? string.Empty); sb.Append('"'); }
+            sb.Append(']');
+            sb.Append(",\"longDesc\":\""); AppendEscaped(sb, a.LongDesc ?? string.Empty); sb.Append('"');
+            sb.Append('}');
+        }
+        sb.Append(']');
+        // Recent chat lines for the phone chat view: [{"t":"text","c":<chatType>}, ...] (oldest->newest).
+        sb.Append(",\"recentChat\":[");
+        var chat = _rynthChatUi.SnapshotRecent(60);
+        for (int i = 0; i < chat.Length; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append("{\"t\":\"");
+            AppendEscaped(sb, chat[i].Text ?? string.Empty);
+            sb.Append("\",\"c\":").Append(chat[i].Type).Append('}');
+        }
+        sb.Append(']');
         sb.Append('}');
         return sb.ToString();
     }
