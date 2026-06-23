@@ -414,63 +414,24 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private const long LootGraceMs = 2000; // Hold nav after combat ends so corpses can spawn
     private DateTime _lastFreeSlotsPushAt = DateTime.MinValue; // throttle the status-feed pack-slots compute
 
-    // Remote control: the StatusAgent (a separate, token-gated process) drops command files here; we
-    // poll + apply them on THIS (pump) thread, the same thread the bot already drives every action from.
-    // Engine is untouched. The dir only ever has files when the user POSTs a command, so the idle poll
-    // is a no-op Directory.GetFiles. Matches the agent's default StatusDirectory + "\commands".
-    private static readonly string RemoteCommandDir = @"C:\Games\RynthCore\Logs\status\commands";
-    // Environment.TickCount64 of the last command poll. MUST default to 0 (= "never polled"), NOT
-    // long.MinValue: `TickCount64 - long.MinValue` overflows long after ~96 min of system uptime and wraps
-    // negative, so the `> 50` gate below would be permanently false and remote control would silently never
-    // run on any machine that's been up a while. With 0, `TickCount64 - 0` fires correctly on the first tick.
-    private long _lastCommandPollTick;
-    private bool _loggedCmdDirState;                      // one-shot init log of whether RemoteCommandDir exists
-    private bool _hideUi;   // remote "Hide UI": suppress vanilla radar/chat/powerbar (pushed each tick)
+    // Remote "Hide UI": suppress vanilla radar/chat/powerbar (re-asserted each tick in the OnTick settings
+    // push). Set by the forwarded "hideui" command (ApplyRemoteCommand). The phone command-file drain and
+    // manual movement moved out to the private RynthRemote plugin (Phase B/D); RynthAi only RECEIVES the
+    // non-movement commands RynthRemote forwards (via the engine broker → _forwardedRemoteCommands).
+    private bool _hideUi;
 
-    /// Drain any remote-control command files addressed to THIS client and apply them. Called from
-    /// OnTick (pump thread). Every command maps to an existing renderer/plugin method that is safe on
-    /// this thread (the same one the bot drives all its actions from). Files are deleted regardless of
-    /// outcome so a malformed file can never loop. Fully defensive — never throws into the pump.
-    private void DrainRemoteCommands()
+    // Remote commands forwarded from the RynthRemote plugin via the engine's SendPluginCommand broker
+    // arrive on the broker's calling thread; queue them and apply on OUR pump thread (OnTick) so AC
+    // mutation never happens off-thread — the same discipline LegacyDashboardRenderer.DrainMetaCommands uses.
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(string action, string value)> _forwardedRemoteCommands = new();
+
+    /// Enqueue a remote command forwarded by the engine broker (the
+    /// RynthPluginApplyRemoteCommand export). Thread-safe; the queued command is applied
+    /// on the next OnTick on the pump thread via the existing ApplyRemoteCommand switch.
+    internal void EnqueueRemoteCommand(string action, string value)
     {
-        try
-        {
-            bool exists = Directory.Exists(RemoteCommandDir);
-            if (!_loggedCmdDirState)   // one-shot: surface a path mismatch (agent writes elsewhere ⇒ silent no-op)
-            {
-                _loggedCmdDirState = true;
-                if (!exists) Host.Log($"[RynthAi] remote-command dir absent ({RemoteCommandDir}); phone commands no-op until it appears (check agent StatusDirectory)");
-            }
-            if (!exists) return;
-            string prefix = "RynthCore." + Environment.ProcessId + ".";
-            string[] files;
-            try { files = Directory.GetFiles(RemoteCommandDir, prefix + "*.cmd.json"); }
-            catch { return; }
-            if (files.Length == 0) return;
-            Array.Sort(files, StringComparer.Ordinal); // stable; agent stamps a sortable prefix
-            foreach (string f in files)
-            {
-                string action = string.Empty, value = string.Empty;
-                try
-                {
-                    string json = File.ReadAllText(f);
-                    using var doc = JsonDocument.Parse(json);
-                    var root = doc.RootElement;
-                    if (root.TryGetProperty("action", out var a) && a.ValueKind == JsonValueKind.String)
-                        action = a.GetString() ?? string.Empty;
-                    if (root.TryGetProperty("value", out var v))
-                        value = v.ValueKind == JsonValueKind.String ? (v.GetString() ?? string.Empty) : v.ToString();
-                }
-                catch { /* unreadable/garbage — fall through and delete it */ }
-                try { File.Delete(f); } catch { }
-                if (action.Length != 0)
-                {
-                    try { ApplyRemoteCommand(action, value); }
-                    catch (Exception ex) { Host.Log($"[RynthAi] remote command '{action}' failed: {ex.Message}"); }
-                }
-            }
-        }
-        catch { /* never let remote control destabilise the pump */ }
+        if (string.IsNullOrEmpty(action)) return;
+        _forwardedRemoteCommands.Enqueue((action, value ?? string.Empty));
     }
 
     /// Map a remote command to the bot's existing control surface. All targets are SafeInvoke-grade
@@ -502,82 +463,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "clearbusy":    HandleClearBusyCommand(); break;
             case "hideui":       _hideUi = on; dash.SetUiHidden(on); break;  // applied each tick in OnTick
             case "sendchat":     if (!string.IsNullOrEmpty(value)) HandleRynthChatSubmit(value); break;
-            case "movestart":    ApplyMove(value, true); break;
-            case "movestop":     ApplyMove(value, false); break;
+            // movestart/movestop are applied DIRECTLY by the RynthRemote plugin (pure Host.SetAutoRun/
+            // SetMotion + its own dead-man watchdog) and are never forwarded here.
         }
         Host.Log($"[RynthAi] applied remote command: {action}={value}");
-    }
-
-    // ── Remote manual movement (phone d-pad) ──────────────────────────────────────────────────────
-    // Hold-to-move: the app sends movestart on press, movestop on release. Forward = continuous
-    // autorun (SetAutoRun); back/turn = a held motion (SetMotion enabled until released). Both Host
-    // calls marshal onto the AC main thread and run after the cast drain, so they don't trip the
-    // anim-walk cast race. NOTE: while the macro's nav/combat-facing is active it will fight manual
-    // input — the app tells the user to stop the macro before driving.
-    // MotionTurnRight / MotionTurnLeft are already defined on this partial class (CorpseOpenController.cs).
-    private const uint MotionWalkBackward = 0x45000006u;
-
-    // Dead-man's switch: hold-to-move latches a continuous motion that ONLY a stop reverses, and every
-    // layer between finger and engine is lossy (pointercancel, app force-kill, Wi-Fi drop, page nav,
-    // card unmount). The app re-sends each held movestart on a ~300ms heartbeat (sends bounded to ~1s
-    // each, coalesced); if we don't hear one within this window we auto-stop everything. 2s gives clean
-    // margin over a stalled-then-recovered heartbeat while bounding an unintended run; the whole
-    // runaway-safety story no longer depends on a release packet that is the likeliest thing to be lost.
-    private const long ManualMoveDeadMs = 2000;
-    private bool _manualMoveActive;
-    private long _manualMoveDeadlineTick;   // Environment.TickCount64 (monotonic) past which we self-stop
-
-    private void ApplyMove(string dir, bool start)
-    {
-        switch ((dir ?? "").ToLowerInvariant())
-        {
-            case "forward": if (Host.HasSetAutoRun) Host.SetAutoRun(start); break;
-            case "back":    if (Host.HasSetMotion)  Host.SetMotion(MotionWalkBackward, start); break;
-            // On a turn RELEASE, clear BOTH turn channels — the bot's own FaceTarget/nav writes share
-            // these globals and may have latched the OPPOSITE turn on; releasing only the pressed
-            // direction would leave that bot-set turn spinning forever. (Press still sets just one.)
-            case "left":
-                if (Host.HasSetMotion)
-                {
-                    if (start) Host.SetMotion(MotionTurnLeft, true);
-                    else { Host.SetMotion(MotionTurnLeft, false); Host.SetMotion(MotionTurnRight, false); }
-                }
-                break;
-            case "right":
-                if (Host.HasSetMotion)
-                {
-                    if (start) Host.SetMotion(MotionTurnRight, true);
-                    else { Host.SetMotion(MotionTurnRight, false); Host.SetMotion(MotionTurnLeft, false); }
-                }
-                break;
-            case "stop":    // hard stop: kill autorun + every held motion (release-safety / panic stop)
-                if (Host.HasSetAutoRun) Host.SetAutoRun(false);
-                if (Host.HasSetMotion)
-                {
-                    Host.SetMotion(MotionWalkBackward, false);
-                    Host.SetMotion(MotionTurnLeft, false);
-                    Host.SetMotion(MotionTurnRight, false);
-                }
-                break;
-        }
-
-        // Maintain the dead-man's switch. Any start (incl. the heartbeat's repeated movestart) re-arms
-        // the deadline; an explicit "stop" disarms it. A per-direction release leaves it armed (other
-        // directions may still be held + fed); when the last release stops the heartbeat the watchdog
-        // fires once after the window and clears it (a redundant, harmless stop).
-        if (start) { _manualMoveActive = true; _manualMoveDeadlineTick = Environment.TickCount64 + ManualMoveDeadMs; }
-        else if (string.Equals(dir, "stop", StringComparison.OrdinalIgnoreCase)) _manualMoveActive = false;
-    }
-
-    /// Called every OnTick: if a manual hold went quiet (heartbeat lost) past the deadline, self-stop.
-    private void TickManualMoveWatchdog()
-    {
-        if (_manualMoveActive && Environment.TickCount64 > _manualMoveDeadlineTick)
-        {
-            _manualMoveActive = false;
-            ApplyMove("stop", false);
-            Host.Log("[RynthAi] manual-move dead-man: no keepalive — auto-stopped");
-        }
     }
 
     // ── Full item appraisal (the Assess/Identify data) for equipped gear ──────────────────────────
@@ -729,12 +618,15 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             // Remote control: apply any phone-issued commands. ~50ms cadence so the movement d-pad
             // feels responsive (press→move latency); a tiny dir glob is cheap. No-op when empty.
             // Monotonic clock (TickCount64) — a wall-clock step must never stall this safety-critical poll.
-            if (Environment.TickCount64 - _lastCommandPollTick > 50)
+            // Apply remote commands forwarded by the RynthRemote plugin (engine SendPluginCommand broker →
+            // _forwardedRemoteCommands), on this pump thread. RynthRemote owns the phone command-file drain
+            // + manual movement and forwards every non-movement command (chat/clearbusy/hideui/bot-control)
+            // here because they touch RynthAi-internal state. Empty in the common case.
+            while (_forwardedRemoteCommands.TryDequeue(out var fwd))
             {
-                _lastCommandPollTick = Environment.TickCount64;
-                DrainRemoteCommands();
+                try { ApplyRemoteCommand(fwd.action, fwd.value); }
+                catch (Exception ex) { Host.Log($"[RynthAi] forwarded remote command '{fwd.action}' failed: {ex.Message}"); }
             }
-            TickManualMoveWatchdog();   // self-stop a manual hold whose keepalive went silent (every tick)
 
             // ── Push settings to engine each tick ──────────────────────
             // OnRender only runs when the engine has an active ImGui pipeline
@@ -1821,10 +1713,17 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         }
 
         if (eat != 0)
+        {
+            Host.Log($"[ChatDiag] '{text}' eaten locally (eat={eat})");
             return; // handled locally (/ra, /mt, /ub, etc.)
+        }
 
         if (Host.HasInvokeChatParser)
-            Host.InvokeChatParser(text);
+        {
+            bool r = Host.InvokeChatParser(text);   // DIAG: does the engine report the send succeeded?
+            Host.Log($"[ChatDiag] InvokeChatParser('{text}') -> {r}");
+        }
+        else Host.Log($"[ChatDiag] '{text}': Host.HasInvokeChatParser=FALSE (no send path wired)");
     }
 
     internal void EnqueueGive(uint itemId, uint targetId, int stackSize)

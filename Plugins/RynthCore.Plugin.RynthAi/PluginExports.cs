@@ -108,7 +108,14 @@ public static unsafe class PluginExports
     // The returned ANSI buffer is freed on the next call; the caller MUST copy
     // its string before calling any of these again.
 
-    private static IntPtr _snapshotPtr = IntPtr.Zero;
+    // [ThreadStatic]: this snapshot is polled concurrently from MULTIPLE threads — the engine's Avalonia
+    // RynthAiPanel (~Hz), the heartbeat status-export (1/s), and (Phase C) the RynthRemote plugin via the
+    // engine's GetPluginSnapshotJson broker. With a single shared pointer the alloc-new→swap→free-old below
+    // races: one caller frees the buffer another is mid-read → garbage ('0x18' JsonException) / use-after-free.
+    // Per-thread storage gives each caller its own buffer (same discipline as the engine's account-name
+    // scratch), so no caller ever frees another thread's pointer. (No initializer — [ThreadStatic] defaults
+    // to IntPtr.Zero on every thread.)
+    [ThreadStatic] private static IntPtr _snapshotPtr;
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetSnapshotJson", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static IntPtr GetSnapshotJson()
@@ -131,6 +138,25 @@ public static unsafe class PluginExports
         {
             return IntPtr.Zero;
         }
+    }
+
+    // ── Remote-command bridge (engine SendPluginCommand broker → this plugin) ──
+    // When RynthRemote owns the command drain, the engine forwards each phone-issued
+    // (action,value) command here. We COPY the ANSI args (the caller frees them right
+    // after this returns) and enqueue them for the pump thread (RynthAiPlugin.OnTick →
+    // ApplyRemoteCommand); we NEVER apply on the caller's thread. The whole body is
+    // guarded — a managed exception must not cross the native boundary.
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginApplyRemoteCommand", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void ApplyRemoteCommand(IntPtr actionAnsi, IntPtr valueAnsi)
+    {
+        try
+        {
+            string action = actionAnsi != IntPtr.Zero ? (Marshal.PtrToStringAnsi(actionAnsi) ?? string.Empty) : string.Empty;
+            string value  = valueAnsi  != IntPtr.Zero ? (Marshal.PtrToStringAnsi(valueAnsi)  ?? string.Empty) : string.Empty;
+            if (action.Length == 0) return;
+            Runtime.Plugin?.EnqueueRemoteCommand(action, value);
+        }
+        catch { /* never let a managed exception cross the native boundary */ }
     }
 
     // Every void action export below is a reverse-P/Invoke (UnmanagedCallersOnly)
