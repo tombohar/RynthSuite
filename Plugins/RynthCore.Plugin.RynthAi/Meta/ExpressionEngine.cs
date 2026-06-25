@@ -2321,44 +2321,265 @@ internal sealed class ExpressionEngine
         return "1";
     }
 
+    // ── Meta-cast magic-mode swap state (mirrors BuffManager.EnsureMagicMode) ──
+    // FIX (2026-06-24, bow->wand meta-cast swap): stock ACE refuses to wield a
+    // Held-slot wand while a melee/missile weapon is in the main hand and does NOT
+    // auto-dequip it (CheckWeaponCollision, Player_Inventory.cs:1991). The OLD
+    // bare UseObject(wand) below therefore never confirmed, so a Meta-driven
+    // self-buff/cast (actiontrycast / actiontrycastbyid) deadlocked the bot
+    // forever — stuck re-issuing the equip, never reaching Magic, blocking
+    // everything (the exact BuffManager coma). We must stow the wielded weapon
+    // into a capacity-verified open pack FIRST (AutoCram pattern, AV-safe), then
+    // wield the wand. Every path is bounded so a stale dequip, a full inventory,
+    // or an unwieldable wand degrades and yields instead of looping.
+    private int _castWieldPendingId;
+    private DateTime _castWieldPendingAt = DateTime.MinValue;
+    private DateTime _castWieldCooldownUntil = DateTime.MinValue;
+    private int _castWieldFailCount;
+    private int _castBowDequipPendingId;
+    private DateTime _castBowDequipAt = DateTime.MinValue;
+    private int _castBowDequipAttempts;
+    private bool _castCombatTornDown;
+    private DateTime _castStanceStuckSince = DateTime.MinValue;
+    private DateTime _castStanceLastRecoverAt = DateTime.MinValue;
+    private DateTime _castStanceLastFlipAt = DateTime.MinValue;
+    private int _castStanceReEquips;
+    private const double CastWieldResolveTimeoutMs = 2500;
+    private const double CastWieldCooldownMs = 5000;
+    private const int CastWieldFailMax = 3;
+    private const int CastBowDequipMaxAttempts = 3;
+    private const int CastStanceReEquipMax = 2;
+    private const double CastStanceStuckRecoverMs = 8000;
+    private const double CastStanceFlipGateMs = 1200;
+
     /// <summary>
     /// Ensures the character is in magic mode. Returns true if already in magic mode.
-    /// Otherwise takes one step (equip wand or change stance) and returns false.
+    /// Otherwise takes one bounded step (dequip blocking weapon, equip wand, or change
+    /// stance) and returns false. Mirrors BuffManager.EnsureMagicMode so a Meta cast
+    /// can never deadlock on the stock-ACE bow→wand collision.
     /// </summary>
     private bool EnsureMagicModeForCast()
     {
-        if (_host.HasGetCurrentCombatMode && _host.GetCurrentCombatMode() == CombatMode.Magic)
-            return true;
-
-        if (_worldObjectCache != null && _host.HasUseObject)
+        if (!_host.HasGetCurrentCombatMode)
         {
-            WorldObject? wand = null;
-            foreach (var wo in _worldObjectCache.GetDirectInventory())
-            {
-                if (wo.ObjectClass != AcObjectClass.WandStaffOrb) continue;
-                wand = wo;
-                break;
-            }
-
-            if (wand != null)
-            {
-                bool wielded = _host.HasGetObjectWielderInfo
-                    ? (_host.GetPlayerId() is uint pid && pid != 0
-                       && _host.TryGetObjectWielderInfo(unchecked((uint)wand.Id), out uint w, out _)
-                       && w == pid)
-                    : wand.Values(LongValueKey.CurrentWieldedLocation, 0) > 0;
-
-                if (!wielded)
-                {
-                    _host.UseObject(unchecked((uint)wand.Id));
-                    return false;
-                }
-            }
+            // Can't read mode — best-effort flip and bail.
+            if (_host.HasChangeCombatMode) _host.ChangeCombatMode(CombatMode.Magic);
+            return false;
         }
 
-        if (_host.HasChangeCombatMode)
+        if (_host.GetCurrentCombatMode() == CombatMode.Magic)
+        {
+            // Reached Magic — clear the whole swap state machine so a later
+            // recoverable episode (e.g. after a slot frees from looting) starts clean.
+            _castWieldPendingId = 0;
+            _castWieldCooldownUntil = DateTime.MinValue;
+            _castWieldFailCount = 0;
+            _castBowDequipPendingId = 0;
+            _castBowDequipAttempts = 0;
+            _castCombatTornDown = false;
+            _castStanceStuckSince = DateTime.MinValue;
+            _castStanceReEquips = 0;
+            return true;
+        }
+
+        int wandId = FindCastWand();
+        if (wandId == 0 || !_host.HasUseObject)
+        {
+            // No wand (or no UseObject) — try bare-handed magic.
+            if (_host.HasChangeCombatMode) _host.ChangeCombatMode(CombatMode.Magic);
+            return false;
+        }
+
+        DateTime now = DateTime.Now;
+
+        if (!IsCastWielded(wandId))
+        {
+            // Wield gate: don't spam UseObject while a prior equip is in flight.
+            if (now < _castWieldCooldownUntil) return false;
+
+            if (_castWieldPendingId != 0)
+            {
+                if ((now - _castWieldPendingAt).TotalMilliseconds < CastWieldResolveTimeoutMs)
+                    return false;
+                _host.Log($"[MetaCast] wand 0x{(uint)_castWieldPendingId:X8} wield not confirmed in " +
+                          $"{CastWieldResolveTimeoutMs:0}ms — cooling down {CastWieldCooldownMs:0}ms");
+                _castWieldPendingId = 0;
+                _castWieldCooldownUntil = now.AddMilliseconds(CastWieldCooldownMs);
+                // Bound the previously-infinite wield loop: after a few cooldowns the
+                // swap provably can't complete now (no pack to free the bow, or an
+                // unresolvable collision) — degrade so the meta retries later, not forever.
+                if (++_castWieldFailCount >= CastWieldFailMax)
+                    return CastSwapDegrade(wandId, FindCastWieldedNonWand(wandId));
+                return false;
+            }
+
+            // Tear down any in-flight physical attack BEFORE the UseObject (once per
+            // episode), or AC gets an equip while m_bAttacking is set and wedges the
+            // item-action gate ("you can only move or use one item at a time").
+            int mode = _host.GetCurrentCombatMode();
+            if (!_castCombatTornDown && (mode == CombatMode.Melee || mode == CombatMode.Missile))
+            {
+                if (_host.HasCancelAttack)   _host.CancelAttack();
+                if (_host.HasStopCompletely) _host.StopCompletely();
+                _castCombatTornDown = true;
+                _host.Log($"[MetaCast] CancelAttack+StopCompletely before wand equip (mode was {mode})");
+            }
+
+            // Stock ACE won't auto-dequip the bow for a Held-slot wand: stow the wielded
+            // non-wand weapon into a capacity-verified open pack FIRST, then wield the wand.
+            int bowId = FindCastWieldedNonWand(wandId);
+            if (bowId != 0 && _host.HasMoveItemInternal)
+            {
+                if (_castBowDequipPendingId == bowId
+                    && (now - _castBowDequipAt).TotalMilliseconds < CastWieldResolveTimeoutMs
+                    && IsCastWielded(bowId))
+                    return false; // dequip still resolving
+
+                if (IsCastWielded(bowId))
+                {
+                    int openPack = WorldObjectCache.FindPackFor(_host, _worldObjectCache, includeMainPack: true, requireFree: 1);
+                    if (openPack == 0 || _castBowDequipAttempts >= CastBowDequipMaxAttempts)
+                    {
+                        _host.Log($"[MetaCast] bow 0x{(uint)bowId:X8} dequip blocked (openPack=0x{(uint)openPack:X8}, " +
+                                  $"attempts={_castBowDequipAttempts}/{CastBowDequipMaxAttempts}) — degrading");
+                        return CastSwapDegrade(wandId, bowId);
+                    }
+                    _castBowDequipAttempts++;
+                    _host.MoveItemInternal((uint)bowId, (uint)openPack, 0, 1); // amount>=1 (engine rejects 0)
+                    _castBowDequipPendingId = bowId;
+                    _castBowDequipAt = now;
+                    _host.Log($"[MetaCast] dequip bow 0x{(uint)bowId:X8} -> pack 0x{(uint)openPack:X8} " +
+                              $"(attempt {_castBowDequipAttempts}/{CastBowDequipMaxAttempts}) before wand equip");
+                    return false; // yield until the bow is out of hand
+                }
+                _castBowDequipPendingId = 0; // bow confirmed unwielded — fall through to wield the wand
+            }
+
+            _host.UseObject((uint)wandId);
+            _castWieldPendingId = wandId;
+            _castWieldPendingAt = now;
+            return false; // yield — let the server equip the wand
+        }
+
+        // Wand wielded — clear the wield gate and flip stance with bounded recovery.
+        if (_castWieldPendingId == wandId)
+        {
+            _castWieldPendingId = 0;
+            _castWieldCooldownUntil = DateTime.MinValue;
+        }
+
+        if (_castStanceStuckSince == DateTime.MinValue)
+            _castStanceStuckSince = now;
+        double stuckMs = (now - _castStanceStuckSince).TotalMilliseconds;
+
+        // Capped re-equip recovery (mirrors CombatManager/BuffManager): resyncs a rare
+        // stale "wielded reads true". HARD-CAPPED — UseObject on a genuinely wielded wand
+        // is a MOVE to AC, and unbounded re-equip jams the item-action queue permanently.
+        if (_castStanceReEquips < CastStanceReEquipMax
+            && stuckMs > CastStanceStuckRecoverMs
+            && (now - _castStanceLastRecoverAt).TotalMilliseconds > CastStanceStuckRecoverMs)
+        {
+            _castStanceLastRecoverAt = now;
+            _castStanceReEquips++;
+            _host.Log($"[MetaCast] stance STUCK {stuckMs:0}ms (wielded, mode≠Magic) — re-equip {_castStanceReEquips}/{CastStanceReEquipMax} 0x{(uint)wandId:X8}");
+            _host.UseObject((uint)wandId);
+            return false;
+        }
+
+        // Throttle the mode flip so we don't issue ChangeCombatMode every pulse.
+        if (_host.HasChangeCombatMode
+            && (now - _castStanceLastFlipAt).TotalMilliseconds > CastStanceFlipGateMs)
+        {
             _host.ChangeCombatMode(CombatMode.Magic);
+            _castStanceLastFlipAt = now;
+        }
         return false;
+    }
+
+    // Bounded degrade for the meta-cast swap. If the wand ended up wielded but mode never
+    // flipped, dequip it so the bow can re-wield; otherwise re-wield the bow we stowed so
+    // the character is never left bare-handed. Reset the state machine and yield — the meta
+    // retries on a later pulse once inventory/stance frees up (no buff family to park here).
+    private bool CastSwapDegrade(int wandId, int bowId)
+    {
+        if (wandId != 0 && _host.HasMoveItemInternal && IsCastWielded(wandId))
+        {
+            int openPack = WorldObjectCache.FindPackFor(_host, _worldObjectCache, includeMainPack: true, requireFree: 1);
+            if (openPack != 0) _host.MoveItemInternal((uint)wandId, (uint)openPack, 0, 1);
+        }
+        else if (bowId != 0 && !IsCastWielded(bowId) && _host.HasUseObject)
+        {
+            _host.UseObject((uint)bowId); // re-wield the bow we dequipped
+        }
+        _castWieldPendingId = 0;
+        _castBowDequipPendingId = 0;
+        _castBowDequipAttempts = 0;
+        _castWieldFailCount = 0;
+        _castCombatTornDown = false;
+        return false;
+    }
+
+    // First wand in direct inventory. Robust IsWandObject (ObjectClass OR name) per the
+    // wand-classification pitfall: an Unknown-class wand still needs to be found and wielded.
+    private int FindCastWand()
+    {
+        if (_worldObjectCache == null) return 0;
+        foreach (var wo in _worldObjectCache.GetDirectInventory())
+            if (IsCastWandObject(wo)) return wo.Id;
+        return 0;
+    }
+
+    // Live (forceRefresh) wielded check — never trusts a stale cache snapshot (gates an
+    // AV-risky move). Mirrors BuffManager.IsWieldedLive.
+    private bool IsCastWielded(int id)
+    {
+        if (id == 0 || _worldObjectCache == null) return false;
+        foreach (var wo in _worldObjectCache.GetDirectInventory(forceRefresh: true))
+            if (wo.Id == id)
+                return wo.Values(LongValueKey.CurrentWieldedLocation, 0) > 0;
+        if (_host.HasGetObjectWielderInfo)
+        {
+            uint pid = _host.GetPlayerId();
+            if (pid != 0 && _host.TryGetObjectWielderInfo((uint)id, out uint wielder, out _))
+                return wielder == pid;
+        }
+        return false;
+    }
+
+    // The currently-wielded non-wand weapon (the bow) that blocks the Held-slot wand.
+    private int FindCastWieldedNonWand(int wandId)
+    {
+        if (_worldObjectCache == null) return 0;
+        foreach (var wo in _worldObjectCache.GetDirectInventory(forceRefresh: true))
+        {
+            if (wo.Id == wandId) continue;
+            if (IsCastWandObject(wo)) continue;
+            if (wo.Values(LongValueKey.CurrentWieldedLocation, 0) > 0
+                && (wo.ObjectClass == AcObjectClass.MeleeWeapon
+                 || wo.ObjectClass == AcObjectClass.MissileWeapon))
+                return wo.Id;
+        }
+        return 0;
+    }
+
+    // FindCastOpenPack DELETED (P2a) — replaced by shared
+    // WorldObjectCache.FindPackFor(host, cache, includeMainPack:true, requireFree:1).
+    // MetaCast wand-swap: requireFree:1 so a single free slot still allows the swap.
+    // Call sites: the meta-cast dequip block + CastSwapDegrade.
+
+    private static bool IsCastWandObject(WorldObject wo) =>
+        wo.ObjectClass == AcObjectClass.WandStaffOrb || IsCastWandName(wo.Name);
+
+    private static bool IsCastWandName(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        return name.IndexOf("Orb",      StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("Staff",    StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("Wand",     StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("Scepter",  StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("Sceptre",  StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("Baton",    StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("Crozier",  StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     private string EvalActionTryCastById(string arg)

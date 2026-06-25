@@ -199,6 +199,20 @@ public class BuffManager : IDisposable
     private const double WieldResolveTimeoutMs = 2500;
     private const double WieldCooldownMs = 5000;
 
+    // FIX (2026-06-24, bow->wand buff swap): stock ACE refuses to wield a Held-slot wand
+    // while the bow is in the main hand and does NOT auto-dequip it (CheckWeaponCollision),
+    // so the bare UseObject(wand) below never confirmed -> permanent buffing coma. We must
+    // stow the bow into a capacity-verified open pack FIRST (AutoCram pattern), then wield
+    // the wand. All paths are bounded so a stale/no-op dequip or unwieldable wand can never
+    // loop forever; on exhaustion the buff family is parked and the bot fights unbuffed.
+    private int _bowDequipPendingId;
+    private DateTime _bowDequipAt = DateTime.MinValue;
+    private int _bowDequipAttempts;
+    private const int BowDequipMaxAttempts = 3;
+    private int _wieldGateFailCount;
+    private const int WieldGateFailMax = 3;
+    private bool _wandSwapExhausted;   // per-EnsureMagicMode(forBuff) signal: swap can't succeed now
+
     // Shared cross-subsystem weapon-swap serializer (set by RynthAiPlugin).
     // Prevents the buff wand-equip from racing CombatManager's weapon equip.
     private WeaponSwapGate? _weaponSwapGate;
@@ -864,7 +878,23 @@ public class BuffManager : IDisposable
                 continue;
             }
 
-            if (!EnsureMagicMode()) return true;
+            if (!EnsureMagicMode(forBuff: true))
+            {
+                if (_wandSwapExhausted)
+                {
+                    // FIX: the bow->wand swap provably can't succeed right now (no open
+                    // pack / repeated fails). Park THIS family in the existing per-family
+                    // cooldown so AnyBuffBelowThreshold + this selector skip it ->
+                    // CheckAndCastSelfBuffs returns false -> BotAction resets to 'Default'
+                    // -> combat runs. Buffing stays top priority; only the impossible
+                    // family is shelved, time-boxed, and auto-retried.
+                    if (buffFamily != 0)
+                        _buffFailCooldownUntil[buffFamily] = DateTime.Now.AddSeconds(BuffFailCooldownSec);
+                    _host.Log($"[WieldGate] wand-swap exhausted for '{buffBaseName}' (fam={buffFamily}) — parking {BuffFailCooldownSec:0}s, fighting unbuffed");
+                    continue;
+                }
+                return true; // normal in-progress swap — keep BotAction='Buffing' and yield
+            }
 
             _pendingSpellId = spellId;
 
@@ -1879,8 +1909,10 @@ public class BuffManager : IDisposable
     private const double BuffStanceStuckRecoverMs = 8000;
     private const int BuffStanceReEquipMax = 2;
 
-    private bool EnsureMagicMode()
+    private bool EnsureMagicMode(bool forBuff = false)
     {
+        // Per-call signal; only the buff path may set it (vitals/self-heals NEVER degrade).
+        _wandSwapExhausted = false;
         if (CurrentCombatMode == CombatMode.Magic)
         {
             // Successfully reached magic mode — clear per-cycle teardown flag
@@ -1895,6 +1927,11 @@ public class BuffManager : IDisposable
             _buffStanceStuckSince = DateTime.MinValue;
             _buffStanceReEquips = 0;
             _buffStanceWedgeWarned = false;
+            // FIX: reached Magic — clear the new swap-confirm / resilience state so a
+            // later recoverable episode (e.g. after a slot frees from looting) starts clean.
+            _bowDequipPendingId = 0;
+            _bowDequipAttempts = 0;
+            _wieldGateFailCount = 0;
             return true;
         }
 
@@ -1945,6 +1982,11 @@ public class BuffManager : IDisposable
                           $"{WieldResolveTimeoutMs:0}ms — cooling down {WieldCooldownMs:0}ms");
                 _pendingWieldId = 0;
                 _wieldCooldownUntil = now.AddMilliseconds(WieldCooldownMs);
+                // FIX: bound the previously-infinite wield loop. If the wand still won't
+                // wield after a few cooldowns (e.g. no pack to free the bow, or an
+                // unresolvable collision), degrade so buffing yields and combat runs.
+                if (++_wieldGateFailCount >= WieldGateFailMax)
+                    return SignalSwapFailure(forBuff, FindWieldedNonWandWeapon(wandId), wandId);
                 return false;
             }
 
@@ -1966,6 +2008,39 @@ public class BuffManager : IDisposable
                 if (_host.HasStopCompletely) _host.StopCompletely();
                 _combatTeardownDoneForCurrentBuffCycle = true;
                 _host.Log($"[BuffPre] CancelAttack+StopCompletely before wand equip (mode was {CurrentCombatMode})");
+            }
+
+            // FIX: stock ACE will NOT auto-dequip the bow for a Held-slot wand
+            // (CheckWeaponCollision refuses while mainhand != null). Stow the wielded
+            // non-wand weapon into a capacity-verified open pack FIRST (AutoCram pattern,
+            // AV-safe), then UseObject(wand) once the hand is free. Fully bounded.
+            int bowId = FindWieldedNonWandWeapon(wandId);
+            if (bowId != 0)
+            {
+                if (_bowDequipPendingId == bowId
+                    && (now - _bowDequipAt).TotalMilliseconds < WieldResolveTimeoutMs
+                    && IsWieldedLive(bowId))
+                    return false; // dequip still resolving
+
+                if (IsWieldedLive(bowId))
+                {
+                    int openPack = WorldObjectCache.FindPackFor(_host, _worldObjectCache, includeMainPack: true, requireFree: 1);
+                    if (openPack == 0 || _bowDequipAttempts >= BowDequipMaxAttempts)
+                    {
+                        // No verified-open pack to receive the bow, or repeated dequip
+                        // failures -> the swap provably can't complete now. Degrade.
+                        _host.Log($"[WieldGate] bow 0x{(uint)bowId:X8} dequip blocked (openPack=0x{(uint)openPack:X8}, attempts={_bowDequipAttempts}/{BowDequipMaxAttempts}) — degrading");
+                        return SignalSwapFailure(forBuff, bowId, wandId);
+                    }
+                    _bowDequipAttempts++;
+                    _host.MoveItemInternal((uint)bowId, (uint)openPack, 0, 1); // amount>=1 (engine rejects 0)
+                    _bowDequipPendingId = bowId;
+                    _bowDequipAt = now;
+                    _lastCastAttempt = now;
+                    _host.Log($"[WieldGate] dequip bow 0x{(uint)bowId:X8} -> pack 0x{(uint)openPack:X8} (attempt {_bowDequipAttempts}/{BowDequipMaxAttempts}) before wand equip");
+                    return false; // yield until the bow is out of hand
+                }
+                _bowDequipPendingId = 0; // bow confirmed unwielded — fall through to wield the wand
             }
 
             _host.UseObject((uint)wandId);
@@ -2031,6 +2106,70 @@ public class BuffManager : IDisposable
             _host.Log($"[BuffStance] ChangeCombatMode(Magic) retry #{_buffStanceConsecutiveFails} (stuck {stuckMs / 1000:0}s, next retry in {gateMs / 1000:0}s)");
         }
         return false; // Yield — let stance animation finish
+    }
+
+    // The currently-wielded non-wand weapon (the bow) that blocks the Held-slot wand.
+    private int FindWieldedNonWandWeapon(int wandId)
+    {
+        if (_worldObjectCache == null) return 0;
+        foreach (var wo in _worldObjectCache.GetDirectInventory(forceRefresh: true))
+        {
+            if (wo.Id == wandId) continue;
+            if (IsWandObject(wo)) continue;
+            if (wo.Values(LongValueKey.CurrentWieldedLocation, 0) > 0
+                && (wo.ObjectClass == AcObjectClass.MeleeWeapon
+                 || wo.ObjectClass == AcObjectClass.MissileWeapon))
+                return wo.Id;
+        }
+        return 0;
+    }
+
+    // Live (forceRefresh) wielded check — never trusts a stale cache snapshot.
+    private bool IsWieldedLive(int id)
+    {
+        if (id == 0 || _worldObjectCache == null) return false;
+        foreach (var wo in _worldObjectCache.GetDirectInventory(forceRefresh: true))
+            if (wo.Id == id)
+                return wo.Values(LongValueKey.CurrentWieldedLocation, 0) > 0;
+        if (_host.HasGetObjectWielderInfo)
+        {
+            uint pid = _host.GetPlayerId();
+            if (pid != 0 && _host.TryGetObjectWielderInfo((uint)id, out uint wielder, out _))
+                return wielder == pid;
+        }
+        return false;
+    }
+
+    // FindOpenPackForDequip DELETED (P2a) — replaced by the shared
+    // WorldObjectCache.FindPackFor(host, cache, includeMainPack:true, requireFree:1).
+    // includeMainPack:true preserves the prior main-pack (cap-102) fallback so the
+    // just-shipped wand-swap dequip behaviour is unchanged; requireFree:1 because a
+    // single genuinely-free slot is enough for the bow (anti-churn is for the auto-
+    // loops, not the user/buff-driven swap). Call sites: EnsureMagicMode + SignalSwapFailure.
+
+    // Bounded degrade. Re-arms the bow for combat and, for the BUFF path only, raises the
+    // exhaustion signal so the buff selector parks the family and the bot fights unbuffed.
+    // Vitals (forBuff=false) just yield/retry and never park (death-risk: heals must keep trying).
+    private bool SignalSwapFailure(bool forBuff, int bowId, int wandId)
+    {
+        // If the wand ended up wielded but mode never flipped, dequip it so the bow can
+        // re-wield (stock ACE won't auto-dequip the wand for a MissileWeapon slot). Only
+        // one of these two branches fires per call — no same-tick wield/unwield race.
+        if (wandId != 0 && IsWieldedLive(wandId))
+        {
+            int openPack = WorldObjectCache.FindPackFor(_host, _worldObjectCache, includeMainPack: true, requireFree: 1);
+            if (openPack != 0) _host.MoveItemInternal((uint)wandId, (uint)openPack, 0, 1);
+        }
+        else if (bowId != 0 && !IsWieldedLive(bowId))
+        {
+            _host.UseObject((uint)bowId); // re-wield the bow for missile combat
+        }
+        _pendingWieldId = 0;
+        _bowDequipPendingId = 0;
+        _bowDequipAttempts = 0;
+        _wieldGateFailCount = 0;
+        if (forBuff) _wandSwapExhausted = true;
+        return false;
     }
 
     /// <summary>
