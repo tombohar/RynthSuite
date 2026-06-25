@@ -43,6 +43,8 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra givexp [count] <item> to <player>       — partial player name match");
         ChatLine("[RynthAi] /ra givepp [count] <item> to <player>       — partial item and player");
         ChatLine("[RynthAi] /ra giver [count] <regex> to <player>       — regex item name match");
+        ChatLine("[RynthAi] /ra givea[p|xp|pp|r] <item> to <player>     — give ALL matching stacks ('… stop' cancels the queue)");
+        ChatLine("[RynthAi] /ra gap <item> to <player>                  — alias for giveapp (give all, partial item + partial player)");
         ChatLine("[RynthAi] /ra ig <profile> to <player>                — give items matching loot profile");
         ChatLine("[RynthAi] /ra igp <profile> to <player>               — ig with partial player name");
         ChatLine("[RynthAi] /ra use[i|l][p|pi|lp] <name> [on <name2>]  — use item (i=inv, l=land, p=partial)");

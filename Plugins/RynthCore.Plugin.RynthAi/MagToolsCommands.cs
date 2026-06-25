@@ -660,12 +660,26 @@ public sealed partial class RynthAiPlugin
 
         if (found == null) { ChatLine($"[RynthAi] Wielded item not found: '{name}'"); return true; }
 
-        // Move to player (main pack)
-        uint playerId = Host.GetPlayerId();
-        Host.MoveItemInternal(unchecked((uint)found.Id), playerId, 0, 0);
-        Host.Log($"[RynthAi] /mt dequip: {found.Name} (0x{(uint)found.Id:X8}) → pack");
+        // FIX (2026-06-24): MoveItemInternal with amount=0 is a silent no-op — the engine
+        // guard (ClientHelperHooks.cs:431 `if (amount <= 0) return false;`) rejects it, so
+        // the old amount=0 call dequipped nothing. Must pass amount>=1. Also target a
+        // capacity-verified open pack (not the main pack blindly) — moving into a FULL pack
+        // CRASHES the client via the native PutItemInContainer path.
+        int dest = WorldObjectCache.FindPackFor(Host, _objectCache, includeMainPack: true, requireFree: 1);
+        if (dest == 0)
+        {
+            ChatLine($"[RynthAi] /mt dequip: no open pack for '{found.Name}' — inventory full.");
+            return true;
+        }
+        Host.MoveItemInternal(unchecked((uint)found.Id), unchecked((uint)dest), 0, 1);
+        Host.Log($"[RynthAi] /mt dequip: {found.Name} (0x{(uint)found.Id:X8}) → pack 0x{(uint)dest:X8}");
         return true;
     }
+
+    // FindOpenPackForDequip DELETED (P2a) — replaced by shared
+    // WorldObjectCache.FindPackFor(host, cache, includeMainPack:true, requireFree:1).
+    // User-driven /mt dequip: requireFree:1 so a single genuinely-free slot still
+    // counts (do not report 'full' when 1 slot exists).
 
     // ═════════════════════════════════════════════════════════════════════════
     //  /mt fellow
