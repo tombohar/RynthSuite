@@ -32,6 +32,33 @@ internal sealed class EquipAppraisal
     public string LongDesc = "";
 }
 
+/// <summary>One item in the read-only remote full-inventory view (P1). Appraisal is cache-hit-only
+/// (never triggers a RequestId) so it is null for the un-identified long tail.</summary>
+internal sealed class InventoryItemSnapshot
+{
+    public uint Id;
+    public string Name = "";
+    public uint Wcid;
+    public int ObjectClass;
+    public uint ContainerId;          // BFS parent (player/side-pack); 0 = equipped pseudo-container
+    public int Location;              // RAW ownership location bits (container-type + slot) — NOT pre-interpreted
+    public int Slot = -1;             // 0-based dense index within the container's contents array
+    public int StackCount = 1;
+    public uint IconDid;              // PWD _iconID (0x06xxxxxx); 0 if bridge/value unavailable
+    public bool Equipped;
+    public int WieldedLocation;
+    public EquipAppraisal? Appraisal; // only when HasAppraisalData(id); null otherwise
+}
+
+/// <summary>One container grouping for the remote inventory view (main pack / a side pack / equipped).</summary>
+internal sealed class InventoryContainerSnapshot
+{
+    public uint Id;
+    public string Name = "";
+    public string Kind = "main";      // "main" | "side" | "equipped"
+    public int Capacity;              // ITEMS_CAPACITY if known, else 0
+}
+
 public sealed partial class RynthAiPlugin : RynthPluginBase
 {
     internal static readonly IntPtr NamePointer = Marshal.StringToHGlobalAnsi("RynthAi");
@@ -540,6 +567,148 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         return outList;
     }
 
+    /// Fill the appraisal fields for an inventory item from the object cache. CACHE-HIT-ONLY —
+    /// the caller gates on Host.HasAppraisalData; this NEVER fires RequestId (busy-count invariant,
+    /// §4.3). Mirrors AppraiseEquipment's field reads (Name/Slot are carried on the item, not here).
+    private EquipAppraisal BuildInventoryAppraisal(WorldObjectCache cache, int id)
+    {
+        var a = new EquipAppraisal { Id = unchecked((uint)id) };
+        a.ArmorLevel  = cache.GetIntProperty(id, 28, 0);
+        a.Value       = cache.GetIntProperty(id, 19, 0);
+        a.Burden      = cache.GetIntProperty(id, 5, 0);
+        a.Workmanship = cache.GetIntProperty(id, 105, 0);
+        a.Material    = cache.GetIntProperty(id, 131, 0);
+        a.MaxMana     = cache.GetIntProperty(id, 108, 0);
+        a.CurMana     = cache.GetIntProperty(id, 107, 0);
+        a.Damage      = cache.GetIntProperty(id, 44, 0);
+        a.DamageType  = cache.GetIntProperty(id, 45, 0);
+        a.WeaponDef   = cache.GetDoubleProperty(id, 29, 0);
+        a.MissileDef  = cache.GetDoubleProperty(id, 149, 0);
+        a.MagicDef    = cache.GetDoubleProperty(id, 150, 0);
+        a.Variance    = cache.GetDoubleProperty(id, 22, 0);
+        a.ElementalMod = cache.GetDoubleProperty(id, 152, 0);
+        if (a.ArmorLevel > 0)
+        {
+            a.Resist = new double[7];
+            for (int i = 0; i < 7; i++) a.Resist[i] = cache.GetDoubleProperty(id, ResistStypes[i], 1.0);
+        }
+        a.LongDesc = cache.GetStringProperty(id, 16, string.Empty);
+        if (Host.HasGetObjectSpellIds)
+        {
+            uint[] buf = new uint[64];
+            int n = Host.GetObjectSpellIds(unchecked((uint)id), buf, buf.Length);
+            if (n > 0)
+            {
+                int take = Math.Min(n, buf.Length);
+                var names = new List<string>(take);
+                for (int i = 0; i < take; i++)
+                {
+                    var info = SpellTableStub.GetById((int)buf[i]);
+                    if (info != null && !string.IsNullOrEmpty(info.Name)) names.Add(info.Name);
+                }
+                a.Spells = names.ToArray();
+            }
+        }
+        return a;
+    }
+
+    /// Build the read-only full-inventory snapshot for the remote viewer and publish it to the dashboard.
+    /// Runs on the SAME ~3s gate as equipment; reuses GetDirectInventory's copy-snapshot (off-thread-safe,
+    /// 1s cooldown re-serves the cache if called hot). NEVER fires RequestId — appraisal is cache-hit-only.
+    private void ScanInventoryForRemote()
+    {
+        var cache = _objectCache;
+        var dash = _dashboard;
+        if (cache == null || dash == null) return;
+        uint playerId = _playerId;
+        if (playerId == 0) return;
+
+        IReadOnlyList<WorldObject> inv;
+        try { inv = cache.GetDirectInventory(); }
+        catch { return; }
+
+        bool hasIcon = Host.HasGetObjectDataIdProperty;
+        bool hasWcid = Host.HasGetObjectWcid;
+        bool hasOwn  = Host.HasGetObjectOwnershipInfo;
+        bool hasAppr = Host.HasHasAppraisalData;
+
+        var items = new List<InventoryItemSnapshot>(inv.Count);
+        var idToName = new Dictionary<uint, string>(inv.Count);
+
+        foreach (var wo in inv)
+        {
+            int id = wo.Id;
+            uint uid = unchecked((uint)id);
+            idToName[uid] = wo.Name ?? string.Empty;
+
+            bool equipped = wo.WieldedLocation > 0;
+            // Equipped items merge in without a BFS parent → group them under the "Equipped"
+            // pseudo-container (id 0); everything else keeps its authoritative BFS parent.
+            uint containerId = equipped ? 0u : unchecked((uint)wo.DirectContainerId);
+
+            int location = 0;
+            if (hasOwn && Host.TryGetObjectOwnershipInfo(uid, out _, out _, out uint loc))
+                location = unchecked((int)loc);
+
+            uint wcid = 0;
+            if (hasWcid) Host.TryGetObjectWcid(uid, out wcid);
+
+            uint icon = 0;
+            if (hasIcon) Host.TryGetObjectDataIdProperty(uid, 8u, out icon);   // Icon=8
+
+            int stack = cache.GetIntProperty(id, 12, 1);   // STACK_SIZE; 1 for non-stackables
+            if (stack < 1) stack = 1;
+
+            EquipAppraisal? appr = null;
+            if (hasAppr && Host.HasAppraisalData(uid))
+                appr = BuildInventoryAppraisal(cache, id);
+
+            items.Add(new InventoryItemSnapshot
+            {
+                Id = uid,
+                Name = wo.Name ?? string.Empty,
+                Wcid = wcid,
+                ObjectClass = (int)wo.ObjectClass,
+                ContainerId = containerId,
+                Location = location,
+                Slot = wo.DirectSlot,
+                StackCount = stack,
+                IconDid = icon,
+                Equipped = equipped,
+                WieldedLocation = wo.WieldedLocation,
+                Appraisal = appr,
+            });
+        }
+
+        // Containers: equipped pseudo-container (if any) → main pack → each referenced side pack.
+        var containers = new List<InventoryContainerSnapshot>();
+        if (items.Exists(it => it.Equipped))
+            containers.Add(new InventoryContainerSnapshot { Id = 0, Name = "Equipped", Kind = "equipped", Capacity = 0 });
+        containers.Add(new InventoryContainerSnapshot
+        {
+            Id = playerId,
+            Name = "Main Pack",
+            Kind = "main",
+            Capacity = cache.GetIntProperty(unchecked((int)playerId), 6, 0),   // ITEMS_CAPACITY
+        });
+        var seen = new HashSet<uint> { 0u, playerId };
+        foreach (var it in items)
+        {
+            uint cid = it.ContainerId;
+            if (!seen.Add(cid)) continue;
+            idToName.TryGetValue(cid, out string? pname);   // a side pack is itself an item in the list
+            containers.Add(new InventoryContainerSnapshot
+            {
+                Id = cid,
+                Name = string.IsNullOrEmpty(pname) ? "Side Pack" : pname,
+                Kind = "side",
+                Capacity = cache.GetIntProperty(unchecked((int)cid), 6, 0),
+            });
+        }
+
+        dash.SetInventory(containers, items);
+    }
+
     // Core scarab tiers, seeded so a fully-depleted tier still reports 0 (the "you're OUT" alert the
     // user wants) instead of silently vanishing. Any OTHER "...Scarab" stack (higher tier, Mana Scarab,
     // etc.) is captured dynamically by its real in-game name, so the list is correct by construction.
@@ -922,6 +1091,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     _dashboard?.SetFreeSlots(freeSlots);
                     _dashboard?.SetComponentCounts(scarabs, tapers, scarabsByType);
                     _dashboard?.SetEquipment(AppraiseEquipment(equipment));
+
+                    // Remote full-inventory snapshot (P1) — same 3s gate, reuses the cached walk.
+                    ScanInventoryForRemote();
                 }
 
                 if (diag) Host.Log("[RynthAi] OnTick: before salvageManager");
@@ -1857,6 +2029,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 if (parts.Length >= 3 && parts[2].Equals("stop", StringComparison.OrdinalIgnoreCase)) CancelGiveQueue();
                 else HandleGiveCommand(parts, GiveItemMatch.Exact,   partialPlayer: true,  allItems: true);
                 break;
+            case "gap":          // short alias for giveapp (give all, partial item + partial player)
             case "giveapp":
                 if (parts.Length >= 3 && parts[2].Equals("stop", StringComparison.OrdinalIgnoreCase)) CancelGiveQueue();
                 else HandleGiveCommand(parts, GiveItemMatch.Partial, partialPlayer: true,  allItems: true);

@@ -128,6 +128,13 @@ internal sealed class LegacyDashboardRenderer
     // Equipped gear with full appraisal, pushed from the pump thread; volatile ref.
     private volatile EquipAppraisal[] _equipment = System.Array.Empty<EquipAppraisal>();
 
+    // Full read-only inventory for the remote viewer (P1), pushed from the pump thread; volatile refs.
+    // Kept OUT of BuildSnapshotJson (the 150ms hot path) — served by its own RynthPluginGetInventoryJson
+    // export so 100s of items never ride the status snapshot. _inventoryVersion bumps on each rescan.
+    private volatile InventoryItemSnapshot[] _invItems = System.Array.Empty<InventoryItemSnapshot>();
+    private volatile InventoryContainerSnapshot[] _invContainers = System.Array.Empty<InventoryContainerSnapshot>();
+    private int _inventoryVersion;   // Interlocked: bumped on write, read in BuildInventoryJson
+
     // ── Monster editor (external process) ────────────────────────────────────
     private FileSystemWatcher? _monsterWatcher;
     private volatile bool _monsterFileChanged;
@@ -1916,6 +1923,93 @@ internal sealed class LegacyDashboardRenderer
     /// Pushed from the plugin tick — the gear the character is wearing/wielding, with full appraisal.
     public void SetEquipment(List<EquipAppraisal> equipment)
         => _equipment = equipment != null ? equipment.ToArray() : System.Array.Empty<EquipAppraisal>();
+
+    /// Pushed from the plugin tick — the full read-only inventory (containers + items) for the remote
+    /// viewer. Atomic ref-swap of both arrays + a monotonic version bump (consumers detect change).
+    public void SetInventory(List<InventoryContainerSnapshot> containers, List<InventoryItemSnapshot> items)
+    {
+        _invContainers = containers != null ? containers.ToArray() : System.Array.Empty<InventoryContainerSnapshot>();
+        _invItems = items != null ? items.ToArray() : System.Array.Empty<InventoryItemSnapshot>();
+        System.Threading.Interlocked.Increment(ref _inventoryVersion);
+    }
+
+    /// Serialize the full inventory (schema "rynthcore.inventory/1") for the dedicated
+    /// RynthPluginGetInventoryJson export. Own builder + 32KB initial capacity (the hot
+    /// BuildSnapshotJson stays lean at 2KB). Reads the volatile arrays once (atomic ref).
+    public string BuildInventoryJson()
+    {
+        var items = _invItems;
+        var containers = _invContainers;
+        int version = System.Threading.Interlocked.CompareExchange(ref _inventoryVersion, 0, 0);
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        var sb = new System.Text.StringBuilder(32768);
+        sb.Append('{');
+        AppendString(sb, "schema", "rynthcore.inventory/1"); sb.Append(',');
+        AppendInt(sb, "version", version); sb.Append(',');
+        AppendInt(sb, "itemCount", items.Length); sb.Append(',');
+        sb.Append("\"containers\":[");
+        for (int i = 0; i < containers.Length; i++)
+        {
+            var c = containers[i];
+            if (i > 0) sb.Append(',');
+            sb.Append("{\"id\":").Append(c.Id);
+            sb.Append(",\"name\":\""); AppendEscaped(sb, c.Name ?? string.Empty); sb.Append('"');
+            sb.Append(",\"kind\":\""); AppendEscaped(sb, c.Kind ?? string.Empty); sb.Append('"');
+            sb.Append(",\"capacity\":").Append(c.Capacity);
+            sb.Append('}');
+        }
+        sb.Append("],\"items\":[");
+        for (int i = 0; i < items.Length; i++)
+        {
+            var it = items[i];
+            if (i > 0) sb.Append(',');
+            sb.Append("{\"id\":").Append(it.Id);
+            sb.Append(",\"name\":\""); AppendEscaped(sb, it.Name ?? string.Empty); sb.Append('"');
+            sb.Append(",\"wcid\":").Append(it.Wcid);
+            sb.Append(",\"objectClass\":").Append(it.ObjectClass);
+            sb.Append(",\"containerId\":").Append(it.ContainerId);
+            sb.Append(",\"location\":").Append(it.Location);
+            sb.Append(",\"slot\":").Append(it.Slot);
+            sb.Append(",\"stackCount\":").Append(it.StackCount);
+            sb.Append(",\"iconDid\":").Append(it.IconDid);
+            sb.Append(",\"equipped\":").Append(it.Equipped ? "true" : "false");
+            sb.Append(",\"wieldedLocation\":").Append(it.WieldedLocation);
+            sb.Append(",\"appraisal\":");
+            if (it.Appraisal is { } a) AppendInventoryAppraisal(sb, a, ci);
+            else sb.Append("null");
+            sb.Append('}');
+        }
+        sb.Append("]}");
+        return sb.ToString();
+    }
+
+    /// Emit the appraisal sub-object for an inventory item — same field shape/names as the
+    /// equipment entry in BuildSnapshotJson (minus name/id/slot, which live on the item), so the
+    /// app reuses the existing AcEquipItem appraisal fragment verbatim.
+    private static void AppendInventoryAppraisal(System.Text.StringBuilder sb, EquipAppraisal a, System.Globalization.CultureInfo ci)
+    {
+        sb.Append("{\"armorLevel\":").Append(a.ArmorLevel);
+        if (a.Resist is { Length: 7 })
+        {
+            sb.Append(",\"resist\":[");
+            for (int r = 0; r < 7; r++) { if (r > 0) sb.Append(','); sb.Append(a.Resist[r].ToString("0.###", ci)); }
+            sb.Append(']');
+        }
+        sb.Append(",\"value\":").Append(a.Value).Append(",\"burden\":").Append(a.Burden)
+          .Append(",\"workmanship\":").Append(a.Workmanship).Append(",\"material\":").Append(a.Material)
+          .Append(",\"maxMana\":").Append(a.MaxMana).Append(",\"curMana\":").Append(a.CurMana)
+          .Append(",\"damage\":").Append(a.Damage).Append(",\"damageType\":").Append(a.DamageType)
+          .Append(",\"weaponDef\":").Append(a.WeaponDef.ToString("0.###", ci))
+          .Append(",\"missileDef\":").Append(a.MissileDef.ToString("0.###", ci))
+          .Append(",\"magicDef\":").Append(a.MagicDef.ToString("0.###", ci))
+          .Append(",\"variance\":").Append(a.Variance.ToString("0.###", ci))
+          .Append(",\"elementalMod\":").Append(a.ElementalMod.ToString("0.###", ci));
+        sb.Append(",\"spells\":[");
+        for (int s = 0; s < a.Spells.Length; s++) { if (s > 0) sb.Append(','); sb.Append('"'); AppendEscaped(sb, a.Spells[s] ?? string.Empty); sb.Append('"'); }
+        sb.Append(']');
+        sb.Append(",\"longDesc\":\""); AppendEscaped(sb, a.LongDesc ?? string.Empty); sb.Append('"');
+        sb.Append('}');
+    }
 
     /// Whole-session kills/hour from the kill counter — a pure counter + clock, safe to compute
     /// on the off-thread snapshot poll (no AC read).

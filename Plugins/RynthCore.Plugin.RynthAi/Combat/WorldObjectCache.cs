@@ -1001,7 +1001,9 @@ public class WorldObjectCache
             for (int i = 0; i < count; i++)
             {
                 uint itemId = buf[i];
-                if (!TryAddDirectInventoryItem(itemId, playerId, out bool isContainer))
+                // Pass the container being enumerated + the item's index as the authoritative
+                // parent/slot for the remote inventory view (stashed onto the WorldObject).
+                if (!TryAddDirectInventoryItem(itemId, playerId, containerId, i, out bool isContainer))
                     continue;
 
                 if (isContainer && seenContainers.Add(itemId))
@@ -1019,6 +1021,87 @@ public class WorldObjectCache
 
         return _directInventory.ToList();
         }
+    }
+
+    // ── Shared AV-safe pack finder (P2a) ──────────────────────────────────
+    // ONE finder replacing the 4 divergent clones (InventoryManager.FindOpenPack,
+    // BuffManager.FindOpenPackForDequip, MagToolsCommands.FindOpenPackForDequip,
+    // ExpressionEngine.FindCastOpenPack). A FULL target pack CRASHES the client via
+    // the native PutItemInContainer path, so we ONLY ever return a sub-pack whose
+    // resolved free capacity (ItemsCapacity>0) is >= requireFree, picking the MOST-
+    // free so a single mis-count can't tip a near-full pack over. The P0 engine gate
+    // (ClientHelperHooks.IsFullOwnedContainer) is the hard truth; requireFree is
+    // purely churn tuning.
+    //
+    //   includeMainPack=false  -> AutoCram: cram empties the MAIN pack, so it must
+    //                             NEVER target it (would self-move and spin).
+    //   includeMainPack=true   -> wand-swap / dequip: the bow needs ONE slot; fall
+    //                             back to the main pack (top-level slots, cap 102)
+    //                             when no sub-pack qualifies.
+    //   requireFree            -> min free slots a sub-pack must have to be picked
+    //                             (2 for the auto-loops = anti-churn margin; 1 for
+    //                             user-driven /mt dequip + MetaCast wand-swap).
+    //
+    // The spec's `item` parameter is intentionally dropped: no clone ever read the
+    // source item when choosing a destination (vestigial). Two overloads preserve
+    // both snapshot disciplines: the (cache) overload force-refreshes for the AV-
+    // risky dequip paths (must not read stale); the (inv) overload reuses a caller-
+    // supplied snapshot (AutoCram's single per-tick snapshot — no double BFS).
+    public static int FindPackFor(RynthCoreHost host, WorldObjectCache? cache,
+                                  bool includeMainPack, int requireFree)
+    {
+        if (cache == null) return 0;
+        int playerId = unchecked((int)host.GetPlayerId());
+        if (playerId == 0) return 0;
+        // forceRefresh — the dequip paths gate an AV-risky move, so must not read a
+        // stale cache before the move.
+        var inv = cache.GetDirectInventory(forceRefresh: true);
+        return FindPackFor(inv, playerId, includeMainPack, requireFree);
+    }
+
+    // Snapshot overload — caller supplies an already-built inventory list (AutoCram
+    // reuses its single per-tick GetDirectInventory snapshot here; do NOT re-refresh).
+    public static int FindPackFor(IReadOnlyList<WorldObject> inv, int playerId,
+                                  bool includeMainPack, int requireFree)
+    {
+        if (inv == null || playerId == 0) return 0;
+        if (requireFree < 1) requireFree = 1;
+        int bestPack = 0, bestFree = 0;
+        int mainUsed = 0; // loose top-level item-slot occupancy (mirrors ScanInventoryStatus 594-604)
+        foreach (var p in inv)
+        {
+            if (p.Container != playerId) continue;
+            // Main-pack item-slot tally: loose, non-equipped, non-foci, non-container
+            // items directly in the player pack. Sub-packs occupy the side-pack slots,
+            // NOT the 102 item slots, so they're excluded from this count.
+            if (p.ObjectClass != AcObjectClass.Container
+                && p.ObjectClass != AcObjectClass.Foci
+                && p.Values(LongValueKey.EquippedSlots, 0) == 0)
+                mainUsed++;
+            if (p.ObjectClass != AcObjectClass.Container) continue;
+            // Skip foci — technically containers but reserved for spell components.
+            if (!string.IsNullOrEmpty(p.Name)
+                && p.Name.IndexOf("Foci", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+            int capacity = p.Values(LongValueKey.ItemsCapacity, 0);
+            if (capacity <= 0) continue; // capacity unknown — don't risk the move
+            int used = 0;
+            foreach (var it in inv)
+            {
+                if (it.Container != p.Id) continue;
+                if (it.ObjectClass == AcObjectClass.Container) continue; // sub-containers use CONTAINERS_CAPACITY
+                used++;
+            }
+            int free = capacity - used;
+            // requireFree margin: a pack with fewer than requireFree slots is ineligible
+            // so a single mis-count can't tip a near-full pack over (anti-churn).
+            if (free >= requireFree && free > bestFree) { bestFree = free; bestPack = p.Id; }
+        }
+        if (bestPack != 0) return bestPack;
+        if (!includeMainPack) return 0; // AutoCram: never target the main pack (would self-move/spin)
+        // Dequip fallback: the bow needs ONE free main-pack slot; a dequip into a
+        // non-full main pack is AV-safe (the AV is only on a genuinely FULL target).
+        int mainFree = 102 - mainUsed;
+        return mainFree > 0 ? playerId : 0;
     }
 
     public IEnumerable<WorldObject> GetContainedItems(int containerId)
@@ -1366,7 +1449,7 @@ public class WorldObjectCache
         }
     }
 
-    private bool TryAddDirectInventoryItem(uint uid, uint playerId, out bool isContainer)
+    private bool TryAddDirectInventoryItem(uint uid, uint playerId, uint containerId, int slot, out bool isContainer)
     {
         isContainer = false;
 
@@ -1402,6 +1485,8 @@ public class WorldObjectCache
 
         var wo = new WorldObject(id, name, cls);
         wo._wieldedLocationDirect = wieldedLocation;
+        wo._directContainerId = unchecked((int)containerId);   // authoritative parent from the BFS
+        wo._directSlot = slot;                                  // position in this container's contents
         wo.Cache = this;
         UpsertDirectInventoryItem(wo);
         return true;

@@ -140,6 +140,30 @@ public static unsafe class PluginExports
         }
     }
 
+    // ── Full-inventory bridge (read-only remote inventory viewer, P1) ───────────
+    // Dedicated export (NOT folded into the 150ms status snapshot) so 100s of items never ride the
+    // hot path. The RynthRemote plugin polls this on its own slower cadence (P2). Per-thread buffer
+    // (same reasoning as _snapshotPtr): polled from multiple threads; never free another's pointer.
+    [ThreadStatic] private static IntPtr _inventoryPtr;
+
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetInventoryJson", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr GetInventoryJson()
+    {
+        try
+        {
+            string json = Runtime.Plugin?.DashboardRenderer?.BuildInventoryJson() ?? "{}";
+            IntPtr newPtr = Marshal.StringToHGlobalAnsi(json);
+            IntPtr oldPtr = Interlocked.Exchange(ref _inventoryPtr, newPtr);
+            if (oldPtr != IntPtr.Zero)
+                Marshal.FreeHGlobal(oldPtr);
+            return newPtr;
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
     // ── Remote-command bridge (engine SendPluginCommand broker → this plugin) ──
     // When RynthRemote owns the command drain, the engine forwards each phone-issued
     // (action,value) command here. We COPY the ANSI args (the caller frees them right

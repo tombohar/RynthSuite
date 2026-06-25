@@ -82,6 +82,15 @@ public class WorldObject
     // Direct override for items discovered by lightweight scan (bypasses cache)
     internal int _wieldedLocationDirect = -1;
 
+    // Remote full-inventory capture (P1): stashed by WorldObjectCache during the direct-inventory
+    // BFS walk so the snapshot is self-contained. _directContainerId/_directSlot come from the BFS
+    // structure (the container we just enumerated + the item's index in its contents array) — more
+    // reliable than a live Container read, which AutoCram showed can return 0/stale off-thread.
+    internal int _directContainerId;        // parent container GUID (player or a side-pack), 0 if unset
+    internal int _directSlot = -1;          // 0-based position in GetContainerContents(), -1 if unset
+    public int DirectContainerId => _directContainerId;
+    public int DirectSlot => _directSlot;
+
     public WorldObject(int id, string name, AcObjectClass objectClass = AcObjectClass.Unknown)
     {
         Id = id;
