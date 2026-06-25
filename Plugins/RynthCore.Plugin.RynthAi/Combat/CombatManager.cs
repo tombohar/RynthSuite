@@ -1180,7 +1180,11 @@ public class CombatManager : IDisposable
         // timer makes the NEXT engagement's first equip tick see minutes of "stuck"
         // and fire a spurious recovery (busy force-clear + UseObject on a wielded wand).
         ResetStanceRecovery();
-        ClearCombatTurnMotions();
+        // Defer the turn-stop while a targeted cast is still resolving: SetMotion(turn,false)
+        // here truncates the in-flight cast gesture → ACE never finishes the cast → server
+        // Player.IsBusy stranded (relog-only wedge). The target drop above still happens; only
+        // the stop-thunk waits, bounded by IsCastInFlight (UseDone-seq or 2.5s); re-issued next tick.
+        if (!IsCastInFlight()) ClearCombatTurnMotions();
     }
 
     /// <summary>
@@ -1665,7 +1669,10 @@ public class CombatManager : IDisposable
             if (_settings.PeaceModeWhenIdle && CurrentCombatMode != CombatMode.NonCombat
                 && _scannedTargets.Count == 0 && BusyCount == 0)
             {
-                if ((DateTime.Now - _lastPeaceAttempt).TotalMilliseconds > 500)
+                // Defer idle peace-swap while a cast at the just-dropped target is still
+                // resolving: ChangeCombatMode truncates the in-flight gesture → strands
+                // Player.IsBusy. Bounded by IsCastInFlight (UseDone-seq or 2.5s).
+                if ((DateTime.Now - _lastPeaceAttempt).TotalMilliseconds > 500 && !IsCastInFlight())
                 {
                     _host.ChangeCombatMode(CombatMode.NonCombat);
                     _lastPeaceAttempt = DateTime.Now;
@@ -1743,8 +1750,16 @@ public class CombatManager : IDisposable
         if (currentDist > disengageLimit)
             return true;
 
-        if (!EquipWeaponAndSetStance(targetObj, "Auto"))
-            return true;
+        // While a targeted combat cast is still resolving on the server, do NOT re-assert
+        // stance/weapon here: EquipWeaponAndSetStance can emit ChangeCombatMode/UseObject,
+        // motion-replacing actions that truncate the in-flight cast gesture → orphan the cast
+        // → strand Player.IsBusy (relog-only wedge). Magic-only (melee re-equips every tick and
+        // never arms the flag); bounded by IsCastInFlight (UseDone-seq or 2.5s); re-runs next tick.
+        if (!(CurrentCombatMode == CombatMode.Magic && IsCastInFlight()))
+        {
+            if (!EquipWeaponAndSetStance(targetObj, "Auto"))
+                return true;
+        }
 
         bool isRanged = CurrentCombatMode == CombatMode.Missile || CurrentCombatMode == CombatMode.Magic;
         bool useNative = _settings.UseNativeAttack && _host.HasNativeAttack;
@@ -1881,7 +1896,11 @@ public class CombatManager : IDisposable
 
                 AttackWithMagic(targetObj);
 
-                if (_returnToPhysicalCombat)
+                // Don't restore the physical weapon on top of a cast just issued this tick
+                // (AttackWithMagic → MarkCombatCastIssued): the UseObject + re-equip below would
+                // truncate the in-flight gesture and strand Player.IsBusy. Defer one windup
+                // (bounded); _returnToPhysicalCombat stays true so the restore still runs after.
+                if (_returnToPhysicalCombat && !IsCastInFlight())
                 {
                     var rule2 = GetRuleForTarget(targetObj);
                     string elem2 = GetPreferredElement(targetObj, rule2);
@@ -2078,7 +2097,11 @@ public class CombatManager : IDisposable
         _pendingJudgeCastAt = DateTime.MinValue;
         _facingTarget       = false;
         _returnToPhysicalCombat = false;
-        ClearCombatTurnMotions();
+        // Target-switch turn-stop: defer while a cast at the PREVIOUS target is still resolving
+        // (nothing clears the in-flight flag on target acquire), else this SetMotion(turn,false)
+        // truncates that gesture → strands Player.IsBusy. The lock switch above still happens;
+        // the stop re-issues next tick. Bounded by IsCastInFlight (UseDone-seq or 2.5s).
+        if (!IsCastInFlight()) ClearCombatTurnMotions();
 
         // Internal lock is set unconditionally so combat is ready to swing the
         // moment busy clears. SelectItem during a combat-mode transition can
@@ -2443,6 +2466,12 @@ public class CombatManager : IDisposable
         }
         return true;
     }
+
+    /// <summary>True while a targeted combat cast is still resolving on the server (windup
+    /// in flight). Shares the bounded IsAwaitingCastResolution state, so it self-clears on
+    /// the UseDone-seq advance or the 2.5s timeout — used to gate motion emitters that would
+    /// otherwise truncate the cast gesture and strand server Player.IsBusy (relog-only wedge).</summary>
+    private bool IsCastInFlight() => IsAwaitingCastResolution();
 
     /// <summary>Record that a targeted combat cast was just issued, so the next
     /// cast waits for it to resolve on the server (see IsAwaitingCastResolution).</summary>
