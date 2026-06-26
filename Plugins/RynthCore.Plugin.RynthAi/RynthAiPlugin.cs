@@ -490,10 +490,102 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "clearbusy":    HandleClearBusyCommand(); break;
             case "hideui":       _hideUi = on; dash.SetUiHidden(on); break;  // applied each tick in OnTick
             case "sendchat":     if (!string.IsNullOrEmpty(value)) HandleRynthChatSubmit(value); break;
+            case "setsetting":   ApplyRemoteSetting(value); break;   // one advanced setting from the phone (clamped + persisted)
             // movestart/movestop are applied DIRECTLY by the RynthRemote plugin (pure Host.SetAutoRun/
             // SetMotion + its own dead-man watchdog) and are never forwarded here.
         }
         Host.Log($"[RynthAi] applied remote command: {action}={value}");
+    }
+
+    // Settings the phone must never write (engine-populated read-only status).
+    private static readonly HashSet<string> ReadOnlySettingKeys = new(StringComparer.OrdinalIgnoreCase)
+        { "MissileCraftingState", "MissileCraftingActive", "MissileCraftingStatus" };
+
+    // Authoritative server-side clamp (min,max) per numeric setting — a bad/garbage phone value can never
+    // push a setting out of range and brick a client. Ranges mirror the in-AC SettingsPanel rows. Booleans
+    // aren't listed (pass through); enums are clamped to their 0..N index range.
+    private static readonly Dictionary<string, (double Min, double Max)> SettingClamp = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["TargetFPSFocused"] = (10, 240), ["TargetFPSBackground"] = (5, 60),
+        ["BlacklistAttempts"] = (1, 20), ["BlacklistTimeoutSec"] = (5, 120), ["BlacklistCastSettleMs"] = (500, 5000),
+        ["TargetNoProgressTimeoutSec"] = (0, 300), ["GiveQueueIntervalMs"] = (50, 2000),
+        ["BowArcVelocity"] = (10, 60), ["CrossbowArcVelocity"] = (10, 80), ["AtlatlArcVelocity"] = (10, 60), ["MagicArcVelocity"] = (10, 60),
+        ["HealAt"] = (0, 100), ["RestamAt"] = (0, 100), ["GetManaAt"] = (0, 100),
+        ["TopOffHP"] = (0, 100), ["TopOffStam"] = (0, 100), ["TopOffMana"] = (0, 100),
+        ["HealOthersAt"] = (0, 100), ["RestamOthersAt"] = (0, 100), ["InfuseOthersAt"] = (0, 100),
+        ["MeleeAttackPower"] = (-1, 100), ["MissileAttackPower"] = (-1, 100),
+        ["MeleeAttackHeight"] = (0, 2), ["MissileAttackHeight"] = (0, 2),
+        ["PetMinMonsters"] = (1, 20),
+        ["SpellCastIntervalMs"] = (100, 1500), ["AttackSpellIntervalMs"] = (250, 5000), ["MinRingTargets"] = (1, 20),
+        ["MinSkillLevelTier1"] = (1, 500), ["MinSkillLevelTier2"] = (1, 500), ["MinSkillLevelTier3"] = (1, 500), ["MinSkillLevelTier4"] = (1, 500),
+        ["MinSkillLevelTier5"] = (1, 500), ["MinSkillLevelTier6"] = (1, 500), ["MinSkillLevelTier7"] = (1, 500), ["MinSkillLevelTier8"] = (1, 500),
+        ["MonsterRange"] = (1, 200), ["MonsterDisengageRange"] = (0, 200), ["RingRange"] = (1, 50), ["ApproachRange"] = (1, 50),
+        ["CorpseApproachRangeMax"] = (0.5, 50), ["CorpseApproachRangeMin"] = (0.5, 20),
+        ["FollowNavMin"] = (0.5, 20), ["NavRingThickness"] = (1, 16), ["NavLineThickness"] = (1, 16),
+        ["NavHeightOffset"] = (-5, 5), ["NavSlopeSink"] = (0, 8), ["OpenDoorRange"] = (0.1, 70), ["MovementMode"] = (0, 2),
+        ["NavStopTurnAngle"] = (1, 90), ["NavResumeTurnAngle"] = (1, 45), ["NavDeadZone"] = (0.5, 20), ["NavSweepMult"] = (0.5, 10),
+        ["NavLookaheadYards"] = (0, 30), ["NavTurnRateDegPerSec"] = (30, 720), ["NavTier1TurnSpeed"] = (0.5, 15), ["PostPortalDelaySec"] = (0, 30),
+        ["T2Speed"] = (0.1, 5), ["T2WalkWithinYd"] = (1, 50), ["T2DistanceTo"] = (0.1, 10), ["T2ReissueMs"] = (100, 10000),
+        ["T2MaxRangeYd"] = (50, 2000), ["T2MaxLandblocks"] = (1, 20),
+        ["RebuffSecondsRemaining"] = (30, 1800),
+        ["BuffMinSkillLevelTier1"] = (1, 500), ["BuffMinSkillLevelTier2"] = (1, 500), ["BuffMinSkillLevelTier3"] = (1, 500), ["BuffMinSkillLevelTier4"] = (1, 500),
+        ["BuffMinSkillLevelTier5"] = (1, 500), ["BuffMinSkillLevelTier6"] = (1, 500), ["BuffMinSkillLevelTier7"] = (1, 500), ["BuffMinSkillLevelTier8"] = (1, 500),
+        ["LootJumpHeight"] = (1, 100), ["LootOwnership"] = (0, 2),
+        ["LootInterItemDelayMs"] = (0, 5000), ["LootContentSettleMs"] = (0, 5000), ["LootEmptyCorpseMs"] = (0, 5000), ["LootClosingDelayMs"] = (0, 5000),
+        ["LootAssessWindowMs"] = (0, 5000), ["LootRetryTimeoutMs"] = (0, 10000), ["LootOpenRetryMs"] = (0, 10000), ["LootCorpseTimeoutMs"] = (0, 60000),
+        ["SalvageOpenDelayFirstMs"] = (0, 5000), ["SalvageOpenDelayFastMs"] = (0, 2000), ["SalvageAddDelayFirstMs"] = (0, 5000), ["SalvageAddDelayFastMs"] = (0, 2000),
+        ["SalvageSalvageDelayMs"] = (0, 2000), ["SalvageResultDelayFirstMs"] = (0, 5000), ["SalvageResultDelayFastMs"] = (0, 2000),
+    };
+
+    // Apply ONE advanced setting sent from the phone as JSON {"key":"HealAt","value":55}. Validates the key
+    // against the live settings shape, blocks read-only + buffing-OFF, CLAMPS numerics, then patches the
+    // current settings JSON and feeds it through the proven ApplySettingsJson round-trip (which persists via
+    // SaveSettings + hot-applies). Pure JSON manipulation (no reflection) — NativeAOT-safe. Never throws.
+    private void ApplyRemoteSetting(string valueJson)
+    {
+        var dash = _dashboard;
+        if (dash == null || string.IsNullOrWhiteSpace(valueJson)) return;
+        try
+        {
+            string? key; bool isBool = false, boolVal = false, isInt = false; long longVal = 0; double dblVal = 0;
+            using (var doc = System.Text.Json.JsonDocument.Parse(valueJson))
+            {
+                var root = doc.RootElement;
+                if (root.ValueKind != System.Text.Json.JsonValueKind.Object) return;
+                if (!root.TryGetProperty("key", out var ke) || ke.ValueKind != System.Text.Json.JsonValueKind.String) return;
+                key = ke.GetString();
+                if (string.IsNullOrEmpty(key)) return;
+                if (!root.TryGetProperty("value", out var ve)) return;
+                switch (ve.ValueKind)
+                {
+                    case System.Text.Json.JsonValueKind.True:  isBool = true; boolVal = true; break;
+                    case System.Text.Json.JsonValueKind.False: isBool = true; boolVal = false; break;
+                    case System.Text.Json.JsonValueKind.Number:
+                        if (ve.TryGetInt64(out longVal)) { isInt = true; dblVal = longVal; }
+                        else dblVal = ve.GetDouble();
+                        break;
+                    default: return;   // no writable string/null settings
+                }
+            }
+            if (ReadOnlySettingKeys.Contains(key)) { Host.Log($"[RynthAi] setSetting rejected read-only '{key}'"); return; }
+            if (key.Equals("EnableBuffing", StringComparison.OrdinalIgnoreCase) && isBool && !boolVal)
+            { Host.Log("[RynthAi] setSetting BLOCKED: EnableBuffing OFF from remote (turn off in-game)"); return; }
+
+            var obj = System.Text.Json.Nodes.JsonNode.Parse(dash.BuildSettingsJson())?.AsObject();
+            if (obj == null || !obj.ContainsKey(key)) { Host.Log($"[RynthAi] setSetting unknown key '{key}'"); return; }
+
+            object applied;
+            if (isBool) { obj[key] = boolVal; applied = boolVal; }
+            else
+            {
+                double v = SettingClamp.TryGetValue(key, out var rng) ? Math.Clamp(dblVal, rng.Min, rng.Max) : dblVal;
+                if (isInt) { long lv = (long)Math.Round(v); obj[key] = lv; applied = lv; }   // int field → integer token
+                else { obj[key] = v; applied = v; }                                          // float/double field → decimal
+            }
+            dash.ApplySettingsJson(obj.ToJsonString());
+            Host.Log($"[RynthAi] setSetting {key}={applied}");
+        }
+        catch (Exception ex) { Host.Log($"[RynthAi] setSetting error: {ex.Message}"); }
     }
 
     // ── Full item appraisal (the Assess/Identify data) for equipped gear ──────────────────────────
