@@ -78,6 +78,20 @@ public class CombatManager : IDisposable
     private bool _stanceWedgeWarned;
     private DateTime _lastPeaceAttempt = DateTime.MinValue;
 
+    // ── Bow→wand dequip-first swap state (2026-06-27) ────────────────────
+    // Stock ACE will NOT auto-dequip a main-hand bow for a Held-slot wand
+    // (CheckWeaponCollision refuses while mainhand != null), and it DENIES
+    // ChangeCombatMode(Magic) while the bow is wielded ("GetEquippedWand()==null").
+    // Combat must stow the bow into an open pack FIRST, then UseObject(wand), and
+    // only request Magic once the wand is actually wielded (handled by the
+    // alreadyWielded branch). Mirrors the proven BuffManager.EnsureMagicMode path.
+    private int _combatBowDequipPendingId;
+    private int _combatBowDequipAttempts;
+    private DateTime _combatBowDequipAt = DateTime.MinValue;
+    private bool _combatSwapTeardownDone;
+    private const int CombatBowDequipMaxAttempts = 3;
+    private const double WandSwapWieldResolveMs = 4000;
+
     // Clear all stance-deadlock episode state. Called wherever the stance is
     // reached or the target drops, so the next episode starts fresh.
     private void ResetStanceRecovery()
@@ -85,7 +99,16 @@ public class CombatManager : IDisposable
         _stanceStuckSince = DateTime.MinValue;
         _stanceReEquipAttempts = 0;
         _stanceWedgeWarned = false;
+        ResetWandSwapState();
         ResetStanceFlipBackoff();
+    }
+
+    // Clear the bow→wand swap episode (called once the desired stance is reached).
+    private void ResetWandSwapState()
+    {
+        _combatBowDequipPendingId = 0;
+        _combatBowDequipAttempts = 0;
+        _combatSwapTeardownDone = false;
     }
 
     // ── Face-before-attack state ─────────────────────────────────────────
@@ -163,6 +186,11 @@ public class CombatManager : IDisposable
     /// <summary>Client busy count — set by plugin from OnBusyCountIncremented/Decremented.
     /// When > 0, combat must not send any game actions (SelectItem, attack, cast).</summary>
     public int BusyCount { get; set; }
+
+    /// <summary>D4 (record-only): human-readable reason combat did NOT cast on the
+    /// most recent tick (or "cast" when it did). Set at every magic skip site; read
+    /// by /ra why and the status feed. Purely diagnostic — never gates behavior.</summary>
+    public string LastCombatSkipReason { get; private set; } = "";
 
     private CharacterSkills? _charSkills;
 
@@ -286,6 +314,22 @@ public class CombatManager : IDisposable
 
     public int RaycastBlockCount { get; private set; }
     public int RaycastCheckCount { get; private set; }
+
+    // D2 three-tier target telemetry, refreshed each ScanNearbyTargets() so a
+    // "scanned=0 vs live mobs" wedge shows WHICH stage zeroed the candidate set:
+    //   Total>0,Ring=0      → mobs exist but all out of engage range (nav/spawn issue)
+    //   Ring>0,Possible=0   → over-filtering (blacklist / not-attackable / LOS)
+    //   Total=0             → genuinely blind (cache empty / respawn-blind)
+    // -1 = no scan has run yet this session.
+    public int LastScanTotalMonsters { get; private set; } = -1;  // real monsters the client renders
+    public int LastScanInRing { get; private set; } = -1;         // of those, within MonsterRange
+    public int LastScanPossible { get; private set; } = -1;       // survive all combat filters (= candidates)
+    public int LastScanLosBlocked { get; private set; } = -1;     // in range + attackable but wall-blocked
+
+    // D6 offensive attack-cast counters. CastsSinceLastKill climbing while kills stay
+    // flat is the early signal of the "animates but 0 damage / too busy forever" orphan.
+    public int SessionAttackCasts { get; private set; }
+    public int CastsSinceLastKill { get; private set; }
 
     // ── Monster scanner ──────────────────────────────────────────────────
     // Pre-scans nearby creatures for distance, IsAttackable, and LOS.
@@ -434,6 +478,7 @@ public class CombatManager : IDisposable
             PickedWeaponMode     = pickedWeaponMode,
             PickedWeaponWieldLoc = weaponWieldLoc,
             HasWieldedAmmoFlag   = hasAmmo,
+            LastCombatSkipReason = LastCombatSkipReason,
         };
     }
 
@@ -461,6 +506,7 @@ public class CombatManager : IDisposable
         public int      PickedWeaponMode;
         public int      PickedWeaponWieldLoc;
         public bool     HasWieldedAmmoFlag;
+        public string   LastCombatSkipReason;
     }
 
     /// <summary>
@@ -506,6 +552,7 @@ public class CombatManager : IDisposable
 
         _scannedTargets.Clear();
         _nearbyNoLos = 0;
+        int scanTotal = 0, scanRing = 0;   // D2 telemetry, published after the loop
         int playerId = (int)_playerId;
         if (playerId == 0) return;
 
@@ -534,6 +581,14 @@ public class CombatManager : IDisposable
             // "Flame Bolt"/"Frost Streak"/etc.
             if (IsSpellProjectileName(wo.Name)) continue;
 
+            // D2 telemetry: every real monster the client renders counts toward Total, and (by
+            // pure proximity) toward Ring. dist is hoisted up here from below the blacklist gate
+            // so Ring reflects how many mobs are physically near us regardless of the gameplay
+            // filters below — that's what distinguishes "out of range" from "all filtered out".
+            scanTotal++;
+            double dist = _worldFilter.Distance(playerId, wo.Id);
+            if (dist <= maxDist) scanRing++;
+
             // User-configured "never attack" list — excluded from acquisition
             // entirely (an already-engaged match drops out of _scannedTargets
             // here and is released by the scan-grace timer in Think).
@@ -545,8 +600,6 @@ public class CombatManager : IDisposable
                 && !_seenMonsterNameToWcid.ContainsKey(wo.Name)
                 && _host.HasGetObjectWcid && _host.TryGetObjectWcid((uint)wo.Id, out uint scanWcid) && scanWcid != 0)
                 _seenMonsterNameToWcid[wo.Name] = scanWcid;
-
-            double dist = _worldFilter.Distance(playerId, wo.Id);
 
             if (_blacklistManager.IsBlacklisted(wo.Id)) continue;
 
@@ -607,6 +660,13 @@ public class CombatManager : IDisposable
             if (Math.Abs(dd) > 0.5) return dd < 0 ? -1 : 1;
             return a.Angle.CompareTo(b.Angle);
         });
+
+        // Publish D2 telemetry (whole-int writes are atomic; the plugin tick reads these on the
+        // same pump thread before pushing them to the status feed).
+        LastScanTotalMonsters = scanTotal;
+        LastScanInRing = scanRing;
+        LastScanPossible = _scannedTargets.Count;
+        LastScanLosBlocked = _nearbyNoLos;
     }
 
     public CombatManager(RynthCoreHost host, LegacyUiSettings settings, WorldObjectCache worldFilter, SpellManager? spellManager = null)
@@ -622,6 +682,27 @@ public class CombatManager : IDisposable
 
     public void SetSpellManager(SpellManager spellManager) => _spellManager = spellManager;
     public void SetCharacterSkills(CharacterSkills skills) => _charSkills = skills;
+
+    /// <summary>Plugin forwards every object deletion here (D7/D8). For a genuinely-despawned
+    /// object (a reliable engine event, unlike a transient scan gap) we: (D8) drop its stale
+    /// per-id state — kill-suppression + blacklist/failure entries — so a respawn reusing the GUID
+    /// starts clean instead of inheriting the old 300s timeout; and (D7) if it was the target we
+    /// were attacking or mid-cast on, clear the cast-resolution/debuff wait so we don't sit out the
+    /// 2.5s windup timeout casting at nothing. Writes are atomic flag/int sets — safe on any thread.</summary>
+    public void OnObjectDeleted(uint objectId)
+    {
+        int id = (int)objectId;
+        _recentlyKilled.Remove(id);
+        _blacklistManager.ForgetTarget(id);
+
+        if (id == activeTargetId || id == _lockedTargetId || id == _lastAttackedTargetId)
+            _awaitingCastResolution = false;
+        if (id == _pendingDebuffTargetId)
+        {
+            _waitingForDebuffResult = false;
+            _pendingDebuffTargetId = 0;
+        }
+    }
     public void SetPlayerId(uint playerId)
     {
         _playerId = playerId;
@@ -1241,6 +1322,7 @@ public class CombatManager : IDisposable
     /// </summary>
     public void OnKillNotification(string deathMessage)
     {
+        CastsSinceLastKill = 0;   // D6: a kill landed (KillerNotification → the killer) — reset the orphan signal.
         // Record EXACTLY ONE kill per death message, attributed by name (→ correct
         // wcid) from the best available source, so rapid one-shots aren't lost when
         // the fight state has already been cleared/advanced by the time the corpse's
@@ -1790,7 +1872,10 @@ public class CombatManager : IDisposable
 
             // Client is busy processing a previous action — don't queue more
             if (BusyCount > 0)
+            {
+                LastCombatSkipReason = "busy-count"; // D4 record-only
                 return true;
+            }
 
             // Magic cadence guard: while a previous combat cast is still
             // resolving on the ACE server, do NOT turn or issue another cast.
@@ -1799,7 +1884,10 @@ public class CombatManager : IDisposable
             // the prior cast → 0 damage. Resolves on a server UseDone (poll) or
             // a hard timeout. Magic only; melee/missile are AC-paced.
             if (CurrentCombatMode == CombatMode.Magic && IsAwaitingCastResolution())
+            {
+                LastCombatSkipReason = "cast-cadence"; // D4 record-only (IsCastInFlight)
                 return true;
+            }
 
             // MAGIC: settle-before-cast facing gate. Never cast mid-turn and
             // never let a turn-stop ride alongside the cast packet — both orphan
@@ -1824,7 +1912,10 @@ public class CombatManager : IDisposable
                     // safety timeout falls through, so a jittery point-blank pose
                     // can't wedge combat forever.
                     if ((DateTime.Now - _faceStartTime).TotalMilliseconds < FACE_MAX_WAIT_MS)
+                    {
+                        LastCombatSkipReason = "facing-turning"; // D4 record-only
                         return true;
+                    }
                     _host.Log($"[CombatCast] facing did not converge in {FACE_MAX_WAIT_MS:0}ms (err={facingError:0.0}°) — releasing turn + casting anyway");
                 }
 
@@ -1836,10 +1927,14 @@ public class CombatManager : IDisposable
                     ClearCombatTurnMotions();
                     _facingTarget = false;
                     _faceSettledAt = DateTime.Now;
+                    LastCombatSkipReason = "face-settle-release"; // D4 record-only
                     return true; // settle tick
                 }
                 if ((DateTime.Now - _faceSettledAt).TotalMilliseconds < FACE_SETTLE_MS)
+                {
+                    LastCombatSkipReason = "face-settle-wait"; // D4 record-only
                     return true; // let the turn-stop settle on the server first
+                }
             }
             // Native attack handles facing internally — skip manual facing.
             // MISSILE only (melee turn motions are cleared above every tick);
@@ -1891,6 +1986,7 @@ public class CombatManager : IDisposable
                 {
                     if ((DateTime.Now - lastAttackCmd).TotalMilliseconds > 5000)
                         _host.Log($"[CombatCast] CanCastNow=false — gesture gate blocking cast (last attack {(DateTime.Now - lastAttackCmd).TotalMilliseconds:0}ms ago, target=0x{activeTargetId:X8})");
+                    LastCombatSkipReason = "cast-gate"; // D4 record-only (CanCastNow=false)
                     return true;
                 }
 
@@ -2294,15 +2390,56 @@ public class CombatManager : IDisposable
         //    (it opens the wand's properties), so we must NOT call it here.
         if (CurrentCombatMode == desiredMode)
         {
-            _stanceStuckSince = DateTime.MinValue; ResetStanceFlipBackoff(); // reached the stance — clear stuck timer + flip backoff
+            _stanceStuckSince = DateTime.MinValue; ResetWandSwapState(); ResetStanceFlipBackoff(); // reached the stance — clear stuck timer + swap + flip backoff
             return true;
         }
 
-        // B) Mode doesn't match. Either the weapon genuinely isn't wielded, or CurrentCombatMode
-        //    is stale (e.g. hot-reload didn't re-fire OnCombatModeChange). Request both a mode
-        //    change and an equip. ChangeCombatMode succeeds if the wand is already wielded
-        //    (OnCombatModeChange fires → fixes hot-reload next tick). UseObject equips it if
-        //    it truly isn't wielded yet.
+        // B-wand) Held-slot wand, not yet wielded. The wand CANNOT wield while a
+        //    melee/missile weapon occupies the main hand — stock ACE's CheckWeaponCollision
+        //    refuses it, AND the server DENIES ChangeCombatMode(Magic) while the bow is
+        //    wielded ("GetEquippedWand()==null"), which is the Missile↔NonCombat↔Magic flap.
+        //    So: tear down the in-flight attack, stow the bow into an open pack FIRST, then
+        //    UseObject(wand). Do NOT request Magic here — the alreadyWielded branch above
+        //    flips the stance once CurrentWieldedLocation confirms the wand. Mirrors the
+        //    proven BuffManager.EnsureMagicMode dequip-first path (the missing 4th site).
+        if (desiredMode == CombatMode.Magic)
+        {
+            // Claim the shared swap slot FIRST so a concurrent buff/combat equip can't
+            // collide; only then tear down / move items (don't cancel an attack then fail
+            // to claim the slot). The 3s gate interval paces the dequip→wield steps.
+            if (_weaponSwapGate != null && !_weaponSwapGate.TryBeginSwap("combat-wand-swap"))
+                return false;
+
+            if (!_combatSwapTeardownDone
+                && (CurrentCombatMode == CombatMode.Melee || CurrentCombatMode == CombatMode.Missile))
+            {
+                if (_host.HasCancelAttack)   _host.CancelAttack();
+                if (_host.HasStopCompletely) _host.StopCompletely();
+                _combatSwapTeardownDone = true;
+                _host.Log($"[EquipDiag] CancelAttack+StopCompletely before wand equip (mode was {CurrentCombatMode})");
+            }
+
+            // Clear the main hand. Yields (false) while a dequip is in flight or blocked;
+            // returns true only once the bow is confirmed out of the main hand.
+            if (!EnsureHandClearForWand(targetWeaponId, diagNow))
+                return false;
+
+            // Main hand is clear — wield the wand (throttled). Stance flip happens next
+            // tick in the alreadyWielded branch once the wand reads as wielded.
+            if ((DateTime.Now - _lastEquipTime).TotalMilliseconds > 2000)
+            {
+                if (diagNow) { _lastEquipDiagAt = DateTime.Now; _host.Log($"[EquipDiag] hand clear — UseObject(0x{targetWeaponId:X8} '{weaponObj.Name}') wand equip"); }
+                _host.UseObject((uint)targetWeaponId);
+                _lastEquipTime = DateTime.Now;
+            }
+            return false;
+        }
+
+        // B) Non-wand (melee/missile) weapon not yet confirmed wielded. Either it genuinely
+        //    isn't wielded, or CurrentCombatMode is stale (e.g. hot-reload didn't re-fire
+        //    OnCombatModeChange). Request both a mode change and an equip — these go in the
+        //    main hand, which AC swaps in place (no held-slot collision). ChangeCombatMode
+        //    succeeds if already wielded (fixes hot-reload next tick); UseObject equips it if not.
         if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
         {
             if (diagNow) { _lastEquipDiagAt = DateTime.Now; _host.Log($"[EquipDiag] wielded=FALSE mode={CurrentCombatMode}→{desiredMode} (weapon=0x{targetWeaponId:X8} '{weaponObj.Name}' src={weaponSource} class={weaponObj.ObjectClass}) — ChangeCombatMode"); }
@@ -2316,6 +2453,82 @@ public class CombatManager : IDisposable
             if (diagNow) { _lastEquipDiagAt = DateTime.Now; _host.Log($"[EquipDiag] wielded=FALSE UseObject(0x{targetWeaponId:X8} '{weaponObj.Name}') — equip attempt"); }
             _host.UseObject((uint)targetWeaponId);
             _lastEquipTime = DateTime.Now;
+        }
+        return false;
+    }
+
+    // Stow the wielded non-wand weapon (the bow) blocking the Held-slot wand into a
+    // capacity-verified open pack (AutoCram-pattern, AV-safe), fully bounded. Returns
+    // true only when the main hand is confirmed clear (safe to wield the wand); false
+    // while a dequip is resolving, blocked, or just issued — caller yields this tick.
+    private bool EnsureHandClearForWand(int wandId, bool diagNow)
+    {
+        int bowId = FindWieldedNonWandWeapon(wandId);
+        if (bowId == 0) { _combatBowDequipPendingId = 0; _combatBowDequipAttempts = 0; return true; }
+
+        DateTime now = DateTime.Now;
+        if (_combatBowDequipPendingId == bowId
+            && (now - _combatBowDequipAt).TotalMilliseconds < WandSwapWieldResolveMs
+            && IsWieldedLive(bowId))
+            return false; // dequip still resolving
+
+        if (IsWieldedLive(bowId))
+        {
+            int openPack = WorldObjectCache.FindPackFor(_host, _worldFilter, includeMainPack: true, requireFree: 1);
+            if (openPack == 0 || _combatBowDequipAttempts >= CombatBowDequipMaxAttempts)
+            {
+                // No verified-open pack to receive the bow, or repeated failures — the swap
+                // can't complete now. Reset the attempt counter and yield; combat keeps
+                // running with the bow (missile) until a slot frees (e.g. after looting).
+                if (diagNow)
+                {
+                    _lastEquipDiagAt = now;
+                    _host.Log($"[EquipDiag] bow 0x{(uint)bowId:X8} dequip blocked (openPack=0x{(uint)openPack:X8}, attempts={_combatBowDequipAttempts}/{CombatBowDequipMaxAttempts}) — cannot swap to wand yet");
+                }
+                _combatBowDequipPendingId = 0;
+                _combatBowDequipAttempts = 0;
+                return false;
+            }
+            _combatBowDequipAttempts++;
+            _host.MoveItemInternal((uint)bowId, (uint)openPack, 0, 1); // amount>=1 (engine rejects 0)
+            _combatBowDequipPendingId = bowId;
+            _combatBowDequipAt = now;
+            _host.Log($"[EquipDiag] dequip bow 0x{(uint)bowId:X8} -> pack 0x{(uint)openPack:X8} (attempt {_combatBowDequipAttempts}/{CombatBowDequipMaxAttempts}) before wand equip");
+            return false; // yield until the bow is out of hand
+        }
+
+        _combatBowDequipPendingId = 0;
+        _combatBowDequipAttempts = 0;
+        return true; // bow confirmed unwielded — main hand clear
+    }
+
+    // The currently-wielded non-wand weapon (the bow) that blocks the Held-slot wand.
+    private int FindWieldedNonWandWeapon(int wandId)
+    {
+        foreach (var wo in _worldFilter.GetDirectInventory(forceRefresh: true))
+        {
+            if (wo.Id == wandId) continue;
+            if (IsWandObject(wo)) continue;
+            if (wo.Values(LongValueKey.CurrentWieldedLocation, 0) > 0
+                && (wo.ObjectClass == AcObjectClass.MeleeWeapon
+                 || wo.ObjectClass == AcObjectClass.MissileWeapon))
+                return wo.Id;
+        }
+        return 0;
+    }
+
+    // Live (forceRefresh) wielded check — never trusts a stale cache snapshot.
+    private bool IsWieldedLive(int id)
+    {
+        if (id == 0) return false;
+        foreach (var wo in _worldFilter.GetDirectInventory(forceRefresh: true))
+            if (wo.Id == id)
+                return wo.Values(LongValueKey.CurrentWieldedLocation, 0) > 0;
+        if (_host.HasGetObjectWielderInfo)
+        {
+            uint pid = _host.GetPlayerId();
+            if (pid != 0 && _host.TryGetObjectWielderInfo((uint)id, out uint wielder, out _))
+                return wielder == pid;
         }
         return false;
     }
@@ -2338,7 +2551,7 @@ public class CombatManager : IDisposable
 
         if (alreadyWielded)
         {
-            if (CurrentCombatMode == CombatMode.Magic) { ResetStanceFlipBackoff(); return true; }
+            if (CurrentCombatMode == CombatMode.Magic) { ResetWandSwapState(); ResetStanceFlipBackoff(); return true; }
             if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
             {
                 _host.ChangeCombatMode(CombatMode.Magic);
@@ -2348,16 +2561,24 @@ public class CombatManager : IDisposable
             return false;
         }
 
-        if (CurrentCombatMode == CombatMode.Magic) { ResetStanceFlipBackoff(); return true; }
+        if (CurrentCombatMode == CombatMode.Magic) { ResetWandSwapState(); ResetStanceFlipBackoff(); return true; }
 
-        if ((DateTime.Now - lastStanceAttempt).TotalMilliseconds > StanceRetryDelayMs())
+        // Wand not wielded. Dequip the blocking bow FIRST (stock ACE won't auto-dequip a
+        // main-hand weapon for the Held-slot wand, and denies ChangeCombatMode(Magic) while
+        // it's wielded). Do NOT request Magic until the wand is wielded — the alreadyWielded
+        // branch above handles the stance flip. Mirrors EquipWeaponAndSetStance / BuffManager.
+        if (_weaponSwapGate != null && !_weaponSwapGate.TryBeginSwap("combat-magicready-wand"))
+            return false;
+        if (!_combatSwapTeardownDone
+            && (CurrentCombatMode == CombatMode.Melee || CurrentCombatMode == CombatMode.Missile))
         {
-            _host.ChangeCombatMode(CombatMode.Magic);
-            lastStanceAttempt = DateTime.Now;
-            NoteStanceFlipSent();
+            if (_host.HasCancelAttack)   _host.CancelAttack();
+            if (_host.HasStopCompletely) _host.StopCompletely();
+            _combatSwapTeardownDone = true;
         }
-        if ((DateTime.Now - _lastEquipTime).TotalMilliseconds > 2000
-            && (_weaponSwapGate == null || _weaponSwapGate.TryBeginSwap("combat-magicready-wand")))
+        if (!EnsureHandClearForWand(wandId, diagNow: true))
+            return false;
+        if ((DateTime.Now - _lastEquipTime).TotalMilliseconds > 2000)
         {
             _host.UseObject((uint)wandId);
             _lastEquipTime = DateTime.Now;
@@ -2692,6 +2913,7 @@ public class CombatManager : IDisposable
         if ((DateTime.Now - _lastEquipTime).TotalMilliseconds < 3000)
         {
             _host.Log($"[CombatCast] equip-gate: wand equip in progress ({(DateTime.Now - _lastEquipTime).TotalMilliseconds:0}ms < 3000ms), skipping cast");
+            LastCombatSkipReason = "equip-gate"; // D4 record-only
             return;
         }
         // Cadence is the motion-end gate (CanCastNow at the AttackWithMagic
@@ -2705,7 +2927,11 @@ public class CombatManager : IDisposable
                 _confirmedDebuffs.Add($"{_pendingDebuffTargetId}_{_pendingDebuffKey}");
                 _waitingForDebuffResult = false;
             }
-            else return;
+            else
+            {
+                LastCombatSkipReason = "awaiting-debuff-result"; // D4 record-only
+                return;
+            }
         }
 
         if (activeTargetId != _lastDebuffTargetId)
@@ -2755,6 +2981,7 @@ public class CombatManager : IDisposable
         if (rule != null && !rule.UseArc && !rule.UseRing && !rule.UseStreak && !rule.UseBolt)
         {
             _host.Log($"[CombatCast] rule '{rule.Name}' has no attack shapes enabled (UseArc/Ring/Streak/Bolt all false) — no offensive cast");
+            LastCombatSkipReason = "no-attack-shapes"; // D4 record-only
             return;
         }
 
@@ -2763,6 +2990,7 @@ public class CombatManager : IDisposable
         int offensiveSpellId = FindBestShapedSpell(element, rule, out bool isRing);
         if (offensiveSpellId != 0)
         {
+            LastCombatSkipReason = "cast"; // D4 record-only: offensive cast issued this tick
             // Visibility: log exactly what war/void spell we're about to cast
             // (id + resolved name + element/tier/target). Diagnostic only.
             _host.Log($"[CombatCast] offensive id={offensiveSpellId} " +
@@ -2772,6 +3000,8 @@ public class CombatManager : IDisposable
             {
                 _host.CastSpell((uint)activeTargetId, offensiveSpellId);
                 MarkCombatCastIssued();
+                SessionAttackCasts++;      // D6: offensive attack-cast tally for the casts-per-kill signal
+                CastsSinceLastKill++;      //     reset in OnKillNotification when a kill lands
                 _lastSpellCast = DateTime.Now;
                 _lastCastWasRing = isRing;
                 // _offensiveCastThisCycle is NOT set here anymore — a cast
@@ -2821,6 +3051,7 @@ public class CombatManager : IDisposable
             bool snapWarm = _spellManager?.IsKnownSnapshotWarm == true;
             _host.WriteToChat($"[RynthAi] No spell found: elem={element} warTier={warTier} voidTier={voidTier} snapshotWarm={snapWarm} pid={_playerId}", 2);
             _host.Log($"[CombatCast] no offensive spell: elem={element} warTier={warTier} voidTier={voidTier} snapshotWarm={snapWarm} rule={rule?.Name ?? "null"} target='{target.Name}'");
+            LastCombatSkipReason = "no-offensive-spell"; // D4 record-only (FindBestShapedSpell==0)
             _lastSpellCast = DateTime.Now; // suppress repeated spam
         }
     }

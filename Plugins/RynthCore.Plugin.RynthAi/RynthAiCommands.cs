@@ -68,6 +68,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra lootcheck     — classify selected item (on|off = auto on click)");
         ChatLine("[RynthAi] /ra dumpinv       — dump all inventory items (cache + direct)");
         ChatLine("[RynthAi] /ra combat        — dump combat state machine snapshot");
+        ChatLine("[RynthAi] /ra why           — one-glance diagnosis of why the bot is idle/attacking");
         ChatLine("[RynthAi] /ra clearbusy     — force-clear busy state (hourglass cursor)");
         ChatLine("[RynthAi] /ra panic         — full AC state reset (cancel attack + peace mode + stop motion + clear busy)");
         ChatLine("[RynthAi] /ra forcebuff          — force-recast all buffs immediately");
@@ -1363,6 +1364,50 @@ public sealed partial class RynthAiPlugin
         }
     }
 
+    /// <summary>/ra why — one-glance "why is the bot doing (or not doing) what it's doing": the
+    /// winning activity, the legacy BotAction, busy count, target lock + cast state, and the D2
+    /// three-tier scan counts, plus a one-line interpretation of the likely stall cause. Turns an
+    /// "it's just standing there" investigation into a single read. (D3)</summary>
+    private void HandleWhyCommand()
+    {
+        if (_combatManager == null) { ChatLine("[RynthAi] Combat manager not ready."); return; }
+        var s = _combatManager.GetStateSnapshot();
+
+        int total  = _combatManager.LastScanTotalMonsters;
+        int ring   = _combatManager.LastScanInRing;
+        int poss   = _combatManager.LastScanPossible;
+        int losBlk = _combatManager.LastScanLosBlocked;
+
+        string arbiter = _arbiter != null
+            ? $"{ActivityArbiter.ToBotAction(_arbiter.Current)} ({_arbiter.Current})"
+            : "n/a (not started)";
+
+        ChatLine("[RynthAi] === Why ===");
+        ChatLine($"[RynthAi] macro={s.IsMacroRunning}  botAction='{s.BotAction}'  arbiter={arbiter}");
+        ChatLine($"[RynthAi] enableCombat={s.EnableCombat}  busy={s.BusyCount}  facing={s.FacingTarget}");
+        ChatLine($"[RynthAi] targets: total={total} ring={ring} possible={poss} losBlk={losBlk}  scanned={s.ScannedCount}");
+        ChatLine($"[RynthAi] active=0x{(uint)s.ActiveTargetId:X8}  locked=0x{(uint)s.LockedTargetId:X8}");
+        // D4 record-only skip reasons: why the last combat/buff cycle did (or didn't) cast.
+        ChatLine($"[RynthAi] combatSkip='{s.LastCombatSkipReason}'"
+                 + (_buffManager != null ? $"  buffSkip='{_buffManager.GetStateSnapshot().LastBuffSkipReason}'" : ""));
+        if (s.ScannedCount > 0)
+            ChatLine($"[RynthAi] closest: '{s.ClosestScannedName}' @ {s.ClosestScannedDist:0.0}yd");
+
+        // Interpretation — the point of D2/D3: name the most likely reason it isn't attacking.
+        string why =
+            !s.IsMacroRunning        ? "macro is STOPPED (start it from the panel / command)." :
+            !s.EnableCombat          ? "combat is disabled in settings." :
+            s.BusyCount > 0          ? "AC busy>0 — waiting on a server action (cast/use/move); try /ra clearbusy if stuck." :
+            total < 0                ? "no combat scan has run yet (cold start / just logged in)." :
+            total == 0               ? "no monsters in the object cache (respawn-blind, or wrong area)." :
+            ring  == 0               ? "monsters exist but ALL out of engage range (nav not closing distance?)." :
+            poss == 0 && losBlk > 0  ? "monsters in range but LOS-blocked (behind walls)." :
+            poss == 0                ? "monsters in range but all filtered (blacklist / not-attackable)." :
+            s.ActiveTargetId == 0    ? "candidates exist but none acquired yet (should engage next tick)." :
+                                       "engaged — should be attacking; if not, check busy / cast cadence.";
+        ChatLine($"[RynthAi] likely: {why}");
+    }
+
     private void HandleCombatStateCommand()
     {
         if (_combatManager == null) { ChatLine("[RynthAi] Combat manager not ready."); return; }
@@ -1709,13 +1754,25 @@ public sealed partial class RynthAiPlugin
 
         if (land)
         {
+            // Multiple landscape objects can share an exact name (e.g. 4 identically
+            // named corpses in a hive). Prefer the NEAREST match — the one the player
+            // is on / closest to — over an arbitrary first hit that could be a far
+            // corpse out of use range. BUT a corpse's live position can be momentarily
+            // unreadable (TryGetObjectPosition fails → Distance returns double.MaxValue),
+            // so fall back to the first match rather than reporting "not found".
+            WorldObject? best = null, anyMatch = null;
+            double bestDist = double.MaxValue;
             foreach (var wo in _objectCache.GetLandscapeObjects())
             {
-                if (partial
+                bool match = partial
                     ? wo.Name.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0
-                    : string.Equals(wo.Name, name, StringComparison.OrdinalIgnoreCase))
-                    return wo;
+                    : string.Equals(wo.Name, name, StringComparison.OrdinalIgnoreCase);
+                if (!match) continue;
+                anyMatch ??= wo;
+                double dist = _playerId != 0 ? _objectCache.Distance((int)_playerId, wo.Id) : double.MaxValue;
+                if (dist < bestDist) { bestDist = dist; best = wo; }
             }
+            if (best != null || anyMatch != null) return best ?? anyMatch;
         }
 
         return null;

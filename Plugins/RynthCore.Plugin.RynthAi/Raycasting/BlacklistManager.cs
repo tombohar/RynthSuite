@@ -91,6 +91,15 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             return true;
         }
 
+        /// <summary>Forget a target entirely (D8): drop its failure count and any blacklist entry.
+        /// Called when the object is deleted so a respawn reusing the GUID starts from a clean slate
+        /// instead of inheriting the despawned object's 300s blacklist timeout.</summary>
+        public void ForgetTarget(int targetId)
+        {
+            _failureCounts.Remove(targetId);
+            _blacklistExpirations.Remove(targetId);
+        }
+
         /// <summary>
         /// Clears the failure count and blacklist status for a target.
         /// Call this when a target successfully takes damage or shows other server feedback.

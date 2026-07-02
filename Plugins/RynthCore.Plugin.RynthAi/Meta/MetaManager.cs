@@ -988,6 +988,54 @@ internal sealed class MetaManager
         // /vt settings load / loadchar — ignore silently
         if (sub == "settings") return true;
 
+        // /vt <verb> aliases → existing /ra handlers (Phase 1.3 VTank-meta migration).
+        // Re-dispatch through the /ra path (_raCommandHandler → HandleRaCommand).
+        if (sub is "forcebuff" or "cancelforcebuff" or "addnavpt")
+        {
+            _raCommandHandler?.Invoke("/ra " + string.Join(" ", parts, 1, parts.Length - 1));
+            return true;
+        }
+
+        // /vt setattackbar <0..1 fraction> → RynthAi attack power % (reuse /ra power,
+        // which sets Melee+Missile AttackPower). VTank metas pass a 0-1 bar fraction.
+        if (sub == "setattackbar" && parts.Length >= 3 &&
+            double.TryParse(parts[2], System.Globalization.NumberStyles.Any,
+                            System.Globalization.CultureInfo.InvariantCulture, out double bar))
+        {
+            int pct = Math.Clamp((int)Math.Round(bar * 100), 0, 100);
+            _raCommandHandler?.Invoke("/ra power " + pct.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            return true;
+        }
+
+        // /vt reverseroute — reverse the active nav route in place (shared settings;
+        // the engine re-reads CurrentRoute each tick, so the flip takes effect next tick).
+        if (sub == "reverseroute")
+        {
+            var route = _settings.CurrentRoute;
+            if (route?.Points != null && route.Points.Count > 0)
+            {
+                int n = route.Points.Count;
+                route.Points.Reverse();
+                _settings.ActiveNavIndex = Math.Clamp(n - 1 - _settings.ActiveNavIndex, 0, n - 1);
+                _host.WriteToChat($"[RynthAi] Route reversed ({n} pts).", 1);
+            }
+            return true;
+        }
+
+        // /vt echo <text> — local chat echo (no server send).
+        if (sub == "echo" && parts.Length >= 3)
+        {
+            _host.WriteToChat(string.Join(" ", parts, 2, parts.Length - 2), 1);
+            return true;
+        }
+
+        // /vt cancelbuff — cancel the buff sequence (same capability as /ra cancelforcebuff).
+        if (sub == "cancelbuff")
+        {
+            _raCommandHandler?.Invoke("/ra cancelforcebuff");
+            return true;
+        }
+
         return false;
     }
 
@@ -1012,6 +1060,26 @@ internal sealed class MetaManager
         ["autofellowmanagement"]      = "AutoFellowMgmt",
         ["switchwandstodebuff"]       = "UseDispelItems",
         ["lootonlyrarecorpses"]       = "MineOnly",
+        // Phase 1.2 VTank-meta migration aliases (targets verified in BuildSettingsMap)
+        ["autocram"]                  = "EnableAutocram",
+        ["autostack"]                 = "EnableAutostack",
+        ["usedispelitems"]            = "UseDispelItems",
+        ["castdispelself"]            = "CastDispelSelf",
+        ["opendoorrange"]             = "OpenDoorRange",
+        // Phase 2 migration: vital recharge is 2-tier — norm = with-target/in-combat,
+        // notarg = idle/no-target (RynthAi has both: HealAt/… vs TopOff…). Percent 0-100.
+        ["recharge-norm-hitp"]        = "HealAt",
+        ["recharge-norm-mana"]        = "GetManaAt",
+        ["recharge-norm-stam"]        = "RestamAt",
+        ["recharge-notarg-hitp"]      = "TopOffHP",
+        ["recharge-notarg-mana"]      = "TopOffMana",
+        ["recharge-notarg-stam"]      = "TopOffStam",
+        ["petmonsterdensity"]         = "PetMinMonsters",
+        ["corpseapproachrange-max"]   = "CorpseApproachRangeMax",  // landblock fraction; consumer ×240
+        ["corpseapproachrange-min"]   = "CorpseApproachRangeMin",
+        ["manastonelootcount"]        = "ManaStoneKeepCount",
+        ["rebuftimeremainingseconds"] = "RebuffSecondsRemaining",
+        ["navclosestoprange"]         = "NavCloseStopRange",        // landblock fraction; nav reads ×240
     };
 
     private bool TrySetVtOption(string vtName, string vtValue)

@@ -128,6 +128,16 @@ internal sealed class LegacyDashboardRenderer
     // Equipped gear with full appraisal, pushed from the pump thread; volatile ref.
     private volatile EquipAppraisal[] _equipment = System.Array.Empty<EquipAppraisal>();
 
+    // D2 three-tier target telemetry + D6 attack-cast/kill ratio, pushed from the pump thread
+    // (SetScanCounts/SetCastStats) and read on the snapshot-poll thread — volatile for visibility
+    // (same rationale as _freeSlots above). -1 = no scan yet this session.
+    private volatile int _scanTotal = -1;      // monsters the client renders this scan
+    private volatile int _scanRing = -1;       // of those, within engage range
+    private volatile int _scanPossible = -1;   // of those, surviving all combat filters (attack candidates)
+    private volatile int _scanLosBlocked = -1; // in-range + attackable but wall-blocked (LOS)
+    private volatile int _sessionAttackCasts;  // offensive combat casts issued this session
+    private volatile int _castsSinceLastKill;  // offensive casts since the last credited kill (orphan signal)
+
     // Full read-only inventory for the remote viewer (P1), pushed from the pump thread; volatile refs.
     // Kept OUT of BuildSnapshotJson (the 150ms hot path) — served by its own RynthPluginGetInventoryJson
     // export so 100s of items never ride the status snapshot. _inventoryVersion bumps on each rescan.
@@ -1908,6 +1918,22 @@ internal sealed class LegacyDashboardRenderer
     /// Pushed from the plugin tick (it owns the inventory cache) — main-pack empty slots. -1 = unknown.
     public void SetFreeSlots(int slots) => _freeSlots = slots;
 
+    /// Pushed from the plugin tick — D2 three-tier target counts (-1 = no scan yet).
+    public void SetScanCounts(int total, int ring, int possible, int losBlocked)
+    {
+        _scanTotal = total;
+        _scanRing = ring;
+        _scanPossible = possible;
+        _scanLosBlocked = losBlocked;
+    }
+
+    /// Pushed from the plugin tick — D6 offensive attack-cast tallies.
+    public void SetCastStats(int sessionAttackCasts, int castsSinceLastKill)
+    {
+        _sessionAttackCasts = sessionAttackCasts;
+        _castsSinceLastKill = castsSinceLastKill;
+    }
+
     private volatile bool _uiHidden;   // remote "Hide UI" state, surfaced to the status feed
     public void SetUiHidden(bool hidden) => _uiHidden = hidden;
 
@@ -2428,6 +2454,15 @@ internal sealed class LegacyDashboardRenderer
             : (int)Math.Clamp((DateTime.UtcNow - new DateTime(lastKillTicks, DateTimeKind.Utc)).TotalSeconds, 0, int.MaxValue);
         AppendInt(sb, "secsSinceLastKill", secsSinceLastKill); sb.Append(',');
         AppendInt(sb, "freeSlots", _freeSlots); sb.Append(',');
+        // D2 three-tier target telemetry + D6 attack-cast/kill ratio (orphan early-warning).
+        AppendInt(sb, "scanTotal", _scanTotal); sb.Append(',');
+        AppendInt(sb, "scanRing", _scanRing); sb.Append(',');
+        AppendInt(sb, "scanPossible", _scanPossible); sb.Append(',');
+        AppendInt(sb, "scanLosBlocked", _scanLosBlocked); sb.Append(',');
+        AppendInt(sb, "sessionAttackCasts", _sessionAttackCasts); sb.Append(',');
+        AppendInt(sb, "castsSinceLastKill", _castsSinceLastKill); sb.Append(',');
+        int killsForRatio = (int)System.Threading.Interlocked.Read(ref _sessionKills);
+        AppendFloat(sb, "castsPerKill", killsForRatio > 0 ? (float)_sessionAttackCasts / killsForRatio : 0f); sb.Append(',');
         AppendBool(sb, "uiHidden", _uiHidden); sb.Append(',');
         AppendInt(sb, "scarabs", _scarabs); sb.Append(',');
         AppendInt(sb, "tapers", _tapers); sb.Append(',');

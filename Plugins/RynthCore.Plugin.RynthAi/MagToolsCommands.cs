@@ -88,6 +88,12 @@ public sealed partial class RynthAiPlugin
                 if (Host.HasInvokeChatParser) Host.InvokeChatParser("/quit");
                 return true;
 
+            // ── Send a chat line / slash command (VTank /mt send) ────────────
+            case "send":
+                if (parts.Length >= 3 && Host.HasInvokeChatParser)
+                    Host.InvokeChatParser(string.Join(" ", parts, 2, parts.Length - 2));
+                return true;
+
             default:
                 return false;
         }
@@ -184,6 +190,25 @@ public sealed partial class RynthAiPlugin
         ["autofellowmanagement"]      = "AutoFellowMgmt",
         ["switchwandstodebuff"]       = "UseDispelItems",
         ["lootonlyrarecorpses"]       = "MineOnly",
+        // VTank-meta migration aliases (mirror of MetaManager.VtOptionMap so options
+        // set via /ub opt / /mt opt resolve the same as /vt opt set).
+        ["autocram"]                  = "EnableAutocram",
+        ["autostack"]                 = "EnableAutostack",
+        ["usedispelitems"]            = "UseDispelItems",
+        ["castdispelself"]            = "CastDispelSelf",
+        ["opendoorrange"]             = "OpenDoorRange",
+        ["recharge-norm-hitp"]        = "HealAt",
+        ["recharge-norm-mana"]        = "GetManaAt",
+        ["recharge-norm-stam"]        = "RestamAt",
+        ["recharge-notarg-hitp"]      = "TopOffHP",
+        ["recharge-notarg-mana"]      = "TopOffMana",
+        ["recharge-notarg-stam"]      = "TopOffStam",
+        ["petmonsterdensity"]         = "PetMinMonsters",
+        ["corpseapproachrange-max"]   = "CorpseApproachRangeMax",
+        ["corpseapproachrange-min"]   = "CorpseApproachRangeMin",
+        ["manastonelootcount"]        = "ManaStoneKeepCount",
+        ["rebuftimeremainingseconds"] = "RebuffSecondsRemaining",
+        ["navclosestoprange"]         = "NavCloseStopRange",
     };
 
     private string? GetOptionValue(string optName)

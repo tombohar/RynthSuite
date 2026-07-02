@@ -471,6 +471,7 @@ internal sealed class ExpressionEngine
             "getfellowshiplocked"      => (_fellowshipTracker?.IsLocked == true ? "1" : "0"),
             "getfellowshipisleader"    => (_fellowshipTracker?.IsLeader == true ? "1" : "0"),
             "getfellowshipisopen"      => (_fellowshipTracker?.IsOpen == true ? "1" : "0"),
+            "getfellowshipstatus"      => EvalGetFellowshipStatus(),
             "getfellowshipisfull"      => EvalFellowshipIsFull(),
             "getfellowshipcanrecruit"  => EvalFellowshipCanRecruit(),
             "getfellowid"              => EvalGetFellowId(A(0)),
@@ -483,10 +484,10 @@ internal sealed class ExpressionEngine
             "raoptset" or "uboptset" => EvalOptSet(A(0), A(1)),
 
             // ── RynthAi settings / meta state (VTank-compatible names) ────────
-            "rasetmetastate" => EvalVtSetMetaState(Tmpl(0)),
+            "rasetmetastate" or "vtsetmetastate" or "setmetastate" => EvalVtSetMetaState(Tmpl(0)),
             "ragetmetastate" => _settings?.CurrentState ?? "",
-            "rasetsetting"   => EvalVtSetSetting(Tmpl(0), A(1)),
-            "ragetsetting"   => EvalVtGetSetting(Tmpl(0)),
+            "rasetsetting" or "vtsetsetting"     => EvalVtSetSetting(Tmpl(0), A(1)),
+            "ragetsetting" or "vtgetsetting" or "vtankgetsetting" => EvalVtGetSetting(Tmpl(0)),
 
             // ── Dynamic evaluation ────────────────────────────────────────────
             "exec"      => Evaluate(A(0)),
@@ -508,8 +509,20 @@ internal sealed class ExpressionEngine
             "dictclear"     => EvalDictClear(A(0)),
             "dictcopy"      => EvalDictCopy(A(0)),
 
-            _ => ""
+            _ => EvalUnknownFunction(funcName)
         };
+    }
+
+    /// <summary>Unknown-function fallback (M3): returns "" per engine convention but logs the
+    /// missing verb ONCE per distinct name, so a typo'd or unsupported meta function is visible
+    /// instead of silently evaluating to empty. Rate-limited by the seen-set to avoid log spam.</summary>
+    private readonly HashSet<string> _loggedUnknownFns = new();
+    private string EvalUnknownFunction(string funcName)
+    {
+        if (!string.IsNullOrEmpty(funcName) && _loggedUnknownFns.Add(funcName))
+            _host.Log($"[Meta] unknown expression function '{funcName}[...]' — evaluates to empty; " +
+                      "check spelling / supported verbs. (logged once per name)");
+        return "";
     }
 
     // ── Variable / char-prop implementations ──────────────────────────────────
@@ -3021,6 +3034,19 @@ internal sealed class ExpressionEngine
         return (_fellowshipTracker.IsLeader || _fellowshipTracker.IsOpen) ? "1" : "0";
     }
 
+    // VTank getfellowshipstatus[] — the migration keystone (~149 metas use it).
+    // Contract reverse-engineered from real meta usage across the VTank library
+    // (512 calls: only ==0 / ==1 / !=0; AutoFellow gates `/ub fellow recruit`
+    // — a leader-only action — on ==1):
+    //   0 = not in a fellowship
+    //   1 = in a fellowship and you are the leader
+    //   2 = in a fellowship and you are NOT the leader
+    private string EvalGetFellowshipStatus()
+    {
+        if (_fellowshipTracker == null || !_fellowshipTracker.IsInFellowship) return "0";
+        return _fellowshipTracker.IsLeader ? "1" : "2";
+    }
+
     private string EvalGetFellowId(string arg)
     {
         if (_fellowshipTracker == null) return "0";
@@ -3142,6 +3168,12 @@ internal sealed class ExpressionEngine
             ["MissileAttackPower"]  = (() => I(s.MissileAttackPower),  v => { if (int.TryParse(v, out int i)) s.MissileAttackPower = i; }),
             ["CustomPetRange"]      = (() => I(s.CustomPetRange),      v => { if (int.TryParse(v, out int i)) s.CustomPetRange   = i; }),
             ["PetMinMonsters"]      = (() => I(s.PetMinMonsters),      v => { if (int.TryParse(v, out int i)) s.PetMinMonsters   = i; }),
+            // VTank-meta migration (Phase 2): fields existed but weren't exposed here.
+            ["CorpseApproachRangeMax"] = (() => D(s.CorpseApproachRangeMax), v => { if (double.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out double d)) s.CorpseApproachRangeMax = d; }),
+            ["CorpseApproachRangeMin"] = (() => D(s.CorpseApproachRangeMin), v => { if (double.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out double d)) s.CorpseApproachRangeMin = d; }),
+            ["ManaStoneKeepCount"]     = (() => I(s.ManaStoneKeepCount),     v => { if (int.TryParse(v, out int i)) s.ManaStoneKeepCount = i; }),
+            ["RebuffSecondsRemaining"] = (() => I(s.RebuffSecondsRemaining), v => { if (int.TryParse(v, out int i)) s.RebuffSecondsRemaining = i; }),
+            ["NavCloseStopRange"]      = (() => F(s.NavCloseStopRange),      v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f)) s.NavCloseStopRange = f; }),
             ["MaxMonRange"]         = (() => D(s.MaxMonRange),         v => { if (double.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out double d)) s.MaxMonRange = d; }),
             ["NavRingThickness"]    = (() => F(s.NavRingThickness),    v => { if (float.TryParse(v,  System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f))  s.NavRingThickness = f; }),
             ["NavLineThickness"]    = (() => F(s.NavLineThickness),    v => { if (float.TryParse(v,  System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f))  s.NavLineThickness = f; }),
@@ -3323,13 +3355,15 @@ internal sealed class ExpressionEngine
     private static string Fmt(double d) => d.ToString("G", CultureInfo.InvariantCulture);
     private static string Fmt(long l)   => l.ToString(CultureInfo.InvariantCulture);
 
-    /// <summary>Equality: numeric if both sides parse as numbers, otherwise ordinal string.</summary>
+    /// <summary>Equality: numeric if both sides parse as numbers, otherwise case-INSENSITIVE
+    /// string (M1). Case-insensitivity matches author intent ($x==True is true for 'true') and
+    /// the conventions of the metas we import; numeric compares are unaffected.</summary>
     private static bool AreEqual(string a, string b)
     {
         if (double.TryParse(a, NumberStyles.Float | NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out double da)
          && double.TryParse(b, NumberStyles.Float | NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out double db))
             return da == db;
-        return string.Equals(a, b, StringComparison.Ordinal);
+        return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
     }
 
     // ── Argument splitter ─────────────────────────────────────────────────────
@@ -3463,12 +3497,18 @@ internal sealed class ExpressionEngine
             return l;
         }
 
-        // Priority 6: ==
+        // Priority 6: ==  != (M1: != was previously unsupported and silently dropped, failing OPEN)
         private string ParseEquality()
         {
             var l = ParseComparison();
             Ws();
-            while (Try("==")) { var r = ParseComparison(); l = AreEqual(l, r) ? "1" : "0"; Ws(); }
+            while (true)
+            {
+                if (Try("=="))      { var r = ParseComparison(); l =  AreEqual(l, r) ? "1" : "0"; }
+                else if (Try("!=")) { var r = ParseComparison(); l = !AreEqual(l, r) ? "1" : "0"; }
+                else break;
+                Ws();
+            }
             return l;
         }
 

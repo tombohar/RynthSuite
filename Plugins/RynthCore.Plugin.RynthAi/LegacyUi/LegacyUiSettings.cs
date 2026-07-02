@@ -113,6 +113,10 @@ public sealed class LegacyUiSettings
     public int ApproachRange = 4;
     public int MinRingTargets = 4;
     public float FollowNavMin = 1.5f;
+    // VTank navclosestoprange: stop this many LANDBLOCK FRACTIONS short of a finite
+    // (Once) route's final point (×240 = yards; 0.00625 ≈ 1.5yd). 0 = off. Runtime-
+    // set by migrated metas; not persisted.
+    public float NavCloseStopRange = 0f;
     public float NavRingThickness = 6.0f;
     public float NavLineThickness = 6.0f;
     public float NavHeightOffset = 0.05f;

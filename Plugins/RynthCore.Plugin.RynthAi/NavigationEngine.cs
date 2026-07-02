@@ -97,6 +97,9 @@ internal sealed class NavigationEngine
     private double BigTurnExit  => Math.Max(1.0,  Math.Min(_settings.NavResumeTurnAngle, BigTurnEnter - 1.0));
     private double SweepMult    => Math.Max(1.0,  _settings.NavSweepMult);
     private double ArrivalYards => Math.Max(1.5,  _settings.FollowNavMin);
+    // VTank navclosestoprange: stop short of a finite (Once) route's final point.
+    // Stored as a landblock fraction; ×240 → yards. 0 = off.
+    private double CloseStopYards => _settings.NavCloseStopRange > 0f ? _settings.NavCloseStopRange * 240.0 : 0.0;
 
     // Lookahead: within this distance of a waypoint, blend the aim point toward
     // the next one so corners are cut smoothly. 0 = off (aim straight at each
@@ -342,6 +345,18 @@ internal sealed class NavigationEngine
         double dNS  = pt.NS - ns;
         double dEW  = pt.EW - ew;
         double dist = Math.Sqrt(dNS * dNS + dEW * dEW) * 240.0;
+
+        // VTank navclosestoprange: on a finite (Once) route's final point, treat
+        // arrival as reached once within the close-stop distance and stop short of
+        // the destination instead of walking onto it.
+        if (CloseStopYards > 0.0 && route.RouteType == NavRouteType.Once
+            && PeekNext(idx, route) < 0 && dist < CloseStopYards)
+        {
+            _host.Log($"Nav: close-stop at final pt [{idx}] dist={dist:F1}yd ≤ {CloseStopYards:F1}yd");
+            StopMovement();
+            HandleRouteEnd(route);
+            return;
+        }
 
         // Arrival check
         if (dist < ArrivalYards)

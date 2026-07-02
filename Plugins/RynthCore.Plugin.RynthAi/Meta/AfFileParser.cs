@@ -65,6 +65,10 @@ internal static class AfFileParser
                 {
                     ParseState(lines, ref idx, result.Rules);
                 }
+                else if (trimmed.StartsWith("NAVDATA:"))
+                {
+                    ParseNavData(lines, ref idx, result.EmbeddedNavs);
+                }
                 else if (trimmed.StartsWith("NAV:"))
                 {
                     ParseNavSection(lines, ref idx, result.EmbeddedNavs);
@@ -564,6 +568,36 @@ internal static class AfFileParser
     }
 
     // ── NAV section parsing ─────────────────────────────────────────────────
+
+    // Reads a `NAVDATA: <name> <lineCount> ~~ {` block (written by AfFileWriter):
+    // the canonical uTank2 nav lines stored verbatim. Count-prefixed so a waypoint
+    // string containing "~~ }" cannot terminate the block early. This is the exact
+    // representation MetFileParser produces and the nav engine consumes — so a route
+    // round-trips losslessly regardless of waypoint type (Portal/Vendor/NPC included).
+    private static void ParseNavData(string[] lines, ref int idx,
+        Dictionary<string, List<string>> navRoutes)
+    {
+        string body = StripPrefix(lines[idx].TrimStart(), "NAVDATA:");
+        int comment = body.IndexOf("~~", StringComparison.Ordinal);
+        if (comment >= 0) body = body.Substring(0, comment).TrimEnd();
+        // Trailing token is the line count; everything before it is the route name
+        // (names are space-sanitized on write; parse from the right to be safe).
+        int sp = body.LastIndexOf(' ');
+        string name = sp > 0 ? body.Substring(0, sp).Trim() : body.Trim();
+        int count = 0;
+        if (sp > 0)
+            int.TryParse(body.Substring(sp + 1).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out count);
+        idx++; // consume header
+
+        var navLines = new List<string>(count);
+        for (int k = 0; k < count && idx < lines.Length; k++)
+            navLines.Add(lines[idx++]);
+
+        if (idx < lines.Length && lines[idx].Trim() == "~~ }") idx++; // consume closer
+
+        if (!string.IsNullOrEmpty(name) && navLines.Count >= 3)
+            navRoutes[name] = navLines;
+    }
 
     private static void ParseNavSection(string[] lines, ref int idx, Dictionary<string, List<string>> navRoutes)
     {

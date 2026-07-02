@@ -440,6 +440,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private long _combatEndedAt;       // Timestamp when combat stopped blocking
     private const long LootGraceMs = 2000; // Hold nav after combat ends so corpses can spawn
     private DateTime _lastFreeSlotsPushAt = DateTime.MinValue; // throttle the status-feed pack-slots compute
+    private DateTime _lastCombatTelemetryAt = DateTime.MinValue; // throttle the D2/D6 combat-telemetry push+log
+    private int _lastCombatTelemetrySig = int.MinValue;          // change key so a static-mob wedge logs once, not every tick
 
     // Remote "Hide UI": suppress vanilla radar/chat/powerbar (re-asserted each tick in the OnTick settings
     // push). Set by the forwarded "hideui" command (ApplyRemoteCommand). The phone command-file drain and
@@ -907,15 +909,16 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 if (diag)
                     Host.Log($"[RynthAi] OnTick: pushSettings.SuppressRetailRadar={pushSettings.SuppressRetailRadar}, SuppressRetailPowerbar={pushSettings.SuppressRetailPowerbar}");
                 Host.SetFpsLimit(pushSettings.EnableFPSLimit, pushSettings.TargetFPSFocused, pushSettings.TargetFPSBackground);
-                // "Hide UI" (remote): blank the vanilla AC radar/chat/powerbar too. The RynthAi Avalonia
+                // "Hide UI" (remote): blank the vanilla AC radar/powerbar too. The RynthAi Avalonia
                 // panels are separate windows already excluded by the stream's PrintWindow capture.
+                // NOTE: retail chat suppression is intentionally NOT handled here — it is owned by
+                // the RynthChat plugin (engine-side ChatHooks, driven from RynthChatPanel's gear menu).
+                // RynthAi pushing it every tick clobbered that toggle, so it lives solely in RynthChat now.
                 bool hideUi = _hideUi;
                 if (Host.HasSetRadarSuppressed)
                     Host.SetRadarSuppressed(hideUi || pushSettings.SuppressRetailRadar);
                 if (Host.HasSetPowerbarSuppressed)
                     Host.SetPowerbarSuppressed(hideUi || pushSettings.SuppressRetailPowerbar);
-                if (Host.HasSetChatSuppressed)
-                    Host.SetChatSuppressed(hideUi);
 
                 // Fellowship-follow: publish the leader's object id so the nav
                 // engine can steer toward their live position. 0 = idle (not in a
@@ -1186,6 +1189,40 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
                     // Remote full-inventory snapshot (P1) — same 3s gate, reuses the cached walk.
                     ScanInventoryForRemote();
+                }
+
+                // D2/D6 combat telemetry: three-tier target counts + offensive attack-cast/kill
+                // ratio, pushed to the status feed and (change-gated) logged so a "scanned=0 vs
+                // live mobs" or "animates but 0 damage" wedge is diagnosable from the feed/log
+                // instead of guesswork. Independent of the inventory gate above — useful pre-settle.
+                if (_combatManager != null
+                    && (DateTime.Now - _lastCombatTelemetryAt).TotalMilliseconds > 3000)
+                {
+                    _lastCombatTelemetryAt = DateTime.Now;
+                    int sTotal = _combatManager.LastScanTotalMonsters;
+                    int sRing = _combatManager.LastScanInRing;
+                    int sPoss = _combatManager.LastScanPossible;
+                    int sLos = _combatManager.LastScanLosBlocked;
+                    int atkCasts = _combatManager.SessionAttackCasts;
+                    int sinceKill = _combatManager.CastsSinceLastKill;
+                    _dashboard?.SetScanCounts(sTotal, sRing, sPoss, sLos);
+                    _dashboard?.SetCastStats(atkCasts, sinceKill);
+
+                    // Log only when there's something to see, and only when the picture changed,
+                    // so a healthy idle bot never spams the per-client log. sinceKill is in the key
+                    // so active combat shows periodic progress while a stalled-with-mobs wedge logs
+                    // its snapshot once and then stays quiet. (-1 = no scan yet → OR is negative → skip.)
+                    if ((sTotal | sRing | sPoss | sLos | atkCasts | sinceKill) > 0)
+                    {
+                        int sig = ((sTotal & 0x3FF) << 20) ^ ((sRing & 0x3FF) << 10) ^ (sPoss & 0x3FF)
+                                  ^ (sLos << 6) ^ (sinceKill << 1);
+                        if (sig != _lastCombatTelemetrySig)
+                        {
+                            _lastCombatTelemetrySig = sig;
+                            Host.Log($"[ScanTele] targets total={sTotal} ring={sRing} possible={sPoss} " +
+                                     $"losBlk={sLos} | atkCasts={atkCasts} sinceKill={sinceKill}");
+                        }
+                    }
                 }
 
                 if (diag) Host.Log("[RynthAi] OnTick: before salvageManager");
@@ -1470,6 +1507,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         try
         {
             _objectCache?.OnDeleteObject(objectId);
+            _combatManager?.OnObjectDeleted(objectId);   // D7/D8: free per-id maps + clear cast-wait if it was our target
             HandleCorpseObjectDeleted(objectId);
         }
         catch (Exception ex)
@@ -2067,6 +2105,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "navdebug":     HandleNavDebugCommand(); break;
             case "addnavpt":     HandleAddNavPointCommand(); break;
             case "follow":       HandleFollowCommand(parts); break;
+            case "myquests":
+            case "refreshquests": _questTracker?.Refresh(); ChatLine("[RynthAi] Quest flag refresh requested."); break;
             case "dunnav":        HandleDungeonNavCommand(parts); break;
             case "dunnav-patrol": HandleDungeonNavPatrolCommand(parts); break;
             case "hazard":        HandleHazardCommand(parts); break;
@@ -2081,6 +2121,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "fellowinfo":   HandleFellowshipInfoCommand(); break;
             case "dumpinv":      HandleDumpInventoryCommand(); break;
             case "combat":       HandleCombatStateCommand(); break;
+            case "why":          HandleWhyCommand(); break;
             case "mapdump":      HandleMapDumpCommand(); break;
             case "clearbusy":    HandleClearBusyCommand(); break;
             case "panic":        HandlePanicCommand(); break;

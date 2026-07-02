@@ -232,6 +232,14 @@ public class BuffManager : IDisposable
     /// <summary>Client busy count — when > 0, don't send any game actions.</summary>
     public int BusyCount { get; set; }
 
+    /// <summary>
+    /// Record-only diagnostic (D4): the reason the most recent buff-decision cycle
+    /// did NOT issue a self/player buff cast (or the site that yielded the tick).
+    /// Purely additive — set at each skip site, never read by control flow.
+    /// Surfaced through GetStateSnapshot()/BuffStateSnapshot for /ra why + arbiter.
+    /// </summary>
+    public string LastBuffSkipReason { get; private set; } = "";
+
     private readonly List<string> BaseCreatureBuffs = new()
     {
         "Strength Self", "Endurance Self", "Coordination Self",
@@ -425,6 +433,7 @@ public class BuffManager : IDisposable
         RamBuffTimerCount   = _ramBuffTimers.Count,
         ItemSpellTimerCount = _itemSpellTimers.Count,
         NeedsAnyBuffNow     = NeedsAnyBuff(),
+        LastBuffSkipReason  = LastBuffSkipReason,
         HealthPct           = _vitals.HealthPct,
         ManaPct             = _vitals.ManaPct,
         StaminaPct          = _vitals.StaminaPct,
@@ -445,6 +454,7 @@ public class BuffManager : IDisposable
         public int      HealthPct;
         public int      ManaPct;
         public int      StaminaPct;
+        public string   LastBuffSkipReason;
     }
 
     private bool _liveBuffsRefreshed;
@@ -668,6 +678,7 @@ public class BuffManager : IDisposable
         // CombatManager can't sneak in a peace-mode switch mid-cast.
         if (!CastGateWatchdog.CanCastNow(_host.CanCastNow, s => _host.Log(s)) || BusyCount > 0)
         {
+            LastBuffSkipReason = BusyCount > 0 ? "busy (BusyCount>0)" : "cast gate closed (CanCastNow=false / gesture animating)";
             if (_pendingSpellId != 0) _settings.BotAction = "Buffing";
             return;
         }
@@ -849,6 +860,7 @@ public class BuffManager : IDisposable
             AcSkillType castSkill = SkillForBuff(buffBaseName);
             if (!IsSkillUsable(castSkill))
             {
+                LastBuffSkipReason = $"skill not usable: {buffBaseName} ({castSkill})";
                 if (diagnose) _host.Log($"[FR] skip '{buffBaseName}' — skill {castSkill} not usable");
                 continue;
             }
@@ -856,12 +868,14 @@ public class BuffManager : IDisposable
             int spellId = FindBestSpellId(buffBaseName, castSkill);
             if (spellId == 0)
             {
+                LastBuffSkipReason = $"not known / unresolvable: {buffBaseName}";
                 if (diagnose) _host.Log($"[FR] skip '{buffBaseName}' — FindBestSpellId returned 0");
                 continue;
             }
 
             if (IsBuffActive(spellId))
             {
+                LastBuffSkipReason = $"already active: {buffBaseName} (id={spellId})";
                 if (diagnose) _host.Log($"[FR] skip '{buffBaseName}' (id={spellId}) — already active");
                 continue;
             }
@@ -874,6 +888,7 @@ public class BuffManager : IDisposable
                 && _buffFailCooldownUntil.TryGetValue(buffFamily, out DateTime coolUntil)
                 && DateTime.Now < coolUntil)
             {
+                LastBuffSkipReason = $"fail-cooldown: {buffBaseName} (fam={buffFamily}, {(coolUntil - DateTime.Now).TotalSeconds:0}s)";
                 if (diagnose) _host.Log($"[FR] skip '{buffBaseName}' (id={spellId}) — hard-fail cooldown {(coolUntil - DateTime.Now).TotalSeconds:0}s");
                 continue;
             }
@@ -890,9 +905,11 @@ public class BuffManager : IDisposable
                     // family is shelved, time-boxed, and auto-retried.
                     if (buffFamily != 0)
                         _buffFailCooldownUntil[buffFamily] = DateTime.Now.AddSeconds(BuffFailCooldownSec);
+                    LastBuffSkipReason = $"wand-swap exhausted: {buffBaseName} (fam={buffFamily})";
                     _host.Log($"[WieldGate] wand-swap exhausted for '{buffBaseName}' (fam={buffFamily}) — parking {BuffFailCooldownSec:0}s, fighting unbuffed");
                     continue;
                 }
+                LastBuffSkipReason = "magic-mode swap in progress (yielding tick)";
                 return true; // normal in-progress swap — keep BotAction='Buffing' and yield
             }
 
@@ -917,6 +934,7 @@ public class BuffManager : IDisposable
                 // doesn't hang on this spell. (No timer to undo — we no longer
                 // record optimistically.)
                 _pendingSpellId = 0;
+                LastBuffSkipReason = $"local CastSpell rejected: {buffBaseName} (id={spellId})";
                 if (diagnose) _host.Log($"[FR] cast '{buffBaseName}' returned false — pending cleared");
             }
             return true;

@@ -277,86 +277,20 @@ internal static class AfFileWriter
 
     private static void WriteNavSection(TextWriter writer, string navName, IReadOnlyList<string> lines)
     {
-        try
-        {
-            if (lines.Count < 3 || !lines[0].Contains("uTank2 NAV"))
-                return;
+        if (lines.Count < 3) return;
 
-            string routeType = int.TryParse(lines[1], out int rt) ? rt switch
-            {
-                1 => "circular",
-                2 => "linear",
-                3 => "follow",
-                4 => "once",
-                _ => "circular"
-            } : "circular";
-
-            writer.WriteLine($"NAV: {navName} {routeType} ~~ {{");
-
-            int pointCount = int.TryParse(lines[2], out int pc) ? pc : 0;
-            int idx = 3;
-
-            for (int p = 0; p < pointCount && idx < lines.Count; p++)
-            {
-                int pointType = int.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                double ew = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                double ns = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                double z = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                idx++; // skip flag
-
-                switch (pointType)
-                {
-                    case 0: // Point
-                        writer.Write("\t");
-                        writer.WriteLine($"pnt {ew.ToString(CultureInfo.InvariantCulture)} {ns.ToString(CultureInfo.InvariantCulture)} {z.ToString(CultureInfo.InvariantCulture)}");
-                        break;
-                    case 2: // Recall
-                    {
-                        int spellId = int.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                        string recallName = SpellIdToRecallName(spellId);
-                        writer.Write("\t");
-                        writer.WriteLine($"rcl {ew.ToString(CultureInfo.InvariantCulture)} {ns.ToString(CultureInfo.InvariantCulture)} {z.ToString(CultureInfo.InvariantCulture)} {{{recallName}}}");
-                        break;
-                    }
-                    case 3: // Pause
-                    {
-                        int ms = int.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                        double sec = ms / 1000.0;
-                        writer.Write("\t");
-                        writer.WriteLine($"pau {sec.ToString(CultureInfo.InvariantCulture)}");
-                        break;
-                    }
-                    case 4: // Chat
-                    {
-                        string chatCmd = lines[idx++];
-                        writer.Write("\t");
-                        writer.WriteLine($"cht {ew.ToString(CultureInfo.InvariantCulture)} {ns.ToString(CultureInfo.InvariantCulture)} {z.ToString(CultureInfo.InvariantCulture)} {{{chatCmd}}}");
-                        break;
-                    }
-                    case 6: // PortalNPC
-                    {
-                        string targetName = lines[idx++];
-                        int objClass = int.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                        bool isTie = bool.Parse(lines[idx++]);
-                        double exitEW = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                        double exitNS = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                        double exitZ = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                        idx++; // flag
-                        double landEW = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                        double landNS = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                        double landZ = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                        idx++; // flag
-
-                        writer.Write("\t");
-                        writer.WriteLine($"ptl {ew.ToString(CultureInfo.InvariantCulture)} {ns.ToString(CultureInfo.InvariantCulture)} {z.ToString(CultureInfo.InvariantCulture)} {exitEW.ToString(CultureInfo.InvariantCulture)} {exitNS.ToString(CultureInfo.InvariantCulture)} {exitZ.ToString(CultureInfo.InvariantCulture)} {objClass} {{{targetName}}}");
-                        break;
-                    }
-                }
-            }
-
-            writer.WriteLine("~~ }");
-        }
-        catch { }
+        // Verbatim, count-prefixed passthrough of the canonical uTank2 nav lines
+        // (the same representation MetFileParser/NavRouteParser use). Lossless for
+        // EVERY waypoint type. The previous per-token writer assumed an 11-line
+        // type-6 trailer (vs the canonical 6: name,class,tie,exitEW,exitNS,exitZ)
+        // and had no case for type 5 (Vendor) / 7 (NPC) at all, so it desynced and
+        // truncated every .met-sourced route at its first Portal/Vendor/NPC point.
+        // Count prefix means a waypoint string that happens to contain "~~ }"
+        // cannot terminate the block early. Legacy human-readable NAV: sections are
+        // still parsed on read for metaf-file compatibility.
+        writer.WriteLine($"NAVDATA: {navName} {lines.Count} ~~ {{");
+        foreach (string l in lines) writer.WriteLine(l);
+        writer.WriteLine("~~ }");
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
