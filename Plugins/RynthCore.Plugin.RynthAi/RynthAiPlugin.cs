@@ -180,6 +180,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     {
         long t0 = Environment.TickCount64;
         try { _dashboard?.SaveSettings(); } catch { }
+        // Release the Monster Editor process handle (if the toggle button
+        // launched one) rather than leaking it on plugin unload/hot-reload.
+        try { _dashboard?.ReleaseMonsterEditorHandle(); } catch { }
         long tAfterSettings = Environment.TickCount64;
         TeardownSession();
         long tAfterTeardown = Environment.TickCount64;

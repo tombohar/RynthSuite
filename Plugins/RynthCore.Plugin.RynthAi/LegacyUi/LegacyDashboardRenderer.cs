@@ -146,9 +146,100 @@ internal sealed class LegacyDashboardRenderer
     private int _inventoryVersion;   // Interlocked: bumped on write, read in BuildInventoryJson
 
     // ── Monster editor (external process) ────────────────────────────────────
+    // Deep-audit finding #10 (2026-06-18): System.Diagnostics.Process is the
+    // documented H6 hazard — HasExited/CloseMainWindow/Process.Start's
+    // handle-touching accessors silently AV this host under NativeAOT in
+    // injected x86 acclient.exe (the engine already abandoned this API for
+    // OpenProcess/GetExitCodeProcess in PluginLoader.IsPidAliveWin32 for the
+    // identical reason). Runs synchronously on the ImGui/game thread from the
+    // "External Editor" button. Replaced with ShellExecuteExW (retaining the
+    // process handle via SEE_MASK_NOCLOSEPROCESS) + Win32 liveness/close.
     private FileSystemWatcher? _monsterWatcher;
     private volatile bool _monsterFileChanged;
-    private System.Diagnostics.Process? _monsterEditorProcess;
+    private IntPtr _monsterEditorProcessHandle = IntPtr.Zero;
+    private int _monsterEditorPid;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct SHELLEXECUTEINFOW
+    {
+        public int cbSize;
+        public uint fMask;
+        public IntPtr hwnd;
+        public string? lpVerb;
+        public string? lpFile;
+        public string? lpParameters;
+        public string? lpDirectory;
+        public int nShow;
+        public IntPtr hInstApp;
+        public IntPtr lpIDList;
+        public string? lpClass;
+        public IntPtr hkeyClass;
+        public uint dwHotKey;
+        public IntPtr hIconOrMonitor;
+        public IntPtr hProcess;
+    }
+
+    private const uint SeeMaskNoCloseProcess = 0x00000040;
+    private const int SwShowNormal = 1;
+    private const uint WaitTimeout = 0x00000102;
+    private const uint WmClose = 0x0010;
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool ShellExecuteExW(ref SHELLEXECUTEINFOW lpExecInfo);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    /// <summary>Finds the first visible top-level window owned by the given PID (mirrors what
+    /// Process.CloseMainWindow does internally) so WM_CLOSE can be posted without touching
+    /// System.Diagnostics.Process.</summary>
+    private static IntPtr FindMainWindowForPid(int pid)
+    {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((hWnd, _) =>
+        {
+            GetWindowThreadProcessId(hWnd, out uint wndPid);
+            if (wndPid == (uint)pid && IsWindowVisible(hWnd))
+            {
+                found = hWnd;
+                return false; // stop enumerating
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    /// <summary>Releases the tracked Monster Editor process handle, if any. Call on plugin
+    /// Shutdown so the handle isn't leaked if the editor is still open when RynthAi unloads.</summary>
+    public void ReleaseMonsterEditorHandle()
+    {
+        if (_monsterEditorProcessHandle != IntPtr.Zero)
+        {
+            CloseHandle(_monsterEditorProcessHandle);
+            _monsterEditorProcessHandle = IntPtr.Zero;
+            _monsterEditorPid = 0;
+        }
+    }
 
     public LegacyDashboardRenderer(RynthCoreHost host)
     {
@@ -1004,10 +1095,18 @@ internal sealed class LegacyDashboardRenderer
         }
 
         // Toggle: if the editor is already running, close it.
-        if (_monsterEditorProcess != null && !_monsterEditorProcess.HasExited)
+        if (_monsterEditorProcessHandle != IntPtr.Zero)
         {
-            _monsterEditorProcess.CloseMainWindow();
-            _monsterEditorProcess = null;
+            uint wait = WaitForSingleObject(_monsterEditorProcessHandle, 0);
+            if (wait == WaitTimeout) // still running
+            {
+                IntPtr hwnd = FindMainWindowForPid(_monsterEditorPid);
+                if (hwnd != IntPtr.Zero)
+                    PostMessage(hwnd, WmClose, IntPtr.Zero, IntPtr.Zero);
+                else
+                    TerminateProcess(_monsterEditorProcessHandle, 0); // no window found — fall back to a hard kill
+            }
+            ReleaseMonsterEditorHandle();
             return;
         }
 
@@ -1021,14 +1120,28 @@ internal sealed class LegacyDashboardRenderer
             return;
         }
 
-        var psi = new System.Diagnostics.ProcessStartInfo
+        var info = new SHELLEXECUTEINFOW
         {
-            FileName        = editorExe,
-            Arguments       = $"\"{_charFolder}\"",
-            UseShellExecute = true,
+            cbSize       = Marshal.SizeOf<SHELLEXECUTEINFOW>(),
+            fMask        = SeeMaskNoCloseProcess,   // retain hProcess instead of closing it internally
+            lpVerb       = "open",
+            lpFile       = editorExe,
+            lpParameters = $"\"{_charFolder}\"",
+            nShow        = SwShowNormal,
         };
-        _monsterEditorProcess = System.Diagnostics.Process.Start(psi);
+
+        if (!ShellExecuteExW(ref info) || info.hProcess == IntPtr.Zero)
+        {
+            _host.WriteToChat("[RynthAi] Failed to launch Monster Editor.", 4);
+            return;
+        }
+
+        _monsterEditorProcessHandle = info.hProcess;
+        _monsterEditorPid = (int)GetProcessId(info.hProcess); // needed to find the main window for WM_CLOSE later
     }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetProcessId(IntPtr hProcess);
 
     private void CaptureTransientUiState()
     {
