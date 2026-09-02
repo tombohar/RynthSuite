@@ -2227,9 +2227,17 @@ internal sealed class LegacyDashboardRenderer
             }
         }
         catch { }
-        lock (_profileListsLock) { _profiles.Clear(); _profiles.AddRange(list); }
-        if (!_profiles.Contains(_settings.SelectedProfile, StringComparer.OrdinalIgnoreCase))
-            _settings.SelectedProfile = _profiles[0];
+        // Deep-audit finding #16 (2026-06-18): Contains/[0] used to read
+        // _profiles just after releasing the lock — a concurrent
+        // SelectProfileAtIndex export call (poll thread) could be mid-index
+        // against a list this same read races. Moved inside the lock.
+        lock (_profileListsLock)
+        {
+            _profiles.Clear();
+            _profiles.AddRange(list);
+            if (!_profiles.Contains(_settings.SelectedProfile, StringComparer.OrdinalIgnoreCase))
+                _settings.SelectedProfile = _profiles[0];
+        }
     }
 
     private void RefreshNavFiles()
@@ -2296,8 +2304,16 @@ internal sealed class LegacyDashboardRenderer
 
     private void LoadSelectedNav()
     {
-        if (_selectedNavIdx < 0 || _selectedNavIdx >= _navFiles.Count) return;
-        string selection = _navFiles[_selectedNavIdx];
+        // Same finding #16 class as SelectProfileAtIndex above — this direct
+        // index into _navFiles is also reachable from the Avalonia poll
+        // thread (via SelectProfileAtIndex) racing the pump thread's
+        // Refresh*Files Clear()/AddRange().
+        string? selection;
+        lock (_profileListsLock)
+        {
+            if (_selectedNavIdx < 0 || _selectedNavIdx >= _navFiles.Count) return;
+            selection = _navFiles[_selectedNavIdx];
+        }
         if (selection == "None")
         {
             _settings.CurrentNavPath = string.Empty;
@@ -2660,30 +2676,48 @@ internal sealed class LegacyDashboardRenderer
     /// </summary>
     public void SelectProfileAtIndex(int kind, int index)
     {
+        // Deep-audit finding #16 (2026-06-18): this export (poll thread) used
+        // to bounds-check and index _navFiles/_lootFiles/_metaFiles/_profiles
+        // with no lock at all, racing the Refresh*Files mutators' Clear()/
+        // AddRange() on the pump thread — a torn read or
+        // ArgumentOutOfRangeException. Snapshot the one list this call needs
+        // under _profileListsLock first, mirroring BuildSnapshotJson.
+        string? navFile = null, lootFile = null, metaFile = null, profileName = null;
+        lock (_profileListsLock)
+        {
+            switch (kind)
+            {
+                case 0: if (index >= 0 && index < _navFiles.Count) navFile = _navFiles[index]; break;
+                case 1: if (index >= 0 && index < _lootFiles.Count) lootFile = _lootFiles[index]; break;
+                case 2: if (index >= 0 && index < _metaFiles.Count) metaFile = _metaFiles[index]; break;
+                case 3: if (index >= 0 && index < _profiles.Count) profileName = _profiles[index]; break;
+            }
+        }
+
         switch (kind)
         {
             case 0:
-                if (index >= 0 && index < _navFiles.Count) { _selectedNavIdx = index; LoadSelectedNav(); }
+                if (navFile != null) { _selectedNavIdx = index; LoadSelectedNav(); }
                 break;
             case 1:
-                if (index >= 0 && index < _lootFiles.Count)
+                if (lootFile != null)
                 {
                     _settings.LootProfileIdx = index;
-                    _settings.CurrentLootPath = index == 0 ? string.Empty : Path.Combine(_lootFolder, _lootFiles[index]);
+                    _settings.CurrentLootPath = index == 0 ? string.Empty : Path.Combine(_lootFolder, lootFile);
                     SaveSettings();
                 }
                 break;
             case 2:
-                if (index >= 0 && index < _metaFiles.Count)
+                if (metaFile != null)
                 {
                     _settings.MetaProfileIdx = index;
-                    string path = index == 0 ? string.Empty : Path.Combine(_metaFolder, _metaFiles[index]);
+                    string path = index == 0 ? string.Empty : Path.Combine(_metaFolder, metaFile);
                     _metaUi.LoadMacroFile(path);
                     SaveSettings();
                 }
                 break;
             case 3:
-                if (index >= 0 && index < _profiles.Count) SwitchProfile(_profiles[index]);
+                if (profileName != null) SwitchProfile(profileName);
                 break;
         }
     }
