@@ -1194,49 +1194,88 @@ internal sealed class ExpressionEngine
     }
 
     // Higher-order helpers: set $0/$1/$2, evaluate template, restore.
+    //
+    // Deep-audit finding #26 (2026-06-18): despite this comment, none of the
+    // four functions below actually restored "0"/"1"/"2" afterward — they
+    // wrote straight into the persistent _variables dictionary and left
+    // whatever the last loop iteration set. Nested list ops clobbered each
+    // other's $0/$1 mid-evaluation, and a user's own numeric-named $0/$1/$2
+    // (if they had any) were silently overwritten for the rest of the meta.
+    // Snapshot before, restore-or-Remove in a finally, per the fix note.
+
+    /// <summary>Snapshots the given _variables keys, returning a restore action for a finally block.</summary>
+    private Action SnapshotVars(params string[] keys)
+    {
+        var saved = new (string Key, bool Had, string? Value)[keys.Length];
+        for (int i = 0; i < keys.Length; i++)
+            saved[i] = (keys[i], _variables.TryGetValue(keys[i], out var v), v);
+        return () =>
+        {
+            foreach (var (key, had, value) in saved)
+            {
+                if (had) _variables[key] = value!;
+                else _variables.Remove(key);
+            }
+        };
+    }
 
     private string EvalListFilter(string handle, string exprTemplate)
     {
         var list = GetList(handle);
         if (list == null || exprTemplate.Length == 0) return NewList();
-        var result = new List<string>();
-        for (int i = 0; i < list.Count; i++)
+        var restore = SnapshotVars("0", "1");
+        try
         {
-            _variables["0"] = Fmt((long)i);
-            _variables["1"] = list[i];
-            if (ToBool(Evaluate(exprTemplate)))
-                result.Add(list[i]);
+            var result = new List<string>();
+            for (int i = 0; i < list.Count; i++)
+            {
+                _variables["0"] = Fmt((long)i);
+                _variables["1"] = list[i];
+                if (ToBool(Evaluate(exprTemplate)))
+                    result.Add(list[i]);
+            }
+            return NewList(result);
         }
-        return NewList(result);
+        finally { restore(); }
     }
 
     private string EvalListMap(string handle, string exprTemplate)
     {
         var list = GetList(handle);
         if (list == null || exprTemplate.Length == 0) return NewList();
-        var result = new List<string>(list.Count);
-        for (int i = 0; i < list.Count; i++)
+        var restore = SnapshotVars("0", "1");
+        try
         {
-            _variables["0"] = Fmt((long)i);
-            _variables["1"] = list[i];
-            result.Add(Evaluate(exprTemplate));
+            var result = new List<string>(list.Count);
+            for (int i = 0; i < list.Count; i++)
+            {
+                _variables["0"] = Fmt((long)i);
+                _variables["1"] = list[i];
+                result.Add(Evaluate(exprTemplate));
+            }
+            return NewList(result);
         }
-        return NewList(result);
+        finally { restore(); }
     }
 
     private string EvalListReduce(string handle, string exprTemplate)
     {
         var list = GetList(handle);
         if (list == null || list.Count == 0 || exprTemplate.Length == 0) return "0";
-        string acc = "0";
-        for (int i = 0; i < list.Count; i++)
+        var restore = SnapshotVars("0", "1", "2");
+        try
         {
-            _variables["0"] = Fmt((long)i);
-            _variables["1"] = list[i];
-            _variables["2"] = acc;
-            acc = Evaluate(exprTemplate);
+            string acc = "0";
+            for (int i = 0; i < list.Count; i++)
+            {
+                _variables["0"] = Fmt((long)i);
+                _variables["1"] = list[i];
+                _variables["2"] = acc;
+                acc = Evaluate(exprTemplate);
+            }
+            return acc;
         }
-        return acc;
+        finally { restore(); }
     }
 
     private string EvalListSort(string handle, string exprTemplate)
@@ -1244,20 +1283,25 @@ internal sealed class ExpressionEngine
         var list = GetList(handle);
         if (list == null) return NewList();
         var copy = new List<string>(list);
-        if (exprTemplate.Length > 0)
+        var restore = SnapshotVars("1", "2");
+        try
         {
-            copy.Sort((a, b) =>
+            if (exprTemplate.Length > 0)
             {
-                _variables["1"] = a;
-                _variables["2"] = b;
-                return (int)ToLong(Evaluate(exprTemplate));
-            });
+                copy.Sort((a, b) =>
+                {
+                    _variables["1"] = a;
+                    _variables["2"] = b;
+                    return (int)ToLong(Evaluate(exprTemplate));
+                });
+            }
+            else
+            {
+                copy.Sort(StringComparer.Ordinal);
+            }
+            return NewList(copy);
         }
-        else
-        {
-            copy.Sort(StringComparer.Ordinal);
-        }
-        return NewList(copy);
+        finally { restore(); }
     }
 
     // ── World state implementations ───────────────────────────────────────────

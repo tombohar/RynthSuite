@@ -180,18 +180,34 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 float t = (float)i / ARC_SAMPLE_COUNT;
                 float time = t * totalTime;
 
-                // Kinematic equations
+                // Kinematic equations.
+                // Deep-audit finding #31 (2026-06-18): the old code computed
+                // the flat-range parabola (assumes origin.Z == target.Z) as
+                // `height`, then bolted on a SEPARATE `heightAdjust*(1-t)`
+                // blend for the actual elevation difference — double-applying
+                // the vertical offset. Neither the true ballistic curve nor a
+                // straight line resulted; at t=1 the arc's own height term
+                // (origin.Z + vVertical*totalTime - 0.5g*totalTime²) is
+                // exactly origin.Z (that's what makes totalTime =
+                // horizontalDist/vHorizontal the correct equal-height
+                // time-of-flight), so the sample landed at origin.Z instead
+                // of target.Z — biasing the LOS verdict for sloped shots.
+                //
+                // Fix: `parabolicSag` is that SAME flat-range height term
+                // relative to origin.Z — by construction it is exactly 0 at
+                // t=0 AND at t=1 (proven via the time-of-flight identity
+                // above), so adding it to a straight lerp(origin.Z, target.Z)
+                // never disturbs either endpoint, while still producing a
+                // real parabolic bump in between. This anchors t=1 at
+                // target.Z exactly (the final explicit segment below no
+                // longer has to patch just the endpoint).
                 float hDist = vHorizontal * time;
-                float height = origin.Z + vVertical * time - 0.5f * GRAVITY * time * time;
-
-                // Adjust height to interpolate between origin.Z and target.Z
-                // (accounts for height difference between origin and target)
-                float heightAdjust = verticalDist * t;
+                float parabolicSag = vVertical * time - 0.5f * GRAVITY * time * time;
 
                 Vector3 arcPoint = new Vector3(
                     origin.X + hdx * hDist,
                     origin.Y + hdy * hDist,
-                    height + heightAdjust * (1.0f - t) // Blend in height difference
+                    origin.Z + verticalDist * t + parabolicSag
                 );
 
                 // Test this segment for collisions

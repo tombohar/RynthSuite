@@ -428,8 +428,14 @@ public sealed partial class RynthAiPlugin
             float t = (float)i / SAMPLES;
             float time = t * totalTime;
             float hDistAlong = vH * time;
-            float z = origin.Z + vV * time - 0.5f * GRAVITY * time * time;
-            z += delta.Z * t * (1.0f - t); // same blend IsArcPathBlocked uses
+            // Deep-audit finding #31 (2026-06-18) — mirrors the fix in
+            // RaycastEngine.IsArcPathBlocked: the flat-range parabolic sag
+            // (vV*time - 0.5g*time²) is exactly 0 at t=0 AND t=1 by
+            // construction (totalTime is the equal-height time-of-flight),
+            // so adding it to a straight lerp(origin.Z, target.Z) anchors
+            // both endpoints exactly instead of double-applying the
+            // elevation difference via a separate (1-t) blend.
+            float z = origin.Z + delta.Z * t + (vV * time - 0.5f * GRAVITY * time * time);
 
             float wx = origin.X + hdx * hDistAlong;
             float wy = origin.Y + hdy * hDistAlong;
