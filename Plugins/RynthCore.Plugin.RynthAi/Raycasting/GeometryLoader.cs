@@ -33,6 +33,16 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         /// Cache for loaded landblock geometry.
         /// Key: Landblock ID (upper 16 bits, e.g., 0xXXYY), Value: BoundingVolumes.
         /// </summary>
+        // Deep-audit finding #5 (2026-06-18): these three caches are read/written
+        // from both the OnTick pump thread (combat/nav raycasts) and the render/UI
+        // path (RynthVision's Submit + InspectTerrain button), with zero
+        // synchronization — plain Dictionary Add/Remove/Clear from two threads at
+        // once is classic bucket-array corruption on whichever thread lands on it,
+        // frequently AC's own main thread. One gate covers all three; per the
+        // audit's fix note, only the cache read/insert/evict/Clear calls are
+        // guarded (the expensive .dat parse/build stays outside the lock).
+        private readonly object _cacheGate = new();
+
         private readonly Dictionary<uint, List<BoundingVolume>> _landblockCache =
             new Dictionary<uint, List<BoundingVolume>>();
 
@@ -66,8 +76,8 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         public DungeonLOS DungeonLOS => _dungeonLOS;
 
         // Statistics
-        public int LandblocksCached => _landblockCache.Count;
-        public int SetupsCached => _setupCache.Count;
+        public int LandblocksCached { get { lock (_cacheGate) return _landblockCache.Count; } }
+        public int SetupsCached { get { lock (_cacheGate) return _setupCache.Count; } }
         public bool IsInitialized => _initialized;
         public string StatusMessage { get; private set; } = "Not initialized";
         public List<string> DiagLog { get; } = new List<string>();
@@ -212,12 +222,15 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             // portal transition poisons all subsequent indoor LOS checks.
             uint cacheKey = isDungeon ? (landblockKey | 0x80000000u) : landblockKey;
 
-            if (_landblockCache.TryGetValue(cacheKey, out var cached))
-                return cached;
+            lock (_cacheGate)
+            {
+                if (_landblockCache.TryGetValue(cacheKey, out var cached))
+                    return cached;
 
-            // Evict the opposite entry if it exists — same landblock, different mode
-            uint oppositeKey = isDungeon ? landblockKey : (landblockKey | 0x80000000u);
-            _landblockCache.Remove(oppositeKey);
+                // Evict the opposite entry if it exists — same landblock, different mode
+                uint oppositeKey = isDungeon ? landblockKey : (landblockKey | 0x80000000u);
+                _landblockCache.Remove(oppositeKey);
+            }
 
             var volumes = new List<BoundingVolume>();
 
@@ -250,10 +263,13 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
 
             Log($"{(isDungeon ? "Dungeon" : "3x3 grid")} for 0x{landblockKey:X4}: {volumes.Count} total collision volumes");
 
-            if (_landblockCache.Count >= MAX_LANDBLOCK_CACHE)
-                EvictOldestLandblock();
+            lock (_cacheGate)
+            {
+                if (_landblockCache.Count >= MAX_LANDBLOCK_CACHE)
+                    EvictOldestLandblock();
 
-            _landblockCache[cacheKey] = volumes;
+                _landblockCache[cacheKey] = volumes;
+            }
             return volumes;
         }
 
@@ -275,7 +291,9 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 Log($"--- Loading landblock 0x{landblockKey:X4} ---");
 
                 // Dump sample IDs from cell.dat root to understand the ID format (first time only)
-                if (_landblockCache.Count <= 1 && _cellDat.IsLoaded)
+                bool dumpSample;
+                lock (_cacheGate) dumpSample = _landblockCache.Count <= 1;
+                if (dumpSample && _cellDat.IsLoaded)
                 {
                     DumpSampleCellIds();
                 }
@@ -955,7 +973,10 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             }
 
             // Load or get cached Setup
-            if (!_setupCache.TryGetValue(modelId, out var setup))
+            bool haveCached;
+            SetupInfo setup;
+            lock (_cacheGate) haveCached = _setupCache.TryGetValue(modelId, out setup);
+            if (!haveCached)
             {
                 byte[] data = _portalDat.GetFileData(modelId);
                 if (data == null)
@@ -967,8 +988,11 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 setup = new SetupInfo();
                 setup.Unpack(data);
 
-                if (_setupCache.Count < MAX_SETUP_CACHE)
-                    _setupCache[modelId] = setup;
+                lock (_cacheGate)
+                {
+                    if (_setupCache.Count < MAX_SETUP_CACHE)
+                        _setupCache[modelId] = setup;
+                }
             }
 
             if (setup.PartFrames == null || setup.PartIds == null || setup.PartIds.Length == 0)
@@ -1116,7 +1140,10 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             }
 
             // Check cache first
-            if (!_setupCache.TryGetValue(modelId, out var setup))
+            bool haveCachedSetup;
+            SetupInfo setup;
+            lock (_cacheGate) haveCachedSetup = _setupCache.TryGetValue(modelId, out setup);
+            if (!haveCachedSetup)
             {
                 // Load and parse the Setup file
                 byte[] data = _portalDat.GetFileData(modelId);
@@ -1157,9 +1184,12 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                         $"{setup.Spheres.Count} spheres, {setup.Cylinders.Count} cylinders");
 
                 // Cache it
-                if (_setupCache.Count >= MAX_SETUP_CACHE)
-                    _setupCache.Clear();
-                _setupCache[modelId] = setup;
+                lock (_cacheGate)
+                {
+                    if (_setupCache.Count >= MAX_SETUP_CACHE)
+                        _setupCache.Clear();
+                    _setupCache[modelId] = setup;
+                }
             }
 
             // Priority 1: Use collision spheres from Setup
@@ -1297,8 +1327,11 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
 
         private GfxObjMeshData LoadGfxObjMesh(uint gfxObjId)
         {
-            if (_meshCache.TryGetValue(gfxObjId, out var cached))
-                return cached;
+            lock (_cacheGate)
+            {
+                if (_meshCache.TryGetValue(gfxObjId, out var cached))
+                    return cached;
+            }
 
             byte[] data = _portalDat.GetFileData(gfxObjId);
             if (data == null || data.Length < 20)
@@ -1434,9 +1467,12 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
 
                     var mesh = new GfxObjMeshData { Vertices = vertices, Faces = faces, BoundsMin = allMin, BoundsMax = allMax };
 
-                    if (_meshCache.Count >= MAX_MESH_CACHE)
-                        _meshCache.Clear();
-                    _meshCache[gfxObjId] = mesh;
+                    lock (_cacheGate)
+                    {
+                        if (_meshCache.Count >= MAX_MESH_CACHE)
+                            _meshCache.Clear();
+                        _meshCache[gfxObjId] = mesh;
+                    }
 
                     return mesh;
                 }
@@ -1719,23 +1755,32 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
 
         public void FlushCache()
         {
-            _landblockCache.Clear();
-            _setupCache.Clear();
+            lock (_cacheGate)
+            {
+                _landblockCache.Clear();
+                _setupCache.Clear();
+            }
             Log("All caches flushed");
         }
 
         public void FlushLandblock(uint landblockKey)
         {
-            _landblockCache.Remove(landblockKey);
-            _landblockCache.Remove(landblockKey | 0x80000000u);
+            lock (_cacheGate)
+            {
+                _landblockCache.Remove(landblockKey);
+                _landblockCache.Remove(landblockKey | 0x80000000u);
+            }
         }
 
         public void Dispose()
         {
             _portalDat?.Dispose();
             _cellDat?.Dispose();
-            _landblockCache.Clear();
-            _setupCache.Clear();
+            lock (_cacheGate)
+            {
+                _landblockCache.Clear();
+                _setupCache.Clear();
+            }
             _initialized = false;
         }
 

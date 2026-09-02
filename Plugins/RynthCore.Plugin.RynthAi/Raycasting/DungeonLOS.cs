@@ -25,6 +25,11 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         private DatDatabase _portalDat;
         private DatDatabase _cellDat;
 
+        // Deep-audit finding #5 (2026-06-18): same class as GeometryLoader's
+        // caches — read/written from both the pump thread (raycasts) and the
+        // render/UI path with no synchronization. One gate for all six.
+        private readonly object _cacheGate = new();
+
         // Cache: EnvironmentId → physics CellStruct geometry (for raycasting)
         private readonly Dictionary<uint, Dictionary<uint, CellGeometry>> _envCache =
             new Dictionary<uint, Dictionary<uint, CellGeometry>>();
@@ -92,16 +97,22 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         /// </summary>
         public List<BoundingVolume> GetDungeonWalls(uint landblockKey)
         {
-            if (_wallCache.TryGetValue(landblockKey, out var cached))
-                return cached;
+            lock (_cacheGate)
+            {
+                if (_wallCache.TryGetValue(landblockKey, out var cached))
+                    return cached;
+            }
 
             var walls = LoadDungeonWalls(landblockKey);
 
-            if (_wallCache.Count >= MAX_WALL_CACHE)
+            lock (_cacheGate)
             {
-                foreach (var key in _wallCache.Keys) { _wallCache.Remove(key); break; }
+                if (_wallCache.Count >= MAX_WALL_CACHE)
+                {
+                    foreach (var key in _wallCache.Keys) { _wallCache.Remove(key); break; }
+                }
+                _wallCache[landblockKey] = walls;
             }
-            _wallCache[landblockKey] = walls;
             return walls;
         }
 
@@ -112,16 +123,22 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         /// </summary>
         public List<MapPolygon> GetDungeonMapPolygons(uint landblockKey)
         {
-            if (_mapCache.TryGetValue(landblockKey, out var cached))
-                return cached;
+            lock (_cacheGate)
+            {
+                if (_mapCache.TryGetValue(landblockKey, out var cached))
+                    return cached;
+            }
 
             var polys = LoadDungeonMapPolygons(landblockKey);
 
-            if (_mapCache.Count >= MAX_WALL_CACHE)
+            lock (_cacheGate)
             {
-                foreach (var key in _mapCache.Keys) { _mapCache.Remove(key); break; }
+                if (_mapCache.Count >= MAX_WALL_CACHE)
+                {
+                    foreach (var key in _mapCache.Keys) { _mapCache.Remove(key); break; }
+                }
+                _mapCache[landblockKey] = polys;
             }
-            _mapCache[landblockKey] = polys;
             return polys;
         }
 
@@ -132,15 +149,21 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         /// </summary>
         public List<MapCell> GetDungeonMapCells(uint landblockKey)
         {
-            if (_mapCellCache.TryGetValue(landblockKey, out var cached)) return cached;
+            lock (_cacheGate)
+            {
+                if (_mapCellCache.TryGetValue(landblockKey, out var cached)) return cached;
+            }
 
             var cells = LoadDungeonMapCells(landblockKey);
 
-            if (_mapCellCache.Count >= MAX_WALL_CACHE)
+            lock (_cacheGate)
             {
-                foreach (var key in _mapCellCache.Keys) { _mapCellCache.Remove(key); break; }
+                if (_mapCellCache.Count >= MAX_WALL_CACHE)
+                {
+                    foreach (var key in _mapCellCache.Keys) { _mapCellCache.Remove(key); break; }
+                }
+                _mapCellCache[landblockKey] = cells;
             }
-            _mapCellCache[landblockKey] = cells;
             return cells;
         }
 
@@ -151,13 +174,19 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         /// </summary>
         public List<MapPolygon> GetDungeonMapFloorPolygons(uint landblockKey)
         {
-            if (_floorPolyCache.TryGetValue(landblockKey, out var cached)) return cached;
-            var polys = LoadDungeonMapFloorPolygons(landblockKey);
-            if (_floorPolyCache.Count >= MAX_WALL_CACHE)
+            lock (_cacheGate)
             {
-                foreach (var k in _floorPolyCache.Keys) { _floorPolyCache.Remove(k); break; }
+                if (_floorPolyCache.TryGetValue(landblockKey, out var cached)) return cached;
             }
-            _floorPolyCache[landblockKey] = polys;
+            var polys = LoadDungeonMapFloorPolygons(landblockKey);
+            lock (_cacheGate)
+            {
+                if (_floorPolyCache.Count >= MAX_WALL_CACHE)
+                {
+                    foreach (var k in _floorPolyCache.Keys) { _floorPolyCache.Remove(k); break; }
+                }
+                _floorPolyCache[landblockKey] = polys;
+            }
             return polys;
         }
 
@@ -526,10 +555,14 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
 
         private CellGeometry GetCellGeometry(uint environmentId, uint cellStructIndex)
         {
-            if (_envCache.TryGetValue(environmentId, out var envCells))
+            Dictionary<uint, CellGeometry> envCells;
+            lock (_cacheGate)
             {
-                if (envCells.TryGetValue(cellStructIndex, out var cached))
-                    return cached;
+                if (_envCache.TryGetValue(environmentId, out envCells))
+                {
+                    if (envCells.TryGetValue(cellStructIndex, out var cached))
+                        return cached;
+                }
             }
 
             byte[] envData = _portalDat.GetFileData(environmentId);
@@ -537,12 +570,18 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
 
             if (envCells == null)
             {
+                // Built fully off the lock; only the _envCache slot itself
+                // (not the inner per-cell dictionary, which is never mutated
+                // again once cached) needs the guard.
                 envCells = ParseEnvironment(envData);
-                if (_envCache.Count >= MAX_ENV_CACHE)
+                lock (_cacheGate)
                 {
-                    foreach (var key in _envCache.Keys) { _envCache.Remove(key); break; }
+                    if (_envCache.Count >= MAX_ENV_CACHE)
+                    {
+                        foreach (var key in _envCache.Keys) { _envCache.Remove(key); break; }
+                    }
+                    _envCache[environmentId] = envCells;
                 }
-                _envCache[environmentId] = envCells;
             }
 
             envCells.TryGetValue(cellStructIndex, out var result);
@@ -556,10 +595,14 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         /// </summary>
         private CellGeometry GetCellRenderGeometry(uint environmentId, uint cellStructIndex)
         {
-            if (_renderEnvCache.TryGetValue(environmentId, out var envCells))
+            Dictionary<uint, CellGeometry> envCells;
+            lock (_cacheGate)
             {
-                if (envCells.TryGetValue(cellStructIndex, out var cached))
-                    return cached;
+                if (_renderEnvCache.TryGetValue(environmentId, out envCells))
+                {
+                    if (envCells.TryGetValue(cellStructIndex, out var cached))
+                        return cached;
+                }
             }
 
             byte[] envData = _portalDat.GetFileData(environmentId);
@@ -568,11 +611,14 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             if (envCells == null)
             {
                 envCells = ParseEnvironment(envData, renderOnly: true);
-                if (_renderEnvCache.Count >= MAX_ENV_CACHE)
+                lock (_cacheGate)
                 {
-                    foreach (var key in _renderEnvCache.Keys) { _renderEnvCache.Remove(key); break; }
+                    if (_renderEnvCache.Count >= MAX_ENV_CACHE)
+                    {
+                        foreach (var key in _renderEnvCache.Keys) { _renderEnvCache.Remove(key); break; }
+                    }
+                    _renderEnvCache[environmentId] = envCells;
                 }
-                _renderEnvCache[environmentId] = envCells;
             }
 
             envCells.TryGetValue(cellStructIndex, out var result);
@@ -1007,12 +1053,15 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
 
         public void FlushCache()
         {
-            _wallCache.Clear();
-            _mapCache.Clear();
-            _mapCellCache.Clear();
-            _floorPolyCache.Clear();
-            _envCache.Clear();
-            _renderEnvCache.Clear();
+            lock (_cacheGate)
+            {
+                _wallCache.Clear();
+                _mapCache.Clear();
+                _mapCellCache.Clear();
+                _floorPolyCache.Clear();
+                _envCache.Clear();
+                _renderEnvCache.Clear();
+            }
         }
 
         private static void Log(string msg)

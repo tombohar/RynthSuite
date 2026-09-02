@@ -30,6 +30,14 @@ public sealed class TerrainSampler : IDisposable
     private float[]? _landHeightTable;
     private bool _ready;
 
+    // Deep-audit finding #6 (2026-06-18): RynthVision's /rv watertypes ->
+    // InspectTerrain runs synchronously on the Avalonia UI thread and calls
+    // LoadLandblock, while the same call hits from the AC tick thread hundreds
+    // of times per Submit via the slope/water overlays. Two threads mutating
+    // one plain Dictionary (with a periodic Clear() at MaxCache=30) is classic
+    // bucket-array corruption on whichever thread lands on it — frequently
+    // AC's own main thread. Guard every access with this gate.
+    private readonly object _cacheGate = new();
     private readonly Dictionary<uint, LandblockData?> _cache = new();
     private const int MaxCache = 30;
 
@@ -94,11 +102,17 @@ public sealed class TerrainSampler : IDisposable
     public LandblockData? LoadLandblock(uint landblockKey)
     {
         if (!_ready || _landHeightTable == null) return null;
-        if (_cache.TryGetValue(landblockKey, out var cached)) return cached;
+        lock (_cacheGate)
+        {
+            if (_cache.TryGetValue(landblockKey, out var cached)) return cached;
+        }
 
         LandblockData? data = LandblockData.Load(_cellDat, landblockKey, _landHeightTable);
-        if (_cache.Count >= MaxCache) _cache.Clear();
-        _cache[landblockKey] = data;
+        lock (_cacheGate)
+        {
+            if (_cache.Count >= MaxCache) _cache.Clear();
+            _cache[landblockKey] = data;
+        }
         return data;
     }
 

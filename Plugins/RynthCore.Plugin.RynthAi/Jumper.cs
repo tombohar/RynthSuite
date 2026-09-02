@@ -178,7 +178,16 @@ internal sealed class Jumper
         }
 
         if (!started)
+        {
+            // Deep-audit finding #7 (2026-06-18): a rejected jump (both hook
+            // paths unavailable/failed) left every flag false -> IsBusy false
+            // on the very next Tick(), but PauseNav() from Start() was never
+            // undone. Nav stayed force-disabled for the rest of the session —
+            // a real "bot just stands there" cause with no error visible to
+            // the user beyond this one chat line. Restore nav on the spot.
             _chat("[RynthAi] Jump hooks unavailable.");
+            RestoreNav();
+        }
     }
 
     private void ReleaseJump()

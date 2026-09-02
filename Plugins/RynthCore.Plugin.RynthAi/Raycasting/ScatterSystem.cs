@@ -33,6 +33,10 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         // slopes, so we use 0.5 (cos 60°) to reduce false positives in the overlay.
         public const float FloorZ = 0.5f;
 
+        // Deep-audit finding #5 (2026-06-18): same unsynchronized-Dictionary-
+        // across-threads class as GeometryLoader/DungeonLOS/TerrainSampler.
+        private readonly object _cacheGate = new();
+
         // Scene cache (portal.dat scenes)
         private Dictionary<uint, List<ScatterObjectDesc>> _sceneCache = new Dictionary<uint, List<ScatterObjectDesc>>();
 
@@ -100,15 +104,21 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         {
             if (_landHeightTable == null || _cellDat == null) return null;
 
-            if (_landblockCache.TryGetValue(landblockKey, out var cached))
-                return cached;
+            lock (_cacheGate)
+            {
+                if (_landblockCache.TryGetValue(landblockKey, out var cached))
+                    return cached;
+            }
 
             var data = LandblockData.Load(_cellDat, landblockKey, _landHeightTable);
             if (data == null) return null;
 
-            if (_landblockCache.Count >= MAX_HEIGHT_GRID_CACHE)
-                _landblockCache.Clear();
-            _landblockCache[landblockKey] = data;
+            lock (_cacheGate)
+            {
+                if (_landblockCache.Count >= MAX_HEIGHT_GRID_CACHE)
+                    _landblockCache.Clear();
+                _landblockCache[landblockKey] = data;
+            }
             return data;
         }
 
@@ -468,8 +478,11 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
 
         private List<ScatterObjectDesc> LoadScene(uint sceneId)
         {
-            if (_sceneCache.TryGetValue(sceneId, out var cached))
-                return cached;
+            lock (_cacheGate)
+            {
+                if (_sceneCache.TryGetValue(sceneId, out var cached))
+                    return cached;
+            }
 
             var objects = new List<ScatterObjectDesc>();
 
@@ -478,7 +491,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 byte[] data = _portalDat.GetFileData(sceneId);
                 if (data == null || data.Length < 8)
                 {
-                    _sceneCache[sceneId] = objects;
+                    lock (_cacheGate) _sceneCache[sceneId] = objects;
                     return objects;
                 }
 
@@ -528,7 +541,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 Log($"Scene 0x{sceneId:X8} parse error: {ex.Message}");
             }
 
-            _sceneCache[sceneId] = objects;
+            lock (_cacheGate) _sceneCache[sceneId] = objects;
             return objects;
         }
 
