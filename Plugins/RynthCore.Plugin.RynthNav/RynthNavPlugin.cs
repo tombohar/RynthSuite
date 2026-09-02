@@ -96,6 +96,12 @@ public sealed class RynthNavPlugin : RynthPluginBase
     private readonly object _reqGate = new();
     private bool _reqLoad, _reqTest;
     private string? _reqPreview, _reqGoto;
+    // Deep-audit finding #17 (2026-06-18): DoMove used to mutate
+    // _gotoActive/_route/_portalWait directly from the UI/chat thread while
+    // the tick thread's StepGoto/OnSubGoalReached read _route non-atomically
+    // (_route.Count / _route[_routeIdx]) — a TOCTOU NRE window. Routed
+    // through the same request-gate pattern as every other panel action.
+    private bool _reqCancel;
 
     public override int Initialize()
     {
@@ -246,8 +252,13 @@ public sealed class RynthNavPlugin : RynthPluginBase
 
     private void ProcessRequests()
     {
-        bool load, test; string? prev, gotoTo;
-        lock (_reqGate) { load = _reqLoad; _reqLoad = false; test = _reqTest; _reqTest = false; prev = _reqPreview; _reqPreview = null; gotoTo = _reqGoto; _reqGoto = null; }
+        bool load, test, cancel; string? prev, gotoTo;
+        lock (_reqGate) { load = _reqLoad; _reqLoad = false; test = _reqTest; _reqTest = false; prev = _reqPreview; _reqPreview = null; gotoTo = _reqGoto; _reqGoto = null; cancel = _reqCancel; _reqCancel = false; }
+        // Cancel first: runs before this same tick's ApplyMovement/StepGoto
+        // (OnTick calls ProcessRequests then ApplyMovement), so a DoMove that
+        // fired this tick takes effect immediately, same as the old direct
+        // mutation did — just on the tick thread instead of the caller's.
+        if (cancel) { _gotoActive = false; _route = null; _portalWait = false; }
         if (load && _hasPose) RefreshTiles(CurrentLandblock);
         if (test) TestImpl();
         if (prev != null) PathImpl(prev, walk: false);
@@ -340,8 +351,11 @@ public sealed class RynthNavPlugin : RynthPluginBase
     // ── Movement (d-pad), unchanged ──────────────────────────────────────────────
     public void DoMove(int cmd)
     {
-        _gotoActive = false; // any manual input cancels auto-walk
-        _route = null; _portalWait = false;
+        // Any manual input cancels auto-walk. Routed through _reqGate (finding
+        // #17) instead of mutating _gotoActive/_route/_portalWait directly —
+        // those are tick-thread-owned state read non-atomically by
+        // StepGoto/OnSubGoalReached.
+        lock (_reqGate) _reqCancel = true;
         lock (_moveGate)
         {
             switch (cmd)

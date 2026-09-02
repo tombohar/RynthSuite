@@ -25,6 +25,17 @@ public sealed class RynthTrackerPlugin : RynthPluginBase
 
     private int _tickCounter;
 
+    // Deep-audit finding #21 (2026-06-18): the RynthTrackerReset export used to
+    // call ResetSession() directly, which Clear()s _killedIds from the
+    // Avalonia UI thread (no Dispatcher hop) while the AC pump thread
+    // concurrently Add()s/Remove()s the same HashSet in
+    // OnUpdateHealth/OnDeleteObject — HashSet<uint> isn't concurrency-safe;
+    // a racing Clear() can throw or corrupt its internal arrays. Mirrors the
+    // engine's DispatchQueued* idiom: the export just sets a flag, OnTick
+    // (pump thread, same thread as the HashSet's other mutators) performs
+    // the actual reset.
+    private volatile bool _pendingReset;
+
     // Written on the game thread every ~0.5s, read on the Avalonia UI thread.
     // Reference reads are atomic on x86 so volatile is sufficient; no lock needed.
     private volatile string _snapshot = EmptySnapshot;
@@ -95,6 +106,13 @@ public sealed class RynthTrackerPlugin : RynthPluginBase
 
     public override void OnTick()
     {
+        if (_pendingReset)
+        {
+            _pendingReset = false;
+            ResetSession();
+            Host.Log("[RynthTracker] Session reset.");
+        }
+
         if (++_tickCounter < 30) return; // rebuild every ~0.5s at 60Hz
         _tickCounter = 0;
         _snapshot = BuildSnapshot();
@@ -102,11 +120,9 @@ public sealed class RynthTrackerPlugin : RynthPluginBase
 
     internal string GetSnapshot() => _snapshot;
 
-    internal void Reset()
-    {
-        ResetSession();
-        Host.Log("[RynthTracker] Session reset.");
-    }
+    /// <summary>Called from the RynthTrackerReset export (Avalonia UI thread) —
+    /// just flags a reset; OnTick performs it on the pump thread.</summary>
+    internal void Reset() => _pendingReset = true;
 
     private void ResetSession()
     {
