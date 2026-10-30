@@ -1,0 +1,249 @@
+~~ RynthSelfTest: RynthAi tests itself in game (2026-10-22). Load with /ra meta load RynthSelfTest and
+~~ start the macro (/ra start); scripts\Run-GameTest.ps1 in RynthCore does both and reads the results.
+~~ Each check saves rt_<check> = PASS / FAIL / SKIP and rt_<check>_why in this character's
+~~ RynthAi\pvars\<name>.txt, and says it in chat. rt_status is RUNNING, then DONE.
+~~ It turns Combat, Buffing, Looting and Nav on and off as it goes and puts them back at the end.
+~~ Missile crafting is tested only with arrowhead and shaft bundles in the pack and no melee weapon
+~~ or wand in hand. To test MAKING ammo, carry no finished ammo (only what is wielded, which the
+~~ test takes off): with loose ammo in the pack RynthAi just puts that back on.
+~~ Source: RynthSuite GameTests/RynthSelfTest.af. Indent with tabs only; RynthAiHostTests (SelfTestMetaTests) parses and plays it.
+STATE: {Default} ~~ {
+	IF:	Always
+		DO:	DoAll
+					GetOpt {EnableCombat} {rt_o_combat}
+					GetOpt {EnableBuffing} {rt_o_buff}
+					GetOpt {EnableLooting} {rt_o_loot}
+					GetOpt {EnableNav} {rt_o_nav}
+					SetOpt {EnableCombat} {False}
+					SetOpt {EnableBuffing} {False}
+					SetOpt {EnableLooting} {False}
+					SetOpt {EnableNav} {False}
+					DoExpr {setpvar[rt_status,`RUNNING`]}
+					DoExpr {setpvar[rt_started,getunixtime[]]}
+					DoExpr {setpvar[rt_buff,`PENDING`]}
+					DoExpr {setpvar[rt_fight,`PENDING`]}
+					DoExpr {setpvar[rt_loot,`PENDING`]}
+					DoExpr {setpvar[rt_craft,`PENDING`]}
+					DoExpr {setpvar[rt_buff_why,`-`]}
+					DoExpr {setpvar[rt_fight_why,`-`]}
+					DoExpr {setpvar[rt_loot_why,`-`]}
+					DoExpr {setpvar[rt_craft_why,`-`]}
+					DoExpr {setpvar[rt_meta,`PASS`]}
+					DoExpr {setpvar[rt_meta_why,`the meta loaded and runs; expressions and saved variables work`]}
+					DoExpr {echo[`[RynthTest] started: buffing, a kill, looting, missile crafting (10 minutes at most)`,1]}
+	IF:	SecsInStateGE 3
+		DO:	SetState {T1 Buff}
+~~ }
+STATE: {T1 Buff} ~~ {
+	IF:	Always
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,0]}
+					DoExpr {setvar[rt_t,getunixtime[]]}
+					SetOpt {EnableBuffing} {True}
+					Chat {/ra buff force}
+	IF:	All
+				ChatMatch {^\[RynthAi\] Force Rebuff Complete\.}
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_buff,`PASS`]}
+					DoExpr {setpvar[rt_buff_why,`a force rebuff finished in `+cstr[getunixtime[]-getvar[rt_t]]+` s`]}
+					DoExpr {echo[`[RynthTest] PASS buffing: `+getpvar[rt_buff_why],1]}
+					SetState {T2 Fight}
+	IF:	All
+				ChatCapture {^\[RynthAi\] (?<msg>(Sequence cancelled|Can't enter Magic mode|Buff stance wedged).*)} {}
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_buff,`FAIL`]}
+					DoExpr {setpvar[rt_buff_why,getvar[capturegroup_msg]]}
+					DoExpr {echo[`[RynthTest] FAIL buffing: `+getpvar[rt_buff_why],2]}
+					SetState {T2 Fight}
+	IF:	All
+				SecsInStateGE 300
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_buff,`FAIL`]}
+					DoExpr {setpvar[rt_buff_why,`no "Force Rebuff Complete" within 300 s of /ra buff force`]}
+					DoExpr {echo[`[RynthTest] FAIL buffing: `+getpvar[rt_buff_why],2]}
+					SetState {T2 Fight}
+~~ }
+STATE: {T2 Fight} ~~ {
+	IF:	Always
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,0]}
+					DoExpr {setvar[rt_t,getunixtime[]]}
+					SetOpt {EnableBuffing} {False}
+	IF:	All
+				SecsInStateGE 2
+				Expr {wobjectfindnearestmonster[]==0}
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_fight,`SKIP`]}
+					DoExpr {setpvar[rt_fight_why,`nothing attackable in view`]}
+					DoExpr {echo[`[RynthTest] SKIP fight: `+getpvar[rt_fight_why],1]}
+					SetState {T3 Loot}
+	IF:	All
+				SecsInStateGE 2
+				Expr {getvar[rt_settled]==0}
+		DO:	SetOpt {EnableCombat} {True}
+	IF:	All
+				Expr {secondssincelastkill[]<(getunixtime[]-getvar[rt_t])}
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_fight,`PASS`]}
+					DoExpr {setpvar[rt_fight_why,`killed a monster `+cstr[getunixtime[]-getvar[rt_t]]+` s after combat went on`]}
+					DoExpr {echo[`[RynthTest] PASS fight: `+getpvar[rt_fight_why],1]}
+					SetState {T3 Loot}
+	IF:	All
+				SecsInStateGE 30
+				Expr {ratargetcount[]<1}
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_fight,`SKIP`]}
+					DoExpr {setpvar[rt_fight_why,`combat found nothing it may attack within 30 s (nearest attackable: `+wobjectgetname[wobjectfindnearestmonster[]]+`)`]}
+					DoExpr {echo[`[RynthTest] SKIP fight: `+getpvar[rt_fight_why],1]}
+					SetState {T3 Loot}
+	IF:	All
+				SecsInStateGE 180
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_fight,`FAIL`]}
+					DoExpr {setpvar[rt_fight_why,`no kill within 180 s of combat going on; combat sees `+cstr[ratargetcount[]]+` target(s); nearest attackable: `+wobjectgetname[wobjectfindnearestmonster[]]]}
+					DoExpr {echo[`[RynthTest] FAIL fight: `+getpvar[rt_fight_why],2]}
+					SetState {T3 Loot}
+~~ }
+STATE: {T3 Loot} ~~ {
+	IF:	Always
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,0]}
+					DoExpr {setvar[rt_t,getunixtime[]]}
+	IF:	All
+				Expr {getpvar[rt_fight]!=`PASS`}
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_loot,`SKIP`]}
+					DoExpr {setpvar[rt_loot_why,`no kill of our own to loot`]}
+					DoExpr {echo[`[RynthTest] SKIP looting: `+getpvar[rt_loot_why],1]}
+					SetState {T4 Craft}
+	IF:	All
+				SecsInStateGE 1
+				Expr {getvar[rt_settled]==0}
+		DO:	SetOpt {EnableLooting} {True}
+	IF:	All
+				ChatCapture {^\[RynthAi\] (?<msg>(Looted \[|Nothing on ).*)} {}
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_loot,`PASS`]}
+					DoExpr {setpvar[rt_loot_why,`after `+cstr[getunixtime[]-getvar[rt_t]]+` s: `+getvar[capturegroup_msg]]}
+					DoExpr {echo[`[RynthTest] PASS looting: `+getpvar[rt_loot_why],1]}
+					SetState {T4 Craft}
+	IF:	All
+				ChatCapture {^\[RynthAi\] (?<msg>Corpse (timeout|refuses to open).*)} {}
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_loot,`FAIL`]}
+					DoExpr {setpvar[rt_loot_why,getvar[capturegroup_msg]]}
+					DoExpr {echo[`[RynthTest] FAIL looting: `+getpvar[rt_loot_why],2]}
+					SetState {T4 Craft}
+	IF:	All
+				SecsInStateGE 120
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_loot,`FAIL`]}
+					DoExpr {setpvar[rt_loot_why,`no "Looted" or "Nothing on ... matches" line within 120 s of looting going on`]}
+					DoExpr {echo[`[RynthTest] FAIL looting: `+getpvar[rt_loot_why],2]}
+					SetState {T4 Craft}
+~~ }
+STATE: {T4 Craft} ~~ {
+	IF:	Always
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,0]}
+					SetOpt {EnableCombat} {False}
+					SetOpt {EnableLooting} {False}
+					DoExpr {setvar[rt_heads,wobjectfindininventorybynamerx[`bundle of .*heads$`]]}
+					DoExpr {setvar[rt_shafts,wobjectfindininventorybynamerx[`bundle of .*shafts$`]]}
+					DoExpr {setvar[rt_wtype,getequippedweapontype[]]}
+	IF:	All
+				Expr {getvar[rt_heads]==0||getvar[rt_shafts]==0}
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_craft,`SKIP`]}
+					DoExpr {setpvar[rt_craft_why,`no arrowhead and shaft bundles in the pack`]}
+					DoExpr {echo[`[RynthTest] SKIP missile crafting: `+getpvar[rt_craft_why],1]}
+					SetState {Done}
+	IF:	All
+				Expr {getvar[rt_wtype]==`Melee`||getvar[rt_wtype]==`Wand`}
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_craft,`SKIP`]}
+					DoExpr {setpvar[rt_craft_why,`a `+getvar[rt_wtype]+` weapon is in hand, not a bow, crossbow or atlatl`]}
+					DoExpr {echo[`[RynthTest] SKIP missile crafting: `+getpvar[rt_craft_why],1]}
+					SetState {Done}
+	IF:	All
+				SecsInStateGE 2
+				Expr {getvar[rt_settled]==0}
+		DO:	SetState {T4 Craft run}
+~~ }
+STATE: {T4 Craft run} ~~ {
+	IF:	Always
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,0]}
+					DoExpr {setvar[rt_crafted,0]}
+					DoExpr {setvar[rt_t,getunixtime[]]}
+					DoExpr {setvar[rt_ammo,wobjectfindininventorybynamerx[`^(?!.*(bundle|head|shaft)).*(arrow|quarrel|bolt|dart)s?$`]]}
+					DoExpr {ifthen[getvar[rt_ammo]!=0,actiontrymove[getvar[rt_ammo],wobjectgetplayer[]],0]}
+	IF:	ChatMatch {^\[RynthAi Craft\] Crafting }
+		DO:	DoExpr {setvar[rt_crafted,1]}
+	IF:	All
+				ChatCapture {^\[RynthAi Craft\] (?<msg>(No bundles|No ammo and no bundles|No ammo, and Fletching|Craft timed out|Timeout after|Could not find ammo|Equip timed out|Equip error|UseObjectOn returned false|Stopped by an error).*)} {}
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_craft,`FAIL`]}
+					DoExpr {setpvar[rt_craft_why,getvar[capturegroup_msg]]}
+					DoExpr {echo[`[RynthTest] FAIL missile crafting: `+getpvar[rt_craft_why],2]}
+					SetState {Done}
+	IF:	All
+				ChatMatch {^\[RynthAi Craft\] (Equipped ammo|Done: )}
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_craft,`PASS`]}
+					DoExpr {setpvar[rt_craft_why,ifthen[getvar[rt_crafted]==1,`made ammo from the bundles`,`put carried ammo back on (to test making ammo, carry none)`]+` in `+cstr[getunixtime[]-getvar[rt_t]]+` s`]}
+					DoExpr {echo[`[RynthTest] PASS missile crafting: `+getpvar[rt_craft_why],1]}
+					SetState {Done}
+	IF:	All
+				SecsInStateGE 75
+				Expr {getvar[rt_settled]==0}
+		DO:	DoAll
+					DoExpr {setvar[rt_settled,1]}
+					DoExpr {setpvar[rt_craft,`FAIL`]}
+					DoExpr {setpvar[rt_craft_why,`nothing from Missile Crafting within 75 s of the ammo coming off (a launcher must be in hand and Missile Crafting on)`]}
+					DoExpr {echo[`[RynthTest] FAIL missile crafting: `+getpvar[rt_craft_why],2]}
+					SetState {Done}
+~~ }
+STATE: {Done} ~~ {
+	IF:	Always
+		DO:	DoAll
+					SetOpt {EnableCombat} {getvar[rt_o_combat]}
+					SetOpt {EnableBuffing} {getvar[rt_o_buff]}
+					SetOpt {EnableLooting} {getvar[rt_o_loot]}
+					SetOpt {EnableNav} {getvar[rt_o_nav]}
+					DoExpr {setpvar[rt_finished,getunixtime[]]}
+					DoExpr {setpvar[rt_status,`DONE`]}
+					DoExpr {echo[`[RynthTest] done: buffing `+getpvar[rt_buff]+`; fight `+getpvar[rt_fight]+`; looting `+getpvar[rt_loot]+`; missile crafting `+getpvar[rt_craft],1]}
+	IF:	SecsInStateGE 3
+		DO:	Chat {/ra stop}
+~~ }

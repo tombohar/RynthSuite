@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    RynthNav.TownNet: the walking paths inside the Town Network (landblock 0x0007), built offline
+    from the retail dats (client_cell_1.dat + client_portal.dat, read only), for townnet.json.
+    The portal list in townnet.json comes from RynthCore's tools/navdata/gen_townnet.py (the
+    world database); this tool adds the indoor walks from every arrival point to every exit
+    portal, and checks them.
+    Commands (build, check, dump, test): see Program.cs.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>RynthNav.TownNet</RootNamespace>
+    <AssemblyName>RynthNav.TownNet</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- DatDatabase: the read-only dat container reader RynthAi and the baker use -->
+    <ProjectReference Include="..\..\Shared\RynthCore.TerrainData\RynthCore.TerrainData.csproj" />
+  </ItemGroup>
+
+</Project>

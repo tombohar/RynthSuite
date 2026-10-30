@@ -7,13 +7,30 @@ namespace RynthCore.Plugin.RynthAi.CreatureData;
 
 /// <summary>
 /// Thread-safe disk-backed store of CreatureProfile records.
-/// File: C:\Games\RynthSuite\RynthAi\CreatureData\creatures.json
 /// Shared across all characters; engine writes, optional external editor reads.
 /// Keyed by composite "name|wcid" so tier variants don't collide.
+///
+/// Per server (2026-10-03): wcids are only unique within one server's world database, and
+/// servers' custom content reuses numbers, so each server keeps its own file:
+///   C:\Games\RynthSuite\RynthAi\CreatureData\&lt;server&gt;\creatures.json
+/// &lt;server&gt; is <see cref="DifficultyTier.ServerKey"/>: the folder that already holds this
+/// server's data (by RynthCore's server id, its name or the world name), else the server's id,
+/// else (no server known) the world name the server announced, made safe for a folder (the
+/// SettingsProfiles rule). Folders made before 2026-10-21 are read where they are; nothing moves.
+/// The shared file from before, CreatureData\creatures.json, is the legacy store: COPIED (not
+/// moved) into a server's folder the first time that server is played, so every server starts
+/// from exactly what it had - the same precedent as the per-server SettingsProfiles
+/// (MigrateToServerFolder). It is only read and written while no server is known (before the
+/// first tick of a login, or a server that announces no name), as before.
+///
+/// Difficulty tiers (a server plugin's, DifficultyTier): appraised max health above tier 0 goes to
+/// <see cref="CreatureProfile.TierMaxHealth"/>; MaxHealth stays the tier-0 value. Everything
+/// else in a profile is the same at every tier.
 /// </summary>
 internal sealed class CreatureProfileStore
 {
-    private const string Folder = @"C:\Games\RynthSuite\RynthAi\CreatureData";
+    /// <summary>Where creatures.json lives (the offline tests point it at a scratch folder).</summary>
+    internal static string Folder = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "CreatureData");
     private const string FileName = "creatures.json";
 
     private readonly object _lock = new();
@@ -21,14 +38,79 @@ internal sealed class CreatureProfileStore
         = new(StringComparer.OrdinalIgnoreCase);
     private string _lastSavedJson = string.Empty;
     private bool _dirty;
+    private string _serverKey = string.Empty;   // "" = the legacy shared file
 
-    private string FilePath => Path.Combine(Folder, FileName);
+    private string FilePath => FileFor(_serverKey);
+
+    private static string FileFor(string serverKey) =>
+        string.IsNullOrEmpty(serverKey) ? Path.Combine(Folder, FileName) : Path.Combine(Folder, serverKey, FileName);
+
+    /// <summary>The server whose file is loaded ("" = the legacy shared file).</summary>
+    public string ServerKey { get { lock (_lock) return _serverKey; } }
+
+    /// <summary>
+    /// The name, as on disk, of the per-server folder matching <paramref name="serverKey"/> (any case)
+    /// that holds a creatures.json; null when there is none. Never throws.
+    /// </summary>
+    public static string? ExistingServerFolder(string serverKey)
+    {
+        if (string.IsNullOrWhiteSpace(serverKey)) return null;
+        try
+        {
+            if (!Directory.Exists(Folder)) return null;
+            foreach (string dir in Directory.EnumerateDirectories(Folder))
+            {
+                string name = Path.GetFileName(dir);
+                if (name.Equals(serverKey.Trim(), StringComparison.OrdinalIgnoreCase) && File.Exists(Path.Combine(dir, FileName)))
+                    return name;
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    /// <summary>
+    /// Switch to <paramref name="serverKey"/>'s file (saving the current one first). The first
+    /// time a server is seen its file is a copy of the legacy shared file. "" or the same server
+    /// is a no-op. Returns a line for the log when a copy was made, else null.
+    /// </summary>
+    public string? SetServer(string serverKey)
+    {
+        serverKey = serverKey?.Trim() ?? string.Empty;
+        string? note = null;
+        lock (_lock)
+        {
+            if (serverKey.Length == 0 || string.Equals(serverKey, _serverKey, StringComparison.OrdinalIgnoreCase))
+                return null;
+        }
+        SaveIfDirty();
+        try
+        {
+            string legacy = FileFor("");
+            string target = FileFor(serverKey);
+            if (!File.Exists(target) && File.Exists(legacy))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                File.Copy(legacy, target);
+                note = $"creature data is now kept per server: copied the shared creatures.json into {serverKey}";
+            }
+        }
+        catch (Exception ex)
+        {
+            note = $"copying creatures.json into {serverKey} failed ({ex.Message}); starting {serverKey} empty";
+        }
+        lock (_lock) _serverKey = serverKey;
+        Load();
+        return note;
+    }
 
     public void Load()
     {
         lock (_lock)
         {
             _byKey.Clear();
+            _lastSavedJson = string.Empty;
+            _dirty = false;
             string path = FilePath;
             if (!File.Exists(path)) return;
 
@@ -43,7 +125,12 @@ internal sealed class CreatureProfileStore
                 if (dict != null)
                 {
                     foreach (var kv in dict)
-                        _byKey[kv.Key] = kv.Value;
+                    {
+                        // Player characters appraised before e52ccc8 (wcid 1 / 4) are not
+                        // creatures: dropped, and the next save writes the file without them.
+                        if (kv.Value != null && PlayerWeenies.IsPlayerWcid(kv.Value.Wcid)) { _dirty = true; continue; }
+                        _byKey[kv.Key] = kv.Value!;
+                    }
                 }
                 _lastSavedJson = json;
             }
@@ -64,15 +151,16 @@ internal sealed class CreatureProfileStore
 
             try
             {
-                Directory.CreateDirectory(Folder);
+                string path = FilePath;
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
                 string json = JsonSerializer.Serialize(
                     _byKey, RynthAiJsonContext.Default.CreatureProfileDict);
 
                 if (json == _lastSavedJson) return;
 
-                string tmp = FilePath + ".tmp";
+                string tmp = path + ".tmp";
                 File.WriteAllText(tmp, json);
-                File.Copy(tmp, FilePath, overwrite: true);
+                File.Copy(tmp, path, overwrite: true);
                 try { File.Delete(tmp); } catch { }
                 _lastSavedJson = json;
             }
@@ -132,12 +220,27 @@ internal sealed class CreatureProfileStore
     }
 
     /// <summary>
-    /// Merge a new observation into the store. Fields with value 0 / empty are
-    /// ignored so partial samples don't clobber better data.
+    /// A profile's appraised max health at a difficulty tier (0 = the unscaled world, and every
+    /// tier on servers without tiers); 0 when that tier hasn't been seen.
     /// </summary>
-    public void Upsert(CreatureProfile sample)
+    public uint MaxHealthAt(CreatureProfile? profile, int difficulty)
+    {
+        if (profile == null) return 0;
+        if (difficulty <= 0) return profile.MaxHealth;
+        lock (_lock)
+            return profile.TierMaxHealth != null && profile.TierMaxHealth.TryGetValue(difficulty, out uint hp) ? hp : 0;
+    }
+
+    /// <summary>
+    /// Merge a new observation into the store. Fields with value 0 / empty are
+    /// ignored so partial samples don't clobber better data. <paramref name="difficulty"/>
+    /// above 0 (a server's scaled world or copy, DifficultyTier) files the max health under that tier
+    /// and leaves the tier-0 vitals alone; the rest merges as always.
+    /// </summary>
+    public void Upsert(CreatureProfile sample, int difficulty = 0)
     {
         if (string.IsNullOrEmpty(sample.Name)) return;
+        if (PlayerWeenies.IsPlayerWcid(sample.Wcid)) return;   // a player character, never creature data
 
         lock (_lock)
         {
@@ -154,10 +257,23 @@ internal sealed class CreatureProfileStore
 
             if (sample.CreatureType != 0) existing.CreatureType = sample.CreatureType;
 
-            // Vitals: take the max observed (handles partial samples + minor variation).
-            if (sample.MaxHealth > existing.MaxHealth) existing.MaxHealth = sample.MaxHealth;
-            if (sample.MaxStamina > existing.MaxStamina) existing.MaxStamina = sample.MaxStamina;
-            if (sample.MaxMana > existing.MaxMana) existing.MaxMana = sample.MaxMana;
+            if (difficulty > 0)
+            {
+                // Health, skills and damage scale with the tier; only health is kept (kill prediction).
+                if (sample.MaxHealth > 0)
+                {
+                    existing.TierMaxHealth ??= new Dictionary<int, uint>();
+                    if (!existing.TierMaxHealth.TryGetValue(difficulty, out uint had) || sample.MaxHealth > had)
+                        existing.TierMaxHealth[difficulty] = sample.MaxHealth;
+                }
+            }
+            else
+            {
+                // Vitals: take the max observed (handles partial samples + minor variation).
+                if (sample.MaxHealth > existing.MaxHealth) existing.MaxHealth = sample.MaxHealth;
+                if (sample.MaxStamina > existing.MaxStamina) existing.MaxStamina = sample.MaxStamina;
+                if (sample.MaxMana > existing.MaxMana) existing.MaxMana = sample.MaxMana;
+            }
 
             if (sample.ArmorLevel > 0) existing.ArmorLevel = sample.ArmorLevel;
 
@@ -187,7 +303,8 @@ internal sealed class CreatureProfileStore
     }
 
     /// <summary>
-    /// Returns the lowest resist (the creature's weakest damage type). 1.0 means "no data".
+    /// The damage type the creature takes the most damage from: resists are damage multipliers
+    /// (1.0 full, 0.5 half), so that's the HIGHEST value (this took the lowest until 2026-09-29).
     /// </summary>
     public static (string Type, double Resist) GetWeakest(CreatureProfile p)
     {
@@ -202,10 +319,10 @@ internal sealed class CreatureProfileStore
             ("electric", p.ResistElectric),
         };
         string bestType = "slash";
-        double best = double.MaxValue;
+        double best = double.MinValue;
         foreach (var pair in pairs)
         {
-            if (pair.Item2 < best)
+            if (pair.Item2 > best)
             {
                 best = pair.Item2;
                 bestType = pair.Item1;

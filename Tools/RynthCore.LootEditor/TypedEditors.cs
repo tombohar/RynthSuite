@@ -18,20 +18,10 @@ internal static class TypedEditors
 
     // ── ObjectClass ──────────────────────────────────────────────────────────
 
+    // Decal/VTank numbering (AcObjectClass), the same table the evaluator and the
+    // in-game ImGui editor use. The old hand-written list drifted from id 11 on.
     public static readonly (int Id, string Name)[] ObjectClasses =
-    {
-        (0, "Unknown"),  (1, "MeleeWeapon"), (2, "Armor"),    (3, "Clothing"),
-        (4, "Jewelry"),  (5, "Monster"),     (6, "Food"),     (7, "Money"),
-        (8, "Misc"),     (9, "MissileWeapon"), (10, "Container"), (11, "Useless"),
-        (12, "Gem"),     (13, "SpellComp"),  (14, "Key"),     (15, "WandStaffOrb"),
-        (16, "Portal"),  (17, "TradeNote"),  (18, "ManaStone"), (19, "Plant"),
-        (20, "BaseAlchemy"), (21, "BaseCooking"), (22, "BaseFletching"), (23, "Player"),
-        (24, "Vendor"),  (25, "Door"),      (26, "Corpse"),   (27, "Lifestone"),
-        (28, "Foci"),    (29, "Salvage"),   (30, "Ust"),      (31, "Bundle"),
-        (32, "Book"),    (33, "Journal"),   (34, "Sign"),     (35, "Housing"),
-        (36, "Pack"),    (37, "Scroll"),    (38, "BaseArmorTinker"), (39, "BaseWeaponTinker"),
-        (40, "BaseMagicTinker"), (41, "BaseItemTinker"), (50, "Salvage (legacy)"),
-    };
+        RynthCore.Loot.Editing.LootRuleText.ObjectClasses;
 
     public static (int Id, string Name)[] ObjectClassesAccess() => ObjectClasses;
 
@@ -54,7 +44,7 @@ internal static class TypedEditors
         AddCell(grid, KeyCombo(LongKeys, vm.Data.DataLines, 1, onChange, vm), col: 1);
         AddCell(grid, Label(op),                                   col: 2);
         AddCell(grid, Label("Value"),                              col: 3);
-        AddCell(grid, IntBox(vm.Data.DataLines, 0, onChange, vm),  col: 4);
+        AddCell(grid, LongValuePicker.For(vm, onChange, integer: true), col: 4);
         return grid;
     }
 
@@ -100,7 +90,7 @@ internal static class TypedEditors
         AddCell(grid, KeyCombo(LongKeys, vm.Data.DataLines, 1, onChange, vm), col: 1);
         AddCell(grid, Label(op),                                      col: 2);
         AddCell(grid, Label("Value"),                                 col: 3);
-        AddCell(grid, DoubleBox(vm.Data.DataLines, 0, onChange, vm),  col: 4);
+        AddCell(grid, LongValuePicker.For(vm, onChange, integer: false), col: 4);
         return grid;
     }
 
@@ -371,43 +361,12 @@ internal static class TypedEditors
 
     // ── Reference key tables (subset of AC enums; covers what people usually edit) ──
 
+    // The LootSdk tables the in-game editor uses (adds 45 DamageType, 48 WeaponSkill).
     public static readonly (int Id, string Name)[] LongKeys =
-    {
-        (5,   "EncumbVal"),
-        (19,  "Value"),
-        (25,  "Level"),
-        (28,  "ArmorLevel"),
-        (54,  "MaxDamage"),
-        (87,  "MaxStructure"),
-        (88,  "Structure"),
-        (105, "ItemWorkmanship"),
-        (107, "ItemMaxMana"),
-        (131, "MaterialType"),
-        (158, "WieldRequirements"),
-        (159, "WieldSkilltype"),
-        (160, "WieldDifficulty"),
-        (218, "EquippedSlots"),
-        (353, "ImbuedEffect"),
-        (370, "DamageRating"),
-        (371, "DamageResistRating"),
-        (372, "CritRating"),
-        (373, "CritResistRating"),
-        (374, "CritDamageRating"),
-        (375, "CritDamageResistRating"),
-        (376, "HealBoostRating"),
-        (379, "VitalityRating"),
-    };
+        RynthCore.Loot.Editing.LootRuleText.LongKeys;
 
     public static readonly (int Id, string Name)[] DoubleKeys =
-    {
-        (5,   "ApproachDistance"),
-        (22,  "DamageVariance"),
-        (29,  "WeaponLength"),
-        (62,  "WeaponDefense"),
-        (63,  "WeaponOffense"),
-        (152, "ElementalDamageVsMonsters"),
-        (167, "ManaRate"),
-    };
+        RynthCore.Loot.Editing.LootRuleText.DoubleKeys;
 
     public static readonly (int Id, string Name)[] StringKeys =
     {
@@ -416,20 +375,8 @@ internal static class TypedEditors
         (7, "Title"),
     };
 
+    // Retail/ACE skill ids from the LootSdk; the old list here was off from id 19 up
+    // (Light Weapons at 47 is Missile Weapons).
     public static readonly (int Id, string Name)[] Skills =
-    {
-        (1,  "Axe"),         (2,  "Bow"),         (3,  "Crossbow"),    (4,  "Dagger"),
-        (5,  "Mace"),        (6,  "MeleeDefense"),(7,  "MissileDef."), (8,  "Sling"),
-        (9,  "Spear"),       (10, "Staff"),       (11, "Sword"),       (12, "ThrownWpn"),
-        (13, "Unarmed"),     (14, "ArcaneLore"),  (15, "MagicDefense"),(16, "ManaConv."),
-        (18, "Item Tinkering"), (19, "Healing"),  (20, "Deception"),   (21, "Leadership"),
-        (22, "Lockpick"),    (23, "Fletching"),   (24, "Alchemy"),     (25, "Cooking"),
-        (26, "Salvaging"),   (31, "Creature Ench."), (32, "Item Ench."), (33, "Life Magic"),
-        (34, "War Magic"),   (35, "Loyalty"),     (36, "Jump"),        (37, "Run"),
-        (38, "Assess"),      (39, "Weapon Tinkering"), (40, "Armor Tinkering"),
-        (41, "Magic Item Tinkering"), (43, "Two Handed"), (44, "Gearcraft"),
-        (45, "Void Magic"),  (46, "Heavy Weapons"), (47, "Light Weapons"),
-        (48, "Finesse Weapons"), (49, "Missile Weapons"), (50, "Shield"),
-        (54, "Dual Wield"),  (55, "Recklessness"), (56, "Sneak Attack"),
-    };
+        RynthCore.Loot.Editing.LootRuleText.Skills;
 }

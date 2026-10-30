@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for RynthVision's dungeon light (2026-10-27): the rules (Light\DungeonLight.cs:
+    where the player is the way AC decides it, where the light applies, the floor it hands RynthCore
+    for a strength and colour, the colour words, /rv light, the status line), the settings' new JSON
+    keys (VisionSettings.cs: defaults, round trip, out-of-range values pulled in; Save/Load and
+    %APPDATA% aren't touched). Since 2026-10-27 RynthVision draws the whole Vision window (it takes
+    over the engine's Vision panel): its manifest (Ui\VisionManifest.cs: the engine panel's title and
+    sizes, "takeOver", only on an engine that hosts it), its pure rules (Ui\VisionFields.cs: opacity,
+    hex, the water-type list, the tabs), the water types' normalising and Clone, and that every key the
+    engine's panel saved is still read and written. The window itself draws with ImGui and isn't
+    compiled here.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>RynthVision.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthVision\Light\DungeonLight.cs" Link="RynthVision\DungeonLight.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthVision\Ui\VisionManifest.cs" Link="RynthVision\VisionManifest.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthVision\Ui\VisionFields.cs" Link="RynthVision\VisionFields.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthVision\VisionSettings.cs" Link="RynthVision\VisionSettings.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthVision\VisionCommands.cs" Link="RynthVision\VisionCommands.cs" />
+    <Compile Include="..\..\Plugins\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+  </ItemGroup>
+
+</Project>

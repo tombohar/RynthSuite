@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    RynthInventory: a searchable inventory across every character on every server (like
+    Virindi Global Inventory). Each client scans its own character and writes one JSON file
+    per character per server under %APPDATA%\RynthCore\inventory; the /ginv window merges
+    all of them. UI: the engine's script windows (ImGui), no Avalonia.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <OutputType>Library</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IlcOptimizationPreference>Size</IlcOptimizationPreference>
+    <StripSymbols>false</StripSymbols>
+    <RootNamespace>RynthCore.Plugin.RynthInventory</RootNamespace>
+    <AssemblyName>RynthCore.Plugin.RynthInventory</AssemblyName>
+    <Platforms>x86</Platforms>
+    <!-- Plugin manifest (embedded in the DLL; Plugins\Directory.Build.targets). minEngineApi is the
+         highest API use NOT behind a Has*/version check. Script windows (v71, HasUi) draw the search window and instance ids (v73) fall back to ownership info; below v71 it still scans and saves (/ginv status), as with ImGui off. -->
+    <RynthPluginMinEngineApi>66</RynthPluginMinEngineApi>
+    <RynthPluginDescription>Search every character's items.</RynthPluginDescription>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Spell names for item spells: RynthAi's spell table, shared rather than copied. -->
+    <EmbeddedResource Include="..\RynthCore.Plugin.RynthAi\Combat\SpellData.txt" LogicalName="RynthInventory.SpellData.txt" Link="Shared\SpellData.txt" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Storage another plugin reads for us ("storage" commands: Aelrynth's vault from RynthAelrynth). Also linked by RynthInventory.Tests. -->
+    <Compile Include="..\Shared\StorageFeed.cs" Link="Shared\StorageFeed.cs" />
+    <!-- How a chat command answers (2026-10-28): the shared reply queue and colours. -->
+    <Compile Include="..\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+  </ItemGroup>
+
+</Project>

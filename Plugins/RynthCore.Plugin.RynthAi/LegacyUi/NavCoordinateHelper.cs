@@ -5,6 +5,9 @@ namespace RynthCore.Plugin.RynthAi.LegacyUi;
 
 internal static class NavCoordinateHelper
 {
+    /// <summary>World Z from the player pose is divided by this to match nav-file height.</summary>
+    public const double NavZScale = 240.0;
+
     public static bool TryGetNavCoords(RynthCoreHost host, out double northSouth, out double eastWest)
     {
         northSouth = 0;
@@ -17,6 +20,17 @@ internal static class NavCoordinateHelper
             return TryConvertPoseToCoords(fallbackCellId, fallbackX, fallbackY, out northSouth, out eastWest);
 
         return false;
+    }
+
+    /// <summary>Current position as a waypoint would store it (NS/EW map coords + Z in nav units).</summary>
+    public static bool TryGetNavPosition(RynthCoreHost host, out double northSouth, out double eastWest, out double navZ)
+    {
+        navZ = 0;
+        if (!TryGetNavCoords(host, out northSouth, out eastWest))
+            return false;
+        if (host.HasGetPlayerPose && host.TryGetPlayerPose(out _, out _, out _, out float z, out _, out _, out _, out _))
+            navZ = z / NavZScale;
+        return true;
     }
 
     internal static bool TryConvertPoseToCoords(uint objCellId, float x, float y, out double northSouth, out double eastWest)

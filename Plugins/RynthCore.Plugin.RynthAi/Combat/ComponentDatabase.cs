@@ -77,6 +77,38 @@ internal static class ComponentDatabase
     private static readonly Dictionary<int, uint[]> _spellComps = new();
     private static bool _spellCompsLoaded;
 
+    // spellId → (MagicSchool, Power) from the same SpellTable pass. The server's own
+    // values (ACE's Spell.School / Spell.Power read the dat's SpellBase), so learning a
+    // scroll is judged with the numbers the server uses. Tests set entries directly.
+    private static readonly Dictionary<int, (int School, int Power)> _spellMeta = new();
+    internal static readonly Dictionary<int, (int School, int Power)> SpellMetaOverride = new();
+
+    /// <summary>
+    /// A spell's magic school (ACE MagicSchool: War 1, Life 2, Item 3, Creature 4, Void 5)
+    /// and power (difficulty) from the portal.dat SpellTable. False when the dat couldn't be
+    /// read or the spell isn't in it.
+    /// </summary>
+    public static bool TryGetSpellSchoolAndPower(int spellId, out int school, out int power)
+    {
+        if (SpellMetaOverride.TryGetValue(spellId, out var o)) { school = o.School; power = o.Power; return true; }
+        if (SpellMetaOverride.Count == 0) EnsureLoaded();
+        if (_spellMeta.TryGetValue(spellId, out var m)) { school = m.School; power = m.Power; return true; }
+        school = 0; power = 0;
+        return false;
+    }
+
+    // spellId → BaseMana from the same SpellTable pass: the most a cast can cost (ACE
+    // Creature.CalculateManaUsage starts from it; Mana Conversion only lowers it on a roll).
+    private static readonly Dictionary<int, int> _spellBaseMana = new();
+
+    /// <summary>A spell's base mana cost from the portal.dat SpellTable. False when the dat
+    /// couldn't be read or the spell isn't in it.</summary>
+    public static bool TryGetSpellBaseMana(int spellId, out int mana)
+    {
+        EnsureLoaded();
+        return _spellBaseMana.TryGetValue(spellId, out mana) && mana > 0;
+    }
+
     private static bool _loaded;
     private static readonly object _lock = new();
     private static Action<string>? _log;
@@ -319,26 +351,28 @@ internal static class ComponentDatabase
         {
             if (r.BaseStream.Position + 4 > raw.Length) break;
             uint spellId = r.ReadUInt32();
-            uint[] comps = ReadSpellBaseFormula(r);
+            uint[] comps = ReadSpellBaseFormula(r, out uint school, out uint power, out uint baseMana);
             _spellComps[(int)spellId] = comps;
+            _spellMeta[(int)spellId] = ((int)school, (int)power);
+            _spellBaseMana[(int)spellId] = (int)baseMana;
             n++;
         }
         return n;
     }
 
-    private static uint[] ReadSpellBaseFormula(BinaryReader r)
+    private static uint[] ReadSpellBaseFormula(BinaryReader r, out uint school, out uint power, out uint baseMana)
     {
         byte[] nameB = ReadObf(r); Align(r);
         byte[] descB = ReadObf(r); Align(r);
 
-        r.ReadUInt32(); // School
+        school = r.ReadUInt32(); // School (MagicSchool: War 1, Life 2, Item 3, Creature 4, Void 5)
         r.ReadUInt32(); // Icon
         r.ReadUInt32(); // Category
         r.ReadUInt32(); // Bitfield
-        r.ReadUInt32(); // BaseMana
+        baseMana = r.ReadUInt32(); // BaseMana (the mana cost before Mana Conversion)
         r.ReadSingle(); // BaseRangeConstant
         r.ReadSingle(); // BaseRangeMod
-        r.ReadUInt32(); // Power
+        power = r.ReadUInt32(); // Power (the spell's difficulty; ACE's scroll rule reads it)
         r.ReadSingle(); // SpellEconomyMod
         r.ReadUInt32(); // FormulaVersion
         r.ReadSingle(); // ComponentLoss

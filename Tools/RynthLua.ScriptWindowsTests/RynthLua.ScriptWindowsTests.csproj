@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline round-trip checks for RynthLua script windows: the RynthLua recorder
+    (ScriptHud.cs HudRecorder / HudFormat.WriteSubmit) encodes display lists, and the engine's
+    own parser (RynthCore src/RynthCore.Engine/UI/ScriptWindows/DisplayListParser.cs, compiled
+    in from the sibling RynthCore checkout) reads them back. Also checks event application,
+    the Vector2/Vector4 globals and the ImGui enum tables against ImGui.NET 1.91.6.1.
+    The plugin is a NativeAOT x86 library, so its sources are compiled in here directly.
+    Nothing native is loaded: no AC, no ImGui context.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>RynthLua.ScriptWindowsTests</RootNamespace>
+    <NoWarn>$(NoWarn);CS0649;CS0169;CS0414;CS8618</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+    <PackageReference Include="MoonSharp" Version="2.0.0" />
+    <!-- The engine parser's whitelists use ImGui.NET's enums; the enum check compares against them. -->
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthLua\*.cs" Link="RynthLua\%(Filename)%(Extension)" />
+    <Compile Include="..\..\Plugins\Shared\RynthAiScriptApi.cs" Link="RynthLua\RynthAiScriptApi.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthAiCombatApi.cs" Link="RynthLua\RynthAiCombatApi.cs" />
+    <Compile Include="..\..\Plugins\Shared\UseAudit.cs" Link="RynthLua\UseAudit.cs" />
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\UI\ScriptWindows\DisplayListParser.cs" Link="Engine\DisplayListParser.cs" />
+    <!-- The engine's AC icon decoder (pure code) and its DXT helper: decoded against the real client_portal.dat when it is there (read only). -->
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\UI\ScriptWindows\AcIconDecoder.cs" Link="Engine\AcIconDecoder.cs" />
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.StatusAgent\Dat\DxtUtil.cs" Link="Engine\DxtUtil.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- RynthLuaPaths.cs uses the install-folder resolver. -->
+    <Compile Include="..\..\Plugins\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+    <Compile Include="..\..\Plugins\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+  </ItemGroup>
+
+</Project>

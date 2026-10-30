@@ -87,27 +87,28 @@ public enum AcIntProperty
 
 /// <summary>
 /// Loot-relevant float item properties. Values match Chorizite STypeFloat sequential enum
-/// (UNDEF=0, HEARTBEAT_INTERVAL=1, …). Cast to int when calling item.Values(key, 0.0).
+/// (UNDEF=0, HEARTBEAT_INTERVAL=1, …) and ACE's PropertyFloat. Cast to int when calling item.Values(key, 0.0).
+/// AttackBonus, DamageMod, ManaConvMod and SlayerDamageBonus were one low until 2026-10-05.
 /// </summary>
 public enum AcFloatProperty
 {
     AcidProtMod        = 18,   // ARMOR_MOD_VS_ACID
-    AttackBonus        = 61,   // WEAPON_OFFENSE     — attack bonus %
+    AttackBonus        = 62,   // WEAPON_OFFENSE     — attack bonus %
     BluntProtMod       = 15,   // ARMOR_MOD_VS_BLUDGEON
     ColdProtMod        = 16,   // ARMOR_MOD_VS_COLD
-    DamageMod          = 62,   // DAMAGE_MOD         — damage bonus %
+    DamageMod          = 63,   // DAMAGE_MOD         — damage bonus %
     DamageVariance     = 22,   // DAMAGE_VARIANCE
     DefenseBonus       = 29,   // WEAPON_DEFENSE     — melee defense bonus %
     ElectricProtMod    = 19,   // ARMOR_MOD_VS_ELECTRIC
     ElementalDamageMod = 152,  // ELEMENTAL_DAMAGE_MOD
     FireProtMod        = 17,   // ARMOR_MOD_VS_FIRE
     MagicDefBonus      = 150,  // WEAPON_MAGIC_DEFENSE
-    ManaConvMod        = 143,  // MANA_CONVERSION_MOD
+    ManaConvMod        = 144,  // MANA_CONVERSION_MOD
     MissileDefBonus    = 149,  // WEAPON_MISSILE_DEFENSE
     NetherProtMod      = 165,  // ARMOR_MOD_VS_NETHER
     PierceProtMod      = 14,   // ARMOR_MOD_VS_PIERCE
     SlashProtMod       = 13,   // ARMOR_MOD_VS_SLASH
-    SlayerDamageBonus  = 137,  // SLAYER_DAMAGE_BONUS
+    SlayerDamageBonus  = 138,  // SLAYER_DAMAGE_BONUS
 }
 
 /// <summary>AC material types. Integer values match the live acclient.exe property table.</summary>
@@ -196,4 +197,6 @@ public enum AcSkillType
     Salvaging, Run, Jump, Loyalty, Leadership, Deception,
     Healing, Lockpick, Cooking, Fletching, Alchemy, ManaConversion,
     AssessCreature, AssessPerson, Summoning,
+    // Appended, not inserted: the members above keep their values.
+    MissileWeapons,
 }

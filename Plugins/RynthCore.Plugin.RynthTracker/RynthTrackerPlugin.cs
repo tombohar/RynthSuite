@@ -1,169 +1,100 @@
 using System;
-using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using RynthCore.Plugin.Shared;
 using RynthCore.PluginCore;
 
 namespace RynthCore.Plugin.RynthTracker;
 
+// The session's numbers come from SessionStats (Plugins\Shared), the same code RynthAi's Mini
+// Remote uses, so the Tracker panel and the Mini Remote agree (0.4.0, 2026-10-11): experience,
+// luminance (with ACECustom's bank and allegiance pass-up), luminance of the last five minutes,
+// kills (including a multi-target spell's extra kills found by their corpses), XP per kill,
+// deaths and Radiance. SessionStatsTracker reads the game and keeps the session across reloads.
+//
+// One session (0.4.1, 2026-10-13): with RynthAi loaded the panel shows RynthAi's own session
+// (the Mini Remote's Session Stats, read through "RynthAi.Hub"), so the Tracker, the Mini Remote,
+// RynthOracle and RynthILT count the same session from the same start, and Reset starts that one
+// over. Without RynthAi (or before its login) the Tracker's own session, kept running all along,
+// is shown instead.
 public sealed class RynthTrackerPlugin : RynthPluginBase
 {
     internal static readonly IntPtr NamePointer    = Marshal.StringToHGlobalAnsi("RynthTracker");
-    internal static readonly IntPtr VersionPointer = Marshal.StringToHGlobalAnsi("0.1.0");
+    internal static readonly IntPtr VersionPointer = Marshal.StringToHGlobalAnsi("0.4.1");   // previous release: 0.4.0
 
-    private uint _playerId;
-    private bool _loginComplete;
-    private DateTime _sessionStart;
-
-    private long _xpTotal;
-    private long _lumTotal;
-    private int  _killsTotal;
-    private int  _deathsTotal;
-
-    // Deduplication: track IDs already counted as dead this session to prevent
-    // double-counting if the server sends multiple health=0 packets for the same object.
-    private readonly HashSet<uint> _killedIds = new();
-
+    private SessionStatsTracker? _session;
+    private readonly RynthAiSessionClient _ai = new();
     private int _tickCounter;
+    // Set by the engine's UI thread (Reset export), acted on by the next OnTick on the pump.
+    private volatile bool _resetWanted;
 
-    // Written on the game thread every ~0.5s, read on the Avalonia UI thread.
+    // Written on the game thread every ~0.5s, read on the engine's UI thread.
     // Reference reads are atomic on x86 so volatile is sufficient; no lock needed.
     private volatile string _snapshot = EmptySnapshot;
 
-    private const string EmptySnapshot =
-        "{\"ss\":0.0,\"xt\":0,\"xh\":0,\"lt\":0,\"lh\":0,\"kt\":0,\"kh\":0.0,\"xk\":0,\"dt\":0}";
+    private const string EmptySnapshot = TrackerSnapshot.Empty;
 
     public override int Initialize()
     {
+        _session = new SessionStatsTracker(Host, "[RynthTracker]", TrackerSessionStore.DefaultDirectory());
         Host.Log("[RynthTracker] Plugin initialized.");
         return 0;
     }
 
     public override void OnLoginComplete()
     {
-        _playerId = Host.GetPlayerId();
-        ResetSession();
-        _loginComplete = true;
-        Host.Log("[RynthTracker] Session started.");
+        _ai.Reset();
+        _session?.OnLoginComplete();
     }
 
     public override void OnLogout()
     {
-        _loginComplete = false;
-        Host.Log("[RynthTracker] Session ended.");
+        _session?.OnLogout();
+        _ai.Reset();
+        _snapshot = EmptySnapshot;
     }
 
-    public override void OnChatWindowText(string? text, int chatType, ref int eat)
-    {
-        if (!_loginComplete || string.IsNullOrEmpty(text)) return;
+    public override void Shutdown() => _session?.Shutdown();
 
-        // XP:  "You've earned N experience."
-        // Lum: "You've earned N Luminance."
-        int earnedIdx = text.IndexOf("earned ", StringComparison.OrdinalIgnoreCase);
-        if (earnedIdx < 0) return;
+    public override void OnKillNotification(string? deathMessage) => _session?.OnKillNotification(deathMessage);
 
-        int numStart = earnedIdx + 7; // "earned ".Length
-        long amount = ParseLeadingNumber(text, numStart);
-        if (amount <= 0) return;
+    public override void OnChatWindowText(string? text, int chatType, ref int eat) => _session?.OnChatWindowText(text);
 
-        int afterNum = SkipPastNumber(text, numStart);
-        if (text.IndexOf("experience", afterNum, StringComparison.OrdinalIgnoreCase) >= 0)
-            _xpTotal += amount;
-        else if (text.IndexOf("luminance", afterNum, StringComparison.OrdinalIgnoreCase) >= 0)
-            _lumTotal += amount;
-    }
+    public override void OnCreateObject(uint objectId) => _session?.OnCreateObject(objectId);
+
+    public override void OnDeleteObject(uint objectId) => _session?.OnDeleteObject(objectId);
 
     public override void OnUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth)
-    {
-        if (!_loginComplete) return;
-
-        if (targetId == _playerId)
-        {
-            // maxHealth > 0 guards against spurious 0/0 packets during login.
-            if (currentHealth == 0 && maxHealth > 0)
-                _deathsTotal++;
-            return;
-        }
-
-        if (currentHealth == 0 && maxHealth > 0 && _killedIds.Add(targetId))
-            _killsTotal++;
-    }
-
-    public override void OnDeleteObject(uint objectId)
-    {
-        _killedIds.Remove(objectId);
-    }
+        => _session?.OnUpdateHealth(targetId, currentHealth, maxHealth);
 
     public override void OnTick()
     {
+        var session = _session;
+        if (session == null) return;
+        long nowMs = Environment.TickCount64;
+        if (_resetWanted)
+        {
+            _resetWanted = false;
+            // RynthAi's session when it is the one shown; the Tracker's own either way, so a later
+            // fallback doesn't jump back to an old start.
+            _ai.ResetSession(Host, nowMs);
+            session.RequestReset();
+        }
+        session.Tick();
         if (++_tickCounter < 30) return; // rebuild every ~0.5s at 60Hz
         _tickCounter = 0;
-        _snapshot = BuildSnapshot();
+        DateTime now = DateTime.UtcNow;
+        if (_ai.TryGet(Host, nowMs, out SessionStatsV1 s))
+        {
+            SessionStatsMoreV1? more = _ai.TryGetMore(Host, nowMs, out SessionStatsMoreV1 m) ? m : null;
+            _snapshot = TrackerSnapshot.Build(TrackerSnapshot.FromRynthAi(s, more, session.Active ? session.View : null), now);
+        }
+        else
+            _snapshot = session.Active ? TrackerSnapshot.Build(session.View, now) : EmptySnapshot;
     }
 
     internal string GetSnapshot() => _snapshot;
 
-    internal void Reset()
-    {
-        ResetSession();
-        Host.Log("[RynthTracker] Session reset.");
-    }
-
-    private void ResetSession()
-    {
-        _sessionStart = DateTime.UtcNow;
-        _xpTotal    = 0;
-        _lumTotal   = 0;
-        _killsTotal  = 0;
-        _deathsTotal = 0;
-        _killedIds.Clear();
-        _snapshot = EmptySnapshot;
-    }
-
-    private string BuildSnapshot()
-    {
-        double ss   = _loginComplete ? (DateTime.UtcNow - _sessionStart).TotalSeconds : 0.0;
-        double hrs  = ss / 3600.0;
-        long   xpHr   = hrs > 0.0 ? (long)(_xpTotal  / hrs) : 0;
-        long   lumHr  = hrs > 0.0 ? (long)(_lumTotal  / hrs) : 0;
-        double killHr = hrs > 0.0 ? _killsTotal / hrs : 0.0;
-        long   xpKill = _killsTotal > 0 ? _xpTotal / _killsTotal : 0;
-
-        var ic = System.Globalization.CultureInfo.InvariantCulture;
-        return "{\"ss\":"  + ss.ToString("F1", ic)
-             + ",\"xt\":"  + _xpTotal
-             + ",\"xh\":"  + xpHr
-             + ",\"lt\":"  + _lumTotal
-             + ",\"lh\":"  + lumHr
-             + ",\"kt\":"  + _killsTotal
-             + ",\"kh\":"  + killHr.ToString("F1", ic)
-             + ",\"xk\":"  + xpKill
-             + ",\"dt\":"  + _deathsTotal
-             + "}";
-    }
-
-    // Parse the leading run of digit+comma characters starting at 'start'.
-    private static long ParseLeadingNumber(string text, int start)
-    {
-        long result   = 0;
-        bool hasDigit = false;
-        for (int i = start; i < text.Length; i++)
-        {
-            char c = text[i];
-            if (c >= '0' && c <= '9')     { result = result * 10 + (c - '0'); hasDigit = true; }
-            else if (c == ',' && hasDigit) { }   // skip thousands separator
-            else if (hasDigit)             break; // first non-number char ends the parse
-        }
-        return hasDigit ? result : 0;
-    }
-
-    // Return the index of the first character after the leading number at 'start'.
-    private static int SkipPastNumber(string text, int start)
-    {
-        for (int i = start; i < text.Length; i++)
-        {
-            char c = text[i];
-            if (c != ',' && (c < '0' || c > '9')) return i;
-        }
-        return text.Length;
-    }
+    /// <summary>Called from the RynthTrackerReset export (engine UI thread): just flags a reset;
+    /// the next OnTick performs it on the pump thread.</summary>
+    internal void Reset() => _resetWanted = true;
 }

@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for RynthInventory: the file format round-trips, the store's atomic writes
+    hold up with several writers and readers at once, the merge/search/totals rules, the scan
+    and write timing (debounce), and that the window's display list is accepted by the engine's
+    own parser (RynthCore src/RynthCore.Engine/UI/ScriptWindows/DisplayListParser.cs, compiled in
+    from the sibling RynthCore checkout) within the engine's limits. Nothing native is loaded:
+    no AC, no ImGui context. Files go to a temp folder, never %APPDATA%\RynthCore.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>RynthInventory.Tests</RootNamespace>
+    <NoWarn>$(NoWarn);CS0649;CS0169;CS0414;CS8618</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+    <!-- The engine parser's whitelists use ImGui.NET's enums. -->
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthInventory\**\*.cs" Exclude="..\..\Plugins\RynthCore.Plugin.RynthInventory\obj\**;..\..\Plugins\RynthCore.Plugin.RynthInventory\bin\**" Link="RynthInventory\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\UI\ScriptWindows\DisplayListParser.cs" Link="Engine\DisplayListParser.cs" />
+    <!-- The plugin links this one from Plugins/Shared (the glob above only covers the plugin's folder). -->
+    <Compile Include="..\..\Plugins\Shared\StorageFeed.cs" Link="Shared\StorageFeed.cs" />
+    <Compile Include="..\..\Plugins\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Combat\SpellData.txt" LogicalName="RynthInventory.SpellData.txt" />
+  </ItemGroup>
+
+</Project>

@@ -52,6 +52,16 @@ dotnet build -c Release
 dotnet run -c Release
 ```
 
+```powershell
+cd C:\Projects\RynthSuite\Tools\RynthCore.AutoVendorTests
+dotnet run -c Release   # RynthAi AutoVendor rule/planning tests
+```
+
+```powershell
+cd C:\Projects\RynthSuite\Tools\RynthCore.MissileArcTests
+dotnet run -c Release   # RynthAi missile arc (LoS ballistics) tests
+```
+
 These projects target `net10.0` (no `-windows` suffix) and use Avalonia 11.2.3, so they build and run identically on Windows, Linux, and macOS.
 
 ## Deploy — Plugin

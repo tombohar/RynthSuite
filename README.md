@@ -1,6 +1,6 @@
 # RynthSuite
 
-RynthCore-based plugins and tools for Asheron's Call. Requires [RynthCore](https://github.com/tombohar/RynthCore) — a .NET 10 NativeAOT injection framework for the AC client.
+RynthCore-based plugins and tools for Asheron's Call. Requires [RynthCore](https://aelrynth.com/git/rynth/RynthCore) — a .NET 10 NativeAOT injection framework for the AC client.
 
 ---
 
@@ -33,6 +33,17 @@ A combat and navigation assistant for Asheron's Call, ported from the legacy Nex
 
 ---
 
+## Monster rules
+
+Each row of the monster profile (edited in `Tools/RynthCore.MonsterEditor`) applies to the monsters whose name contains the row's Name (and whose Match expression is true, when one is set); the `Default` row applies to the rest. The **P** column is the row's Priority:
+
+- **Higher Priority is fought first.** When a monster of a higher Priority is in range, lower-priority monsters wait.
+- **Priority 0 (or less) means IGNORE.** RynthAi never picks the monster as a target and does not count it as "a monster nearby": it does not hold up navigation, looting, buffing, resting, or the idle peace-mode switch. Use it for monsters that are not worth the time (for example an `Olthoi Grub` row at Priority 0). A `Default` row at 0 ignores every monster no other row names.
+- **Priority 0 means never attacked, even if it attacks you.** There is no automatic exception: an ignored monster that hits you is still never targeted. The HP failsafe (Emergency Heal At) still protects you, and you can raise the row's Priority if a monster needs fighting.
+- Meta conditions that count monsters by name or distance (`NoMonstersWithinDistance`, `MobsInDist_Priority`, name-count) are explicit conditions you wrote and still see ignored monsters.
+
+---
+
 ## Tools
 
 Cross-platform Avalonia editors built on the shared LootSdk. These target `net10.0` (no `-windows` suffix) and run on Windows, Linux, and macOS.
@@ -49,7 +60,7 @@ Cross-platform Avalonia editors built on the shared LootSdk. These target `net10
 
 ## Requirements
 
-- [RynthCore](https://github.com/tombohar/RynthCore) built and deployed to `C:\Games\RynthCore\`
+- [RynthCore](https://aelrynth.com/git/rynth/RynthCore) built and deployed to `C:\Games\RynthCore\`
 - **.NET 10 SDK (x86)** for the plugin (NativeAOT)
 - .NET 10 SDK for the tools (any platform)
 - Asheron's Call client installed at `C:\Turbine\Asheron's Call\` (for raycasting `.dat` access)

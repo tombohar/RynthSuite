@@ -16,10 +16,17 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.2.3" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.3" />
     <PackageReference Include="Avalonia.Controls.DataGrid" Version="11.2.3" />
+    <!-- Avalonia pulls Tmds.DBus.Protocol 0.20.0 (GHSA-xrw6-gwf8-vvr9; D-Bus is Linux-only, but pin the fixed version). -->
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\Shared\RynthCore.LootSdk\RynthCore.LootSdk.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Install-folder resolver (env, HKCU, HKLM, default C:\Games). Read only; same file as RynthCore src\Shared. -->
+    <Compile Include="..\..\Plugins\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
   </ItemGroup>
 
 </Project>

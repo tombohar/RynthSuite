@@ -1,0 +1,12 @@
+<Project>
+  <!--
+    Plugin manifests (RynthCore SDK): each plugin's csproj sets RynthPluginMinEngineApi (and any
+    RynthPluginDependency items); the SDK's targets write the manifest JSON from the csproj, compile
+    in RynthPluginInfo, and embed the JSON in the DLL. The plugins reference the SDK by
+    ProjectReference, so its build\ targets are imported here rather than by NuGet.
+  -->
+  <PropertyGroup>
+    <_RynthCoreSdkTargets>$(MSBuildThisFileDirectory)..\..\RynthCore\src\RynthCore.PluginSdk\build\RynthCore.PluginSdk.targets</_RynthCoreSdkTargets>
+  </PropertyGroup>
+  <Import Project="$(_RynthCoreSdkTargets)" Condition="Exists('$(_RynthCoreSdkTargets)')" />
+</Project>

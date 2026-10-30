@@ -158,6 +158,33 @@ public static class VTankLootEvaluator
         }
     }
 
+    /// <summary>
+    /// The first rule, in list order, that matches the item (rule Priority is not consulted),
+    /// or null when none does; <paramref name="index"/> is its position, or -1.
+    /// Corpse looting classifies items with this.
+    /// </summary>
+    public static VTankLootRule? FirstMatch(VTankLootProfile profile, WorldObject? item, VTankLootContext? ctx, out int index)
+    {
+        for (int i = 0; i < profile.Rules.Count; i++)
+        {
+            if (Match(profile.Rules[i], item, ctx))
+            {
+                index = i;
+                return profile.Rules[i];
+            }
+        }
+        index = -1;
+        return null;
+    }
+
+    /// <summary>
+    /// One condition on its own, same semantics as inside <see cref="Match(VTankLootRule, WorldObject?, VTankLootContext?)"/>.
+    /// AutoVendor judges conditions one at a time so it can tell "no" from "can't tell".
+    /// Throws on a malformed data line or an unsupported node type (the caller decides what that means).
+    /// </summary>
+    public static bool MatchCondition(VTankLootCondition cond, WorldObject item, VTankLootContext? ctx)
+        => Match(cond, item, unchecked((uint)item.Id), ctx);
+
     private static bool Match(VTankLootCondition cond, WorldObject item, uint itemId, VTankLootContext? ctx)
     {
         var d = cond.DataLines;
@@ -167,10 +194,10 @@ public static class VTankLootEvaluator
             VTankNodeTypes.StringValueMatch                => MatchStringValue(item, d),
             VTankNodeTypes.LongValKeyLE                    => Long(d) is var (val,key) && item.Values((LongValueKey)key, 0) <= val,
             VTankNodeTypes.LongValKeyGE                    => Long(d) is var (val,key) && item.Values((LongValueKey)key, 0) >= val,
-            VTankNodeTypes.DoubleValKeyLE                  => Double(d) is var (val,key) && item.Values((DoubleValueKey)key, 0.0) <= val,
-            VTankNodeTypes.DoubleValKeyGE                  => Double(d) is var (val,key) && item.Values((DoubleValueKey)key, 0.0) >= val,
+            VTankNodeTypes.DoubleValKeyLE                  => Double(d) is var (val,key) && item.Values(FloatKey(key), 0.0) <= val,
+            VTankNodeTypes.DoubleValKeyGE                  => Double(d) is var (val,key) && item.Values(FloatKey(key), 0.0) >= val,
             VTankNodeTypes.DamagePercentGE                 => false, // VTank source returns false unconditionally
-            VTankNodeTypes.ObjectClass                     => (int)item.ObjectClass == ReadInt(d, 0),
+            VTankNodeTypes.ObjectClass                     => ScrollLearner.ClassMatches(item, ReadInt(d, 0)),   // Scroll (42) also matches scroll Books
             VTankNodeTypes.SpellCountGE                    => ctx is null || ctx.GetItemSpellIds(itemId).Length >= ReadInt(d, 0),
             VTankNodeTypes.SpellMatch                      => MatchSpellMatch(itemId, ctx, d),
             VTankNodeTypes.MinDamageGE                     => MatchMinDamageGE(item, d),
@@ -189,8 +216,8 @@ public static class VTankLootEvaluator
             VTankNodeTypes.BuffedMedianDamageGE            => MatchBuffedMedianDamageGE(item, d),
             VTankNodeTypes.BuffedMissileDamageGE           => MatchBuffedMissileDamageGE(item, d),
             VTankNodeTypes.BuffedLongValKeyGE              => DoubleKey(d) is var (val,key) && item.Values((LongValueKey)key, 0) >= val,
-            VTankNodeTypes.BuffedDoubleValKeyGE            => DoubleKey(d) is var (val,key) && item.Values((DoubleValueKey)key, 0.0) >= val,
-            VTankNodeTypes.CalcdBuffedTinkedDamageGE       => item.Values(54, 0) >= ReadDouble(d, 0),
+            VTankNodeTypes.BuffedDoubleValKeyGE            => DoubleKey(d) is var (val,key) && item.Values(FloatKey(key), 0.0) >= val,
+            VTankNodeTypes.CalcdBuffedTinkedDamageGE       => item.Values(44, 0) >= ReadDouble(d, 0),
             VTankNodeTypes.TotalRatingsGE                  => MatchTotalRatingsGE(item, d),
             VTankNodeTypes.CalcedBuffedTinkedTargetMeleeGE => false, // not implemented
             VTankNodeTypes.DisabledRule                    => MatchDisabledRule(d),
@@ -251,7 +278,7 @@ public static class VTankLootEvaluator
     private static bool MatchMinDamageGE(WorldObject item, IList<string> d)
     {
         double threshold = ReadDouble(d, 0);
-        int maxDamage = item.Values(54, 0);
+        int maxDamage = item.Values(44, 0);   // Damage: the weapon profile's max (54 is WeaponEncumbrance; until 2026-10-07)
         if (maxDamage == 0) return false;
         double variance = item.Values(DoubleValueKey.DamageVariance, 0.0);
         double minDamage = maxDamage - (variance * maxDamage);
@@ -283,7 +310,7 @@ public static class VTankLootEvaluator
     private static bool MatchBuffedMedianDamageGE(WorldObject item, IList<string> d)
     {
         double threshold = ReadDouble(d, 0);
-        int maxDamage = item.Values(54, 0);
+        int maxDamage = item.Values(44, 0);   // Damage: the weapon profile's max (54 is WeaponEncumbrance; until 2026-10-07)
         if (maxDamage == 0) return false;
         double variance = item.Values(DoubleValueKey.DamageVariance, 0.0);
         double minDamage = maxDamage - (variance * maxDamage);
@@ -293,7 +320,7 @@ public static class VTankLootEvaluator
     private static bool MatchBuffedMissileDamageGE(WorldObject item, IList<string> d)
     {
         double threshold = ReadDouble(d, 0);
-        int maxDamage = item.Values(54, 0);
+        int maxDamage = item.Values(44, 0);   // Damage: the weapon profile's max (54 is WeaponEncumbrance; until 2026-10-07)
         if (maxDamage == 0) return false;
         double elemBonus = item.Values((DoubleValueKey)152, 1.0);
         if (elemBonus < 1.0) elemBonus = 1.0;
@@ -329,4 +356,24 @@ public static class VTankLootEvaluator
     private static (double Val, int Key) Double(IList<string> d) => (ReadDouble(d, 0), ReadInt(d, 1));
     // Buffed long/double helpers store value as double in slot 0 (matching VTank's "Read" of doubles).
     private static (double Val, int Key) DoubleKey(IList<string> d) => (ReadDouble(d, 0), ReadInt(d, 1));
+
+    // A double key as the STypeFloat it reads. VTank files the appraisal's armor and weapon
+    // profiles under Decal's 0x0A0000xx keys (uTank2 LootPlugins.DoubleValueKey), which no
+    // object property has: read raw they were always 0, so LootSnob's "AttackBonus >=" rules
+    // never matched (until 2026-10-05). Range (0x0A00000D) and the physics keys stay unmapped.
+    private static DoubleValueKey FloatKey(int key) => unchecked((uint)key) switch
+    {
+        0x0A000000 => (DoubleValueKey)13,   // SlashProt     → ArmorModVsSlash
+        0x0A000001 => (DoubleValueKey)14,   // PierceProt    → ArmorModVsPierce
+        0x0A000002 => (DoubleValueKey)15,   // BludgeonProt  → ArmorModVsBludgeon
+        0x0A000003 => (DoubleValueKey)18,   // AcidProt      → ArmorModVsAcid
+        0x0A000004 => (DoubleValueKey)19,   // LightningProt → ArmorModVsElectric
+        0x0A000005 => (DoubleValueKey)17,   // FireProt      → ArmorModVsFire
+        0x0A000006 => (DoubleValueKey)16,   // ColdProt      → ArmorModVsCold
+        0x0A000009 => (DoubleValueKey)280,  // SalvageWorkmanship → the engine's workmanship read (as wobjectgetdoubleprop)
+        0x0A00000B => DoubleValueKey.DamageVariance,   // Variance
+        0x0A00000C => DoubleValueKey.WeaponOffense,    // AttackBonus
+        0x0A00000E => DoubleValueKey.DamageMod,        // DamageBonus
+        _ => (DoubleValueKey)key,
+    };
 }

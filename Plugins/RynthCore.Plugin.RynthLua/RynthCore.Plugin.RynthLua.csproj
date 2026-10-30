@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <OutputType>Library</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IlcOptimizationPreference>Size</IlcOptimizationPreference>
+    <StripSymbols>false</StripSymbols>
+    <RootNamespace>RynthCore.Plugin.RynthLua</RootNamespace>
+    <AssemblyName>RynthCore.Plugin.RynthLua</AssemblyName>
+    <Platforms>x86</Platforms>
+    <!-- Plugin manifest (embedded in the DLL; Plugins\Directory.Build.targets). minEngineApi is the
+         highest API use NOT behind a Has*/version check. Vendor v67, the RynthAi bridge v68, live ids v69, action results v70, script windows v71, trade v72 and instance ids v73 are all guarded; scripts run without them (views.Available is false below v71). -->
+    <RynthPluginMinEngineApi>66</RynthPluginMinEngineApi>
+    <RynthPluginDescription>Lua scripting for metas and your own scripts.</RynthPluginDescription>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Plugins it can use when they are loaded (looked up at run time; optional, so they never block or reorder it). -->
+    <RynthPluginDependency Include="RynthAi" Optional="true" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+    <!-- Lua 5.2 interpreter, pure C#. Its core modules are found by reflection, hence the root. -->
+    <PackageReference Include="MoonSharp" Version="2.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <TrimmerRootAssembly Include="MoonSharp.Interpreter" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- RynthAi's script interface (RynthAi.Script v1), shared source with RynthAi. -->
+    <Compile Include="..\Shared\RynthAiScriptApi.cs" Link="Shared\RynthAiScriptApi.cs" />
+    <!-- RynthAi's combat hook (RynthAi.Combat v1): scripts choose attack and heal spells. -->
+    <Compile Include="..\Shared\RynthAiCombatApi.cs" Link="Shared\RynthAiCombatApi.cs" />
+    <!-- One logged, guarded way to use an object (who used what, and why). -->
+    <Compile Include="..\Shared\UseAudit.cs" Link="Shared\UseAudit.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Install-folder resolver (env, HKCU, HKLM, default C:\Games). Read only; same file as RynthCore src\Shared. -->
+    <Compile Include="..\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+    <!-- How a chat command answers (2026-10-28): the shared reply queue and colours. -->
+    <Compile Include="..\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+  </ItemGroup>
+
+</Project>

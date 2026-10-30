@@ -2,6 +2,7 @@
   <Folder Name="/Plugins/">
     <Project Path="Plugins/RynthCore.Plugin.RynthAi/RynthCore.Plugin.RynthAi.csproj" />
     <Project Path="Plugins/RynthCore.Plugin.RynthChat/RynthCore.Plugin.RynthChat.csproj" />
+    <Project Path="Plugins/RynthCore.Plugin.RynthNet/RynthCore.Plugin.RynthNet.csproj" />
   </Folder>
   <Folder Name="/Shared/">
     <Project Path="Shared/RynthCore.LootSdk/RynthCore.LootSdk.csproj" />
@@ -9,6 +10,11 @@
   <Folder Name="/Tools/">
     <Project Path="Tools/RynthCore.MonsterEditor/RynthCore.MonsterEditor.csproj" />
     <Project Path="Tools/RynthCore.LootEditor/RynthCore.LootEditor.csproj" />
+    <Project Path="Tools/RynthLua.CompatTests/RynthLua.CompatTests.csproj" />
+    <Project Path="Tools/RynthCore.RynthAiTests/RynthCore.RynthAiTests.csproj" />
+    <Project Path="Tools/RynthCore.RynthAiHostTests/RynthCore.RynthAiHostTests.csproj" />
+    <Project Path="Tools/RynthSuite.BoundaryTests/RynthSuite.BoundaryTests.csproj" />
+    <Project Path="Tools/RynthNet.Tests/RynthNet.Tests.csproj" />
   </Folder>
   <Project Path="../RynthCore/src/RynthCore.PluginCore/RynthCore.PluginCore.csproj" />
   <Project Path="../RynthCore/src/RynthCore.PluginSdk/RynthCore.PluginSdk.csproj" />

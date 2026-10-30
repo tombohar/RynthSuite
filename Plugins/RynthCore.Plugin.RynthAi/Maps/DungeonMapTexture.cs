@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using RynthCore.Plugin.RynthAi.LegacyUi;
+using RynthCore.Install;
 
 namespace RynthCore.Plugin.RynthAi.Maps;
 
@@ -13,13 +14,13 @@ namespace RynthCore.Plugin.RynthAi.Maps;
 /// empty cells are fully transparent (alpha=0).
 ///
 /// Displayed via dl.AddImageQuad — O(1) vertices per layer vs O(strips + edges) otherwise.
-/// Disk-cached to C:\Games\RynthSuite\RynthAi\Maps\{landblock:X8}_{layerIdx}.bin so
+/// Disk-cached to <SuiteDir>\RynthAi\Maps\{landblock:X8}_{layerIdx}.bin so
 /// re-entering a dungeon skips the rasterise step.
 /// </summary>
 internal sealed class DungeonMapTexture : IDisposable
 {
     private const float GridCell = 0.5f;
-    private const string CacheDir = @"C:\Games\RynthSuite\RynthAi\Maps";
+    private static readonly string CacheDir = System.IO.Path.Combine(RynthInstallPaths.RynthAiDir, @"Maps");
     private const uint   Magic    = 0x524D5458u; // "XTMR"
 
     // D3D9 vtable indices on IDirect3DDevice9 / IDirect3DTexture9

@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline look at RynthAi's dungeon patrol and dungeon paths (DungeonPathfinder) on the real
+    dat files, read only, through the plugin's own GeometryLoader. Prints the patrol route the
+    plugin would build in a dungeon landblock (0x6346, the Olthoi hive, by default): how many
+    rooms the cell graph merges into, how many doorways get a straight-on approach, how long
+    the route is and how often it turns back. The plugin itself is a NativeAOT x86 library, so
+    the sources it needs are compiled in here directly.
+    Run: dotnet run -c Release, optionally followed (after the usual separator) by a landblock
+    in hex, an AC folder, and "dump" to list every route point.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>RynthCore.PatrolProof</RootNamespace>
+    <NoWarn>$(NoWarn);CS8632</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\BoundingVolume.cs" Link="Linked\BoundingVolume.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\DungeonLOS.cs" Link="Linked\DungeonLOS.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\GeometryLoader.cs" Link="Linked\GeometryLoader.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\LandblockStructs.cs" Link="Linked\LandblockStructs.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\ScatterSystem.cs" Link="Linked\ScatterSystem.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\LegacyUi\NavRouteParser.cs" Link="Linked\NavRouteParser.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\DungeonPathfinder.cs" Link="Linked\DungeonPathfinder.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\DungeonPathfinder.Rooms.cs" Link="Linked\DungeonPathfinder.Rooms.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\DungeonPathfinder.Sweep.cs" Link="Linked\DungeonPathfinder.Sweep.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\DungeonPathfinder.Portals.cs" Link="Linked\DungeonPathfinder.Portals.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\DungeonGeometry.cs" Link="Linked\DungeonGeometry.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\DungeonPatrolOptions.cs" Link="Linked\DungeonPatrolOptions.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\DungeonHazardSurfaces.cs" Link="Linked\DungeonHazardSurfaces.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthInstallPaths.cs" Link="Linked\RynthInstallPaths.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+    <ProjectReference Include="..\..\Shared\RynthCore.TerrainData\RynthCore.TerrainData.csproj" />
+  </ItemGroup>
+
+</Project>

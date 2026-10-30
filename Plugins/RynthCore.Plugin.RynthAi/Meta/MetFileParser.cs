@@ -44,7 +44,8 @@ internal static class MetFileParser
         /* 24 */ MetaConditionType.BurdenPercentage_GE,
         /* 25 */ MetaConditionType.DistAnyRoutePT_GE,
         /* 26 */ MetaConditionType.Expression,
-        /* 27 */ MetaConditionType.ChatMessageCapture,
+        /* 27 */ null,                               // VTank "Client Dialog Popup" (unsupported → Never)
+        /* 28 */ MetaConditionType.ChatMessageCapture, // TABLE {p: pattern, c: colour id list}
     };
 
     // ── VTank AType → RynthAi MetaActionType ────────────────────────────────
@@ -240,10 +241,11 @@ internal static class MetFileParser
                 break;
 
             case 26: // Expression
-            case 27: // ChatMessageCapture
                 rule.ConditionData = ReadExpressionTable(r);
-                if (vtCType == 27 && string.IsNullOrEmpty(rule.ConditionData))
-                    rule.ConditionData = ReadTypedString(r);
+                break;
+
+            case 28: // ChatMessageCapture
+                ParseChatCaptureTable(rule, r);
                 break;
 
             case 4: // ChatMessage
@@ -348,6 +350,34 @@ internal static class MetFileParser
             if (k == "e") expression = v;
         }
         return expression;
+    }
+
+    /// <summary>ChatCapture data: TABLE {p: regex pattern, c: colour id list "2;4"}.</summary>
+    private static void ParseChatCaptureTable(MetaRule rule, MetReader r)
+    {
+        string type = r.PeekLine().Trim();
+        if (type != "TABLE")
+        {
+            rule.ConditionData = ReadTypedString(r);
+            return;
+        }
+
+        r.ReadLine(); // TABLE
+        int colCount = ParseInt(r.ReadLine());
+        for (int i = 0; i < colCount; i++) r.ReadLine();
+        for (int i = 0; i < colCount; i++) r.ReadLine();
+        int rowCount = ParseInt(r.ReadLine());
+
+        for (int row = 0; row < rowCount && r.HasMore; row++)
+        {
+            string k = ReadTypedString(r);
+            switch (k)
+            {
+                case "p": rule.ConditionData = ReadTypedString(r); break;
+                case "c": rule.ChatColors = ReadTypedString(r); break;
+                default: SkipTypedValue(r); break;
+            }
+        }
     }
 
     private static void ParseInventoryCountData(MetaRule rule, MetReader r)
@@ -550,8 +580,11 @@ internal static class MetFileParser
                 break;
 
             case 1: // SetMetaState
-            case 5: // CallMetaState
                 rule.ActionData = ReadTypedString(r);
+                break;
+
+            case 5: // CallMetaState — VTank stores TABLE {st: to, ret: return}
+                ParseCallStateTable(rule, r);
                 break;
 
             case 2: // ChatCommand
@@ -770,6 +803,38 @@ internal static class MetFileParser
         }
 
         rule.ActionData = $"{state};{range.ToString(CultureInfo.InvariantCulture)};{time.ToString(CultureInfo.InvariantCulture)}";
+    }
+
+    /// <summary>
+    /// CallState data is a TABLE with keys st (the state to call) and ret (the
+    /// state pushed for Return). Reading it as a string skipped the table and
+    /// left the action empty, so it never called anything.
+    /// </summary>
+    private static void ParseCallStateTable(MetaRule rule, MetReader r)
+    {
+        string type = r.PeekLine().Trim();
+        if (type != "TABLE")
+        {
+            rule.ActionData = ReadTypedString(r);
+            return;
+        }
+
+        r.ReadLine(); // TABLE
+        int colCount = ParseInt(r.ReadLine());
+        for (int i = 0; i < colCount; i++) r.ReadLine();
+        for (int i = 0; i < colCount; i++) r.ReadLine();
+        int rowCount = ParseInt(r.ReadLine());
+
+        for (int row = 0; row < rowCount && r.HasMore; row++)
+        {
+            string k = ReadTypedString(r);
+            switch (k)
+            {
+                case "st":  rule.ActionData = ReadTypedString(r); break;
+                case "ret": rule.CallReturnState = ReadTypedString(r); break;
+                default: SkipTypedValue(r); break;
+            }
+        }
     }
 
     private static void ParseSetOptionTable(MetaRule rule, MetReader r)

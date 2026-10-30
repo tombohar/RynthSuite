@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for RynthNet's Characters window (moved from RynthCore 2026-10-21): the model
+    (Characters\CharactersModel.cs: snapshot parsing, distance / compass / "elsewhere", state text,
+    stale marker, row order; these checks were RynthCore's tools/CharactersPanelTests), the rows
+    built from a fake game (CharactersRows.cs), the Atlas names (AtlasNames.cs), the manifest
+    RynthCore hosts the window from (CharactersManifest.cs), and Shared\RynthUi\RynthIcons.cs
+    against the engine's baked icons (the sibling RynthCore's ImGui\PhosphorIcons.cs, when there).
+    The window itself draws with ImGui and isn't compiled here.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>RynthNet.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\Characters\CharactersModel.cs" Link="RynthNet\CharactersModel.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\Characters\CharactersRows.cs" Link="RynthNet\CharactersRows.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\Characters\AtlasNames.cs" Link="RynthNet\AtlasNames.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\Characters\CharactersManifest.cs" Link="RynthNet\CharactersManifest.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\CommandParser.cs" Link="RynthNet\CommandParser.cs" />
+    <Compile Include="..\..\Plugins\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthUi\RynthIcons.cs" Link="Shared\RynthIcons.cs" />
+  </ItemGroup>
+
+</Project>

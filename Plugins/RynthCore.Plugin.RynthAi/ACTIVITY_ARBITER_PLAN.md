@@ -1,5 +1,43 @@
 # RynthAi Activity Arbiter — rewrite plan
 
+## STATUS: steps 1-5 all landed 2026-09-04 — NOT yet soaked
+
+All five migration steps are in code. `ActivityArbiter.Apply` is the sole writer
+of every `BotAction` string; the buff and salvage gap-fills, the four
+`_*PausedNav` flags, the `IsCorpseNavigationClaimActive` nav gate, and
+NavigationEngine's two self-promoting writes are all deleted. `OnTick` now asks
+one question — what did the arbiter decide — and the string is a display
+projection.
+
+**Steps 4 and 5 shipped in the same build, which the Risk Controls below
+explicitly warn against.** That was a deliberate scope call (2026-09-04), not an
+oversight: it means a regression in the full loop has a two-step bisect surface
+rather than one. Soak the patrol → aggro → fight → loot → salvage → resume loop
+before trusting it, and if it misbehaves, suspect step 5 (the OnTick collapse)
+before step 4 (the Looting/Salvaging migration) — step 5 changed who ticks, step
+4 only changed who writes.
+
+Remaining known deviations from the target design:
+- The three UI resets (`LegacyDashboardRenderer` ×2, `LegacyNavigationUi` ×1)
+  still write `"Default"` directly on stop/reset. They are cosmetic — the
+  arbiter overwrites on the next tick — and were deliberately left alone.
+- `OnTick` is not literally `switch(Current){ winner.Tick() }`. Manager call
+  order (salvage → mana/pet → crafting → combat/corpse → nav) carries behaviour
+  the plan never enumerated, so the decision gates *whether* each runs rather
+  than replacing the sequence wholesale.
+- `NavigationEngine.Tick`'s own `shouldNav` still reads the string. It is now
+  redundant by construction (OnTick is the sole caller and only calls Tick when
+  the decision is Navigating) and is kept as an inner assertion, not a second
+  authority. One residual predating the migration: during a portal action with
+  Combat/Looting decided, that gate takes the stop path instead of running the
+  teleport detection the portal exception exists for. Closing it means deciding
+  whether nav should route-walk while combat owns the tick — a live-session
+  question, not a refactor.
+- The Meta integration below is still deferred, and remains the right shape.
+  Worth noting the migration made it easier: meta mutates `_settings` (routes,
+  enables), and those are now arbiter *inputs*, so a meta write is recomputed
+  into the decision on the next tick instead of fighting a written string.
+
 ## Problem (proven 2026-05-15)
 
 `LegacyUiSettings.BotAction` is a bare `string` written from ~20 sites across 6
@@ -76,9 +114,18 @@ bot moves. No retained state to wedge. The pause-flag soup is deleted entirely;
 4. **Migrate Looting + Salvaging**; delete CorpseOpenController's 5 writes, the
    salvage gap-fill (~line 434), and all `_*PausedNav` flags. **Test: full
    loop — patrol → aggro → fight → loot → salvage → resume patrol.**
+   *(DONE 2026-09-04. `HasLootWork` answers "is there loot work in range"
+   rather than "have I claimed a corpse", so the decision leads the claim
+   instead of lagging a tick behind it and handing nav a free step.)*
 
 5. **Delete dead code**: the entire OnTick imperative cascade, pause flags,
    `_combatEndedAt`. OnTick becomes `arbiter.Tick()`.
+   *(DONE 2026-09-04, with two deliberate deviations. `_combatEndedAt` SURVIVES
+   as loot-grace: corpse CreateObjects arrive a tick or two after the kill, and
+   deleting it would let nav walk away from a body that is about to exist. It is
+   no longer a lock — it feeds the pure `HasLootWork` predicate, which is the
+   property that mattered. And `BoostNavPriority`/`BoostLootPriority`, which the
+   cascade implemented by stomping the string, became inputs to `Decide()`.)*
 
 ## Risk controls
 

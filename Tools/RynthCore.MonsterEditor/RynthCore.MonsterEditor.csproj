@@ -16,6 +16,18 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.2.3" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.3" />
     <PackageReference Include="Avalonia.Controls.DataGrid" Version="11.2.3" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+    <!-- Reads UtilityBelt's mob_damage_insights.ldb (same LiteDB version UB writes with). -->
+    <PackageReference Include="LiteDB" Version="5.0.21" />
+    <!-- Direct reference overrides Avalonia's transitive 0.20.x (NU1903 / GHSA-xrw6-gwf8-vvr9). -->
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Install-location resolver (installer-chosen RynthCore / RynthSuite folders). -->
+    <Compile Include="..\..\Plugins\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+    <!-- UB damage-insights seed schema, shared with the RynthAi plugin. -->
+    <Compile Include="..\..\Shared\UbMobSeed.cs" Link="Shared\UbMobSeed.cs" />
   </ItemGroup>
 
 </Project>

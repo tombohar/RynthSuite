@@ -42,7 +42,7 @@ internal sealed class DungeonNavNode
     public List<uint> Neighbors = new(); // portal-connected cells only
 }
 
-internal static class DungeonPathfinder
+internal static partial class DungeonPathfinder
 {
     // Angle threshold (degrees) above which a portal edge is classified as a drop.
     // A slope has significant horizontal movement relative to its Z change — its
@@ -89,6 +89,8 @@ internal static class DungeonPathfinder
     {
         _cachedGraph        = null;
         _cachedLandblockKey = 0;
+        _cachedGeometry     = null;
+        _geoLandblock       = 0;
     }
 
     // ── Graph construction ──────────────────────────────────────────────────
@@ -353,9 +355,20 @@ internal static class DungeonPathfinder
     public static NavRouteParser BuildNavRoute(
         List<uint> cellPath,
         Dictionary<uint, DungeonNavNode> graph,
-        double destNS, double destEW)
+        double destNS, double destEW,
+        DungeonGeometry? geo = null, IReadOnlySet<uint>? hazardCells = null,
+        double startNS = double.NaN, double startEW = double.NaN, double startZ = 0, double destZ = 0)
     {
         var route = new NavRouteParser { RouteType = NavRouteType.Once };
+
+        // With the dungeon map geometry: straight on through doorways, straight across rooms.
+        if (geo != null && geo.DoorwayCount > 0 && cellPath.Count > 0 && graph.TryGetValue(cellPath[0], out var s0))
+        {
+            double sNs = double.IsNaN(startNS) ? s0.NS : startNS, sEw = double.IsNaN(startEW) ? s0.EW : startEW;
+            route.Points.AddRange(BuildPathPoints(cellPath, graph, geo, hazardCells, sNs, sEw, startZ, destNS, destEW, destZ, out _));
+            route.Points.Add(new NavPoint { Type = NavPointType.Point, NS = destNS, EW = destEW, Z = destZ / 240.0 });
+            return route;
+        }
 
         for (int i = 0; i + 1 < cellPath.Count; i++)
         {
@@ -409,7 +422,7 @@ internal static class DungeonPathfinder
             changed = false;
             for (int i = 1; i + 1 < route.Points.Count; i++)
             {
-                if (route.Points[i].Type != NavPointType.Point) continue;
+                if (!NavRouteParser.IsPlainWaypoint(route.Points[i].Type)) continue;
                 if (SegDistYards(route.Points[i - 1], route.Points[i + 1], route.Points[i]) < thresholdYards)
                 {
                     route.Points.RemoveAt(i--);
@@ -438,19 +451,281 @@ internal static class DungeonPathfinder
     private const double PatrolMinKeepFraction = 0.20;
 
     /// <summary>
-    /// Returns the 2-core of the dungeon's walkable subgraph — the subset of
-    /// cells where every node has at least two walkable neighbours within the
-    /// set. Dead-end spurs of any length are stripped by repeatedly removing
-    /// leaf nodes (degree ≤ 1) until none remain. Only corridors that form
-    /// part of a cycle or connect two junctions survive, which is exactly the
-    /// "main route" a patrol bot should follow.
+    /// The cells the patrol walks, by <see cref="DungeonPatrolOptions.Coverage"/>:
+    ///   Whole dungeon (default): every cell reachable from <paramref name="startCell"/> without
+    ///     drops or hazards, less the dead-end areas of up to MaxDeadEndCells cells in all (closets,
+    ///     a short corridor ending in a small room; <see cref="TrimDeadEndPockets"/>). Longer dead
+    ///     ends are walked in until only that much is left ahead (a big room: to it), and back.
+    ///   Loops only: the 2-core (cells on a loop or between two junctions), as before 2026-10-12:
+    ///     every dead-end branch goes, however long. In a hive (0x6146 Matron Hive East: 524
+    ///     reachable, 2-core 171) that leaves two thirds of the dungeon unpatrolled. Where the
+    ///     hazards cut the loops (the 2-core collapses but the dungeon isn't linear), the
+    ///     reachable cells less the small dead-end areas, as Whole dungeon.
+    ///   Everything: every reachable cell.
     ///
-    /// Falls back to the full reachable set if the pruned graph would be too
-    /// small to be useful (small or purely linear dungeons).
+    /// A linear dungeon (its hazard-free 2-core under PatrolMinKeepNodes or 20% of reachable)
+    /// keeps every reachable cell, spurs included, whatever the coverage: there the spurs are
+    /// the dungeon.
+    ///
+    /// <paramref name="rooms"/> (BuildRooms with the same hazards, when the map geometry is
+    /// there): dead-end areas are found room by room rather than cell by cell.
     /// </summary>
-    private static HashSet<uint> GetMainRouteNodes(
+    internal static HashSet<uint> GetMainRouteNodes(
         Dictionary<uint, DungeonNavNode> graph, uint startCell,
-        IReadOnlySet<uint>? hazardCells = null)
+        IReadOnlySet<uint>? hazardCells = null, DungeonPatrolOptions? options = null, DungeonRooms? rooms = null)
+    {
+        var o = options ?? DungeonPatrolOptions.Default;
+        var (reachable, pruned) = ReachableAndCore(graph, startCell, hazardCells);
+        int originalCount = reachable.Count;
+
+        // Linear is judged on the dungeon itself, not on what the hazards left (2026-10-10, 0x6146:
+        // 3 acid cells + 35 lava-floor cells cut the loops, 2-core 277 -> 68).
+        bool collapsed = pruned.Count < PatrolMinKeepNodes || pruned.Count < originalCount * PatrolMinKeepFraction;
+        bool linear = collapsed;
+        if (linear && hazardCells != null && hazardCells.Count > 0)
+        {
+            var (freeReach, freeCore) = ReachableAndCore(graph, startCell, null);
+            linear = freeCore.Count < PatrolMinKeepNodes || freeCore.Count < freeReach.Count * PatrolMinKeepFraction;
+        }
+
+        HashSet<uint> result;
+        string how;
+        if (o.Coverage == PatrolCoverage.Everything)
+        {
+            result = reachable;
+            how = $"everything: all {originalCount} reachable cells, dead ends included";
+        }
+        else if (linear)
+        {
+            result = reachable;
+            how = $"linear: patrol uses all {originalCount} reachable cells, dead ends included";
+        }
+        else if (o.Coverage == PatrolCoverage.LoopsOnly && !collapsed)
+        {
+            result = pruned;
+            how = $"loops only: the 2-core ({pruned.Count} cells)";
+        }
+        else
+        {
+            result = TrimDeadEndPockets(graph, reachable, startCell, o.MaxDeadEndCells, rooms, o.LookInRoomMeters);
+            how = (o.Coverage == PatrolCoverage.LoopsOnly ? "loops only, but hazards cut the loops: "
+                   : o.Coverage == PatrolCoverage.Sweep ? "sweep, over " : "")
+                + $"all reachable cells but dead-end areas of <= {o.MaxDeadEndCells} cells{(rooms != null ? " (by room)" : "")} ({result.Count} kept)";
+        }
+        if (PointLog != null)
+            MainRouteNote = $"main route from {startCell:X8}: {originalCount} reachable cells, 2-core {pruned.Count} "
+                          + $"({hazardCells?.Count ?? 0} hazard cells) -> " + how + " [" + o.Describe() + "]";
+        return result;
+    }
+
+    /// <summary>Dead-end areas this small (all their cells, from where they leave the rest of the
+    /// dungeon) are left out of the patrol by default (Settings: Skip Dead Ends Up To).</summary>
+    internal const int PatrolMaxDeadEndCells = DungeonPatrolOptions.MaxDeadEndCellsDefault;
+
+    /// <summary>
+    /// The hazard cells the patrol keeps out of: <paramref name="all"/> (the live set: floor
+    /// textures, pools sighted, cells marked by hand), less the lava/acid floor cells
+    /// (<paramref name="floorCells"/>) when <see cref="DungeonPatrolOptions.AvoidHazardFloors"/> is
+    /// off. A floor cell that is also in <paramref name="markedCells"/> (sighted or marked by hand,
+    /// DungeonHazardStore) stays avoided. Null when nothing is left.
+    /// </summary>
+    internal static IReadOnlySet<uint>? PatrolHazards(IReadOnlySet<uint>? all, IEnumerable<uint>? floorCells,
+                                                      IReadOnlySet<uint>? markedCells, DungeonPatrolOptions? options)
+    {
+        if (all == null || all.Count == 0) return all;
+        if ((options ?? DungeonPatrolOptions.Default).AvoidHazardFloors || floorCells == null) return all;
+        var result = new HashSet<uint>(all);
+        foreach (uint c in floorCells)
+            if (markedCells == null || !markedCells.Contains(c)) result.Remove(c);
+        return result;
+    }
+
+    /// <summary>
+    /// <paramref name="cells"/> without every dead-end area of at most <paramref name="maxCells"/>
+    /// cells. A dead-end area (a pocket) is everything that hangs off the rest by one cell or
+    /// room: a closet, a corridor with a small room at its end, a little loop off a corridor. It
+    /// is measured whole, so a short corridor ending in a 3-5 cell room goes (2026-10-13: the spur
+    /// walk this replaces stopped at the room, whose cells join each other, and kept it; raising
+    /// its limit changed nothing in 0x6146).
+    ///
+    /// Pockets nest, and every one that small goes wherever it is: the patrol never walks into a
+    /// dead end of maxCells cells or fewer. A long branch is walked (and the small pockets off it
+    /// are not); where what is left of it ahead is that short, the patrol turns round. A branch to
+    /// a big room keeps it: a room spreading over <paramref name="bigRoomMeters"/> or more (the
+    /// look-in size) counts as too big to skip, so a pocket holding one is never dropped.
+    ///
+    /// With <paramref name="rooms"/> (the map geometry is there) the pockets are found on the room
+    /// graph, a room's cells counted together: entering a room at all is entering it, and a
+    /// room's own corners (a star-shaped junction's arms) are not pockets of their own. Without,
+    /// cell by cell (and no room is big).
+    ///
+    /// Rooted at <paramref name="keep"/> (the start): the side the start is on is never a pocket,
+    /// so a start in a closet keeps the closet and walks out of it. Everything hangs off the start
+    /// in that sense, so of what hangs off it the biggest part (the rest of the dungeon, or all
+    /// of it when the start is on a loop) always stays, however small the dungeon.
+    /// </summary>
+    internal static HashSet<uint> TrimDeadEndPockets(Dictionary<uint, DungeonNavNode> graph, HashSet<uint> cells, uint keep,
+                                                     int maxCells, DungeonRooms? rooms = null,
+                                                     double bigRoomMeters = DungeonPatrolOptions.LookInRoomDefault)
+    {
+        var result = new HashSet<uint>(cells);
+        if (maxCells <= 0 || cells.Count == 0) return result;
+        if (rooms == null || !rooms.RoomOf.TryGetValue(keep, out int keepRoom))
+        {
+            result.ExceptWith(DroppedPockets(FindDeadEndPockets(CellAdjacency(graph, cells), _ => 1, keep), maxCells));
+            return result;
+        }
+
+        var (adj, weight) = RoomAdjacency(graph, cells, rooms);
+        int Weight(uint r) => RoomSpreadMeters(graph, rooms.Cells[(int)r]) >= bigRoomMeters ? maxCells + 1 : weight[r];
+        var droppedRooms = DroppedPockets(FindDeadEndPockets(adj, Weight, (uint)keepRoom), maxCells);
+        foreach (uint c in cells)
+            if (rooms.RoomOf.TryGetValue(c, out int r) && droppedRooms.Contains((uint)r)) result.Remove(c);
+        return result;
+    }
+
+    /// <summary>The nodes of every pocket of at most <paramref name="maxSize"/>, but the biggest
+    /// hanging off each root of the walk (the dungeon itself, seen from the start).</summary>
+    private static HashSet<uint> DroppedPockets(DeadEndPockets p, int maxSize)
+    {
+        var main = new HashSet<uint>();
+        foreach (uint root in p.Roots)
+        {
+            DeadEndPocket? best = null;
+            foreach (var q in p.All)
+                if (q.Attach == root && (best == null || q.Size > best.Value.Size)) best = q;
+            if (best != null) main.Add(best.Value.Root);
+        }
+        var dropped = new HashSet<uint>();
+        foreach (var q in p.All)
+            if (q.Size <= maxSize && !main.Contains(q.Root) && !dropped.Contains(q.Root))
+                foreach (uint c in p.NodesOf(q)) dropped.Add(c);
+        return dropped;
+    }
+
+    /// <summary>The room graph of <paramref name="cells"/>: a node per room (its index) with cells in
+    /// the set, weighted by those cells, joined where two of their cells are walkable neighbours.</summary>
+    internal static (Dictionary<uint, List<uint>> Adj, Dictionary<uint, int> Weight) RoomAdjacency(
+        Dictionary<uint, DungeonNavNode> graph, HashSet<uint> cells, DungeonRooms rooms)
+    {
+        var weight = new Dictionary<uint, int>();
+        foreach (uint c in cells)
+            if (rooms.RoomOf.TryGetValue(c, out int r)) weight[(uint)r] = weight.GetValueOrDefault((uint)r) + 1;
+        var adj = new Dictionary<uint, List<uint>>(weight.Count);
+        foreach (uint r in weight.Keys) adj[r] = new List<uint>();
+        foreach (var (c, nbs) in CellAdjacency(graph, cells))
+        {
+            if (!rooms.RoomOf.TryGetValue(c, out int ra)) continue;
+            foreach (uint nb in nbs)
+                if (rooms.RoomOf.TryGetValue(nb, out int rb) && ra != rb && !adj[(uint)ra].Contains((uint)rb))
+                    adj[(uint)ra].Add((uint)rb);
+        }
+        return (adj, weight);
+    }
+
+    /// <summary>The walkable neighbours (no drops) of each cell inside <paramref name="cells"/>, each once.</summary>
+    private static Dictionary<uint, List<uint>> CellAdjacency(Dictionary<uint, DungeonNavNode> graph, HashSet<uint> cells)
+    {
+        var adj = new Dictionary<uint, List<uint>>(cells.Count);
+        foreach (uint c in cells)
+        {
+            var list = new List<uint>();
+            if (graph.TryGetValue(c, out var n))
+                foreach (uint nb in n.Neighbors)
+                    if (nb != c && cells.Contains(nb) && graph.TryGetValue(nb, out var o) && !IsDropEdge(n, o) && !list.Contains(nb))
+                        list.Add(nb);
+            adj[c] = list;
+        }
+        return adj;
+    }
+
+    /// <summary>A dead-end area: <see cref="Root"/> and everything behind it hang off the rest by
+    /// <see cref="Attach"/> alone. <see cref="Size"/> is its weight (cells), Attach not counted.</summary>
+    internal readonly record struct DeadEndPocket(uint Attach, uint Root, int Size);
+
+    /// <summary>Every dead-end area of a graph, nested ones included (<see cref="FindDeadEndPockets"/>).</summary>
+    internal sealed class DeadEndPockets
+    {
+        internal readonly List<uint> Order = new();
+        internal readonly Dictionary<uint, int> Disc = new();
+        internal readonly Dictionary<uint, int> Count = new();
+        /// <summary>Every pocket, in depth-first order of their roots (outer ones first).</summary>
+        public readonly List<DeadEndPocket> All = new();
+        /// <summary>Where the walk started: keep, then a node of each part not connected to it.</summary>
+        public readonly List<uint> Roots = new();
+
+        /// <summary>The pocket's nodes: its root's subtree, a run of the depth-first order.</summary>
+        public IEnumerable<uint> NodesOf(DeadEndPocket p)
+        {
+            for (int k = Disc[p.Root], end = k + Count[p.Root]; k < end; k++) yield return Order[k];
+        }
+    }
+
+    /// <summary>
+    /// The dead-end areas of a graph seen from <paramref name="keep"/>: a depth-first walk from it
+    /// (Tarjan's cut vertices), where a child w of v whose subtree has no way round v (low[w] >=
+    /// disc[v]) is a pocket hanging off v, weighing the sum of its nodes' weights. Nodes not
+    /// connected to keep are walked from the lowest id up.
+    /// </summary>
+    internal static DeadEndPockets FindDeadEndPockets(Dictionary<uint, List<uint>> adj, Func<uint, int> weight, uint keep)
+    {
+        var r = new DeadEndPockets();
+        var disc = r.Disc;
+        var count = r.Count;
+        var order = r.Order;
+        var size = new Dictionary<uint, int>(adj.Count);
+        var low = new Dictionary<uint, int>(adj.Count);
+        var parent = new Dictionary<uint, uint>(adj.Count);
+        var roots = new List<uint>();
+        if (adj.ContainsKey(keep)) roots.Add(keep);
+        var rest = new List<uint>(adj.Keys);
+        rest.Sort();
+        roots.AddRange(rest);
+        var stack = new Stack<(uint Node, int Next)>();
+        foreach (uint root in roots)
+        {
+            if (disc.ContainsKey(root)) continue;
+            r.Roots.Add(root);
+            disc[root] = low[root] = order.Count; order.Add(root); count[root] = 1; size[root] = weight(root);
+            stack.Push((root, 0));
+            while (stack.Count > 0)
+            {
+                var (v, i) = stack.Pop();
+                var nbs = adj[v];
+                if (i < nbs.Count)
+                {
+                    stack.Push((v, i + 1));
+                    uint w = nbs[i];
+                    if (!adj.ContainsKey(w)) continue;
+                    if (!disc.ContainsKey(w))
+                    {
+                        parent[w] = v;
+                        disc[w] = low[w] = order.Count; order.Add(w); count[w] = 1; size[w] = weight(w);
+                        stack.Push((w, 0));
+                    }
+                    else if (!(parent.TryGetValue(v, out uint pv) && pv == w))
+                        low[v] = Math.Min(low[v], disc[w]);
+                    continue;
+                }
+                // v finished: hand its low-link, node count and weight up to its parent.
+                if (parent.TryGetValue(v, out uint p))
+                {
+                    low[p] = Math.Min(low[p], low[v]);
+                    count[p] += count[v];
+                    size[p] += size[v];
+                }
+            }
+        }
+
+        foreach (var (w, v) in parent)
+            if (low[w] >= disc[v]) r.All.Add(new DeadEndPocket(v, w, size[w]));
+        r.All.Sort((a, b) => disc[a.Root].CompareTo(disc[b.Root]));
+        return r;
+    }
+
+    /// <summary>The cells reachable from startCell (no drops, no hazards) and their 2-core.</summary>
+    private static (HashSet<uint> Reachable, HashSet<uint> Core) ReachableAndCore(
+        Dictionary<uint, DungeonNavNode> graph, uint startCell, IReadOnlySet<uint>? hazardCells)
     {
         // BFS to collect all cells reachable from startCell without drops or hazards.
         // The start cell is always kept (player is already standing there) even if
@@ -477,7 +752,6 @@ internal static class DungeonPathfinder
             }
         }
 
-        int originalCount = reachable.Count;
         var pruned = new HashSet<uint>(reachable);
 
         // Prune to convergence: repeatedly remove every node whose effective
@@ -508,12 +782,7 @@ internal static class DungeonPathfinder
             foreach (uint id in toRemove) pruned.Remove(id);
         }
 
-        // Fall back to full reachable set if pruning collapsed the graph.
-        if (pruned.Count < PatrolMinKeepNodes ||
-            pruned.Count < originalCount * PatrolMinKeepFraction)
-            return reachable;
-
-        return pruned;
+        return (reachable, pruned);
     }
 
     /// <summary>
@@ -526,13 +795,44 @@ internal static class DungeonPathfinder
     /// of a loop and backtracking the way it came. Only true dead-ends and bridges are
     /// re-tread (the unavoidable in-and-out), via the shortest reconnecting path. The walk is
     /// closed back to the start so the Circular route returns home.
+    ///
+    /// <paramref name="portals"/> (the landblock's live portals): the patrol keeps out of their
+    /// circles, turning round before a portal it can't get past (DungeonPathfinder.Portals.cs;
+    /// what it did about each: <see cref="LastPortalAvoidance"/>). <paramref name="startAt"/>
+    /// (world): where the character stands, so a portal that splits its room leaves it the part it
+    /// is in.
     /// </summary>
     public static NavRouteParser BuildPatrolRoute(
         Dictionary<uint, DungeonNavNode> graph,
         uint startCell,
-        IReadOnlySet<uint>? hazardCells = null)
+        IReadOnlySet<uint>? hazardCells = null,
+        DungeonGeometry? geo = null,
+        DungeonPatrolOptions? options = null,
+        IReadOnlyList<PatrolPortal>? portals = null,
+        (double X, double Y, double Z)? startAt = null)
     {
-        var mainRoute = GetMainRouteNodes(graph, startCell, hazardCells);
+        LastPortalAvoidance = null;
+        var o = (options ?? DungeonPatrolOptions.Default).Clamped();
+        if (portals is { Count: > 0 }) return BuildPatrolRouteAroundPortals(graph, startCell, hazardCells, geo, o, portals, startAt);
+        // Dead ends are judged room by room when the rooms can be made (the room patrol below).
+        var rooms = geo != null && geo.DoorwayCount > 0 ? BuildRooms(graph, geo, hazardCells) : null;
+        var mainRoute = GetMainRouteNodes(graph, startCell, hazardCells, o, rooms);
+
+        // Sweep (DungeonPathfinder.Sweep.cs): the same cells, walked only near enough to be seen.
+        // Falls through to the room patrol below when it can't build one. No other coverage comes here.
+        if (o.Coverage == PatrolCoverage.Sweep && geo != null && geo.DoorwayCount > 0)
+        {
+            var sweep = BuildSweepPatrol(graph, startCell, mainRoute, hazardCells, geo, o);
+            if (sweep != null && sweep.Points.Count > 0) return sweep;
+        }
+
+        // With the dungeon map geometry: the same coverage over rooms instead of cells, rooms
+        // crossed directly, doorways taken straight on (DungeonPathfinder.Rooms.cs).
+        if (geo != null && geo.DoorwayCount > 0)
+        {
+            var byRoom = BuildRoomPatrol(graph, startCell, mainRoute, hazardCells, geo, o);
+            if (byRoom != null && byRoom.Points.Count > 0) return byRoom;
+        }
 
         // Undirected walkable subgraph over mainRoute (portal-adjacent, non-drop). mainRoute is
         // already hazard-filtered, so membership there implies non-hazard.
@@ -612,6 +912,11 @@ internal static class DungeonPathfinder
         }
 
         SimplifyRoute(route);
+        // The map geometry is there but the room patrol found nothing to walk (the start is cut
+        // off from every doorway): the cell walk's points still keep off the walls.
+        if (geo != null)
+            foreach (var p in route.Points)
+                PushOffWalls(geo, Tag(p, "cell-walk"), null, CornerPushMax, o.WallClearance);
         return route;
     }
 
@@ -715,7 +1020,8 @@ internal static class DungeonPathfinder
         double playerNS, double playerEW, float playerZ,
         double destNS,   double destEW,
         out int nodeCount, out int pathLength,
-        IReadOnlySet<uint>? hazardCells = null)
+        IReadOnlySet<uint>? hazardCells = null,
+        DungeonLOS? los = null)
     {
         nodeCount  = 0;
         pathLength = 0;
@@ -736,6 +1042,7 @@ internal static class DungeonPathfinder
         pathLength = path.Count;
         if (pathLength == 0) return null;
 
-        return BuildNavRoute(path, graph, destNS, destEW);
+        var geo = GetGeometry(landblockKey, cellDat, los);
+        return BuildNavRoute(path, graph, destNS, destEW, geo, hazardCells, playerNS, playerEW, playerZ, playerZ);
     }
 }

@@ -1,40 +1,131 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.PluginSdk;
+using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthAi.Loot;
 
 /// <summary>
 /// Drives the salvage state machine for loot-rule items marked Salvage.
-/// Items are enqueued by CorpseOpenController after pickup confirmation.
 ///
-/// Flow per item:
-///   Idle → call OpenSalvagePanel(ustId), wait OpenDelay
-///        → call AddNewItem(itemId), wait AddDelay
-///        → call Salvage(), wait SalvageDelay
-///        → wait ResultDelay → Idle (next item or CombineSalvage)
+/// Items come from looting: <see cref="NoteLootedForSalvage"/> when the pickup is sent and
+/// <see cref="EnqueueItem"/> when it is confirmed. Every such item is TRACKED until it has
+/// been salvaged or has left the pack, and a sweep every couple of seconds queues tracked
+/// items that are in the pack. Before 2026-10-02 the queue was the only record: a pickup
+/// whose confirm was lost (busy reset, corpse closed), an item salvaged before it reached
+/// the pack, a missing UST, or three failed tries dropped the item for good, and it sat in
+/// the pack.
 ///
-/// First-open delays (400ms/600ms) let the panel animate open and the
-/// gmSalvageUI singleton hook fire before we make thiscall instance calls.
-/// Fast delays (50ms) apply once the panel has been opened at least once.
+/// Flow per batch (up to <see cref="MaxBatchItems"/> items in one panel cycle):
+///   Idle → UseObject(UST), wait OpenDelay
+///        → SalvagePanelAddItem each item (AddDelayFast apart), plus matching under-full bags
+///        → SalvagePanelExecute, wait SalvageDelay
+///        → poll until the items leave the pack (or ResultMaxWaitMs) → one summary log line
+/// Items that are worn, retained, on the Items list or the UST itself are skipped with the
+/// reason in the log; RynthAi never takes off anything the character is wearing.
+///
+/// First-open delays (400ms/600ms) let the panel animate open and the gmSalvageUI singleton
+/// hook fire before we make thiscall instance calls. Fast delays (50ms) apply once the panel
+/// has been opened at least once.
+///
+/// Without the panel (2026-10-12, setting SalvageWithoutPanel, engine API v82 SalvageDirect):
+/// the panel's Salvage button only ever sends one game action, 0x027D (UST, count, item ids),
+/// and the engine can send it itself. Then a batch (up to <see cref="MaxDirectBatchItems"/>
+/// items, plus matching under-full bags up to the engine's 100 ids) is one request:
+///   Idle → SalvageDirect(UST, items + bags) → poll until the items leave the pack → summary
+/// No panel on screen, no open/add delays. A request that changes nothing (no item left the
+/// pack) is tried once through the panel, and the log says why; after
+/// <see cref="DirectOffAfterFailures"/> such batches in a row that the panel then salvaged, the
+/// rest of the session uses the panel. The combine sweep sends each bag group the same way
+/// (ACE merges salvage bags listed in a salvage request), with the same one panel retry.
 /// </summary>
 public sealed class SalvageManager
 {
-    private enum Phase { Idle, OpeningPanel, AddingItem, Salvaging, WaitingForResult, CombiningSalvage }
+    private enum Phase { Idle, OpeningPanel, AddingItems, ReadyToExecute, Salvaging, WaitingForResult, CombiningSalvage }
 
     private readonly RynthCoreHost _host;
     private readonly LegacyUiSettings _settings;
     private readonly WorldObjectCache? _cache;
 
+    // ── Single-item salvage: queue, tracking, batch ──────────────────────────
     private readonly Queue<uint> _queue = new();
+    private readonly HashSet<uint> _queued = new();
     private Phase _phase = Phase.Idle;
     private long _phaseReadyAt;
-    private uint _currentItemId;
     private uint _currentUstId;
     private bool _panelEverOpened;
     private bool _firstResultCycle = true;
     private bool _pendingCombineScan;
+
+    /// <summary>Most items added to the panel for one Salvage press.</summary>
+    internal const int MaxBatchItems = 20;
+    /// <summary>Most items in one salvage request without the panel. ACE makes new bags per request
+    /// (it never tops up a bag already in the pack), so bigger batches leave fewer partial bags; the
+    /// matching under-full bags ride along up to the engine's 100 ids.</summary>
+    internal const int MaxDirectBatchItems = 50;
+    /// <summary>A request without the panel is first checked this long after it was sent...</summary>
+    internal const long DirectSettleMs = 150;
+    /// <summary>...and polled until its items leave the pack, up to this long.</summary>
+    internal const long DirectResultMaxWaitMs = 3_000;
+    /// <summary>After this many batches in a row where the request without the panel changed nothing
+    /// and the panel then salvaged, the session goes back to the panel.</summary>
+    internal const int DirectOffAfterFailures = 3;
+    /// <summary>A batch starts this long after the last item was queued (or when a full batch is
+    /// waiting), so one corpse's salvage goes in one panel cycle instead of one cycle per item.</summary>
+    internal const long GatherMs = 1_000;
+    private const long SweepIntervalMs = 2_000;
+    /// <summary>A tracked item that never shows up in the pack is forgotten after this.</summary>
+    internal const long ArrivalGraceMs = 60_000;
+    /// <summary>After <see cref="MaxItemRetries"/> failed tries in a row an item rests this long...</summary>
+    internal const long GiveUpCooldownMs = 60_000;
+    /// <summary>...and after this many rests it is left in the pack for good (logged).</summary>
+    internal const int MaxGiveUpRounds = 3;
+    private const long NoUstRetryMs = 10_000;
+
+    private sealed class TrackedItem
+    {
+        public string Name = string.Empty;
+        public long NotedAt;
+        public bool SeenInPack;
+        public long CooldownUntil;
+        public int GiveUps;
+    }
+
+    private readonly Dictionary<uint, TrackedItem> _tracked = new();
+    private long _lastEnqueueAt;
+    private long _lastSweepAt;
+    private long _noUstWarnedAt = long.MinValue / 2;
+
+    // The batch in flight: what we meant to add, what the panel took, and per-batch notes.
+    private readonly List<uint> _batch = new();
+    private readonly List<uint> _batchAdded = new();
+    private readonly Dictionary<uint, string> _batchNames = new();
+    private int _batchAddIdx;
+    private int _batchBagsAdded;
+    private int _batchNumber;
+    private int _batchAddFailures;
+    private readonly SkipNotes _batchSkips = new();
+
+    // Salvage without the panel: how the batch in flight went out, the bags sent along, the
+    // salvage bags in the pack before it, and the server's salvage chat seen meanwhile.
+    private bool _batchDirect;
+    private bool _batchPanelFallback;
+    private string _batchFallbackWhy = string.Empty;
+    private readonly List<uint> _batchBags = new();
+    private HashSet<uint>? _batchBagsBefore;
+    private readonly List<string> _salvageChat = new();
+    private int _directPanelWorkedStreak;
+    private bool _directOff;
+    private string _directOffReason = string.Empty;
+    private int _directRequests;
+    private int _directFallbacks;
+
+    // Session totals for /ra salvstate.
+    private int _itemsSalvagedThisSession;
+    private int _itemsSkippedThisSession;
+    private int _batchesThisSession;
 
     // Combine-salvage state — process one material group per cycle by opening
     // the salvage panel, adding all under-full bags of that material, and hitting
@@ -52,6 +143,9 @@ public sealed class SalvageManager
     // Execute. After the result delay, we count how many of these are still in
     // the cache to decide whether the server actually merged them.
     private List<uint>? _combineGroupSnapshot;
+    // The current group went out without the panel / is the panel retry of one that did.
+    private bool _combineGroupDirect;
+    private bool _combineGroupPanelRetry;
 
     // Polling deadline for verification. The salvage delete event from the
     // server can arrive 500ms-1s after Execute on busy servers; we keep
@@ -68,11 +162,30 @@ public sealed class SalvageManager
     private int _bagsMergedThisSession;
 
     // Per-item retry counter so a failed salvage gets re-queued a few times
-    // before we give up. AC sometimes drops a Salvage execute when the bot is
+    // before it rests. AC sometimes drops a Salvage execute when the bot is
     // busy with other actions; the item stays in the pack and we want to try
     // again when the queue gets back to idle.
     private readonly Dictionary<uint, int> _itemRetryCount = new();
     private const int MaxItemRetries = 3;
+
+    // Backoff after a refused panel step. Without it a failed UseObject/AddItem
+    // re-queues the items and TickIdle dequeues them again on the very next tick,
+    // so one busy hiccup burns all three attempts inside ~50ms.
+    private long _idleRetryReadyAt;
+    private const long RetryBackoffMs = 1000;
+
+    // Same for the combine sweep: a refused UseObject used to skip the whole
+    // material group immediately, and with no timer set the next tick tried the
+    // next group — so one hiccup could tear through every group in the sweep.
+    // Retry the group a few times on the same backoff before giving up on it.
+    private int _combineOpenAttempts;
+    private const int MaxCombineOpenAttempts = 3;
+
+    // Last thing that went wrong, for GetStateSnapshot. The Log() trail has this
+    // but the log is where you look *after* you know salvage is the problem;
+    // this is so a state dump says so on its own.
+    private string _lastError = string.Empty;
+    private long _lastErrorAt;
 
     // Periodic combine sweep — even when no items have been salvaged this
     // session (or every salvage gave up after retries), we still want to
@@ -80,7 +193,9 @@ public sealed class SalvageManager
     private long _lastCombineSweepAt;
     private const long CombineSweepIntervalMs = 30_000;
 
-    private static long NowMs => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    /// <summary>Milliseconds clock. Tests replace it to step time; the game uses wall time.</summary>
+    internal Func<long> Clock { get; set; } = () => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    private long NowMs => Clock();
 
     /// <summary>
     /// Set by the plugin to point at the currently-loaded loot profile's
@@ -97,8 +212,88 @@ public sealed class SalvageManager
         _cache = cache;
     }
 
+    private const long HasUstCacheMs = 3000;
+    private long _hasUstCheckedAt = long.MinValue / 2;
+    private bool _hasUst;
+
+    /// <summary>
+    /// A UST is carried (cached 3 s; FindUst can force an inventory walk). Without one there is
+    /// nothing to salvage with: looting leaves items that only a Salvage rule wants, and the
+    /// combine sweep doesn't run (2026-10-10).
+    /// </summary>
+    public bool HasUst()
+    {
+        long now = NowMs;
+        if (now - _hasUstCheckedAt >= HasUstCacheMs)
+        {
+            _hasUstCheckedAt = now;
+            _hasUst = FindUst() != 0;
+        }
+        return _hasUst;
+    }
+
     /// <summary>Returns true while a salvage operation is in flight.</summary>
     public bool IsBusy => _phase != Phase.Idle || _queue.Count > 0;
+
+    private bool PanelAvailable => _host.HasSalvagePanel && _host.HasUseObject;
+
+    /// <summary>Salvage requests go out without the panel: the setting is on, the engine has
+    /// SalvageDirect (API v82) and the session hasn't gone back to the panel.</summary>
+    internal bool UseDirect => _settings.SalvageWithoutPanel && _host.HasSalvageDirect && !_directOff;
+
+    /// <summary>
+    /// Chat from the game (RynthAiPlugin.OnChatWindowText). While a batch or a combine group is in
+    /// flight, the server's salvage lines are kept for the summary: "You obtain ... using your
+    /// knowledge of ...", and the refusals ("You do not own that salvage tool!", "That is not a
+    /// salvaging tool.", "...not suitable for salvaging.", "The list of items you are attempting to
+    /// salvage is invalid.", "You cannot salvage items that you are trading!").
+    /// </summary>
+    public void OnChatWindowText(string? text)
+    {
+        // A batch is being sent (_batch filled; the reply can beat the phase change) or is in flight.
+        if (string.IsNullOrEmpty(text) || (_phase == Phase.Idle && _batch.Count == 0) || _salvageChat.Count >= 8) return;
+        if (text.Contains("using your knowledge of", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("salvage tool", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("salvaging tool", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("suitable for salvaging", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("attempting to salvage", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("cannot salvage", StringComparison.OrdinalIgnoreCase))
+            _salvageChat.Add(text.Trim());
+    }
+
+    /// <summary>The kept salvage chat as a log fragment ("; server said: ..."), or "".</summary>
+    private string ChatNote()
+    {
+        if (_salvageChat.Count == 0) return string.Empty;
+        string first = _salvageChat[0].Length > 160 ? _salvageChat[0][..160] + "..." : _salvageChat[0];
+        return $"; server said: \"{first}\"" + (_salvageChat.Count > 1 ? $" (+{_salvageChat.Count - 1} more)" : "");
+    }
+
+    /// <summary>True when a refusal (not a "You obtain" line) was seen.</summary>
+    private bool ChatSaidRefused() => _salvageChat.Any(l => !l.Contains("using your knowledge of", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// True from the UST use until the salvage execute has gone out (a batch or a bag combine).
+    /// Meanwhile the client swallows a door or corpse use: no Use packet, no busy count, and the
+    /// open waited out its 5 s limit (in one log, 6 of 6 corpse opens sent 0-155 ms after the UST
+    /// use were lost; 4 of 4 sent after the execute were answered). Narrower than IsBusy, which
+    /// also covers a queued batch whose panel isn't open yet.
+    /// </summary>
+    public bool PanelPending =>
+        _phase is Phase.OpeningPanel or Phase.AddingItems or Phase.ReadyToExecute
+        || (_phase == Phase.CombiningSalvage
+            && _combinePhase is CombinePhase.OpeningPanel or CombinePhase.AddingBags or CombinePhase.Salvaging);
+
+    /// <summary>
+    /// Looting sent the pickup of an item whose rule says Salvage. Tracks it without queueing:
+    /// the sweep queues it once it is in the pack, even if the pickup confirm never comes.
+    /// </summary>
+    public void NoteLootedForSalvage(uint itemId, string? name = null)
+    {
+        if (itemId == 0) return;
+        if (IsSalvageBag(name ?? _cache?[unchecked((int)itemId)]?.Name)) return;
+        Track(itemId, name);
+    }
 
     /// <summary>Enqueue an item to be salvaged. Called by CorpseOpenController after pickup.</summary>
     public void EnqueueItem(uint itemId)
@@ -120,14 +315,48 @@ public sealed class SalvageManager
             return;
         }
 
+        Track(itemId, name);
+        QueueItem(itemId);
+    }
+
+    private void Track(uint itemId, string? name)
+    {
+        long now = NowMs;
+        if (!_tracked.TryGetValue(itemId, out TrackedItem? t))
+        {
+            t = new TrackedItem { NotedAt = now };
+            _tracked[itemId] = t;
+        }
+        if (!string.IsNullOrWhiteSpace(name)) t.Name = name!;
+    }
+
+    private void Untrack(uint itemId)
+    {
+        _tracked.Remove(itemId);
+        _itemRetryCount.Remove(itemId);
+    }
+
+    private void QueueItem(uint itemId)
+    {
+        if (!_queued.Add(itemId)) return;
         _queue.Enqueue(itemId);
+        _lastEnqueueAt = NowMs;
         _pendingCombineScan = false; // reset; will be set again when queue drains
+    }
+
+    private uint DequeueItem()
+    {
+        uint id = _queue.Dequeue();
+        _queued.Remove(id);
+        return id;
     }
 
     /// <summary>Called every game tick from RynthAiPlugin.OnTick.</summary>
     public void OnTick(int busyCount)
     {
-        if (!_host.HasSalvagePanel || !_host.HasUseObject)
+        // Nothing to salvage with (no panel calls, no SalvageDirect). A batch already in flight
+        // still finishes: its steps fail cleanly and the items go back in the queue.
+        if (_phase == Phase.Idle && !PanelAvailable && !UseDirect)
             return;
 
         long now = NowMs;
@@ -140,10 +369,20 @@ public sealed class SalvageManager
 
             case Phase.OpeningPanel:
                 if (now >= _phaseReadyAt)
-                    BeginAddingItem(now);
+                {
+                    _batchAddIdx = 0;
+                    _phase = Phase.AddingItems;
+                    _phaseReadyAt = now;
+                    TickAddingItems(now);
+                }
                 break;
 
-            case Phase.AddingItem:
+            case Phase.AddingItems:
+                if (now >= _phaseReadyAt)
+                    TickAddingItems(now);
+                break;
+
+            case Phase.ReadyToExecute:
                 if (now >= _phaseReadyAt)
                     BeginSalvaging(now);
                 break;
@@ -155,16 +394,12 @@ public sealed class SalvageManager
 
             case Phase.WaitingForResult:
                 if (now < _phaseReadyAt) break;
-                // Poll: if the item is still in inventory and we're under the
-                // deadline, wait for the next tick. Server delete events for
-                // salvage-consumed items can lag the result delay by 500ms+.
-                if (_currentItemId != 0
-                    && now < _waitingResultDeadline
-                    && IsItemInDirectInventory(_currentItemId))
-                {
+                // Poll: while any added item is still in the pack and we're under the
+                // deadline, wait. Server delete events for salvage-consumed items can
+                // lag the result delay by 500ms+.
+                if (now < _waitingResultDeadline && AnyStillInPack(_batchAdded))
                     break;
-                }
-                OnResultReady(now);
+                OnBatchResult(now);
                 break;
 
             case Phase.CombiningSalvage:
@@ -177,13 +412,15 @@ public sealed class SalvageManager
 
     private void TickIdle(long now, int busyCount)
     {
+        SweepTracked(now);
+
         if (_queue.Count == 0)
         {
             if (_pendingCombineScan && _settings.EnableCombineSalvage)
             {
                 _pendingCombineScan = false;
                 _lastCombineSweepAt = now;
-                BeginCombineSalvage(now);
+                if (HasUst()) BeginCombineSalvage(now);
                 return;
             }
             // Periodic standalone sweep: if 30s have passed since the last
@@ -196,7 +433,7 @@ public sealed class SalvageManager
                 && now - _lastCombineSweepAt >= CombineSweepIntervalMs)
             {
                 _lastCombineSweepAt = now;
-                BeginCombineSalvage(now);
+                if (HasUst()) BeginCombineSalvage(now);
             }
             return;
         }
@@ -205,41 +442,128 @@ public sealed class SalvageManager
         if (busyCount > 0)
             return;
 
-        uint itemId = _queue.Dequeue();
-        if (itemId == 0)
+        // Serving out the backoff from a refused panel step.
+        if (now < _idleRetryReadyAt)
             return;
 
-        // Backstop for the EnqueueItem guard: the item's name may not have been
-        // cached at enqueue time. Never run the single-item salvage flow on a
-        // bag — it's already salvage; the combine sweep consolidates it.
-        string? dqName = _cache?[unchecked((int)itemId)]?.Name;
-        if (IsSalvageBag(dqName))
-        {
-            Log($"[Salvage] Dequeued a salvage bag 0x{itemId:X8} ({dqName}) — skipping solo salvage; combine sweep will consolidate it.");
-            if (_settings.EnableCombineSalvage) _pendingCombineScan = true;
+        // Let a corpse's worth of salvage gather so it goes in one panel cycle (or one request).
+        bool direct = UseDirect;
+        int maxBatch = direct ? MaxDirectBatchItems : MaxBatchItems;
+        if (_queue.Count < maxBatch && now - _lastEnqueueAt < GatherMs)
             return;
-        }
+
+        if (!BuildBatch(now, maxBatch))
+            return;
 
         uint ustId = FindUst();
+        _hasUstCheckedAt = now; _hasUst = ustId != 0;
         if (ustId == 0)
         {
-            _host.WriteToChat("[RynthAi] Salvage: No UST found in inventory — item skipped. Add a Ust to your pack.", 2);
-            Log($"[Salvage] No UST found in inventory — skipping 0x{itemId:X8}.");
+            // Keep the items (they used to be dropped here for good) and look again later.
+            if (now - _noUstWarnedAt >= 5 * 60_000)
+            {
+                _noUstWarnedAt = now;
+                _host.WriteToChat("[RynthAi] Salvage: no UST in your pack — salvage is waiting. Add a Ust to your pack.", 2);
+            }
+            NoteError("no UST in inventory — salvage waiting");
+            Log($"[Salvage] No UST found — {_batch.Count} item(s) wait; trying again in {NoUstRetryMs / 1000}s.");
+            ReturnBatchToQueue();
+            _idleRetryReadyAt = now + NoUstRetryMs;
             return;
         }
 
-        _currentItemId = itemId;
         _currentUstId = ustId;
+
+        if (direct)
+        {
+            SendDirectBatch(now);
+            return;
+        }
+        StartPanelCycle(now);
+    }
+
+    /// <summary>
+    /// Sends the batch (plus matching under-full bags when CombineBagsDuringSalvage is on) as one
+    /// salvage request without the panel. Not sent at all (the engine refused, or its sender isn't
+    /// bound) → the panel takes this batch, and an engine that can't send turns the setting's
+    /// effect off for the session.
+    /// </summary>
+    private void SendDirectBatch(long now)
+    {
+        _batchBags.Clear();
+        if (_settings.CombineBagsDuringSalvage)
+            _batchBags.AddRange(FindMatchingUnderFullBags(_batch, RynthCoreHost.MaxSalvageDirectItems - _batch.Count));
+        _batchBagsBefore = SnapshotSalvageBagIds();
+        _salvageChat.Clear();
+
+        var ids = new uint[_batch.Count + _batchBags.Count];
+        _batch.CopyTo(ids, 0);
+        _batchBags.CopyTo(ids, _batch.Count);
+        int sent = _host.SalvageDirect(_currentUstId, ids);
+        if (sent <= 0)
+        {
+            string why = sent switch
+            {
+                -1 => "the engine's salvage sender isn't bound on this client",
+                -2 => "the engine is older than plugin API v82",
+                _ => "the engine refused the request",
+            };
+            if (sent is -1 or -2) TurnDirectOff(why);
+            NoteError($"salvage without the panel not sent ({why})");
+            _directFallbacks++;
+            _batchBags.Clear();
+            _batchPanelFallback = true;
+            _batchFallbackWhy = "the request without the panel wasn't sent: " + why;
+            Log($"[Salvage] Batch {_batchNumber + 1}: salvage without the panel wasn't sent ({why}) — using the panel for these {_batch.Count} item(s).");
+            StartPanelCycle(now);
+            return;
+        }
+
+        _directRequests++;
+        _batchDirect = true;
+        _batchAdded.AddRange(_batch);
+        _batchBagsAdded = _batchBags.Count;
+        _phaseReadyAt = now + DirectSettleMs;
+        _waitingResultDeadline = now + DirectResultMaxWaitMs;
+        _phase = Phase.WaitingForResult;
+    }
+
+    private void TurnDirectOff(string why)
+    {
+        if (_directOff) return;
+        _directOff = true;
+        _directOffReason = why;
+        Log($"[Salvage] Salvage without the panel is off for this session: {why}. The salvage panel is used instead.");
+    }
+
+    /// <summary>The panel path: use the UST (opens the panel), then add, execute, verify.</summary>
+    private void StartPanelCycle(long now)
+    {
+        if (!PanelAvailable)
+        {
+            Log($"[Salvage] No salvage panel on this client — {_batch.Count} item(s) back in the queue.");
+            NoteError("no salvage panel calls on this client");
+            foreach (uint id in _batch) RequeueOrDrop(id, "no salvage panel");
+            ClearBatch();
+            _currentUstId = 0;
+            _phase = Phase.Idle;
+            _idleRetryReadyAt = now + RetryBackoffMs;
+            return;
+        }
+        _salvageChat.Clear();
 
         // UseObject on the UST mimics a double-click — this is the reliable path to
         // trigger gmSalvageUI::OpenSalvagePanel (our hook captures the instance there).
         // SendNotice_OpenSalvagePanel does not reliably call the hooked function.
-        if (!_host.UseObject(_currentUstId))
+        if (!_host.UseFor(_currentUstId, "Salvage", "open the salvage panel (UST)"))
         {
-            Log($"[Salvage] UseObject(UST) failed for 0x{_currentUstId:X8} — re-queuing item.");
-            _queue.Enqueue(itemId); // re-queue so we retry next tick
-            _currentItemId = 0;
+            Log($"[Salvage] UseObject(UST) failed for 0x{_currentUstId:X8} — {_batch.Count} item(s) back in the queue.");
+            NoteError($"UseObject(UST) failed for 0x{_currentUstId:X8}");
             _currentUstId = 0;
+            foreach (uint id in _batch) RequeueOrDrop(id, "UseObject(UST) failed");
+            ClearBatch();
+            _phase = Phase.Idle;
+            _idleRetryReadyAt = now + RetryBackoffMs;
             return;
         }
 
@@ -248,35 +572,196 @@ public sealed class SalvageManager
         _phase = Phase.OpeningPanel;
     }
 
-    private void BeginAddingItem(long now)
+    /// <summary>
+    /// Takes up to <see cref="MaxBatchItems"/> items off the queue that can be salvaged now.
+    /// Items not in the pack yet stay tracked (the sweep queues them on arrival); items that
+    /// can't be salvaged are skipped with a reason. False when nothing is left to salvage.
+    /// </summary>
+    private bool BuildBatch(long now, int maxBatch)
     {
-        if (!_host.SalvagePanelAddItem(_currentItemId))
+        ClearBatch();
+        if (_cache == null)
         {
-            Log($"[Salvage] SalvagePanelAddItem failed for 0x{_currentItemId:X8} (panel instance not ready — re-queuing).");
-            // Re-queue the item so we retry on the next idle cycle. Reset panel-ever-opened
-            // so the longer first-open delays are applied on retry.
-            _queue.Enqueue(_currentItemId);
-            _currentItemId = 0;
-            _currentUstId = 0;
-            _panelEverOpened = false;
-            _phase = Phase.Idle;
+            while (_queue.Count > 0) DequeueItem();
+            return false;
+        }
+
+        var inPack = new Dictionary<uint, WorldObject>();
+        foreach (WorldObject wo in _cache.GetDirectInventory(forceRefresh: true))
+            inPack[unchecked((uint)wo.Id)] = wo;
+
+        int waiting = 0;
+        while (_queue.Count > 0 && _batch.Count < maxBatch)
+        {
+            uint id = DequeueItem();
+            _tracked.TryGetValue(id, out TrackedItem? t);
+
+            if (!inPack.TryGetValue(id, out WorldObject? wo))
+            {
+                string name = t?.Name ?? _cache[unchecked((int)id)]?.Name ?? string.Empty;
+                if (IsWornByPlayer(_cache[unchecked((int)id)]))
+                {
+                    SkipForGood(id, name, SkipWorn);
+                    continue;
+                }
+                if (t != null && !t.SeenInPack && now - t.NotedAt < ArrivalGraceMs)
+                {
+                    waiting++; // still on its way; the sweep queues it when it lands
+                    continue;
+                }
+                // Already gone (salvaged, sold, dropped) or never arrived.
+                Untrack(id);
+                continue;
+            }
+
+            if (t != null) t.SeenInPack = true;
+            string itemName = wo.Name;
+            string? reason = SkipReasonFor(id, wo);
+            if (reason != null)
+            {
+                SkipForGood(id, itemName, reason);
+                continue;
+            }
+
+            _batch.Add(id);
+            _batchNames[id] = itemName;
+        }
+
+        if (_batch.Count == 0)
+        {
+            // Nothing to send: say why once (this runs only when items were queued, and
+            // skipped/waiting items leave the queue, so it can't repeat every tick).
+            if (_batchSkips.Count > 0 || waiting > 0)
+                Log($"[Salvage] Nothing to salvage this round: {_batchSkips.Describe()}"
+                    + (waiting > 0 ? $"{(_batchSkips.Count > 0 ? "; " : "")}{waiting} not in the pack yet (will salvage when they arrive)" : "")
+                    + ".");
+            _batchSkips.Clear();
+            return false;
+        }
+
+        if (waiting > 0)
+            _batchSkips.Add("not in the pack yet (will salvage when they arrive)", $"{waiting} item(s)", countOnly: true, n: waiting);
+        return true;
+    }
+
+    // Skip reasons (also the log wording).
+    internal const string SkipWorn = "worn (RynthAi never takes off what the character is wearing)";
+    internal const string SkipRetained = "retained";
+    internal const string SkipItemsList = "on the Items list";
+    internal const string SkipUst = "it is the UST";
+    internal const string SkipBag = "already a salvage bag (the combine sweep handles bags)";
+    internal const string SkipGaveUp = "salvage failed too often";
+
+    /// <summary>Why <paramref name="wo"/> (in the pack) must not be salvaged, or null.</summary>
+    private string? SkipReasonFor(uint id, WorldObject wo)
+    {
+        if (IsSalvageBag(wo.Name)) return SkipBag;
+        if (IsWornByPlayer(wo)) return SkipWorn;
+        if (wo.ObjectClass == AcObjectClass.Ust || IsUst(wo.Name)
+            || (_host.HasGetObjectWcid && _host.TryGetObjectWcid(id, out uint wcid) && wcid == UstWcid))
+            return SkipUst;
+        int sid = unchecked((int)id);
+        if (_settings.ItemRules.Any(r => r.Id == sid)) return SkipItemsList;
+        // ACE skips a Retained item without a word (Player_Crafting.HandleSalvaging).
+        if (_host.TryGetObjectBoolProperty(id, StypeBoolRetained, out bool retained) && retained) return SkipRetained;
+        return null;
+    }
+
+    private const uint StypeBoolRetained = 91;
+
+    private bool IsWornByPlayer(WorldObject? wo)
+    {
+        if (wo == null) return false;
+        if (wo.WieldedLocation > 0) return true;
+        uint pid = _host.GetPlayerId();
+        if (pid != 0 && wo.Wielder == unchecked((int)pid)) return true;
+        return WorldObjectCache.IsWieldedByPlayer(_host, wo);
+    }
+
+    private void SkipForGood(uint id, string name, string reason)
+    {
+        _batchSkips.Add(reason, string.IsNullOrWhiteSpace(name) ? $"0x{id:X8}" : name);
+        _itemsSkippedThisSession++;
+        Untrack(id);
+        if (reason == SkipWorn)
+            _host.WriteToChat($"[RynthAi] Salvage: left {(string.IsNullOrWhiteSpace(name) ? "an item" : $"'{name}'")} alone — the character is wearing it. Take it off by hand if it should be salvaged.", 2);
+    }
+
+    private void ReturnBatchToQueue()
+    {
+        foreach (uint id in _batch) QueueItem(id);
+        ClearBatch();
+    }
+
+    private void ClearBatch()
+    {
+        _batch.Clear();
+        _batchAdded.Clear();
+        _batchNames.Clear();
+        _batchSkips.Clear();
+        _batchAddIdx = 0;
+        _batchBagsAdded = 0;
+        _batchAddFailures = 0;
+        _batchDirect = false;
+        _batchPanelFallback = false;
+        _batchFallbackWhy = string.Empty;
+        _batchBags.Clear();
+        _batchBagsBefore = null;
+    }
+
+    /// <summary>Adds the batch to the open panel one item per step, then matching bags.</summary>
+    private void TickAddingItems(long now)
+    {
+        bool wasFirstOpen = !_panelEverOpened;
+        if (_batchAddIdx < _batch.Count)
+        {
+            uint id = _batch[_batchAddIdx];
+            if (_host.SalvagePanelAddItem(id))
+            {
+                _batchAdded.Add(id);
+            }
+            else if (_batchAdded.Count == 0 && _batchAddIdx == 0)
+            {
+                // The first add failing means the panel instance isn't ready: put the
+                // whole batch back and retry on the longer first-open delays.
+                Log($"[Salvage] SalvagePanelAddItem failed (panel instance not ready) — {_batch.Count} item(s) back in the queue.");
+                NoteError("SalvagePanelAddItem failed (panel not ready)");
+                foreach (uint b in _batch) RequeueOrDrop(b, "SalvagePanelAddItem failed");
+                ClearBatch();
+                _currentUstId = 0;
+                _panelEverOpened = false;
+                _phase = Phase.Idle;
+                _idleRetryReadyAt = now + RetryBackoffMs;
+                return;
+            }
+            else
+            {
+                _batchAddFailures++;
+                RequeueOrDrop(id, "SalvagePanelAddItem failed");
+            }
+            _batchAddIdx++;
+            _phaseReadyAt = now + _settings.SalvageAddDelayFastMs;
             return;
         }
 
-        // Combine-during-salvage: add ALL under-full bags of the same material
-        // (and workmanship band, if configured) alongside the new item so the
-        // server merges everything in one operation.
-        int extraBags = 0;
-        if (_settings.CombineBagsDuringSalvage)
-            extraBags = AddAllMatchingUnderFullBags(_currentItemId);
+        if (_batchAdded.Count == 0)
+        {
+            _phase = Phase.Idle;
+            ClearBatch();
+            return;
+        }
 
-        bool wasFirstOpen = !_panelEverOpened;
+        // Combine-during-salvage: add ALL under-full bags of the batch's materials
+        // (and workmanship bands, if configured) so the server merges everything in
+        // one operation.
+        if (_settings.CombineBagsDuringSalvage)
+            _batchBagsAdded = AddAllMatchingUnderFullBags(_batchAdded);
+
         _panelEverOpened = true;
-        // Allow 50 ms per extra bag so AC can register each add before Execute fires.
-        int addDelay = (wasFirstOpen ? _settings.SalvageAddDelayFirstMs : _settings.SalvageAddDelayFastMs)
-                       + extraBags * _settings.SalvageAddDelayFastMs;
-        _phaseReadyAt = now + addDelay;
-        _phase = Phase.AddingItem;
+        int settle = (wasFirstOpen ? _settings.SalvageAddDelayFirstMs : _settings.SalvageAddDelayFastMs)
+                     + _batchBagsAdded * _settings.SalvageAddDelayFastMs;
+        _phaseReadyAt = now + settle;
+        _phase = Phase.ReadyToExecute;
     }
 
     // STypes (canonical values from Chorizite STypes.cs — verified against
@@ -293,65 +778,90 @@ public sealed class SalvageManager
 
     /// <summary>
     /// Scans inventory for every under-full salvage bag whose material (and
-    /// workmanship band, if configured) matches <paramref name="itemId"/>, adds
-    /// each one to the open salvage panel, and returns how many were added.
+    /// workmanship band, if configured) matches one of <paramref name="itemIds"/>,
+    /// adds each one to the open salvage panel, and returns how many were added.
     /// Adding them all at once lets the server merge everything in one Salvage
     /// operation instead of leaving partial bags for the periodic sweep.
     /// </summary>
-    private int AddAllMatchingUnderFullBags(uint itemId)
+    private int AddAllMatchingUnderFullBags(IReadOnlyCollection<uint> itemIds)
     {
-        if (_cache == null) return 0;
-        if (!_host.TryGetObjectIntProperty(itemId, StypeMaterialType, out int itemMat) || itemMat == 0)
-            return 0;
+        int added = 0;
+        foreach (uint bagId in FindMatchingUnderFullBags(itemIds, int.MaxValue))
+            if (_host.SalvagePanelAddItem(bagId))
+                added++;
+        return added;
+    }
+
+    /// <summary>
+    /// Every under-full salvage bag in the pack whose material (and workmanship band, if
+    /// configured) matches one of <paramref name="itemIds"/>, at most <paramref name="max"/>.
+    /// </summary>
+    private List<uint> FindMatchingUnderFullBags(IReadOnlyCollection<uint> itemIds, int max)
+    {
+        var found = new List<uint>();
+        if (_cache == null || itemIds.Count == 0 || max <= 0) return found;
 
         RynthCore.Loot.SalvageCombineSettings? cfg = CombineConfigProvider?.Invoke();
         bool useBands = cfg != null && cfg.Enabled;
 
-        // The freshly-looted ITEM carries a true 1-10 ItemWorkmanship(#105) —
+        // A freshly-looted ITEM carries a true 1-10 ItemWorkmanship(#105) —
         // unlike a bag, whose #105 is a cumulative sum. So the item's band is
         // read directly here; bag keys come from TryGetBagCombineKey (average).
-        string itemKey;
-        if (useBands)
+        var keys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (uint itemId in itemIds)
         {
-            if (!_host.TryGetObjectIntProperty(itemId, StypeItemWorkmanship, out int itemWm) || itemWm <= 0)
-                return 0;
-            string? itemBand = cfg!.GetBandKey(itemMat, itemWm);
-            if (itemBand == null) return 0;
-            itemKey = $"{itemMat}|{itemBand}";
+            if (!_host.TryGetObjectIntProperty(itemId, StypeMaterialType, out int itemMat) || itemMat == 0)
+                continue;
+            if (useBands)
+            {
+                if (!_host.TryGetObjectIntProperty(itemId, StypeItemWorkmanship, out int itemWm) || itemWm <= 0)
+                    continue;
+                string? itemBand = cfg!.GetBandKey(itemMat, itemWm);
+                if (itemBand == null) continue;
+                keys.Add($"{itemMat}|{itemBand}");
+            }
+            else
+            {
+                keys.Add(itemMat.ToString());
+            }
         }
-        else
-        {
-            itemKey = itemMat.ToString();
-        }
+        if (keys.Count == 0) return found;
 
-        int added = 0;
+        var batch = new HashSet<uint>(itemIds);
         foreach (WorldObject bag in _cache.GetDirectInventory(forceRefresh: true))
         {
+            if (found.Count >= max) break;
             uint bagId = unchecked((uint)bag.Id);
-            if (bagId == itemId) continue;
+            if (batch.Contains(bagId)) continue;
             if (!IsSalvageBag(bag.Name)) continue;
             if (!IsBagUnderFull(bagId, bag.Name)) continue;
             if (!TryGetBagCombineKey(bagId, bag.Name, cfg, useBands, out string bagKey, out _)) continue;
-            if (bagKey != itemKey) continue;
-
-            if (_host.SalvagePanelAddItem(bagId))
-            {
-                Log($"[Salvage] Combine-during-salvage: added bag {bag.Name} 0x{bagId:X8} ({added + 1}).");
-                added++;
-            }
+            if (!keys.Contains(bagKey)) continue;
+            found.Add(bagId);
         }
+        return found;
+    }
 
-        return added;
+    /// <summary>The salvage bags in the pack now (a fresh walk).</summary>
+    private HashSet<uint> SnapshotSalvageBagIds()
+    {
+        var set = new HashSet<uint>();
+        if (_cache == null) return set;
+        foreach (WorldObject wo in _cache.GetDirectInventory(forceRefresh: true))
+            if (IsSalvageBag(wo.Name)) set.Add(unchecked((uint)wo.Id));
+        return set;
     }
 
     private void BeginSalvaging(long now)
     {
         if (!_host.SalvagePanelExecute())
         {
-            Log($"[Salvage] SalvagePanelExecute failed for 0x{_currentItemId:X8} — re-queuing.");
-            RequeueOrDrop(_currentItemId, "execute failed");
-            _currentItemId = 0;
+            Log($"[Salvage] SalvagePanelExecute failed — {_batchAdded.Count} item(s) back in the queue.");
+            NoteError("SalvagePanelExecute failed");
+            foreach (uint id in _batchAdded) RequeueOrDrop(id, "execute failed");
+            ClearBatch();
             _phase = Phase.Idle;
+            _idleRetryReadyAt = now + RetryBackoffMs;
             return;
         }
 
@@ -370,33 +880,105 @@ public sealed class SalvageManager
         _phase = Phase.WaitingForResult;
     }
 
-    private void OnResultReady(long now)
+    private void OnBatchResult(long now)
     {
-        // If the item we tried to salvage is STILL in the player's actual
-        // inventory after the result delay, the salvage didn't consume it
-        // (panel closed mid-execute, bot got busy, AC dropped the request,
-        // etc.). Re-queue so we try again.
-        //
-        // We use GetDirectInventory(forceRefresh: true) — a live walk of the
-        // player's containers — instead of _cache[id] because salvage-consumed
-        // items don't reliably trigger OnDeleteObject in the cache, leading to
-        // false positives where successfully-salvaged items get re-queued.
-        uint itemId = _currentItemId;
-        bool itemStillPresent = itemId != 0 && IsItemInDirectInventory(itemId);
+        // An item still in the player's actual inventory after the result wait wasn't
+        // consumed (panel closed mid-execute, bot got busy, AC dropped the request, ...):
+        // it goes back in the queue. GetDirectInventory(forceRefresh: true) — a live walk
+        // of the player's containers — is the ground truth; salvage-consumed items don't
+        // reliably trigger OnDeleteObject in the cache.
+        var live = SnapshotDirectInventoryIds();
 
-        _currentItemId = 0;
-        _phase = Phase.Idle;
-
-        if (itemStillPresent)
+        // A request without the panel that changed nothing (no item left the pack) is tried once
+        // through the panel, before any retry is counted against the items.
+        if (_batchDirect && PanelAvailable && !_batchAdded.Any(id => !live.Contains(id)))
         {
-            Log($"[Salvage] Item 0x{itemId:X8} still in inventory after salvage cycle — re-queuing.");
-            RequeueOrDrop(itemId, "item still present after result");
+            string reply = _salvageChat.Count > 0 ? ChatNote() : "; no salvage reply from the server";
+            _directFallbacks++;
+            NoteError("salvage without the panel changed nothing — panel retry");
+            Log($"[Salvage] Batch {_batchNumber + 1}: salvage without the panel changed nothing ({_batchAdded.Count} item(s) still in the pack{reply}) — trying them once through the panel.");
+            _batchFallbackWhy = "the request without the panel changed nothing";
+            _batchAdded.Clear();
+            _batchBags.Clear();
+            _batchBagsAdded = 0;
+            _batchBagsBefore = null;
+            _batchDirect = false;
+            _batchPanelFallback = true;
+            StartPanelCycle(now);
+            return;
+        }
+
+        var salvagedNames = new List<string>();
+        int stillThere = 0, requeued = 0;
+        foreach (uint id in _batchAdded)
+        {
+            string name = _batchNames.TryGetValue(id, out string? n) ? n : $"0x{id:X8}";
+            if (live.Contains(id))
+            {
+                stillThere++;
+                if (RequeueOrDrop(id, "still in the pack after Salvage")) requeued++;
+            }
+            else
+            {
+                salvagedNames.Add(name);
+                Untrack(id);
+            }
+        }
+
+        _batchNumber++;
+        _batchesThisSession++;
+        _itemsSalvagedThisSession += salvagedNames.Count;
+
+        // Bags: what a request without the panel did to them (the panel path keeps its old note).
+        string bagNote;
+        if (_batchDirect && _batchBagsBefore != null)
+        {
+            var bagsNow = SnapshotSalvageBagIds();
+            int newBags = bagsNow.Count(b => !_batchBagsBefore.Contains(b));
+            int mergedIn = _batchBags.Count(b => !bagsNow.Contains(b));
+            bagNote = (newBags > 0 ? $", {newBags} new salvage bag(s)" : salvagedNames.Count > 0 ? ", no new salvage bag seen yet" : "")
+                      + (_batchBags.Count > 0 ? $", {mergedIn}/{_batchBags.Count} bag(s) merged in" : "");
         }
         else
         {
-            // Successful salvage — clear retry counter for this id.
-            _itemRetryCount.Remove(itemId);
+            bagNote = _batchBagsAdded > 0 ? $", +{_batchBagsAdded} bag(s) combined" : "";
         }
+
+        string how = _batchDirect ? " without the panel"
+                   : _batchPanelFallback ? $" through the panel ({_batchFallbackWhy})"
+                   : "";
+
+        // The panel salvaged what a request without it couldn't: count it; enough in a row and the
+        // session goes back to the panel. A request that worked resets the count.
+        if (_batchDirect && salvagedNames.Count > 0)
+            _directPanelWorkedStreak = 0;
+        else if (_batchPanelFallback && salvagedNames.Count > 0 && UseDirect)
+        {
+            _directPanelWorkedStreak++;
+            if (_directPanelWorkedStreak >= DirectOffAfterFailures)
+            {
+                TurnDirectOff($"{_directPanelWorkedStreak} batches in a row changed nothing without the panel and were salvaged through it");
+                _host.WriteToChat("[RynthAi] Salvage: salvaging without the panel didn't work here; using the salvage panel for the rest of the session.", 2);
+            }
+        }
+
+        string line = $"[Salvage] Batch {_batchNumber}{how}: salvaged {salvagedNames.Count}/{_batchAdded.Count}"
+            + (salvagedNames.Count > 0 ? $" ({SkipNotes.NameList(salvagedNames)})" : "")
+            + bagNote
+            + (stillThere > 0 ? $"; {stillThere} still in the pack ({requeued} queued again"
+                                 + (stillThere > requeued ? $", {stillThere - requeued} resting or given up, see above" : "") + ")" : "")
+            + (_batchAddFailures > 0 ? $"; panel refused {_batchAddFailures} (queued again)" : "")
+            + (_batchSkips.Count > 0 ? $"; skipped: {_batchSkips.Describe()}" : "")
+            + ChatNote()
+            + $". Session: {_itemsSalvagedThisSession} salvaged, {_itemsSkippedThisSession} skipped, {_tracked.Count} still tracked.";
+        Log(line);
+        if (stillThere > 0 && ChatSaidRefused())
+            NoteError($"server refused salvage{ChatNote()}");
+        _salvageChat.Clear();
+
+        ClearBatch();
+        _currentUstId = 0;
+        _phase = Phase.Idle;
 
         // Always trigger a combine scan on the next idle tick when the queue
         // drains — both to consolidate any newly-merged bags and so combine
@@ -407,27 +989,127 @@ public sealed class SalvageManager
     }
 
     /// <summary>
-    /// Re-queue an item that failed a salvage step. Counts retries per id and
-    /// drops the item once it's failed MaxItemRetries times in a row, so a
-    /// truly un-salvageable item doesn't trap the queue forever.
+    /// Every <see cref="SweepIntervalMs"/>: queue tracked items that are in the pack, forget
+    /// ones that left it (or never arrived), and skip ones the character is wearing. One log
+    /// line when it queues or skips something; nothing when there's nothing to say.
     /// </summary>
-    private void RequeueOrDrop(uint itemId, string reason)
+    private void SweepTracked(long now)
     {
-        if (itemId == 0) return;
+        if (_tracked.Count == 0 || _cache == null) return;
+        if (now - _lastSweepAt < SweepIntervalMs) return;
+        _lastSweepAt = now;
+
+        var inPack = new Dictionary<uint, WorldObject>();
+        foreach (WorldObject wo in _cache.GetDirectInventory(forceRefresh: true))
+            inPack[unchecked((uint)wo.Id)] = wo;
+
+        int queuedNow = 0, resting = 0;
+        List<uint>? forget = null;
+        List<(uint Id, string Name)>? worn = null;
+        foreach (var kv in _tracked)
+        {
+            uint id = kv.Key;
+            TrackedItem t = kv.Value;
+            if (inPack.TryGetValue(id, out WorldObject? wo))
+            {
+                t.SeenInPack = true;
+                if (string.IsNullOrEmpty(t.Name)) t.Name = wo.Name;
+                if (_queued.Contains(id) || _batch.Contains(id)) continue; // BuildBatch checks it
+                if (IsWornByPlayer(wo)) { (worn ??= new()).Add((id, wo.Name)); continue; }
+                if (now < t.CooldownUntil) { resting++; continue; }
+                QueueItem(id);
+                queuedNow++;
+                continue;
+            }
+
+            if (_queued.Contains(id) || _batch.Contains(id)) continue;
+            WorldObject? cached = _cache[unchecked((int)id)];
+            if (IsWornByPlayer(cached)) { (worn ??= new()).Add((id, cached?.Name ?? t.Name)); continue; }
+            if (t.SeenInPack || now - t.NotedAt >= ArrivalGraceMs)
+                (forget ??= new()).Add(id);
+        }
+
+        if (forget != null)
+            foreach (uint id in forget) Untrack(id);
+        if (worn != null)
+        {
+            foreach (var (id, name) in worn) SkipForGood(id, name, SkipWorn);
+            Log($"[Salvage] Sweep: skipped {_batchSkips.Describe()}.");
+            _batchSkips.Clear();
+        }
+        if (queuedNow > 0)
+            Log($"[Salvage] Sweep: queued {queuedNow} looted-for-salvage item(s) found in the pack"
+                + (resting > 0 ? $", {resting} resting after failures" : "")
+                + $" ({_tracked.Count} tracked).");
+    }
+
+    /// <summary>
+    /// Re-queue an item that failed a salvage step. After MaxItemRetries failures in a row
+    /// the item rests for GiveUpCooldownMs (the sweep queues it again after that); after
+    /// MaxGiveUpRounds rests it is left in the pack for good, with a log line saying so.
+    /// True when the item went straight back in the queue.
+    /// </summary>
+    private bool RequeueOrDrop(uint itemId, string reason)
+    {
+        if (itemId == 0) return false;
 
         int prior = _itemRetryCount.TryGetValue(itemId, out int n) ? n : 0;
         int next = prior + 1;
-        if (next > MaxItemRetries)
+        if (next < MaxItemRetries)
         {
-            _itemRetryCount.Remove(itemId);
-            Log($"[Salvage] Giving up on 0x{itemId:X8} after {MaxItemRetries} attempts ({reason}).");
-            // Trigger a combine scan if dropping this item left the queue empty.
-            if (_queue.Count == 0) _pendingCombineScan = true;
-            return;
+            _itemRetryCount[itemId] = next;
+            QueueItem(itemId);
+            return true;
         }
-        _itemRetryCount[itemId] = next;
-        _queue.Enqueue(itemId);
-        Log($"[Salvage] Re-queued 0x{itemId:X8} ({reason}) — attempt {next}/{MaxItemRetries}.");
+
+        _itemRetryCount.Remove(itemId);
+        string name = _tracked.TryGetValue(itemId, out TrackedItem? t) && t.Name.Length > 0 ? t.Name : $"0x{itemId:X8}";
+        if (t != null && t.GiveUps + 1 < MaxGiveUpRounds)
+        {
+            t.GiveUps++;
+            t.CooldownUntil = NowMs + GiveUpCooldownMs;
+            Log($"[Salvage] '{name}' 0x{itemId:X8} failed {MaxItemRetries} times ({reason}) — trying again in {GiveUpCooldownMs / 1000}s (round {t.GiveUps}/{MaxGiveUpRounds}).");
+        }
+        else
+        {
+            Untrack(itemId);
+            _itemsSkippedThisSession++;
+            Log($"[Salvage] Giving up on '{name}' 0x{itemId:X8}: {SkipGaveUp} ({reason}). It stays in the pack.");
+            NoteError($"gave up on 0x{itemId:X8} ({reason})");
+        }
+        // Trigger a combine scan if this left the queue empty.
+        if (_queue.Count == 0) _pendingCombineScan = true;
+        return false;
+    }
+
+    /// <summary>Per-batch skip notes, grouped by reason, for one bounded log line.</summary>
+    private sealed class SkipNotes
+    {
+        private readonly List<(string Reason, List<string> Names, int Extra)> _byReason = new();
+        public int Count { get; private set; }
+
+        public void Add(string reason, string name, bool countOnly = false, int n = 1)
+        {
+            int i = _byReason.FindIndex(e => e.Reason == reason);
+            if (i < 0) { _byReason.Add((reason, new List<string>(), 0)); i = _byReason.Count - 1; }
+            var e = _byReason[i];
+            if (countOnly) _byReason[i] = (e.Reason, e.Names, e.Extra + n);
+            else e.Names.Add(name);
+            Count += n;
+        }
+
+        public void Clear() { _byReason.Clear(); Count = 0; }
+
+        public string Describe()
+            => string.Join("; ", _byReason.Select(e =>
+                e.Names.Count == 0 ? $"{e.Extra} {e.Reason}" : $"{e.Reason}: {NameList(e.Names)}"));
+
+        /// <summary>"A, B x2, C" — at most 8 distinct names, then "+N more".</summary>
+        public static string NameList(List<string> names)
+        {
+            var groups = names.GroupBy(x => x).Select(g => g.Count() > 1 ? $"{g.Key} x{g.Count()}" : g.Key).ToList();
+            return groups.Count <= 8 ? string.Join(", ", groups) : string.Join(", ", groups.Take(8)) + $", +{groups.Count - 8} more";
+        }
     }
 
     // ── Combine salvage bags ──────────────────────────────────────────────────
@@ -490,6 +1172,8 @@ public sealed class SalvageManager
 
         _combineGroupIdx = 0;
         _combineAddIdx = 0;
+        _combineGroupDirect = false;
+        _combineGroupPanelRetry = false;
         _combinePhase = CombinePhase.None;
         _combinePhaseReadyAt = now;
         _phase = Phase.CombiningSalvage;
@@ -517,17 +1201,68 @@ public sealed class SalvageManager
                 if (ust == 0)
                 {
                     Log("[Salvage] Combine: no UST available — aborting combine cycle.");
+            NoteError("combine: no UST in inventory");
                     _combineGroups = null;
                     _phase = Phase.Idle;
                     return;
                 }
-                if (!_host.UseObject(ust))
+                // Without the panel: the group's bags go in one salvage request (ACE merges the
+                // salvage bags listed in it). Not sent -> the panel takes this group.
+                if (UseDirect && !_combineGroupPanelRetry)
                 {
-                    Log("[Salvage] Combine: UseObject(UST) failed — skipping this group.");
+                    uint[] bagIds = group.Take(RynthCoreHost.MaxSalvageDirectItems).ToArray();
+                    _salvageChat.Clear();
+                    int sent = _host.SalvageDirect(ust, bagIds);
+                    if (sent > 0)
+                    {
+                        _directRequests++;
+                        _combineGroupDirect = true;
+                        _combineGroupSnapshot = new List<uint>(bagIds);
+                        _combinePhase = CombinePhase.WaitingForResult;
+                        _combinePhaseReadyAt = now + DirectSettleMs;
+                        _waitingResultDeadline = now + DirectResultMaxWaitMs;
+                        break;
+                    }
+                    string why = sent switch
+                    {
+                        -1 => "the engine's salvage sender isn't bound on this client",
+                        -2 => "the engine is older than plugin API v82",
+                        _ => "the engine refused the request",
+                    };
+                    if (sent is -1 or -2) TurnDirectOff(why);
+                    _directFallbacks++;
+                    Log($"[Salvage] Combine group {_combineGroupIdx + 1}/{_combineGroups.Count}: request without the panel wasn't sent ({why}) — using the panel.");
+                }
+                if (!PanelAvailable)
+                {
+                    Log($"[Salvage] Combine group {_combineGroupIdx + 1}/{_combineGroups.Count}: no salvage panel on this client — skipping the group.");
+                    NoteError("combine: no salvage panel calls on this client");
                     _combineGroupIdx++;
                     _combineAddIdx = 0;
+                    _combineGroupPanelRetry = false;
+                    _combinePhaseReadyAt = now + RetryBackoffMs;
                     return;
                 }
+                _salvageChat.Clear();
+                if (!_host.UseFor(ust, "Salvage", "combine salvage: open the salvage panel (UST)"))
+                {
+                    _combineOpenAttempts++;
+                    if (_combineOpenAttempts < MaxCombineOpenAttempts)
+                    {
+                        Log($"[Salvage] Combine: UseObject(UST) failed — retrying this group in {RetryBackoffMs}ms (attempt {_combineOpenAttempts}/{MaxCombineOpenAttempts}).");
+                        _combinePhaseReadyAt = now + RetryBackoffMs;
+                        return;
+                    }
+                    Log($"[Salvage] Combine: UseObject(UST) failed {_combineOpenAttempts}x — skipping this group.");
+                    NoteError($"combine: UseObject(UST) failed {_combineOpenAttempts}x — group skipped");
+                    _combineOpenAttempts = 0;
+                    _combineGroupIdx++;
+                    _combineAddIdx = 0;
+                    _combineGroupPanelRetry = false;
+                    _combinePhaseReadyAt = now + RetryBackoffMs;
+                    return;
+                }
+                _combineOpenAttempts = 0;
                 int openDelay = _panelEverOpened ? _settings.SalvageOpenDelayFastMs : _settings.SalvageOpenDelayFirstMs;
                 _combinePhaseReadyAt = now + openDelay;
                 _combinePhase = CombinePhase.OpeningPanel;
@@ -585,7 +1320,23 @@ public sealed class SalvageManager
                 {
                     break;
                 }
-                VerifyCombineGroupResult();
+                bool merged = VerifyCombineGroupResult();
+                if (!merged && _combineGroupDirect && PanelAvailable)
+                {
+                    // The request without the panel merged nothing: this group once more, through the panel.
+                    _directFallbacks++;
+                    Log($"[Salvage] Combine group {_combineGroupIdx + 1}/{_combineGroups!.Count}: the request without the panel merged nothing"
+                        + (_salvageChat.Count > 0 ? ChatNote() : "; no salvage reply from the server") + " — trying the panel once.");
+                    _combineGroupDirect = false;
+                    _combineGroupPanelRetry = true;
+                    _combineAddIdx = 0;
+                    _combinePhase = CombinePhase.None;
+                    _combinePhaseReadyAt = now;
+                    break;
+                }
+                _combineGroupDirect = false;
+                _combineGroupPanelRetry = false;
+                _salvageChat.Clear();
                 _combineGroupIdx++;
                 _combineAddIdx = 0;
                 _combinePhase = CombinePhase.None;
@@ -606,11 +1357,11 @@ public sealed class SalvageManager
     ///   S == 1       → clean merge into a single bag
     ///   1 &lt; S &lt; M     → partial merge (overflow / mixed-band / next sweep can finish it)
     /// </summary>
-    private void VerifyCombineGroupResult()
+    private bool VerifyCombineGroupResult()
     {
         var snapshot = _combineGroupSnapshot;
         _combineGroupSnapshot = null;
-        if (snapshot == null || snapshot.Count == 0 || _cache == null) return;
+        if (snapshot == null || snapshot.Count == 0 || _cache == null) return true;
 
         var liveIds = SnapshotDirectInventoryIds();
         int survivors = 0;
@@ -623,13 +1374,14 @@ public sealed class SalvageManager
         int merged = snapshot.Count - survivors;
         int groupNum = _combineGroupIdx + 1;
         int totalGroups = _combineGroups?.Count ?? 0;
+        string how = _combineGroupDirect ? " (without the panel)" : _combineGroupPanelRetry ? " (panel retry)" : "";
 
         if (survivors == snapshot.Count)
         {
             _combineGroupsFailed++;
             string ids = string.Join(", ", snapshot.ConvertAll(id => $"0x{id:X8}"));
-            Log($"[Salvage] Combine group {groupNum}/{totalGroups}: NO MERGE — all {snapshot.Count} bag(s) still in inventory. Surviving ids: {ids}. Session: {_combineGroupsSucceeded} ok / {_combineGroupsFailed} failed, {_bagsMergedThisSession} bag(s) merged.");
-            return;
+            Log($"[Salvage] Combine group {groupNum}/{totalGroups}{how}: NO MERGE — all {snapshot.Count} bag(s) still in inventory. Surviving ids: {ids}. Session: {_combineGroupsSucceeded} ok / {_combineGroupsFailed} failed, {_bagsMergedThisSession} bag(s) merged.");
+            return false;
         }
 
         _combineGroupsSucceeded++;
@@ -637,12 +1389,13 @@ public sealed class SalvageManager
 
         if (survivors <= 1)
         {
-            Log($"[Salvage] Combine group {groupNum}/{totalGroups}: merged {snapshot.Count} bag(s) → {survivors} survivor (+{merged} consumed). Session: {_combineGroupsSucceeded} ok / {_combineGroupsFailed} failed, {_bagsMergedThisSession} bag(s) merged.");
+            Log($"[Salvage] Combine group {groupNum}/{totalGroups}{how}: merged {snapshot.Count} bag(s) → {survivors} survivor (+{merged} consumed). Session: {_combineGroupsSucceeded} ok / {_combineGroupsFailed} failed, {_bagsMergedThisSession} bag(s) merged.");
         }
         else
         {
-            Log($"[Salvage] Combine group {groupNum}/{totalGroups}: PARTIAL merge — {snapshot.Count} bag(s) → {survivors} survivors (+{merged} consumed). Remaining bag(s) will be picked up by next sweep. Session: {_combineGroupsSucceeded} ok / {_combineGroupsFailed} failed, {_bagsMergedThisSession} bag(s) merged.");
+            Log($"[Salvage] Combine group {groupNum}/{totalGroups}{how}: PARTIAL merge — {snapshot.Count} bag(s) → {survivors} survivors (+{merged} consumed). Remaining bag(s) will be picked up by next sweep. Session: {_combineGroupsSucceeded} ok / {_combineGroupsFailed} failed, {_bagsMergedThisSession} bag(s) merged.");
         }
+        return true;
     }
 
     /// <summary>
@@ -772,21 +1525,12 @@ public sealed class SalvageManager
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// True if <paramref name="id"/> appears in a fresh walk of the player's
+    /// True if any of <paramref name="ids"/> appears in a fresh walk of the player's
     /// inventory containers. Ground truth for "did the server actually destroy
     /// this item" — the cache's _byId can hold stale entries for salvage-
     /// consumed items because OnDeleteObject doesn't fire on every merge path.
     /// </summary>
-    private bool IsItemInDirectInventory(uint id)
-    {
-        if (_cache == null) return false;
-        var inv = _cache.GetDirectInventory(forceRefresh: true);
-        foreach (var item in inv)
-        {
-            if (unchecked((uint)item.Id) == id) return true;
-        }
-        return false;
-    }
+    private bool AnyStillInPack(List<uint> ids) => ids.Count > 0 && AnySnapshotBagStillInInventory(ids);
 
     /// <summary>
     /// Snapshots the ids currently in the player's direct inventory as a
@@ -897,11 +1641,18 @@ public sealed class SalvageManager
     {
         if (_cache == null) return false;
         uint playerId = _host.GetPlayerId();
-        if (playerId == 0) return true;
+        // Fail closed when the player id isn't readable yet — matches every other
+        // playerId==0 guard in the plugin (InventoryManager:94, WorldObjectCache:977,
+        // FindPackFor). Returning true here counted every scanned object as ours.
+        if (playerId == 0) return false;
 
         int pid = unchecked((int)playerId);
         if (item.Wielder != 0 && item.Wielder != pid) return false;
-        if (item.Container == 0 || item.Container == pid) return true;
+        if (item.Container == pid) return true;
+        // Container==0 means "not in any pack" — that's a wielded item (ours only if
+        // we're the wielder) or an item lying on the ground. It used to return true
+        // for both, so ground USTs read as carried. 2026-06-03 audit P2.
+        if (item.Container == 0) return item.Wielder == pid;
 
         var owner = _cache[item.Container];
         if (owner == null) return false;
@@ -913,11 +1664,26 @@ public sealed class SalvageManager
     {
         if (string.IsNullOrEmpty(name))
             return false;
-        // UST names end in "Ust" (e.g. "Salvaging Ust", "Aged Legendary Salvaging Ust",
-        // "Sturdy Iron Salvaging Ust"). Exclude only actual salvage bags — those follow
-        // the precise "Salvage (Material)" format, caught by IsSalvageBag.
-        return name.Contains("Ust", StringComparison.OrdinalIgnoreCase)
-            && !IsSalvageBag(name);
+        // UST names carry "Ust" as its own word (e.g. "Salvaging Ust", "Aged Legendary
+        // Salvaging Ust", "Sturdy Iron Salvaging Ust"). A bare Contains also matched
+        // "Just"/"Robust"/"Lustrous" (2026-06-03 audit P2); a word match keeps working
+        // if a name ever carries a suffix, which EndsWith would not.
+        // Exclude actual salvage bags — the "Salvage (Material)" format, via IsSalvageBag.
+        return HasWordUst(name) && !IsSalvageBag(name);
+    }
+
+    /// <summary>True when "Ust" appears as a whole word (letter/digit boundaries).</summary>
+    private static bool HasWordUst(string name)
+    {
+        for (int i = 0; i + 3 <= name.Length; i++)
+        {
+            if (!(name[i] is 'U' or 'u') || !(name[i + 1] is 'S' or 's') || !(name[i + 2] is 'T' or 't'))
+                continue;
+            if (i > 0 && char.IsLetterOrDigit(name[i - 1])) continue;
+            if (i + 3 < name.Length && char.IsLetterOrDigit(name[i + 3])) continue;
+            return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -948,5 +1714,95 @@ public sealed class SalvageManager
         return name.Contains("Salvage (", StringComparison.OrdinalIgnoreCase);
     }
 
-    private void Log(string message) => _host.Log(message);
+    private void Log(string message) => RynthLog.Write(LogCat.Salvage, message);
+
+    private void NoteError(string what)
+    {
+        _lastError   = what;
+        _lastErrorAt = NowMs;
+    }
+
+    /// <summary>
+    /// One-shot view of the salvage FSM. Salvage had no snapshot (Combat/Buff/Meta
+    /// did), so a wedged panel cycle meant reading the log backwards to work out
+    /// which phase it died in. Read-only; safe from the UI or a chat command.
+    /// </summary>
+    public SalvageStateSnapshot GetStateSnapshot()
+    {
+        long now = NowMs;
+        return new SalvageStateSnapshot
+        {
+            HasPanelApi        = _host.HasSalvagePanel && _host.HasUseObject,
+            HasDirectApi       = _host.HasSalvageDirect,
+            DirectOn           = UseDirect,
+            DirectOffReason    = _directOff ? _directOffReason : (!_settings.SalvageWithoutPanel ? "setting off" : !_host.HasSalvageDirect ? "engine before API v82" : string.Empty),
+            DirectRequests     = _directRequests,
+            DirectFallbacks    = _directFallbacks,
+            EnableCombine      = _settings.EnableCombineSalvage,
+            Phase              = _phase.ToString(),
+            PhaseReadyInMs     = Math.Max(0, _phaseReadyAt - now),
+            QueueCount         = _queue.Count,
+            CurrentItemId      = _batch.Count > 0 ? _batch[0] : 0,
+            CurrentUstId       = _currentUstId,
+            PanelEverOpened    = _panelEverOpened,
+            PendingCombineScan = _pendingCombineScan,
+            RetryTrackedItems  = _itemRetryCount.Count,
+            RetryBackoffInMs   = Math.Max(0, _idleRetryReadyAt - now),
+            CombinePhase       = _combinePhase.ToString(),
+            CombineGroupIdx    = _combineGroupIdx,
+            CombineGroupCount  = _combineGroups?.Count ?? 0,
+            CombineAddIdx      = _combineAddIdx,
+            CombineOpenAttempts = _combineOpenAttempts,
+            MsSinceCombineSweep = _lastCombineSweepAt == 0 ? -1 : now - _lastCombineSweepAt,
+            GroupsSucceeded    = _combineGroupsSucceeded,
+            GroupsFailed       = _combineGroupsFailed,
+            BagsMerged         = _bagsMergedThisSession,
+            LastError          = _lastError,
+            MsSinceLastError   = _lastErrorAt == 0 ? -1 : now - _lastErrorAt,
+            TrackedItems       = _tracked.Count,
+            BatchSize          = _batch.Count,
+            Batches            = _batchesThisSession,
+            ItemsSalvaged      = _itemsSalvagedThisSession,
+            ItemsSkipped       = _itemsSkippedThisSession,
+        };
+    }
+
+    public struct SalvageStateSnapshot
+    {
+        public bool   HasPanelApi;
+        /// <summary>The engine has SalvageDirect (API v82).</summary>
+        public bool   HasDirectApi;
+        /// <summary>Requests go out without the panel now.</summary>
+        public bool   DirectOn;
+        /// <summary>Why not, when <see cref="DirectOn"/> is false ("" when on).</summary>
+        public string DirectOffReason;
+        public int    DirectRequests;
+        public int    DirectFallbacks;
+        public bool   EnableCombine;
+        public string Phase;
+        public long   PhaseReadyInMs;
+        public int    QueueCount;
+        public uint   CurrentItemId;
+        public uint   CurrentUstId;
+        public bool   PanelEverOpened;
+        public bool   PendingCombineScan;
+        public int    RetryTrackedItems;
+        public long   RetryBackoffInMs;
+        public string CombinePhase;
+        public int    CombineGroupIdx;
+        public int    CombineGroupCount;
+        public int    CombineAddIdx;
+        public int    CombineOpenAttempts;
+        public long   MsSinceCombineSweep;
+        public int    GroupsSucceeded;
+        public int    GroupsFailed;
+        public int    BagsMerged;
+        public string LastError;
+        public long   MsSinceLastError;
+        public int    TrackedItems;
+        public int    BatchSize;
+        public int    Batches;
+        public int    ItemsSalvaged;
+        public int    ItemsSkipped;
+    }
 }

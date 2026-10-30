@@ -9,15 +9,17 @@ namespace RynthCore.Plugin.RynthVision;
 /// <summary>
 /// Feature toggles and colours for RynthVision overlays. Colours are ARGB
 /// (0xAARRGGBB) to match the engine's Nav3D API. Persists to
-/// %APPDATA%\RynthCore\rynthvision.json; the engine's Avalonia panel reads and
-/// writes these through the plugin's JSON bridge exports.
+/// %APPDATA%\RynthCore\rynthvision.json. RynthVision's own Vision window
+/// (Ui/VisionWindow.cs, 2026-10-27) edits a copy (<see cref="Clone"/>) and queues
+/// each change for the tick; the engine's Vision panels (its ImGui face on an
+/// older engine, the Avalonia twin) still read and write these through the
+/// plugin's JSON exports. Same file and keys either way, so nothing to migrate.
 /// </summary>
 internal sealed class VisionSettings
 {
     public bool ShowRadarRing = true;
     public bool ShowUnclimbableSlopes = false;
     public bool ShowImpassableWater = false;
-    public bool ShowDungeonLighting = false;
 
     public uint SlopeColorArgb = 0x60FF2020;       // semi-transparent red
     public uint WaterColorArgb = 0x600060FF;       // semi-transparent blue
@@ -30,15 +32,15 @@ internal sealed class VisionSettings
     // landscape without becoming visually heavy. Default 3 m, range 0.5–30.
     public float RadarRingHeight = 3.0f;
 
-    // Cell-radius around the player. 1 cell = 24 m. Slopes can extend across
-    // adjacent landblocks (see SlopeOverlay), so values above 8 cross
-    // landblock boundaries and pull in extra terrain data on demand. Default
-    // 12 cells (~288 m) gives roughly one landblock of look-ahead each
-    // direction; 24 cells is the practical max before the triangle budget
-    // becomes the bottleneck.
+    // Cell-radius around the player (1 cell = 24 m, 8 cells per landblock).
+    // The overlays read up to 3 landblocks out in each direction
+    // (LandblockWindow), which covers the whole square for any radius up to
+    // MaxRenderRadius from any cell of the player's landblock. Default 12 cells
+    // (~288 m); 24 is the cap, where the engine's triangle budget (8192) is
+    // already the limit (49×49 cells × 2 triangles for slopes alone).
+    public const int MaxRenderRadius = 24;
     public int SlopeRenderRadius = 12;
-    // Same cell-radius idea as SlopeRenderRadius — extends across landblock
-    // boundaries when set large. Default 12 matches slopes for parity.
+    // Same cell-radius idea as SlopeRenderRadius. Default 12 matches slopes.
     public int WaterRenderRadius = 12;
 
     // Cell normal.Z threshold below which a triangle is treated as
@@ -61,33 +63,44 @@ internal sealed class VisionSettings
     //   0x12 = 18 WaterShallowSea
     //   0x13 = 19 WaterShallowStillSea
     //   0x14 = 20 WaterDeepSea
-    // The overlay only paints landblocks whose every vertex is one of these
-    // types ("EntirelyWater" landblocks per ACE LandblockStruct.CalcWater),
-    // because that's exactly the condition AC's LandCell.find_terrain_poly
-    // turns into TransitionState.Collided for a regular character. Partial-
-    // water landblocks rely on per-position depth checks we don't have
-    // surface-Z data for, so we don't speculate.
-    public int[] WaterTerrainTypes = { 0x10, 0x11, 0x12, 0x13, 0x14 };
+    // Landblocks whose every vertex is one of these ("EntirelyWater" per ACE
+    // LandblockStruct.CalcWater) are always painted solid: a regular
+    // character can't enter them. Other water cells follow the two options
+    // below. Replaced (never mutated) on change; WaterOverlay relies on that.
+    // An empty or all-invalid list from the panel resets to these defaults.
+    private static readonly int[] DefaultWaterTerrainTypes = { 0x10, 0x11, 0x12, 0x13, 0x14 };
+    public int[] WaterTerrainTypes = (int[])DefaultWaterTerrainTypes.Clone();
 
-    // Default true: a cell counts as water if ANY of its four corners is a
-    // water-type. With WaterImpassableOnly=true (also default), the cell
-    // additionally needs a too-steep triangle — so the visible result is
-    // "shoreline cells where the seafloor drops below walkable angle", i.e.
-    // the actual spots AC blocks you. all-four-corners was too strict at
-    // typical shorelines where only 1-2 vertices fall in deep water.
+    // Outside fully-water landblocks: true = a cell is water if ANY of its
+    // four corners is a water type (catches shorelines, where often only 1-2
+    // vertices are water); false = only when all four corners are.
     public bool WaterAnyCorner = true;
 
-    // When true, the water overlay only paints cells that are BOTH water
-    // AND have an unwalkable triangle (steep underwater slope). That's
-    // the actual "impassable water" — the deep parts where AC's slope
-    // physics blocks you at the shore drop-off. When false, every cell
-    // matching WaterTerrainTypes is painted regardless of walkability —
-    // useful as a "where is water" awareness overlay but does not signal
-    // impassability. Uses SlopeFloorZ as the steepness threshold.
+    // Outside fully-water landblocks: true = paint only the water cells'
+    // unwalkable triangles (normal Z below SlopeFloorZ) — the seafloor
+    // drop-offs AC's slope physics blocks, i.e. water that is certainly
+    // impassable (AC's wading depth check needs a water surface height the
+    // dats don't give us). false = paint every water cell: a "where is
+    // water" view that doesn't signal impassability.
     public bool WaterImpassableOnly = true;
+
+    // Dungeon light (2026-10-27; Light/DungeonLight.cs): raises the ambient light AC draws
+    // dungeons with (RynthCore's ambient light floor, plugin API v91). Off by default. Strength
+    // 0-100 maps onto an ambient of 20 % (AC's own dungeon) to 100 %; the colour tints it (ARGB,
+    // alpha always FF); the scope is where it lights (LightScope: 0 dungeons, 1 also buildings,
+    // 2 also outdoors). The engine's Vision panel doesn't show these (plugin screens move out
+    // of the engine, RynthCore CLAUDE.md): the Light tab of RynthVision's own Vision window and /rv light.
+    public bool LightOn = false;
+    public int LightStrength = Light.DungeonLight.DefaultStrength;
+    public uint LightColorArgb = Light.DungeonLight.DefaultColor;
+    public int LightScope = (int)Light.LightScope.Dungeons;
 
     // ── JSON bridge (manual build + JsonDocument parse — both AOT-safe) ───────
 
+    /// <summary>
+    /// Every setting. <see cref="ApplyJson"/> takes any subset of these keys,
+    /// so a panel can send just the field that changed.
+    /// </summary>
     public string ToJson()
     {
         var ci = CultureInfo.InvariantCulture;
@@ -107,7 +120,11 @@ internal sealed class VisionSettings
             + $"\"waterRadius\":{WaterRenderRadius},"
             + $"\"waterAnyCorner\":{(WaterAnyCorner ? 1 : 0)},"
             + $"\"waterImpassableOnly\":{(WaterImpassableOnly ? 1 : 0)},"
-            + $"\"waterTypes\":[{string.Join(",", WaterTerrainTypes)}]"
+            + $"\"waterTypes\":[{string.Join(",", WaterTerrainTypes)}],"
+            + $"\"light\":{(LightOn ? 1 : 0)},"
+            + $"\"lightStrength\":{LightStrength},"
+            + $"\"lightColor\":{LightColorArgb},"
+            + $"\"lightScope\":{LightScope}"
             + "}";
     }
 
@@ -135,15 +152,33 @@ internal sealed class VisionSettings
             var list = new List<int>();
             foreach (var e in v.EnumerateArray())
                 if (e.TryGetInt32(out int n)) list.Add(n);
-            // Self-heal: an earlier version of the panel could push an empty
-            // array on first-edit (Populate race) which then persisted. An
-            // empty array means "match nothing" → no water ever painted. If
-            // the JSON has zero entries, keep the constructor defaults
-            // instead so the overlay works out-of-the-box.
-            if (list.Count > 0)
-                WaterTerrainTypes = list.ToArray();
+            WaterTerrainTypes = NormalizeWaterTypes(list);
         }
+        // Out-of-range light values are pulled into range (a hand-edited file, an older panel).
+        if (r.TryGetProperty("light", out v))         LightOn = v.GetInt32() != 0;
+        if (r.TryGetProperty("lightStrength", out v)) LightStrength = Math.Clamp(v.GetInt32(), 0, 100);
+        if (r.TryGetProperty("lightColor", out v))    LightColorArgb = 0xFF000000u | (v.GetUInt32() & 0x00FFFFFFu);
+        if (r.TryGetProperty("lightScope", out v))    LightScope = Math.Clamp(v.GetInt32(), 0, 2);
     }
+
+    /// <summary>
+    /// The water types to keep from <paramref name="types"/>: 0..31, each once, in order. An empty
+    /// (or all-invalid) list would match nothing and paint no water ever, so it means "back to the
+    /// defaults"; the window (or a panel) then shows the defaults.
+    /// </summary>
+    public static int[] NormalizeWaterTypes(IEnumerable<int> types)
+    {
+        var list = new List<int>();
+        foreach (int n in types)
+            if (n >= 0 && n <= 31 && !list.Contains(n)) list.Add(n);
+        return list.Count > 0 ? list.ToArray() : (int[])DefaultWaterTerrainTypes.Clone();
+    }
+
+    /// <summary>
+    /// A copy for the window (published by the tick, read on AC's render thread). The water list is
+    /// shared: it is replaced, never changed in place.
+    /// </summary>
+    public VisionSettings Clone() => (VisionSettings)MemberwiseClone();
 
     // ── Persistence ───────────────────────────────────────────────────────────
 

@@ -1,4 +1,4 @@
-// Detector C — offline lava/acid hazard-cell detection from EnvCell surface textures.
+// Detector C — offline lava/acid hazard-cell detection from EnvCell floor textures.
 //
 // WHY: AC environmental hazards are server-side `HotSpot` weenies, and ~75/120 templates set
 // PropertyBool.Visibility=true, so ACE never broadcasts them to the client (Player_Tracking.cs:58
@@ -8,8 +8,18 @@
 // the EnvCell, sitting in client_portal.dat. Detector C reads that texture directly and pre-emptively
 // marks matching cells hazardous at patrol-build time — no first-hit, no broadcast, no visible object.
 //
+// FLOORS ONLY (2026-10-23): a cell is a hazard when a texture in HazardTextures.txt is on its
+// walkable FLOOR — a render polygon facing up at least as steeply as AC's FloorZ (0.66417) — not
+// merely somewhere in its surface palette. The palette also holds the walls' and ceilings' textures
+// (and sometimes entries no polygon uses), so the palette test flagged cells for their walls: in
+// Tiny Hive (0x0289) the learned 0x0500279D is the Olthoi hive WALL texture (on walls in 3,530
+// cells across the dats, on a floor in none) and boxed the patrol in at the entrance.
+// The floors come from DungeonLOS.GetCellFloorSurfaces (render polygons carry PosSurface, an
+// index into the EnvCell's palette); learning (LearnFromCell) looks at floors too, so it can
+// never learn a wall texture.
+//
 // RESOLUTION CHAIN (all verified):
-//   EnvCell (cell.dat)  -> ushort[numSurfaces] palette
+//   EnvCell (cell.dat)  -> ushort[numSurfaces] palette; CellStruct render polygon PosSurface -> palette index
 //      -> (0x08000000u | surfIdx)  -> Surface file (portal.dat 0x0800xxxx)
 //           -> Surface.Type (uint @ OFFSET 0, NO leading-id skip)
 //                if (Type & (Base1Image 0x2 | Base1ClipMap 0x4)) -> OrigTextureId (uint, next)  <-- HAZARD KEY
@@ -30,14 +40,16 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using RynthCore.Plugin.RynthAi.Raycasting;
+using RynthCore.Install;
 
 namespace RynthCore.Plugin.RynthAi;
 
 internal static class DungeonHazardSurfaces
 {
     // Sibling of NavProfiles / DungeonHazards (LegacyDashboardRenderer._navFolder family).
-    private static readonly string Folder  = @"C:\Games\RynthSuite\RynthAi";
-    private static readonly string SetPath = System.IO.Path.Combine(Folder, "HazardTextures.txt");
+    // Settable so the offline tests can point it at a scratch folder.
+    internal static string Folder = RynthCore.Install.RynthInstallPaths.RynthAiDir;
+    private static string SetPath => System.IO.Path.Combine(Folder, "HazardTextures.txt");
 
     private static readonly object _gate = new();
 
@@ -51,6 +63,11 @@ internal static class DungeonHazardSurfaces
     // Per-landblock computed hazard-cell set (recomputed when the texture set changes).
     private static uint           _cachedLandblock;
     private static HashSet<uint>? _cachedCells;
+
+    // Per-landblock floor textures: cell -> OrigTextureIds on its walkable floor. Dat-only, so it
+    // never goes stale; kept for one landblock (the patrol's).
+    private static uint                                _floorTexLandblock;
+    private static Dictionary<uint, HashSet<uint>>?    _floorTex;
 
     // ── Hazard-texture set (persistent, user-editable) ─────────────────────────
 
@@ -126,6 +143,7 @@ internal static class DungeonHazardSurfaces
             {
                 "# RynthAi Detector C — hazard floor textures (0x05 OrigTextureId), one hex id per line.",
                 "# Flag a lava/acid floor with: /ra hazard surfaces  then  /ra hazard learnhere (or texture add 0x<id>).",
+                "# Only a texture on a cell's walkable floor marks it; the same texture on walls or ceilings does not.",
             };
             var sorted = new List<uint>(_hazardTextures!);
             sorted.Sort();
@@ -204,82 +222,133 @@ internal static class DungeonHazardSurfaces
         return result;
     }
 
-    /// <summary>Distinct non-zero OrigTextureIds present in an EnvCell's surface palette. Never throws.</summary>
-    private static HashSet<uint> CellTextureSet(DatDatabase? cellDat, DatDatabase? portal, uint cellId)
-    {
-        var set = new HashSet<uint>();
-        foreach (var (_, texId) in GetCellSurfaces(cellDat, portal, cellId))
-            if (texId != 0) set.Add(texId);
-        return set;
-    }
-
-    // ── Per-landblock hazard-cell computation ──────────────────────────────────
+    // ── Floor textures ─────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Returns (cached) the EnvCells in the landblock whose surface palette contains a flagged
-    /// hazard texture. Cheap no-op re-call for the same landblock. Pure dat reads. Never throws.
+    /// (Cached) cell → OrigTextureIds on its walkable floor, for every EnvCell of the landblock
+    /// that has a textured floor (DungeonLOS.GetCellFloorSurfaces, resolved through portal.dat).
+    /// Empty without geometry. Never throws.
     /// </summary>
-    public static HashSet<uint> ComputeHazardCells(uint landblockKey, DatDatabase? cellDat, DatDatabase? portal)
+    public static Dictionary<uint, HashSet<uint>> GetFloorTextures(uint landblockKey, DungeonLOS? los, DatDatabase? portal)
     {
         lock (_gate)
-            if (_cachedCells != null && _cachedLandblock == landblockKey) return _cachedCells;
+            if (_floorTex != null && _floorTexLandblock == landblockKey) return _floorTex;
 
-        var cells = new HashSet<uint>();
+        var map = new Dictionary<uint, HashSet<uint>>();
         try
         {
-            if (cellDat != null && portal != null && HazardTextureCount > 0)
+            if (los != null && portal != null)
             {
-                foreach (uint cellId in cellDat.GetLandblockCellIds(landblockKey))
+                foreach (var kv in los.GetCellFloorSurfaces(landblockKey))
                 {
-                    foreach (uint texId in CellTextureSet(cellDat, portal, cellId))
+                    var set = new HashSet<uint>();
+                    foreach (ushort s in kv.Value)
                     {
-                        if (IsHazardTexture(texId)) { cells.Add(cellId); break; }
+                        uint t = ResolveOrigTextureId(portal, s);
+                        if (t != 0) set.Add(t);
                     }
+                    if (set.Count > 0) map[kv.Key] = set;
                 }
             }
         }
         catch { }
 
-        lock (_gate) { _cachedCells = cells; _cachedLandblock = landblockKey; }
+        // Nothing read (geometry not up yet): don't pin an empty answer for this landblock.
+        if (map.Count > 0)
+            lock (_gate) { _floorTex = map; _floorTexLandblock = landblockKey; }
+        return map;
+    }
+
+    /// <summary>OrigTextureIds on one cell's walkable floor (empty when none). For diagnostics. Never throws.</summary>
+    public static HashSet<uint> GetCellFloorTextures(uint cellId, DungeonLOS? los, DatDatabase? portal)
+        => GetFloorTextures(cellId >> 16, los, portal).TryGetValue(cellId, out var set) ? set : new HashSet<uint>();
+
+    // ── Per-landblock hazard-cell computation ──────────────────────────────────
+
+    /// <summary>
+    /// Returns (cached) the EnvCells in the landblock whose walkable floor shows a flagged hazard
+    /// texture. Cheap no-op re-call for the same landblock. Pure dat reads. Never throws.
+    /// </summary>
+    public static HashSet<uint> ComputeHazardCells(uint landblockKey, DungeonLOS? los, DatDatabase? portal)
+    {
+        lock (_gate)
+            if (_cachedCells != null && _cachedLandblock == landblockKey) return _cachedCells;
+
+        var cells = new HashSet<uint>();
+        bool settled = false;   // cache only a real answer, not "geometry not up yet"
+        try
+        {
+            if (los != null && portal != null)
+            {
+                if (HazardTextureCount == 0) settled = true;
+                else
+                {
+                    var floors = GetFloorTextures(landblockKey, los, portal);
+                    cells = HazardCellsFrom(floors);
+                    settled = floors.Count > 0;
+                }
+            }
+        }
+        catch { }
+
+        if (settled)
+            lock (_gate) { _cachedCells = cells; _cachedLandblock = landblockKey; }
+        return cells;
+    }
+
+    /// <summary>The cells whose floor textures include a flagged hazard texture.</summary>
+    internal static HashSet<uint> HazardCellsFrom(IReadOnlyDictionary<uint, HashSet<uint>> floorTexByCell)
+    {
+        var cells = new HashSet<uint>();
+        foreach (var kv in floorTexByCell)
+            foreach (uint t in kv.Value)
+                if (IsHazardTexture(t)) { cells.Add(kv.Key); break; }
         return cells;
     }
 
     // ── Learn-here (precision-guarded auto-flag) ───────────────────────────────
 
     /// <summary>
-    /// Stand in a hazard cell and call this: it flags the cell's surface texture(s) that are RARE
-    /// across the landblock (the texture only lava/acid cells use), while rejecting the common
-    /// floor/wall textures. This is the safe auto-bootstrap — it avoids the catastrophic failure of
-    /// learning a ubiquitous floor texture and banning the whole dungeon. Returns the newly-flagged ids.
+    /// Stand in a hazard cell and call this: it flags the texture(s) on the cell's FLOOR that are
+    /// RARE across the landblock's floors (the texture only lava/acid cells use), while rejecting
+    /// the common floor textures. Wall and ceiling textures are never candidates. This is the safe
+    /// auto-bootstrap — it avoids the catastrophic failure of learning a ubiquitous floor texture
+    /// and banning the whole dungeon. Returns the newly-flagged ids.
     /// </summary>
-    public static List<uint> LearnFromCell(uint cellId, DatDatabase? cellDat, DatDatabase? portal,
+    public static List<uint> LearnFromCell(uint cellId, DungeonLOS? los, DatDatabase? portal,
                                            double rareFractionMax = 0.25)
     {
         var learned = new List<uint>();
         try
         {
-            if (cellDat == null || portal == null) return learned;
-            uint landblockKey = cellId >> 16;
-
-            var freq = new Dictionary<uint, int>();
-            int totalCells = 0;
-            foreach (uint cid in cellDat.GetLandblockCellIds(landblockKey))
-            {
-                var texs = CellTextureSet(cellDat, portal, cid);
-                if (texs.Count == 0) continue;
-                totalCells++;
-                foreach (uint t in texs) freq[t] = freq.GetValueOrDefault(t) + 1;
-            }
-            if (totalCells == 0) return learned;
-
-            foreach (uint t in CellTextureSet(cellDat, portal, cellId))
-            {
-                double frac = freq.GetValueOrDefault(t) / (double)totalCells;
-                if (frac <= rareFractionMax && AddHazardTexture(t))
-                    learned.Add(t);
-            }
+            if (los == null || portal == null) return learned;
+            var floors = GetFloorTextures(cellId >> 16, los, portal);
+            foreach (uint t in RareFloorTextures(cellId, floors, rareFractionMax))
+                if (AddHazardTexture(t)) learned.Add(t);
         }
         catch { }
         return learned;
+    }
+
+    /// <summary>
+    /// The textures on <paramref name="cellId"/>'s floor that are on the floor of at most
+    /// <paramref name="rareFractionMax"/> of the landblock's cells with a textured floor.
+    /// </summary>
+    internal static List<uint> RareFloorTextures(uint cellId, IReadOnlyDictionary<uint, HashSet<uint>> floorTexByCell,
+                                                 double rareFractionMax)
+    {
+        var rare = new List<uint>();
+        if (!floorTexByCell.TryGetValue(cellId, out var here) || here.Count == 0) return rare;
+
+        var freq = new Dictionary<uint, int>();
+        foreach (var texs in floorTexByCell.Values)
+            foreach (uint t in texs) freq[t] = freq.GetValueOrDefault(t) + 1;
+        int totalCells = floorTexByCell.Count;
+        if (totalCells == 0) return rare;
+
+        foreach (uint t in here)
+            if (freq.GetValueOrDefault(t) / (double)totalCells <= rareFractionMax) rare.Add(t);
+        rare.Sort();
+        return rare;
     }
 }

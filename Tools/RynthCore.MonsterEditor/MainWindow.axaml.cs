@@ -29,10 +29,15 @@ public partial class MainWindow : Window
         { "None", "Slash", "Pierce", "Bludgeon", "Fire", "Cold", "Lightning", "Acid", "Nether" };
     public string[] PetOptions { get; } =
         { "PAuto", "Slash", "Pierce", "Bludgeon", "Fire", "Cold", "Lightning", "Acid", "Nether" };
+    /// <summary>RynthAi KiteModes: Default follows the DEFAULT row; PullAway tags then runs clear.</summary>
+    public string[] KiteOptions { get; } =
+        { "Default", "Off", "PullAway" };
 
     private string _charFolder   = string.Empty;
     private string _monstersPath = string.Empty;
     private bool   _initialized;
+    // Set when the monsters file couldn't be read: saving would replace it with what's on screen.
+    private bool   _loadFailed;
 
     public MainWindow()
     {
@@ -51,7 +56,7 @@ public partial class MainWindow : Window
 
         string[] args = Environment.GetCommandLineArgs();
         if (args.Length > 1)
-            OpenCharFolder(args[1].Trim('"'));
+            Open(args[1].Trim('"'));
         else
             await PromptOpenFileAsync();
     }
@@ -65,11 +70,11 @@ public partial class MainWindow : Window
 
         var pick = await sp.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title                  = "Open monsters.json",
+            Title                  = "Open a monster rules file (RynthAi > MonsterProfiles > character.json)",
             AllowMultiple          = false,
             FileTypeFilter         = new[]
             {
-                new FilePickerFileType("Monster Rules") { Patterns = new[] { "monsters.json" } },
+                new FilePickerFileType("Monster Rules") { Patterns = new[] { "*.json" } },
                 new FilePickerFileType("All Files")     { Patterns = new[] { "*" } },
             }
         });
@@ -83,14 +88,21 @@ public partial class MainWindow : Window
 
         string? path = file.TryGetLocalPath();
         if (!string.IsNullOrEmpty(path))
-            OpenCharFolder(Path.GetDirectoryName(path)!);
+            Open(path);
     }
 
-    private void OpenCharFolder(string charFolder)
+    /// <summary>Opens a monsters file, or a character's settings folder (what the plugin passes):
+    /// the folder maps to the file the plugin reads, MonsterProfiles\(server)\(character).json
+    /// (MonsterRulesFile.ResolveRulesPath). Before 2026-10-05 the editor always used
+    /// monsters.json in that folder, which the plugin now moves to MonsterProfiles at load, so the
+    /// editor opened empty and its saves were never read once the plugin's own file existed.</summary>
+    private void Open(string pathOrFolder)
     {
-        _charFolder   = charFolder;
-        _monstersPath = Path.Combine(charFolder, "monsters.json");
-        Title = $"RynthAi — Monster Rules — {Path.GetFileName(charFolder)}";
+        _monstersPath = MonsterRulesFile.ResolveRulesPath(pathOrFolder);
+        _charFolder   = Directory.Exists(pathOrFolder) ? pathOrFolder : MonsterRulesFile.CharFolderForRulesPath(_monstersPath);
+        string who = Path.GetFileNameWithoutExtension(_monstersPath);
+        if (who.Equals("monsters", StringComparison.OrdinalIgnoreCase)) who = Path.GetFileName(_charFolder);
+        Title = $"RynthAi — Monster Rules — {who}";
 
         LoadWeaponOptions();
         LoadRules();
@@ -128,17 +140,17 @@ public partial class MainWindow : Window
     {
         foreach (var r in Rules) r.PropertyChanged -= Rule_Changed;
         Rules.Clear();
+        _loadFailed = false;
 
-        if (File.Exists(_monstersPath))
+        try
         {
-            try
-            {
-                string json  = File.ReadAllText(_monstersPath);
-                var    rules = JsonSerializer.Deserialize(json, EditorJsonContext.Default.ListMonsterRule);
-                if (rules != null)
-                    foreach (var r in rules) AddRule(r);
-            }
-            catch (Exception ex) { SetStatus($"Load error: {ex.Message}", error: true); return; }
+            foreach (var r in MonsterRulesFile.Load(_monstersPath)) AddRule(r);
+        }
+        catch (Exception ex)
+        {
+            _loadFailed = true;
+            SetStatus($"Load error: {ex.Message} - not saving over {_monstersPath}; fix the file and reopen it.", error: true);
+            return;
         }
 
         EnsureDefault();
@@ -187,12 +199,10 @@ public partial class MainWindow : Window
 
     private void Save()
     {
-        if (string.IsNullOrEmpty(_monstersPath)) return;
+        if (string.IsNullOrEmpty(_monstersPath) || _loadFailed) return;
         try
         {
-            Directory.CreateDirectory(_charFolder);
-            string json = JsonSerializer.Serialize(new List<MonsterRule>(Rules), EditorJsonContext.Default.ListMonsterRule);
-            File.WriteAllText(_monstersPath, json);
+            MonsterRulesFile.Save(_monstersPath, Rules);
             SetStatus($"Saved {Rules.Count} rule(s) — {DateTime.Now:HH:mm:ss}");
         }
         catch (Exception ex) { SetStatus($"Save error: {ex.Message}", error: true); }

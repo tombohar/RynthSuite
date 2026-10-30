@@ -85,6 +85,13 @@ jobs:
         dotnet run --project "$env:GITHUB_WORKSPACE\Tools\RynthCore.LootSdkTests\RynthCore.LootSdkTests.csproj" -c Release
         if ($LASTEXITCODE -ne 0) { throw "LootSdk golden tests FAILED" }
 
+    # AutoVendor pure-logic tests (rule judging, buy-up-to-N, batch planning, splits).
+    - name: Validation gate - AutoVendor tests
+      shell: pwsh
+      run: |
+        dotnet run --project "$env:GITHUB_WORKSPACE/Tools/RynthCore.AutoVendorTests/RynthCore.AutoVendorTests.csproj" -c Release
+        if ($LASTEXITCODE -ne 0) { throw "AutoVendor tests FAILED" }
+
     # ── Build LootEditor ───────────────────────────────────────────────────────
     - name: Build LootEditor
       shell: pwsh

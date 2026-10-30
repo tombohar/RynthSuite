@@ -15,7 +15,11 @@ public static unsafe class PluginExports
     private static int Init(RynthCoreApiNative* api) => Runtime.Init(api);
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginShutdown", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static void Shutdown() => Runtime.Shutdown();
+    public static void Shutdown()
+    {
+        try { Runtime.Shutdown(); }   // an exception out of a native export fail-fasts the client
+        catch { }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnLoginComplete", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnLoginComplete() => Runtime.OnLoginComplete();
@@ -24,16 +28,21 @@ public static unsafe class PluginExports
     public static void OnLogout() => Runtime.OnLogout();
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginName", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetName() => RynthChatPlugin.NamePointer;
+    public static IntPtr GetName()
+    {
+        try { return RynthChatPlugin.NamePointer; }
+        catch { return IntPtr.Zero; }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginVersion", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetVersion() => RynthChatPlugin.VersionPointer;
+    public static IntPtr GetVersion()
+    {
+        try { return RynthChatPlugin.VersionPointer; }
+        catch { return IntPtr.Zero; }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginTick", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void Tick() => Runtime.OnTick();
-
-    [UnmanagedCallersOnly(EntryPoint = "RynthPluginRender", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static void Render() => Runtime.OnRender();
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnChatWindowText", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnChatWindowText(IntPtr textUtf16, int chatType, IntPtr eatFlag) => Runtime.OnChatWindowText(textUtf16, chatType, eatFlag);
@@ -65,6 +74,18 @@ public static unsafe class PluginExports
         {
             return IntPtr.Zero;
         }
+    }
+
+    /// <summary>
+    /// How many lines the scrollback keeps (the engine's "Chat history" setting; 0.3.0).
+    /// Returns the number applied (clamped to 100..10000), or 0 before the plugin is up.
+    /// Engines before it never call this, and the plugin keeps ChatBuffer.DefaultCapacity.
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthChatSetCapacity", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int SetCapacity(int lines)
+    {
+        try { return Runtime.Plugin?.SetScrollbackCapacity(lines) ?? 0; }
+        catch { return 0; }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthChatSendLine", CallConvs = new[] { typeof(CallConvCdecl) })]

@@ -15,6 +15,10 @@
     <RootNamespace>RynthCore.Plugin.RynthNav</RootNamespace>
     <AssemblyName>RynthCore.Plugin.RynthNav</AssemblyName>
     <Platforms>x86</Platforms>
+    <!-- Plugin manifest (embedded in the DLL; Plugins\Directory.Build.targets). minEngineApi is the
+         highest API use NOT behind a Has*/version check. Live object ids (v69) and WieldItem (v70) are behind Has* checks; without them portal avoidance/aiming and wand wielding fall back. -->
+    <RynthPluginMinEngineApi>66</RynthPluginMinEngineApi>
+    <RynthPluginDescription>Walks you to coordinates and towns, with route planning and the Atlas. Downloads its map (about 540 MB).</RynthPluginDescription>
     <!-- Publish straight to the launcher-registered home (mirrors RynthVision). -->
     <PublishDir>C:\Games\RynthSuite\RynthNav\</PublishDir>
   </PropertyGroup>
@@ -34,6 +38,19 @@
   <ItemGroup>
     <!-- Shared travel-route planner (same source the offline RynthNav.PortalGraph tool validates). -->
     <Compile Include="..\..\Tools\RynthNav.PortalGraph\PortalRoute.cs" Link="PortalRoute.cs" />
+    <!-- Interfaces shared with other RynthSuite plugins (RynthAi uses RynthNav.Path). -->
+    <Compile Include="..\Shared\RynthNavPathApi.cs" Link="Shared\RynthNavPathApi.cs" />
+    <!-- One logged, guarded way to use an object (who used what, and why). -->
+    <Compile Include="..\Shared\UseAudit.cs" Link="Shared\UseAudit.cs" />
+    <!-- Text in the world on the Nav3D buffer (the path markers' labels; RynthAi's waypoint labels use it too). -->
+    <Compile Include="..\Shared\Nav3DText.cs" Link="Shared\Nav3DText.cs" />
+    <!-- Install folders (RynthAi's NavProfiles, where "save as nav route" writes). Read only. -->
+    <Compile Include="..\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+    <!-- How a chat command answers (2026-10-28): the shared reply queue and colours. -->
+    <Compile Include="..\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+    <!-- RynthAi's own nav file reader/writer (uTank2 NAV 1.2), so a saved route is written exactly
+         the way RynthAi writes its own. Self-contained (System.IO only). -->
+    <Compile Include="..\RynthCore.Plugin.RynthAi\LegacyUi\NavRouteParser.cs" Link="Shared\NavRouteParser.cs" />
   </ItemGroup>
 
   <ItemGroup>

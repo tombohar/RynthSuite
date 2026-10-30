@@ -1,0 +1,95 @@
+# RynthAi creature-type weaknesses: the fallback for monsters that aren't in
+# creature_resists.tsv (custom monsters on other servers). Generated from the average
+# resists of each type's creatures in the Aelrynth world database.
+#   id|Type|name keywords|Element multiplier,... (most damage first)
+# A multiplier is damage taken (1.0 = full, 0.5 = half). The bot uses the first element
+# in the list it can attack with. To change a type, put its line (same id) in
+# C:\Games\RynthSuite\RynthAi\CreatureData\creature_types.txt; lines there win.
+# Keywords match whole words in a monster's name when its type isn't known yet.
+1|Olthoi|Olthoi|Nether 1.00,Bludgeon 0.91,Pierce 0.86,Cold 0.72,Slash 0.67,Fire 0.65,Lightning 0.35,Acid 0.32
+2|Banderling|Banderling|Lightning 1.16,Nether 1.00,Fire 0.96,Cold 0.76,Slash 0.73,Acid 0.64,Pierce 0.63,Bludgeon 0.51
+3|Drudge|Drudge|Fire 1.11,Cold 1.03,Nether 1.00,Slash 0.85,Acid 0.83,Bludgeon 0.81,Lightning 0.79,Pierce 0.66
+4|Mosswart|Mosswart|Nether 1.02,Fire 0.99,Lightning 0.94,Bludgeon 0.79,Pierce 0.77,Acid 0.67,Slash 0.58,Cold 0.53
+5|Lugian|Lugian|Nether 1.00,Lightning 0.95,Acid 0.79,Pierce 0.68,Bludgeon 0.63,Slash 0.62,Cold 0.48,Fire 0.33
+6|Tumerok|Tumerok|Nether 1.00,Slash 0.91,Fire 0.72,Cold 0.69,Pierce 0.68,Bludgeon 0.67,Lightning 0.67,Acid 0.66
+7|Mite|Mite|Nether 1.00,Fire 0.93,Acid 0.93,Pierce 0.82,Bludgeon 0.80,Lightning 0.78,Cold 0.75,Slash 0.74
+8|Tusker|Tusker|Nether 1.00,Fire 0.97,Pierce 0.95,Cold 0.68,Acid 0.68,Bludgeon 0.67,Slash 0.48,Lightning 0.30
+9|PhyntosWasp|Phyntos Wasp|Nether 1.00,Bludgeon 0.87,Slash 0.82,Pierce 0.82,Cold 0.67,Acid 0.67,Fire 0.62,Lightning 0.54
+10|Rat||Bludgeon 1.14,Fire 1.01,Nether 1.00,Pierce 0.97,Lightning 0.92,Slash 0.69,Acid 0.68,Cold 0.61
+13|Golem|Golem|Bludgeon 2.70,Acid 2.66,Cold 2.57,Fire 2.56,Pierce 2.53,Slash 2.48,Nether 1.00,Lightning 0.80
+14|Undead|Undead|Nether 1.00,Fire 0.84,Slash 0.74,Bludgeon 0.68,Acid 0.66,Lightning 0.62,Pierce 0.51,Cold 0.39
+15|Gromnie|Gromnie|Nether 1.00,Pierce 0.82,Bludgeon 0.82,Slash 0.80,Acid 0.71,Cold 0.70,Lightning 0.68,Fire 0.60
+16|Reedshark|Reedshark|Nether 1.02,Cold 0.80,Slash 0.79,Pierce 0.75,Acid 0.74,Lightning 0.72,Bludgeon 0.68,Fire 0.56
+17|Armoredillo|Armoredillo|Nether 1.00,Pierce 0.92,Lightning 0.85,Cold 0.75,Acid 0.59,Slash 0.58,Bludgeon 0.52,Fire 0.49
+19|Virindi|Virindi|Nether 1.00,Slash 0.86,Pierce 0.80,Bludgeon 0.80,Fire 0.80,Acid 0.79,Cold 0.48,Lightning 0.47
+20|Wisp||Slash 1.04,Nether 1.00,Pierce 0.90,Bludgeon 0.86,Lightning 0.56,Acid 0.42,Fire 0.40,Cold 0.39
+21|Knathtead|K'nath|Nether 1.00,Fire 0.83,Acid 0.83,Lightning 0.82,Slash 0.74,Pierce 0.73,Cold 0.67,Bludgeon 0.54
+22|Shadow|Shadow|Nether 0.97,Slash 0.88,Fire 0.87,Bludgeon 0.63,Pierce 0.52,Lightning 0.49,Acid 0.27,Cold 0.15
+23|Mattekar|Mattekar|Nether 1.00,Pierce 0.90,Fire 0.88,Bludgeon 0.86,Acid 0.75,Slash 0.59,Cold 0.45,Lightning 0.34
+25|Rabbit||Fire 1.50,Slash 1.00,Pierce 1.00,Bludgeon 1.00,Cold 1.00,Acid 1.00,Lightning 1.00,Nether 1.00
+26|Sclavus|Sclavus|Nether 1.00,Cold 0.98,Slash 0.95,Pierce 0.75,Fire 0.75,Bludgeon 0.46,Acid 0.27,Lightning 0.27
+27|ShallowsShark|Shallows|Nether 1.02,Pierce 0.88,Lightning 0.87,Slash 0.67,Bludgeon 0.64,Cold 0.62,Fire 0.61,Acid 0.54
+28|Monouga|Monouga|Nether 1.00,Cold 0.96,Pierce 0.91,Acid 0.82,Slash 0.70,Lightning 0.68,Fire 0.66,Bludgeon 0.60
+29|Zefir|Zefir|Nether 1.00,Slash 0.95,Bludgeon 0.92,Acid 0.80,Pierce 0.75,Cold 0.74,Lightning 0.53,Fire 0.51
+30|Skeleton|Skeleton|Nether 0.99,Bludgeon 0.89,Slash 0.62,Fire 0.59,Acid 0.47,Lightning 0.44,Pierce 0.37,Cold 0.35
+31|Human|Human|Nether 1.00,Lightning 0.77,Pierce 0.62,Acid 0.61,Bludgeon 0.58,Slash 0.57,Cold 0.55,Fire 0.50
+32|Shreth|Shreth|Cold 1.18,Bludgeon 1.00,Nether 1.00,Pierce 0.78,Slash 0.67,Acid 0.67,Lightning 0.61,Fire 0.56
+33|Chittick|Chittick|Pierce 1.00,Nether 1.00,Acid 0.85,Cold 0.71,Lightning 0.67,Fire 0.63,Slash 0.58,Bludgeon 0.55
+34|Moarsman||Nether 1.00,Slash 0.83,Cold 0.80,Lightning 0.78,Pierce 0.66,Fire 0.61,Acid 0.61,Bludgeon 0.55
+35|OlthoiLarvae|Larvae|Nether 1.00,Pierce 0.89,Bludgeon 0.87,Slash 0.70,Cold 0.69,Fire 0.68,Lightning 0.37,Acid 0.36
+36|Slithis|Slithis|Nether 1.00,Fire 0.72,Bludgeon 0.63,Slash 0.58,Acid 0.58,Pierce 0.51,Cold 0.25,Lightning 0.17
+38|FireElemental||Nether 1.00,Cold 0.72,Slash 0.44,Pierce 0.44,Bludgeon 0.44,Acid 0.39,Lightning 0.30,Fire 0.04
+39|Snowman|Snowman|Nether 1.00,Fire 0.99,Slash 0.91,Bludgeon 0.91,Acid 0.91,Lightning 0.91,Pierce 0.85,Cold 0.00
+40|Unknown||Nether 1.00,Slash 0.81,Pierce 0.81,Bludgeon 0.79,Acid 0.57,Lightning 0.53,Fire 0.46,Cold 0.39
+41|Bunny|Bunny|Fire 1.19,Nether 1.00,Pierce 0.88,Slash 0.86,Bludgeon 0.85,Acid 0.84,Lightning 0.84,Cold 0.82
+42|LightningElemental||Nether 1.00,Acid 0.74,Slash 0.47,Pierce 0.47,Bludgeon 0.47,Cold 0.37,Fire 0.30,Lightning 0.00
+43|Rockslide||Bludgeon 1.00,Nether 1.00,Pierce 0.90,Slash 0.53,Fire 0.40,Lightning 0.40,Acid 0.33,Cold 0.10
+44|Grievver|Grievver|Nether 1.00,Slash 0.99,Pierce 0.76,Bludgeon 0.68,Fire 0.38,Lightning 0.33,Acid 0.28,Cold 0.26
+45|Niffis|Niffis|Nether 0.94,Slash 0.92,Cold 0.81,Acid 0.81,Bludgeon 0.55,Pierce 0.53,Fire 0.50,Lightning 0.50
+46|Ursuin|Ursuin|Pierce 1.00,Nether 1.00,Fire 0.86,Slash 0.59,Bludgeon 0.59,Cold 0.59,Acid 0.59,Lightning 0.59
+47|Crystal|Crystal|Nether 1.00,Bludgeon 0.85,Slash 0.76,Pierce 0.74,Lightning 0.71,Cold 0.59,Fire 0.45,Acid 0.44
+48|HollowMinion|Hollow|Nether 1.00,Cold 0.65,Slash 0.49,Pierce 0.49,Acid 0.49,Bludgeon 0.32,Fire 0.24,Lightning 0.24
+49|Scarecrow|Scarecrow|Fire 1.00,Nether 1.00,Slash 0.90,Lightning 0.90,Bludgeon 0.53,Pierce 0.51,Cold 0.51,Acid 0.51
+50|Idol||Nether 1.00,Slash 0.96,Fire 0.87,Bludgeon 0.67,Pierce 0.50,Lightning 0.50,Acid 0.20,Cold 0.10
+51|Empyrean||Nether 1.00,Slash 0.60,Pierce 0.60,Bludgeon 0.60,Fire 0.00,Cold 0.00,Acid 0.00,Lightning 0.00
+52|Hopeslayer||Fire 1.50,Slash 1.00,Pierce 1.00,Bludgeon 1.00,Cold 1.00,Acid 1.00,Lightning 1.00,Nether 1.00
+53|Doll|Doll|Nether 1.00,Bludgeon 0.94,Slash 0.93,Pierce 0.84,Fire 0.84,Acid 0.84,Cold 0.59,Lightning 0.57
+54|Marionette|Marionette|Nether 1.00,Slash 0.99,Fire 0.68,Pierce 0.67,Acid 0.64,Cold 0.60,Lightning 0.58,Bludgeon 0.51
+55|Carenzi|Carenzi|Bludgeon 1.00,Nether 1.00,Cold 0.90,Slash 0.80,Acid 0.76,Lightning 0.74,Pierce 0.60,Fire 0.60
+56|Siraluun|Siraluun|Cold 1.00,Acid 1.00,Nether 1.00,Bludgeon 0.95,Slash 0.80,Pierce 0.60,Fire 0.60,Lightning 0.50
+57|AunTumerok||Nether 1.00,Slash 0.78,Pierce 0.78,Bludgeon 0.78,Fire 0.78,Cold 0.78,Acid 0.78,Lightning 0.78
+58|HeaTumerok||Nether 1.00,Cold 0.87,Pierce 0.86,Fire 0.86,Acid 0.85,Lightning 0.84,Slash 0.82,Bludgeon 0.82
+59|Simulacrum|Simulacrum|Nether 1.00,Bludgeon 0.88,Pierce 0.85,Slash 0.84,Fire 0.80,Lightning 0.76,Acid 0.70,Cold 0.65
+60|AcidElemental||Nether 1.00,Lightning 0.60,Slash 0.39,Pierce 0.39,Bludgeon 0.39,Cold 0.36,Fire 0.24,Acid 0.00
+61|FrostElemental||Nether 0.99,Fire 0.66,Slash 0.49,Pierce 0.48,Bludgeon 0.48,Lightning 0.41,Acid 0.38,Cold 0.03
+62|Elemental||Nether 1.00,Slash 0.59,Bludgeon 0.59,Pierce 0.57,Acid 0.46,Fire 0.41,Lightning 0.40,Cold 0.39
+63|Statue|Statue|Nether 1.00,Acid 0.69,Lightning 0.61,Fire 0.50,Cold 0.50,Bludgeon 0.26,Slash 0.15,Pierce 0.15
+64|Wall|Wall|Nether 1.00,Bludgeon 0.72,Slash 0.69,Pierce 0.69,Acid 0.69,Lightning 0.69,Fire 0.68,Cold 0.64
+65|AlteredHuman|Martine|Nether 1.00,Slash 0.10,Pierce 0.10,Bludgeon 0.10,Fire 0.10,Cold 0.10,Acid 0.10,Lightning 0.10
+68|DarkSarcophagus||Nether 1.00,Fire 0.50,Slash 0.00,Pierce 0.00,Bludgeon 0.00,Cold 0.00,Acid 0.00,Lightning 0.00
+69|Chicken|Chicken Chick|Fire 1.00,Nether 1.00,Lightning 0.90,Bludgeon 0.89,Slash 0.81,Cold 0.81,Pierce 0.77,Acid 0.77
+70|GotrokLugian|Gotrok|Lightning 1.05,Nether 1.00,Acid 0.82,Pierce 0.67,Slash 0.64,Bludgeon 0.63,Cold 0.43,Fire 0.28
+71|Margul|Margul|Nether 1.00,Bludgeon 0.95,Cold 0.95,Lightning 0.95,Slash 0.85,Pierce 0.85,Fire 0.74,Acid 0.74
+75|Burun|Burun|Nether 1.00,Pierce 0.75,Cold 0.74,Slash 0.59,Fire 0.59,Bludgeon 0.47,Lightning 0.34,Acid 0.12
+77|Ghost|Spectral|Nether 1.01,Bludgeon 0.60,Fire 0.56,Slash 0.54,Acid 0.48,Pierce 0.46,Lightning 0.44,Cold 0.39
+78|Fiun|Fiun|Nether 1.00,Fire 0.94,Lightning 0.94,Slash 0.78,Pierce 0.74,Acid 0.73,Bludgeon 0.66,Cold 0.60
+79|Eater|Eater|Slash 1.19,Pierce 1.17,Nether 1.00,Fire 0.99,Cold 0.99,Lightning 0.99,Bludgeon 0.61,Acid 0.61
+80|Penguin|Penguin|Fire 1.30,Nether 1.00,Lightning 0.90,Slash 0.86,Pierce 0.75,Acid 0.75,Bludgeon 0.66,Cold 0.60
+81|Ruschk|Ruschk|Fire 1.06,Nether 1.00,Lightning 0.97,Pierce 0.96,Bludgeon 0.89,Slash 0.88,Acid 0.81,Cold 0.79
+82|Thrungus|Thrungus|Nether 1.00,Fire 0.89,Lightning 0.70,Cold 0.63,Pierce 0.62,Slash 0.61,Acid 0.50,Bludgeon 0.47
+83|ViamontianKnight|Viamontian|Lightning 1.20,Fire 1.17,Nether 1.00,Bludgeon 0.90,Cold 0.90,Acid 0.90,Slash 0.80,Pierce 0.80
+84|Remoran|Remoran|Nether 0.96,Bludgeon 0.52,Pierce 0.47,Fire 0.42,Lightning 0.39,Slash 0.38,Cold 0.38,Acid 0.38
+85|Swarm||Nether 1.00,Slash 0.65,Bludgeon 0.65,Fire 0.65,Pierce 0.40,Cold 0.40,Acid 0.40,Lightning 0.40
+86|Moar|Moar|Lightning 1.00,Nether 1.00,Slash 0.85,Cold 0.79,Acid 0.76,Pierce 0.62,Fire 0.52,Bludgeon 0.43
+89|Mukkir|Mukkir|Nether 1.00,Pierce 0.88,Bludgeon 0.88,Slash 0.65,Fire 0.63,Cold 0.63,Acid 0.38,Lightning 0.23
+91|Food||Nether 1.00,Cold 0.90,Pierce 0.88,Lightning 0.88,Fire 0.86,Slash 0.79,Bludgeon 0.73,Acid 0.61
+92|ParadoxOlthoi|Touched Paradox|Nether 1.00,Bludgeon 0.86,Pierce 0.84,Slash 0.68,Fire 0.58,Cold 0.58,Lightning 0.39,Acid 0.32
+93|Harvest|Pumpkin|Nether 1.00,Bludgeon 0.77,Pierce 0.73,Slash 0.70,Fire 0.61,Acid 0.56,Lightning 0.47,Cold 0.39
+95|Apparition||Nether 1.00,Bludgeon 0.70,Pierce 0.65,Slash 0.60,Fire 0.35,Cold 0.35,Acid 0.35,Lightning 0.35
+96|Aerbax|Aerbax's|Nether 0.95,Pierce 0.94,Slash 0.92,Fire 0.92,Acid 0.87,Bludgeon 0.65,Cold 0.43,Lightning 0.43
+97|Touched||Nether 1.00,Slash 0.01,Pierce 0.01,Bludgeon 0.01,Fire 0.01,Cold 0.01,Acid 0.01,Lightning 0.01
+98|BlightedMoarsman||Nether 1.00,Lightning 0.94,Slash 0.89,Cold 0.83,Acid 0.81,Pierce 0.56,Bludgeon 0.50,Fire 0.49
+99|GearKnight|Gear Gearknight|Acid 1.29,Nether 1.00,Lightning 0.96,Bludgeon 0.51,Cold 0.51,Slash 0.50,Pierce 0.50,Fire 0.50
+100|Gurog|Gurog|Nether 1.00,Pierce 0.80,Fire 0.80,Lightning 0.40,Slash 0.31,Bludgeon 0.31,Cold 0.31,Acid 0.31
+101|Anekshay||Nether 1.07,Acid 0.76,Bludgeon 0.65,Cold 0.45,Lightning 0.40,Fire 0.34,Pierce 0.33,Slash 0.29
+28640|Type28640||Slash 1.20,Pierce 1.20,Fire 1.00,Cold 1.00,Lightning 1.00,Nether 1.00,Bludgeon 0.60,Acid 0.60

@@ -164,6 +164,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         private static void Log(string msg)
         {
             System.Diagnostics.Debug.WriteLine($"[LandblockInfo] {msg}");
+            RynthLog.Trace(LogCat.Raycast, $"[LandblockInfo] {msg}"); // visible via /ra trace raycast
         }
     }
 
@@ -282,6 +283,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         private static void Log(string msg)
         {
             System.Diagnostics.Debug.WriteLine($"[EnvCell] {msg}");
+            RynthLog.Trace(LogCat.Raycast, $"[EnvCell] {msg}"); // visible via /ra trace raycast
         }
     }
 
@@ -585,6 +587,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         private static void Log(string msg)
         {
             System.Diagnostics.Debug.WriteLine($"[Setup] {msg}");
+            RynthLog.Trace(LogCat.Raycast, $"[Setup] {msg}"); // visible via /ra trace raycast
         }
     }
 
@@ -755,6 +758,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         private static void Log(string msg)
         {
             System.Diagnostics.Debug.WriteLine($"[GfxObj] {msg}");
+            RynthLog.Trace(LogCat.Raycast, $"[GfxObj] {msg}"); // visible via /ra trace raycast
         }
     }
 

@@ -68,7 +68,9 @@ internal sealed class RadarVisitedLayer
     [JsonPropertyName("strips")] public float[] Strips { get; set; } = Array.Empty<float>();
 }
 
-// Kind: 0 = monster, 1 = npc, 2 = portal, 3 = door
+// Kind (RadarKind in the engine's UI/Data/RadarSnapshotJson.cs): 0 monster, 1 NPC, 2 portal,
+// 3 door; appended 2026-10-04: 4 player, 5 fellow, 6 your pet, 7 vendor, 8 corpse, 9 your
+// corpse, 10 lifestone, 11 item on the ground. Engines before that drop kinds 4+ (not drawn).
 internal sealed class RadarMarker
 {
     [JsonPropertyName("kind")]  public byte    Kind  { get; set; }
@@ -76,6 +78,9 @@ internal sealed class RadarMarker
     [JsonPropertyName("y")]     public float   Y     { get; set; }
     [JsonPropertyName("z")]     public float   Z     { get; set; }
     [JsonPropertyName("label")] public string? Label { get; set; }
+    // The object's id, so the engine's radar click selects exactly this object
+    // (engines from 2026-10-01). Older engines skip the unknown field.
+    [JsonPropertyName("id")]    public uint    Id    { get; set; }
 }
 
 [JsonSerializable(typeof(RadarSnapshotPayload))]

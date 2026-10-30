@@ -7,7 +7,7 @@ namespace RynthCore.Plugin.RynthChat;
 public sealed class RynthChatPlugin : RynthPluginBase
 {
     internal static readonly IntPtr NamePointer    = Marshal.StringToHGlobalAnsi("RynthChat");
-    internal static readonly IntPtr VersionPointer = Marshal.StringToHGlobalAnsi("0.1.0");
+    internal static readonly IntPtr VersionPointer = Marshal.StringToHGlobalAnsi("0.3.0");
 
     private readonly ChatBuffer _buffer = new();
 
@@ -29,6 +29,9 @@ public sealed class RynthChatPlugin : RynthPluginBase
 
     public override void OnChatWindowText(string? text, int chatType, ref int eat)
     {
+        // A plugin earlier in the dispatch ate the line (RynthAi's Meta Manager eats the
+        // reply to its own /myquests poll): keep it out of the chat window.
+        if (eat != 0) return;
         _buffer.Add(text, chatType);
     }
 
@@ -38,6 +41,8 @@ public sealed class RynthChatPlugin : RynthPluginBase
     }
 
     internal string BuildScrollbackJson(ulong sinceSeq) => _buffer.BuildJson(sinceSeq);
+
+    internal int SetScrollbackCapacity(int lines) => _buffer.SetCapacity(lines);
 
     // Called on the game thread from the engine's deferred chat dispatch
     // (Win32Backend posts WM_RYNTHCORE_CHAT so this runs on a fresh, non-reentrant

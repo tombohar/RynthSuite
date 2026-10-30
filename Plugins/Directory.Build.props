@@ -1,0 +1,24 @@
+<Project>
+  <!--
+    NativeAOT GC segment size for every plugin (hex, 8 MB). Each NativeAOT DLL
+    runs its own GC, which reserves SOH + LOH + POH segments up front: 16 MB
+    each by default on x86, 48 MB of acclient's 4 GB address space per plugin
+    even when nearly empty, and never returned because a NativeAOT DLL can't be
+    unloaded (every engine hot-reload loads fresh copies). 8 MB segments
+    reserve 16 MB. Measured 2026-09-29 with a win-x86 NativeAOT probe; the
+    runtime ignores a 0x prefix, so the value is bare hex.
+  -->
+  <ItemGroup>
+    <IlcArg Include="--runtimeopt:GCSegmentSize=800000" />
+  </ItemGroup>
+
+  <!--
+    Plugin manifest fields shared by every RynthSuite plugin (Directory.Build.targets embeds the
+    manifest; each csproj sets its own RynthPluginMinEngineApi and description).
+  -->
+  <PropertyGroup>
+    <RynthPluginAuthor>RynthSuite</RynthPluginAuthor>
+    <RynthPluginHomepage>https://aelrynth.com/rynth.html</RynthPluginHomepage>
+    <RynthPluginLicense>MIT</RynthPluginLicense>
+  </PropertyGroup>
+</Project>

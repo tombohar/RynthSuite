@@ -658,7 +658,8 @@ ifthen[value, trueexpr, falseexpr]
 
 delayexec[delay, text]
     Schedules text to be evaluated as an expression after delay milliseconds.
-    Returns "1" immediately. The evaluation runs on a background thread —
+    Returns the job's id (1, 2, 3 ... as ub-IT), which clearexec[id] cancels. The
+    evaluation runs on a background thread —
     avoid using delayexec with expressions that modify shared variables
     concurrently with the meta tick loop.
     delay: milliseconds (1 second = 1000).
@@ -727,6 +728,19 @@ getunixtime[]
     Example: getunixtime[]                               →  e.g. "1744329600"
     Example: setvar[t, getunixtime[]]                    →  snapshot a timestamp
     Example: getunixtime[] - getvar[t] > 60              →  true if 60s have elapsed
+
+secondssincelastkill[]
+    Returns the whole number of seconds since your character's last kill.
+    Only kills credited to you count (the server's "you killed it" notice);
+    deaths you only see in chat, and your fellows' kills, do not.
+    Before your first kill this session it counts from when the macro was last
+    started, or from login (or a RynthAi reload) if the macro hasn't been started
+    since, so a meta can still react when nothing has been killed at all.
+    After a kill it is always the time since that kill, also across a macro stop/start.
+    The meta condition "No Kills Within Minutes" (.af: NoKillsInMins 5) uses the same clock.
+    Test in chat:  /ra mexec secondssincelastkill[]
+    Example: secondssincelastkill[]                 →  e.g. "42"
+    Example: secondssincelastkill[] >= 300          →  true after 5 minutes without a kill
 
 getaccounthash[]
     Returns a lowercase MD5 hex string of the current account name.
@@ -1676,6 +1690,23 @@ ragetsetting[setting]
     Example: ragetsetting[EnableCombat]           →  "1" or "0"
     Example: ragetsetting[MonsterRange]           →  "50"
     Example: cnumber[ragetsetting[MonsterRange]]  →  50 (as number)
+
+vtsetsetting[option, value] / vtgetsetting[option]
+    The same as '/vt opt set|get': VTank option names and VTank units. A VTank
+    distance option (AttackDistance, ApproachDistance, DoorOpenRange, OpenDoorRange,
+    AttackRange, RingDistance, CorpseApproachRange[-Min|-Max], PetCustomRange,
+    NavCloseStopRange) given as a value up to 1 is landblock units (x240 = yards);
+    a value above 1 is taken as yards already. vtgetsetting reads such a distance
+    back in landblock units. No other option is scaled. rasetsetting/ragetsetting use
+    RynthAi's own names and units, always.
+
+ub-IT functions answered here (ExpressionEngine.UbCompat.cs): actiontrymove, actiontrysplit,
+actiontrydrop (always "0": nothing drops items), wobjectgethealthvalue / staminavalue /
+manavalue, hascorpsebeenopenedbyme, getcorpsesunopenedbyme, iscasting, getcooldownexpiration,
+spelldata, vtmacroenabled, clearexec, canrefreshquests, enlightenmentmaterials, xpreset /
+xpmeter / xpduration / xptotal / lumtotal / xpavg / lumavg. Functions about ub-IT's own HUDs,
+Decal views and character select (statushud, uiview*, getcharacterindex, netclients, ...)
+answer with the value ub-IT gives when there is nothing to report.
 
 Supported setting names:
     Booleans: EnableCombat, EnableBuffing, EnableNavigation, EnableLooting,

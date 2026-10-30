@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Test runner for RynthAi's pure logic (no game, no engine, no host). The plugin itself is
+    a NativeAOT x86 library on net10.0-windows, so a plain net10.0 exe cannot reference it
+    (NU1201); instead the dependency-free source files are compiled in here directly, the
+    same way RynthCore.MissileArcTests and RynthCore.AutoVendorTests do it. See README.md
+    for how to reach code that is not dependency-free yet (seams, and the project-reference
+    route, which works only as a net10.0-windows win-x86 exe).
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail; a name filter can follow, see Program.cs)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <RootNamespace>RynthCore.RynthAiTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Nav: .nav route parsing / writing (LegacyUi/NavRouteParser.cs has no dependencies). -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\LegacyUi\NavRouteParser.cs" Link="Linked\NavRouteParser.cs" />
+    <!-- Combat: the melee/missile stall ladder (pure timing state, time passed in). -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Combat\CombatStallWatchdog.cs" Link="Linked\CombatStallWatchdog.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Combat\PointBlankFacing.cs" Link="Linked\PointBlankFacing.cs" />
+    <!-- Weapon weakness selection: element ranking per monster. Its only outside reference is
+         CreatureProfileStore.Folder (the user override folder), faked in Fakes\. -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\CreatureData\CreatureWeakness.cs" Link="Linked\CreatureWeakness.cs" />
+    <!-- Learned per-monster damage (System only), for the Aelrynth difficulty-tier tests. -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\CreatureData\MonsterDamageStore.cs" Link="Linked\MonsterDamageStore.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\CreatureData\PlayerWeenies.cs" Link="Linked\PlayerWeenies.cs" />
+    <!-- Loot: the measured loot-timer baseline and its [LootSettings] log line. -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\LootBaseline.cs" Link="Linked\LootBaseline.cs" />
+    <!-- RynthChat: the channel classifier (no dependencies). -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthChat\ChatClassifier.cs" Link="Linked\ChatClassifier.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- CreatureWeakness reads these from the executing assembly under the plugin's resource
+         names, so they are embedded here under the same logical names. -->
+    <EmbeddedResource Include="..\..\Plugins\RynthCore.Plugin.RynthAi\CreatureData\creature_resists.tsv" Link="Linked\creature_resists.tsv" LogicalName="RynthCore.Plugin.RynthAi.CreatureData.creature_resists.tsv" />
+    <EmbeddedResource Include="..\..\Plugins\RynthCore.Plugin.RynthAi\CreatureData\creature_types.txt" Link="Linked\creature_types.txt" LogicalName="RynthCore.Plugin.RynthAi.CreatureData.creature_types.txt" />
+    <EmbeddedResource Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Data\creature_weakness.json" Link="Linked\creature_weakness.json" LogicalName="RynthCore.Plugin.RynthAi.Data.creature_weakness.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Hand-written .nav files for NavFormatTests. -->
+    <None Include="Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Install-folder resolver (env, HKCU, HKLM, default C:\Games). Read only; same file as RynthCore src\Shared. -->
+    <Compile Include="..\..\Plugins\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+  </ItemGroup>
+
+</Project>

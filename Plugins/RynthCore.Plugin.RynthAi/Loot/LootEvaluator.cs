@@ -14,7 +14,7 @@ public static class LootEvaluator
     public static bool Evaluate(LootCondition condition, WorldObject item, CharacterSkills? skills)
         => condition switch
         {
-            ObjectClassCondition c      => item.ObjectClass == (AcObjectClass)(int)c.ObjectClass,
+            ObjectClassCondition c      => ScrollLearner.ClassMatches(item, (int)c.ObjectClass),
             LongValKeyGECondition c     => item.Values(c.Key, 0) >= c.Value,
             LongValKeyLECondition c     => item.Values(c.Key, 0) <= c.Value,
             LongValKeyECondition c      => item.Values(c.Key, 0) == c.Value,
@@ -55,8 +55,12 @@ public static class LootEvaluator
     private static bool EvalString(WorldObject item, StringValueCondition c)
     {
         string value = item.Values((StringValueKey)c.Key, string.Empty);
-        return Regex.IsMatch(value, c.Pattern,
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        // Through the shared cache, like the VTank path: an invalid pattern in a JSON
+        // profile threw out of the tick on every pass while a corpse was open (combat
+        // and nav skipped until the corpse timed out). A bad pattern now never matches.
+        // An empty pattern matched everything before; the cache treats it as no match.
+        if (string.IsNullOrEmpty(c.Pattern)) return true;
+        return Meta.RegexCache.IsMatch(value, c.Pattern, RegexOptions.IgnoreCase);
     }
 
     private static int EvalTotalRatings(WorldObject item)
@@ -68,7 +72,7 @@ public static class LootEvaluator
 
     private static double EvalMinDamage(WorldObject item)
     {
-        int maxDamage    = item.Values(54, 0); // STypeInt MAX_DAMAGE
+        int maxDamage    = item.Values(44, 0); // Damage, the weapon profile's max (was 54, WeaponEncumbrance, until 2026-10-07)
         double variance  = item.Values(DoubleValueKey.DamageVariance, 0.0);
         return maxDamage - variance * maxDamage;
     }

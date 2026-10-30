@@ -53,9 +53,9 @@ internal static class CastGateWatchdog
             return true; // already declared stuck; stay open until the engine gate recovers
 
         if (_closedSince == DateTime.MinValue)
-            _closedSince = DateTime.Now;
+            _closedSince = RynthClock.Now;
 
-        if ((DateTime.Now - _closedSince).TotalMilliseconds > StuckMs)
+        if ((RynthClock.Now - _closedSince).TotalMilliseconds > StuckMs)
         {
             _overriding = true;
             log?.Invoke($"[CastGate] CanCastNow stuck false >{StuckMs:F0}ms — overriding gate open " +

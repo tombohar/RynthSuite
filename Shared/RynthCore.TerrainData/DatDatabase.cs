@@ -1,357 +1,515 @@
+// ============================================================================
+//  RynthCore.TerrainData - DatDatabase.cs
+//  Read-only access to Asheron's Call .dat archives (client_portal.dat,
+//  client_cell_1.dat, ...). Written for RynthCore (MIT) on 2026-10-05.
+//
+//  Written from the dat container format as it is publicly documented, with
+//  Chorizite's DatReaderWriter (MIT, notice below) used as the format reference:
+//    - file header at byte 0x140: magic, block size, file size, data set,
+//      subset, free head / tail / count, then the byte offset of the root
+//      B-tree node (all little-endian uint32);
+//    - storage is fixed-size blocks; a block's first uint32 is the byte offset
+//      of the next block of the same chain (0 ends the chain), the remaining
+//      BlockSize - 4 bytes are payload;
+//    - the directory is a B-tree whose nodes are stored as block chains: 62
+//      uint32 child offsets, a uint32 entry count (at most 61), then the
+//      entries, 24 bytes each: flags/version, id, byte offset of the file's
+//      first block, size, timestamp, iteration. Entries are sorted by id,
+//      child i holds the ids between entry i-1 and entry i, and a node whose
+//      first child offset is 0 is a leaf.
+//
+//  Nothing is indexed up front: lookups descend the tree from the root. Every
+//  interior node is kept once read (about 1 node in 62, a few hundred KB for
+//  client_cell_1.dat) and leaves go through a small LRU, so a lookup usually
+//  costs one leaf read and neighbouring ids (adjacent landblocks) none. The
+//  public API (null when a file or the database is missing) is the one
+//  RynthAi, RynthVision, RynthJuice and the RynthNav tools already use.
+//
+//  Thread-safety: every stream read and cache access holds one lock, so one
+//  database can be shared between threads. NativeAOT/trimming safe (no
+//  reflection).
+//
+//  Chorizite DatReaderWriter notice (format reference):
+//    Copyright 2024 ACClientLib
+//    Permission is hereby granted, free of charge, to any person obtaining a
+//    copy of this software and associated documentation files (the
+//    "Software"), to deal in the Software without restriction, including
+//    without limitation the rights to use, copy, modify, merge, publish,
+//    distribute, sublicense, and/or sell copies of the Software, and to permit
+//    persons to whom the Software is furnished to do so, subject to the
+//    following conditions: The above copyright notice and this permission
+//    notice shall be included in all copies or substantial portions of the
+//    Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+//    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+//    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+//    NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+//    DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+//    OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+//    USE OR OTHER DEALINGS IN THE SOFTWARE.
+// ============================================================================
+
+// The API returns null for "not there" without annotations; its callers
+// (RynthAi, RynthJuice, RynthVision) are written against that.
+#nullable disable
+
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
+using RynthCore.TerrainData;
 
 namespace RynthCore.Plugin.RynthAi.Raycasting
 {
     /// <summary>
-    /// AC .dat file reader — ported directly from ACEmulator's DatLoader.
-    /// 
-    /// Key format details (from ACE source):
-    ///   - Header at file offset 0x140
-    ///   - Block chain: FIRST 4 bytes of each block = next block address (byte offset)
-    ///                  Remaining (BlockSize - 4) bytes = data
-    ///   - B-tree node (DatDirectoryHeader): 62 branches, entry count, 61 entries × 24 bytes = 1716 total
-    ///   - All pointers (BTree root, chain pointers, file offsets) are byte offsets
+    /// A read-only .dat archive. <see cref="Open"/> reads the header and checks
+    /// the root directory node; files are then found by id
+    /// (<see cref="FindFile"/>, <see cref="GetFileData"/>) by searching the
+    /// on-disk B-tree. Methods return null / empty when the database isn't open
+    /// or the file isn't there; nothing throws for a missing or damaged file.
     /// </summary>
     public class DatDatabase : IDisposable
     {
-        private FileStream _stream;
-        private readonly object _lock = new object();
+        // ---- container layout ----
+        private const long HeaderOffset = 0x140;
+        private const int HeaderBytes = 9 * 4;            // magic .. root offset
+        private const int ChildSlots = 62;
+        private const int MaxEntriesPerNode = 61;
+        private const int EntryBytes = 24;
+        private const int CountOffset = ChildSlots * 4;                         // 248
+        private const int EntriesOffset = CountOffset + 4;                      // 252
+        private const int NodeBytes = EntriesOffset + MaxEntriesPerNode * EntryBytes; // 1716
 
-        private const uint DAT_HEADER_OFFSET = 0x140;
+        // A real tree is 4 levels deep at most; this only stops a damaged child
+        // pointer from sending a search round in circles.
+        private const int DepthLimit = 16;
 
-        // B-tree geometry (from ACE DatDirectoryHeader.cs):
-        //   0x3E (62) branches, 0x3D (61) max entries, each entry = 6 × uint32 = 24 bytes
-        //   ObjectSize = (4 * 62) + 4 + (24 * 61) = 248 + 4 + 1464 = 1716
-        private const int BTREE_BRANCH_COUNT = 0x3E; // 62
-        private const int BTREE_MAX_ENTRIES = 0x3D;   // 61
-        private const int BTREE_ENTRY_SIZE = 24;      // 6 × uint32
-        private const int BTREE_NODE_SIZE = (4 * BTREE_BRANCH_COUNT) + 4 + (BTREE_ENTRY_SIZE * BTREE_MAX_ENTRIES); // 1716
+        // Cache budget: all interior nodes (capped), a 128-leaf LRU.
+        private const int LeafLruSize = 128;
+        private const int InteriorCap = 4096;
 
-        // Header fields
+        private readonly object _gate = new object();
+        private FileStream _file;
+        private long _length;
+        private byte[] _nodeBuf;   // one node's bytes, reused (under _gate)
+        private readonly Dictionary<uint, Node> _interior = new Dictionary<uint, Node>();
+        private readonly LruCache<uint, Node> _leaves = new LruCache<uint, Node>(LeafLruSize);
+        private int _count = -1;
+
+        /// <summary>Header word at 0x140 (the dat magic).</summary>
         public uint FileType { get; private set; }
+        /// <summary>Block size in bytes (1024 in the retail dats).</summary>
         public uint BlockSize { get; private set; }
+        /// <summary>File size recorded in the header.</summary>
         public uint FileSize { get; private set; }
+        /// <summary>The header's data set (database type) word.</summary>
         public uint DataSet { get; private set; }
-        public uint BTreeRoot { get; private set; } // Byte offset
+        /// <summary>Byte offset of the root directory node.</summary>
+        public uint BTreeRoot { get; private set; }
 
+        /// <summary>True between a successful <see cref="Open"/> and <see cref="Close"/>.</summary>
         public bool IsLoaded { get; private set; }
+        /// <summary>The path last passed to <see cref="Open"/>.</summary>
         public string FilePath { get; private set; }
-        public int RecordCount { get; private set; }
 
-        // All files indexed by ObjectId (populated during Open)
-        private readonly Dictionary<uint, DatBTreeEntry> _allFiles = new Dictionary<uint, DatBTreeEntry>();
-
+        /// <summary>Diagnostics from Open and failed reads (first 100 lines).</summary>
         public List<string> DiagLog { get; } = new List<string>();
 
+        /// <summary>
+        /// Number of files in the dat. Counted on first use from the directory
+        /// nodes' entry counts (only the first bytes of each node are read) and
+        /// remembered until <see cref="Close"/>; 0 when not open.
+        /// </summary>
+        public int RecordCount
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    if (!IsLoaded) return 0;
+                    if (_count < 0) _count = CountUnder(BTreeRoot, 0);
+                    return _count;
+                }
+            }
+        }
+
+        private sealed class Node
+        {
+            public uint[] Children;          // entry count + 1 offsets; null for a leaf
+            public DatBTreeEntry[] Entries;  // ascending ObjectId
+        }
+
+        // ------------------------------------------------------------------ open / close
+
+        /// <summary>Opens <paramref name="path"/> read-only. False (and a DiagLog line) on any failure.</summary>
         public bool Open(string path)
         {
-            try
+            lock (_gate)
             {
-                if (!File.Exists(path))
-                {
-                    Log($"File not found: {path}");
-                    return false;
-                }
-
+                CloseLocked();
                 FilePath = path;
-                // Plugin init runs *before* acclient.exe opens its own DAT files,
-                // so our handle is the first one Windows sees on the file. Our
-                // share-mode dictates what AC's subsequent open can request — if
-                // we omit FileShare.Delete, AC's open (which needs delete-rename
-                // semantics for DDD/patcher) fails with a sharing violation and
-                // the AC client errors out with "cannot access the data files."
-                //
-                // FileShare.ReadWrite | FileShare.Delete = permit other openers
-                // to read, write, and delete-mark the file. RandomAccess hint +
-                // 4 KB buffer keeps the .dat B-tree reads efficient.
-                _stream = new FileStream(
-                    path,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete,
-                    bufferSize: 4096,
-                    options: FileOptions.RandomAccess);
-
-                Log($"File: {Path.GetFileName(path)}, Size: {_stream.Length:N0} bytes");
-
-                if (!ReadHeader())
+                try
                 {
-                    Close();
+                    if (!File.Exists(path)) { Log($"Not found: {path}"); return false; }
+
+                    // acclient.exe keeps its own handles on the dats and may open
+                    // them after us (RynthAi opens at plugin init), so share
+                    // everything, including delete: the client's open asks for
+                    // delete-rename access and fails ("cannot access the data
+                    // files") if an earlier handle refuses it.
+                    _file = new FileStream(path, FileMode.Open, FileAccess.Read,
+                        FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.RandomAccess);
+                    _length = _file.Length;
+
+                    Span<byte> h = stackalloc byte[HeaderBytes];
+                    if (!ReadAt(HeaderOffset, h)) { Log("Header is short"); CloseLocked(); return false; }
+                    FileType = BinaryPrimitives.ReadUInt32LittleEndian(h);
+                    BlockSize = BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(4));
+                    FileSize = BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(8));
+                    DataSet = BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(12));
+                    BTreeRoot = BinaryPrimitives.ReadUInt32LittleEndian(h.Slice(32));
+                    Log($"Header: type=0x{FileType:X8} blockSize={BlockSize} fileSize={FileSize} dataSet=0x{DataSet:X8} root=0x{BTreeRoot:X8} (file {_length} bytes)");
+
+                    if (BlockSize <= 4 || BlockSize > 0x10000) { Log($"Bad block size {BlockSize}"); CloseLocked(); return false; }
+                    if (BTreeRoot == 0 || BTreeRoot >= _length) { Log($"Bad root offset 0x{BTreeRoot:X8}"); CloseLocked(); return false; }
+
+                    _nodeBuf = new byte[NodeBytes];
+                    IsLoaded = true;
+                    if (GetNode(BTreeRoot) == null)
+                    {
+                        Log($"Root node at 0x{BTreeRoot:X8} doesn't parse");
+                        CloseLocked();
+                        return false;
+                    }
+                    Log($"Opened {Path.GetFileName(path)}");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Log($"Open failed: {ex.Message}");
+                    CloseLocked();
                     return false;
                 }
-
-                // Read the entire B-tree directory and index all files
-                ReadDirectory(BTreeRoot);
-
-                RecordCount = _allFiles.Count;
-                IsLoaded = true;
-
-                Log($"SUCCESS: {RecordCount} files indexed, BlockSize={BlockSize}, Root=0x{BTreeRoot:X8}");
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Log($"Error: {ex.Message}");
-                Close();
-                return false;
             }
         }
 
-        /// <summary>
-        /// Reads the dat header from offset 0x140.
-        /// Format matches ACE's DatDatabaseHeader.Unpack().
-        /// </summary>
-        private bool ReadHeader()
+        /// <summary>Closes the file and drops the cached directory nodes.</summary>
+        public void Close()
         {
-            if (_stream.Length < DAT_HEADER_OFFSET + 64)
-            {
-                Log("File too small");
-                return false;
-            }
-
-            _stream.Seek(DAT_HEADER_OFFSET, SeekOrigin.Begin);
-            using (var reader = new BinaryReader(_stream, System.Text.Encoding.Default, true))
-            {
-                FileType = reader.ReadUInt32();
-                BlockSize = reader.ReadUInt32();
-                FileSize = reader.ReadUInt32();
-                DataSet = reader.ReadUInt32();
-                uint dataSubset = reader.ReadUInt32();
-
-                uint freeHead = reader.ReadUInt32();
-                uint freeTail = reader.ReadUInt32();
-                uint freeCount = reader.ReadUInt32();
-                BTreeRoot = reader.ReadUInt32();
-            }
-
-            Log($"FileType=0x{FileType:X8}, BlockSize={BlockSize}, DataSet={DataSet}, BTree=0x{BTreeRoot:X8}");
-
-            if (BlockSize == 0 || BTreeRoot == 0 || BTreeRoot >= (uint)_stream.Length)
-            {
-                Log("Invalid header values");
-                return false;
-            }
-
-            return true;
+            lock (_gate) CloseLocked();
         }
 
-        /// <summary>
-        /// Reads data from the dat file following the block chain.
-        /// Matches ACE's DatReader.ReadDat() exactly.
-        /// 
-        /// Block format:
-        ///   [4 bytes: next block address] [BlockSize - 4 bytes: data]
-        ///   
-        /// The FIRST 4 bytes of each block are the chain pointer (next block address).
-        /// If 0, this is the last block.
-        /// </summary>
-        private byte[] ReadDatData(uint offset, int size)
+        public void Dispose() { Close(); }
+
+        private void CloseLocked()
         {
-            if (offset + BlockSize > (uint)_stream.Length || size <= 0)
-                return null;
-
-            byte[] buffer = new byte[size];
-
-            _stream.Seek(offset, SeekOrigin.Begin);
-
-            // Read first 4 bytes = next block address
-            byte[] addrBuf = new byte[4];
-            _stream.Read(addrBuf, 0, 4);
-            uint nextAddress = BitConverter.ToUInt32(addrBuf, 0);
-
-            int bufferOffset = 0;
-            int remaining = size;
-
-            while (remaining > 0)
-            {
-                if (nextAddress == 0)
-                {
-                    // Last block — read remaining data directly
-                    int toRead = Math.Min(remaining, (int)(_stream.Length - _stream.Position));
-                    if (toRead <= 0) break;
-                    _stream.Read(buffer, bufferOffset, toRead);
-                    remaining = 0;
-                }
-                else
-                {
-                    // Read data portion of this block (BlockSize - 4 bytes)
-                    int dataInBlock = (int)BlockSize - 4;
-                    int toRead = Math.Min(dataInBlock, remaining);
-                    _stream.Read(buffer, bufferOffset, toRead);
-                    bufferOffset += toRead;
-                    remaining -= toRead;
-
-                    if (remaining > 0)
-                    {
-                        // Follow chain to next block
-                        if (nextAddress >= (uint)_stream.Length) break;
-                        _stream.Seek(nextAddress, SeekOrigin.Begin);
-
-                        // Read next block's chain pointer
-                        _stream.Read(addrBuf, 0, 4);
-                        nextAddress = BitConverter.ToUInt32(addrBuf, 0);
-                    }
-                }
-            }
-
-            return buffer;
+            IsLoaded = false;
+            _file?.Dispose();
+            _file = null;
+            _length = 0;
+            _nodeBuf = null;
+            _interior.Clear();
+            _leaves.Clear();
+            _count = -1;
         }
 
-        /// <summary>
-        /// Recursively reads the B-tree directory and indexes all files.
-        /// Matches ACE's DatDirectory.Read() + AddFilesToList().
-        /// </summary>
-        private void ReadDirectory(uint sectorOffset)
-        {
-            if (sectorOffset == 0 || sectorOffset >= (uint)_stream.Length)
-                return;
+        // ------------------------------------------------------------------ lookups
 
-            // Read the directory header (B-tree node)
-            byte[] nodeData;
-            lock (_lock)
-            {
-                nodeData = ReadDatData(sectorOffset, BTREE_NODE_SIZE);
-            }
-
-            if (nodeData == null || nodeData.Length < BTREE_NODE_SIZE)
-                return;
-
-            // Parse branches (62 × uint32)
-            uint[] branches = new uint[BTREE_BRANCH_COUNT];
-            for (int i = 0; i < BTREE_BRANCH_COUNT; i++)
-                branches[i] = BitConverter.ToUInt32(nodeData, i * 4);
-
-            // Parse entry count
-            int countOffset = BTREE_BRANCH_COUNT * 4; // 248
-            uint entryCount = BitConverter.ToUInt32(nodeData, countOffset);
-
-            if (entryCount > BTREE_MAX_ENTRIES)
-                return; // Invalid node
-
-            // Parse entries
-            int entriesOffset = countOffset + 4; // 252
-            var entries = new DatBTreeEntry[entryCount];
-
-            for (int i = 0; i < entryCount; i++)
-            {
-                int eOff = entriesOffset + i * BTREE_ENTRY_SIZE;
-                entries[i] = new DatBTreeEntry
-                {
-                    BitFlags = BitConverter.ToUInt32(nodeData, eOff),
-                    ObjectId = BitConverter.ToUInt32(nodeData, eOff + 4),
-                    FileOffset = BitConverter.ToUInt32(nodeData, eOff + 8),
-                    FileSize = BitConverter.ToUInt32(nodeData, eOff + 12)
-                };
-            }
-
-            // Recurse into child directories (if branches[0] != 0, node has children)
-            if (branches[0] != 0)
-            {
-                for (int i = 0; i < entryCount + 1 && i < BTREE_BRANCH_COUNT; i++)
-                {
-                    if (branches[i] != 0)
-                        ReadDirectory(branches[i]);
-                }
-            }
-
-            // Add entries to the file index
-            for (int i = 0; i < entryCount; i++)
-            {
-                if (entries[i].ObjectId != 0)
-                    _allFiles[entries[i].ObjectId] = entries[i];
-            }
-        }
-
-        /// <summary>
-        /// Finds a file by ID. O(1) lookup from the pre-built index.
-        /// </summary>
+        /// <summary>The directory entry for <paramref name="fileId"/>, or null.</summary>
         public DatBTreeEntry FindFile(uint fileId)
         {
-            if (!IsLoaded) return null;
-            _allFiles.TryGetValue(fileId, out var entry);
-            return entry;
-        }
-
-        /// <summary>
-        /// Reads file data for a given entry.
-        /// </summary>
-        public byte[] ReadFileData(DatBTreeEntry entry)
-        {
-            if (!IsLoaded || entry == null || entry.FileSize == 0 || _stream == null)
-                return null;
-
-            lock (_lock)
+            lock (_gate)
             {
-                return ReadDatData(entry.FileOffset, (int)entry.FileSize);
+                if (!IsLoaded) return null;
+                uint at = BTreeRoot;
+                for (int depth = 0; depth < DepthLimit && at != 0; depth++)
+                {
+                    Node n = GetNode(at);
+                    if (n == null) return null;
+                    int i = LowerBound(n.Entries, fileId);
+                    if (i < n.Entries.Length && n.Entries[i].ObjectId == fileId) return n.Entries[i];
+                    if (n.Children == null) return null;
+                    at = n.Children[i];
+                }
+                return null;
             }
         }
 
-        public byte[] GetFileData(uint fileId)
+        /// <summary>The bytes of the file <paramref name="entry"/> describes, or null.</summary>
+        public byte[] ReadFileData(DatBTreeEntry entry)
         {
-            var entry = FindFile(fileId);
-            return entry != null ? ReadFileData(entry) : null;
+            if (entry == null) return null;
+            lock (_gate)
+            {
+                if (!IsLoaded) return null;
+                if (entry.FileSize > _length) { Log($"0x{entry.ObjectId:X8}: size {entry.FileSize} exceeds the file"); return null; }
+                var data = new byte[entry.FileSize];
+                if (ReadChain(entry.FileOffset, data) != data.Length)
+                {
+                    Log($"0x{entry.ObjectId:X8}: block chain at 0x{entry.FileOffset:X8} is broken");
+                    return null;
+                }
+                return data;
+            }
         }
 
+        /// <summary><see cref="FindFile"/> then <see cref="ReadFileData"/>.</summary>
+        public byte[] GetFileData(uint fileId) => ReadFileData(FindFile(fileId));
+
         /// <summary>
-        /// Returns all interior cell IDs (0x0100–0xFFFD) for a given landblock from the dat index.
-        /// This avoids the sequential scan gap cutoff that misses cells in large dungeons.
+        /// The interior (EnvCell) ids 0xXXYY0100-0xXXYYFFFD of landblock
+        /// <paramref name="landblockKey"/> (0xXXYY), ascending. Only the nodes
+        /// whose id range overlaps the landblock are read.
         /// </summary>
         public List<uint> GetLandblockCellIds(uint landblockKey)
         {
-            var cellIds = new List<uint>();
-            if (!IsLoaded) return cellIds;
-
-            uint prefix = landblockKey << 16;
-            foreach (var id in _allFiles.Keys)
+            var found = new List<uint>();
+            lock (_gate)
             {
-                if ((id & 0xFFFF0000) != prefix) continue;
-                uint cell = id & 0xFFFF;
-                if (cell >= 0x0100 && cell <= 0xFFFD)
-                    cellIds.Add(id);
+                if (!IsLoaded) return found;
+                uint lo = (landblockKey << 16) | 0x0100;
+                uint hi = (landblockKey << 16) | 0xFFFD;
+                CollectRange(BTreeRoot, lo, hi, found, 0);
             }
-            return cellIds;
+            return found;
+        }
+
+        // In-order walk of the part of the subtree at `at` holding ids in [lo, hi].
+        private void CollectRange(uint at, uint lo, uint hi, List<uint> into, int depth)
+        {
+            if (at == 0 || depth >= DepthLimit) return;
+            Node n = GetNode(at);
+            if (n == null) return;
+            var e = n.Entries;
+            for (int i = 0; i <= e.Length; i++)
+            {
+                // Child i spans (e[i-1], e[i]); visit it if that overlaps [lo, hi].
+                if (n.Children != null)
+                {
+                    bool aboveLo = i == e.Length || e[i].ObjectId > lo;
+                    bool belowHi = i == 0 || e[i - 1].ObjectId < hi;
+                    if (aboveLo && belowHi) CollectRange(n.Children[i], lo, hi, into, depth + 1);
+                }
+                if (i == e.Length) break;
+                uint id = e[i].ObjectId;
+                if (id > hi) break;
+                if (id >= lo) into.Add(id);
+            }
         }
 
         /// <summary>
-        /// Returns sample file IDs from the index for diagnostics.
+        /// Every entry, ascending by id, read from the tree as it goes (nothing
+        /// is kept afterwards). Reads every node of the dat: for diagnostics and
+        /// offline tools, not for lookups.
         /// </summary>
+        public IEnumerable<DatBTreeEntry> EnumerateEntries()
+        {
+            Node root;
+            lock (_gate)
+            {
+                if (!IsLoaded) yield break;
+                root = GetNodeUncached(BTreeRoot);
+            }
+            if (root == null) yield break;
+
+            // Explicit stack (no recursion through iterators); the lock is taken
+            // per node read, never held across a yield.
+            var stack = new Stack<(Node node, int next)>();
+            stack.Push((root, 0));
+            DescendLeft(stack);
+            while (stack.Count > 0)
+            {
+                var (node, next) = stack.Pop();
+                if (next >= node.Entries.Length) continue;
+                yield return node.Entries[next];
+                stack.Push((node, next + 1));
+                if (node.Children != null)
+                {
+                    Node child = ReadForWalk(node.Children[next + 1], stack.Count);
+                    if (child != null) { stack.Push((child, 0)); DescendLeft(stack); }
+                }
+            }
+        }
+
+        // Pushes the leftmost path below the node on top of the stack.
+        private void DescendLeft(Stack<(Node node, int next)> stack)
+        {
+            while (true)
+            {
+                var top = stack.Peek().node;
+                if (top.Children == null) return;
+                Node child = ReadForWalk(top.Children[0], stack.Count);
+                if (child == null) return;
+                stack.Push((child, 0));
+            }
+        }
+
+        private Node ReadForWalk(uint at, int depth)
+        {
+            if (at == 0 || depth >= DepthLimit) return null;
+            lock (_gate)
+            {
+                if (!IsLoaded) return null;
+                return GetNodeUncached(at);
+            }
+        }
+
+        /// <summary>The lowest file ids in the dat (up to <paramref name="maxCount"/>), for diagnostics.</summary>
         public List<uint> GetSampleIds(int maxCount = 20)
         {
             var ids = new List<uint>();
-            foreach (var kvp in _allFiles)
+            if (maxCount <= 0) return ids;
+            foreach (var e in EnumerateEntries())
             {
-                ids.Add(kvp.Key);
+                ids.Add(e.ObjectId);
                 if (ids.Count >= maxCount) break;
             }
             return ids;
         }
 
-        public void Close()
+        // ------------------------------------------------------------------ nodes
+
+        // First entry index whose id is >= id (Length when none).
+        private static int LowerBound(DatBTreeEntry[] e, uint id)
         {
-            _stream?.Dispose();
-            _stream = null;
-            IsLoaded = false;
-            _allFiles.Clear();
+            int a = 0, b = e.Length;
+            while (a < b)
+            {
+                int m = (a + b) >> 1;
+                if (e[m].ObjectId < id) a = m + 1; else b = m;
+            }
+            return a;
         }
 
-        public void Dispose() { Close(); }
+        // Cached node. Caller holds _gate.
+        private Node GetNode(uint at)
+        {
+            if (_interior.TryGetValue(at, out Node n)) return n;
+            if (_leaves.TryGet(at, out n)) return n;
+            n = ParseNode(at);
+            if (n == null) return null;
+            if (n.Children != null)
+            {
+                if (_interior.Count < InteriorCap) _interior[at] = n;
+            }
+            else _leaves.Set(at, n);
+            return n;
+        }
+
+        // For full walks: use a cached node if there is one, but don't fill the
+        // caches with the whole tree. Caller holds _gate.
+        private Node GetNodeUncached(uint at)
+        {
+            if (_interior.TryGetValue(at, out Node n)) return n;
+            if (_leaves.TryGet(at, out n)) return n;
+            return ParseNode(at);
+        }
+
+        // Reads and decodes the node at byte offset `at`. Caller holds _gate.
+        private Node ParseNode(uint at)
+        {
+            byte[] buf = _nodeBuf;
+            int got = ReadChain(at, buf);
+            if (got < EntriesOffset) return null;
+            ReadOnlySpan<byte> s = buf;
+            int count = BinaryPrimitives.ReadInt32LittleEndian(s.Slice(CountOffset));
+            if (count < 0 || count > MaxEntriesPerNode || got < EntriesOffset + count * EntryBytes) return null;
+
+            var entries = new DatBTreeEntry[count];
+            for (int i = 0; i < count; i++)
+            {
+                var r = s.Slice(EntriesOffset + i * EntryBytes, EntryBytes);
+                entries[i] = new DatBTreeEntry
+                {
+                    BitFlags = BinaryPrimitives.ReadUInt32LittleEndian(r),
+                    ObjectId = BinaryPrimitives.ReadUInt32LittleEndian(r.Slice(4)),
+                    FileOffset = BinaryPrimitives.ReadUInt32LittleEndian(r.Slice(8)),
+                    FileSize = BinaryPrimitives.ReadUInt32LittleEndian(r.Slice(12)),
+                };
+            }
+
+            uint[] children = null;
+            if (BinaryPrimitives.ReadUInt32LittleEndian(s) != 0)
+            {
+                children = new uint[count + 1];
+                for (int i = 0; i <= count; i++)
+                    children[i] = BinaryPrimitives.ReadUInt32LittleEndian(s.Slice(i * 4));
+            }
+            return new Node { Children = children, Entries = entries };
+        }
+
+        // Node entry counts under `at`, reading only each node's first bytes
+        // (child table + count). Caller holds _gate.
+        private int CountUnder(uint at, int depth)
+        {
+            if (at == 0 || depth >= DepthLimit) return 0;
+            Span<byte> head = stackalloc byte[EntriesOffset];
+            if (ReadChain(at, head) != EntriesOffset) return 0;
+            int count = BinaryPrimitives.ReadInt32LittleEndian(head.Slice(CountOffset));
+            if (count < 0 || count > MaxEntriesPerNode) return 0;
+            int total = count;
+            if (BinaryPrimitives.ReadUInt32LittleEndian(head) != 0)
+            {
+                // Copy the child offsets out: the recursion reuses the stack.
+                Span<uint> kids = stackalloc uint[count + 1];
+                for (int i = 0; i <= count; i++) kids[i] = BinaryPrimitives.ReadUInt32LittleEndian(head.Slice(i * 4));
+                for (int i = 0; i <= count; i++) total += CountUnder(kids[i], depth + 1);
+            }
+            return total;
+        }
+
+        // ------------------------------------------------------------------ blocks
+
+        // Copies the block chain starting at byte offset `first` into `dest`
+        // and returns how many bytes it filled: dest.Length, or less when the
+        // chain ends (a 0 link) first; -1 when a link points outside the file.
+        // Caller holds _gate.
+        private int ReadChain(uint first, Span<byte> dest)
+        {
+            int payload = (int)BlockSize - 4;
+            long block = first;
+            int done = 0;
+            Span<byte> link = stackalloc byte[4];
+            while (done < dest.Length)
+            {
+                if (block == 0) return done;
+                if (block + 4 > _length) return -1;
+                int take = Math.Min(payload, dest.Length - done);
+                if (!ReadAt(block, link) || !ReadAt(block + 4, dest.Slice(done, take))) return -1;
+                done += take;
+                block = BinaryPrimitives.ReadUInt32LittleEndian(link);
+            }
+            return done;
+        }
+
+        // Caller holds _gate (or is Open, before anything else can see the file).
+        private bool ReadAt(long offset, Span<byte> into)
+        {
+            if (offset < 0 || offset + into.Length > _length) return false;
+            _file.Position = offset;
+            int got = 0;
+            while (got < into.Length)
+            {
+                int n = _file.Read(into.Slice(got));
+                if (n <= 0) return false;
+                got += n;
+            }
+            return true;
+        }
 
         private void Log(string msg)
         {
-            string line = $"[DatDB] {msg}";
+            string line = "[DatDB] " + msg;
             System.Diagnostics.Debug.WriteLine(line);
             if (DiagLog.Count < 100) DiagLog.Add(line);
         }
     }
 
+    /// <summary>One directory entry: a file's id, flags, first block and size.</summary>
     public class DatBTreeEntry
     {
         public uint BitFlags;
         public uint ObjectId;
-        public uint FileOffset;  // Byte offset into file
+        public uint FileOffset;  // byte offset of the file's first block
         public uint FileSize;
     }
 }

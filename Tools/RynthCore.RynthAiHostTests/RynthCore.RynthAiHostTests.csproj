@@ -1,0 +1,84 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline tests for the RynthAi code that is bound to the engine host: loot rule matching
+    (LootEvaluator, VTankLootEvaluator, Keep #) and metas (MetaManager conditions and state
+    transitions, ExpressionEngine functions). No game, no engine, no client.
+
+    Unlike RynthCore.RynthAiTests (a plain net10.0 exe that links single source files), this
+    runner references the plugin project itself. That only works as a net10.0-windows x86
+    exe: the plugin is net10.0-windows and marked 32-bit (see RynthCore.RynthAiTests\README.md).
+    It needs the x86 .NET runtime (C:\Program Files (x86)\dotnet). The plugin grants
+    InternalsVisibleTo to this assembly name.
+
+    The host is either default(RynthCoreHost) (every Has* is false, every call does nothing) or
+    Fakes\FakeHost.cs, which fills in a handful of engine calls with in-process fakes. Program.cs
+    points every hard-coded C:\Games path the tested code can write to at a temp folder before
+    any test runs.
+
+    Run: dotnet run -c Release, optionally followed by a name filter after the usual separator
+    (exit 0 = pass, 1 = fail; KNOWN = a registered bug, which does not fail the run).
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Same as the plugin: number parsing in the tested code uses the current culture. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>RynthCore.RynthAiHostTests</RootNamespace>
+    <AssemblyName>RynthCore.RynthAiHostTests</AssemblyName>
+    <Platforms>x86</Platforms>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Plugins\RynthCore.Plugin.RynthAi\RynthCore.Plugin.RynthAi.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Same assertion helper and runner as RynthCore.RynthAiTests (one copy, linked). -->
+    <Compile Include="..\RynthCore.RynthAiTests\Harness\Check.cs" Link="Harness\Check.cs" />
+    <Compile Include="..\RynthCore.RynthAiTests\Harness\Runner.cs" Link="Harness\Runner.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The engine's radar snapshot parser (self-contained DTOs), so the radar test checks
+         RynthAi's JSON against the engine's real reader. Same relative engine path the plugin
+         itself references. -->
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\UI\Data\RadarSnapshotJson.cs" Link="Engine\RadarSnapshotJson.cs" />
+    <!-- The Meta editor's "Set current" landblock / landcell text (self-contained), so MetaTests
+         check that MetaManager matches what the editor writes (engine 2026-10-05). -->
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\UI\Data\MetaLocation.cs" Link="Engine\MetaLocation.cs" />
+    <!-- The Inventory panel's attribute filter rules and matching (pure; engine 2026-10-11). -->
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\Compatibility\InventoryAttributeFilter.cs" Link="Engine\InventoryAttributeFilter.cs" />
+    <!-- The Mini Remote sections' manifest parser and catalog (pure; engine 2026.10.5.46), so
+         SectionsTests checks RynthAi's RynthPluginGetSectionsJson against the engine's reader.
+         IltDetect (with AelrynthWire, which it shares a parser with) does the catalog's matching. -->
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\UI\Sections\ServerForce.cs" Link="Engine\ServerForce.cs" />
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\UI\Sections\SectionManifest.cs" Link="Engine\SectionManifest.cs" />
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\UI\Sections\SectionCatalog.cs" Link="Engine\SectionCatalog.cs" />
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\Compatibility\IltDetect.cs" Link="Engine\IltDetect.cs" />
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\Compatibility\AelrynthWire.cs" Link="Engine\AelrynthWire.cs" />
+    <!-- The engine's v84 GetObjectProperties record writer (pure), so the propertydump tests feed
+         RynthAi exactly what the engine sends (engine 2026-10-13). -->
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\Compatibility\PropertyWire.cs" Link="Engine\PropertyWire.cs" />
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\Compatibility\ObjectPropertyRecord.cs" Link="Engine\ObjectPropertyRecord.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The standalone Monster Editor's model and file code (no Avalonia in these), so its
+         load/save is checked against the plugin's own serializer (MonsterEditorTests). -->
+    <Compile Include="..\RynthCore.MonsterEditor\Models.cs" Link="MonsterEditor\Models.cs" />
+    <Compile Include="..\RynthCore.MonsterEditor\JsonContext.cs" Link="MonsterEditor\JsonContext.cs" />
+    <Compile Include="..\RynthCore.MonsterEditor\MonsterRulesFile.cs" Link="MonsterEditor\MonsterRulesFile.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

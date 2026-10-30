@@ -15,7 +15,24 @@
     <RootNamespace>RynthCore.Plugin.RynthTracker</RootNamespace>
     <AssemblyName>RynthCore.Plugin.RynthTracker</AssemblyName>
     <Platforms>x86</Platforms>
+    <!-- Plugin manifest (embedded in the DLL; Plugins\Directory.Build.targets). minEngineApi is the
+         highest API use NOT behind a Has*/version check. Nothing above the v66 baseline. -->
+    <RynthPluginMinEngineApi>66</RynthPluginMinEngineApi>
+    <RynthPluginDescription>Kills, experience and luminance per hour for each session.</RynthPluginDescription>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Reading our hits out of the combat log (victim + amount); RynthAi reads the same lines. -->
+    <Compile Include="..\Shared\CombatText.cs" Link="Shared\CombatText.cs" />
+    <!-- Session stats shared with RynthAi's Mini Remote: the same numbers in both (2026-10-11). -->
+    <Compile Include="..\Shared\KillCounter.cs" Link="Shared\KillCounter.cs" />
+    <Compile Include="..\Shared\TrackerSessionStore.cs" Link="Shared\TrackerSessionStore.cs" />
+    <Compile Include="..\Shared\SessionStats.cs" Link="Shared\SessionStats.cs" />
+    <Compile Include="..\Shared\SessionStatsTracker.cs" Link="Shared\SessionStatsTracker.cs" />
+    <!-- One session (2026-10-13): RynthAi's session through "RynthAi.Hub" when RynthAi is loaded. -->
+    <Compile Include="..\Shared\RynthAiHubApi.cs" Link="Shared\RynthAiHubApi.cs" />
+    <Compile Include="..\Shared\RynthAiSessionClient.cs" Link="Shared\RynthAiSessionClient.cs" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />

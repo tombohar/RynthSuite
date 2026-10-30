@@ -4,5 +4,6 @@ REM as she roams, reading her position from C:\Games\RynthCore\NavData\_player.t
 REM (written by the RynthNav plugin). Leave this window open while you play.
 cd /d "C:\Projects\RynthSuite\Tools\RynthNav.Baker"
 echo Starting RynthNav bake-ahead watcher (radius 3.0)...
-dotnet run -c Debug -- --watch --radius 3.0
+REM The live folder is refused unless --force-live is given (the baker never writes there by default).
+dotnet run -c Debug -- --watch --radius 3.0 --out C:\Games\RynthCore\NavData --force-live
 pause

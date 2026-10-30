@@ -18,7 +18,7 @@ public partial class App : Application
         };
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
-            desktop.MainWindow = new MainWindow();
+            desktop.MainWindow = new MainWindow(desktop.Args is { Length: > 0 } a ? a[0] : null);
         base.OnFrameworkInitializationCompleted();
     }
 }

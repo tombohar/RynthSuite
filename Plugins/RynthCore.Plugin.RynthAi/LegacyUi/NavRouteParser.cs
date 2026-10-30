@@ -26,7 +26,10 @@ public enum NavPointType
     Chat       = 4,   // trailer: command string
     OpenVendor = 5,   // trailer: vendorId(int), vendorName(string)
     PortalNPC  = 6,   // VTank "Portal": use a portal object by name. trailer: name, class, tie, ew, ns, z
-    Npc        = 7    // VTank "NPC": use/talk an NPC by name.        trailer: name, class, tie, ew, ns, z
+    Npc        = 7,   // VTank "NPC": use/talk an NPC by name.        trailer: name, class, tie, ew, ns, z
+    Checkpoint = 8,   // walked like a Point; no trailer (confirmed from a real route, 2026-09-28)
+    Jump       = 9    // walk here, face heading, jump. trailer: heading, shift ("true"/"false"), ms
+                      // (order from UtilityBelt's VTNJump.Parse/Write)
 }
 
 public sealed class NavPoint
@@ -39,6 +42,9 @@ public sealed class NavPoint
     public int SpellId { get; set; }
     public int PauseTimeMs { get; set; }
     public string ChatCommand { get; set; } = string.Empty;
+    public double JumpHeading { get; set; }   // Jump: heading to face (degrees)
+    public bool   JumpShift   { get; set; }   // Jump: shift (walk) jump
+    public double JumpMs      { get; set; }   // Jump: spacebar hold time = power (0-1000)
 
     // Portal (6) / Npc (7) target name; for OpenVendor (5) the vendor's name.
     public string TargetName { get; set; } = string.Empty;
@@ -61,17 +67,38 @@ public sealed class NavPoint
     public double PortalLandEW { get; set; }
     public double PortalLandZ { get; set; }
 
+    /// <summary>
+    /// A point the dungeon pathfinder put centred in front of (or beyond) a narrow opening, so
+    /// the character goes through straight. The engine reaches it within at most 1 yd and does
+    /// not cut the corner at it. Built in memory only: never read from or written to .nav files.
+    /// </summary>
+    public bool Doorway { get; set; }
+
+    /// <summary>"Lifestone Recall": a recall step by its spell's name (it showed "Spell 1635",
+    /// 2026-10-08); the id when the spell table doesn't know it.</summary>
+    internal static string RecallName(int spellId)
+    {
+        string? name = SpellNameLookup?.Invoke(spellId);
+        return string.IsNullOrEmpty(name) ? $"Spell {spellId}" : name;
+    }
+
+    /// <summary>The spell table's name for an id; RynthAi sets it (this file is also compiled into
+    /// tools without the spell table, which keep "Spell N").</summary>
+    internal static Func<int, string?>? SpellNameLookup { get; set; }
+
     public override string ToString()
     {
         return Type switch
         {
             NavPointType.Point      => $"[Point] {NS:F3}, {EW:F3}",
-            NavPointType.Recall     => $"[Recall] Spell {SpellId}",
+            NavPointType.Recall     => $"[Recall] {RecallName(SpellId)}",
             NavPointType.Pause      => $"[Pause] {PauseTimeMs / 1000.0:F1}s",
             NavPointType.Chat       => $"[Chat] {ChatCommand}",
             NavPointType.OpenVendor => $"[Vendor] {TargetName}",
             NavPointType.PortalNPC  => $"[Portal] {TargetName}",
             NavPointType.Npc        => $"[NPC] {TargetName}",
+            NavPointType.Checkpoint => $"[Checkpoint] {NS:F3}, {EW:F3}",
+            NavPointType.Jump       => $"[Jump] {JumpHeading:F0}° {JumpMs:F0}ms{(JumpShift ? " shift" : "")}",
             _                       => $"[Unknown] {(int)Type}"
         };
     }
@@ -96,6 +123,7 @@ public sealed class NavRouteParser
     /// </summary>
     public static int TrailerLineCount(NavPointType t) => t switch
     {
+        NavPointType.Jump       => 3,
         NavPointType.Recall     => 1,
         NavPointType.Pause      => 1,
         NavPointType.Chat       => 1,
@@ -106,7 +134,25 @@ public sealed class NavRouteParser
     };
 
     public static bool IsKnownType(int t) =>
-        t is 0 or 2 or 3 or 4 or 5 or 6 or 7;
+        t is 0 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9;
+
+    /// <summary>A waypoint that is simply walked to (Point, Checkpoint).</summary>
+    public static bool IsPlainWaypoint(NavPointType t) => t is NavPointType.Point or NavPointType.Checkpoint;
+
+    /// <summary>
+    /// Whether a freshly loaded route starts at [0] rather than at its nearest waypoint.
+    /// Follow and Once routes always do, so their opening Recall/Portal/Chat steps fire;
+    /// with <c>NavResumeNearest</c> off every route does.
+    /// </summary>
+    public static bool StartsAtFirstPoint(NavRouteType type, bool resumeNearest)
+        => !resumeNearest || type is NavRouteType.Follow or NavRouteType.Once;
+
+    /// <summary>
+    /// Follow-type nav files (route type 3) name a character to follow instead of
+    /// listing points: "uTank2 NAV 1.2", 3, name, id. Empty for other routes.
+    /// </summary>
+    public string FollowTargetName { get; set; } = string.Empty;
+    public uint   FollowTargetId   { get; set; }
 
     public static NavRouteParser Load(string filePath, Action<string>? warn = null)
     {
@@ -129,6 +175,18 @@ public sealed class NavRouteParser
         var route = new NavRouteParser();
         if (lines.Count < 3 || !lines[0].Contains("uTank2 NAV 1.2", StringComparison.OrdinalIgnoreCase))
             return route;
+
+        // Follow navs: name + id of the character to follow, no points. Line 2 is
+        // the name, not a point count, so this has to come before the header check.
+        if (int.TryParse(lines[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int rt0)
+            && rt0 == (int)NavRouteType.Follow && !int.TryParse(lines[2], out _))
+        {
+            route.RouteType = NavRouteType.Follow;
+            route.FollowTargetName = lines[2].Trim();
+            if (lines.Count > 3 && uint.TryParse(lines[3].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out uint fid))
+                route.FollowTargetId = fid;
+            return route;
+        }
 
         if (!int.TryParse(lines[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int routeType) ||
             !int.TryParse(lines[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out int pointCount))
@@ -166,6 +224,10 @@ public sealed class NavRouteParser
                     NS   = double.Parse(lines[idx++], CultureInfo.InvariantCulture),
                     Z    = double.Parse(lines[idx++], CultureInfo.InvariantCulture)
                 };
+                // Z is in nav units (metres / 240). Waypoints added from the UI before
+                // 2026-09-29 stored metres, so they drew hundreds of metres up; no real
+                // point is 5 units (1.2 km) high, so anything past that is converted.
+                if (Math.Abs(pt.Z) > 5.0) pt.Z /= 240.0;
                 idx++; // skip the flag / colour line
 
                 switch (pt.Type)
@@ -182,6 +244,11 @@ public sealed class NavRouteParser
                     case NavPointType.OpenVendor:
                         pt.VendorId   = uint.Parse(lines[idx++], CultureInfo.InvariantCulture);
                         pt.TargetName = lines[idx++];
+                        break;
+                    case NavPointType.Jump:
+                        pt.JumpHeading = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
+                        pt.JumpShift   = lines[idx++].Trim().Equals("true", StringComparison.OrdinalIgnoreCase);
+                        pt.JumpMs      = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
                         break;
                     case NavPointType.PortalNPC:
                     case NavPointType.Npc:
@@ -218,10 +285,43 @@ public sealed class NavRouteParser
     public void Save(string filePath)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(filePath) ?? ".");
+        // A .nav marked read-only can't be overwritten: clear that first (no dependencies here:
+        // this file is linked into RynthNav and test tools; RynthAi reports failures itself).
+        try
+        {
+            if (File.Exists(filePath))
+            {
+                FileAttributes attrs = File.GetAttributes(filePath);
+                if ((attrs & FileAttributes.ReadOnly) != 0) File.SetAttributes(filePath, attrs & ~FileAttributes.ReadOnly);
+            }
+        }
+        catch { /* the write below fails and the caller reports why */ }
 
         using var writer = new StreamWriter(filePath, false);
+        WriteTo(writer);
+    }
+
+    /// <summary>The route as uTank2 nav lines, the form a meta's embedded navs are kept in.</summary>
+    public List<string> ToLines()
+    {
+        using var writer = new StringWriter(CultureInfo.InvariantCulture);
+        WriteTo(writer);
+        var lines = new List<string>(writer.ToString().Split('\n'));
+        for (int i = 0; i < lines.Count; i++) lines[i] = lines[i].TrimEnd('\r');
+        if (lines.Count > 0 && lines[^1].Length == 0) lines.RemoveAt(lines.Count - 1);
+        return lines;
+    }
+
+    private void WriteTo(TextWriter writer)
+    {
         writer.WriteLine("uTank2 NAV 1.2");
         writer.WriteLine((int)RouteType);
+        if (RouteType == NavRouteType.Follow && FollowTargetName.Length > 0)
+        {
+            writer.WriteLine(FollowTargetName);
+            writer.WriteLine(FollowTargetId.ToString(CultureInfo.InvariantCulture));
+            return;
+        }
         writer.WriteLine(Points.Count);
 
         foreach (NavPoint point in Points)
@@ -246,6 +346,11 @@ public sealed class NavRouteParser
                 case NavPointType.OpenVendor:
                     writer.WriteLine(point.VendorId.ToString(CultureInfo.InvariantCulture));
                     writer.WriteLine(point.TargetName);
+                    break;
+                case NavPointType.Jump:
+                    writer.WriteLine(point.JumpHeading.ToString(CultureInfo.InvariantCulture));
+                    writer.WriteLine(point.JumpShift ? "True" : "False");
+                    writer.WriteLine(point.JumpMs.ToString(CultureInfo.InvariantCulture));
                     break;
                 case NavPointType.PortalNPC:
                 case NavPointType.Npc:

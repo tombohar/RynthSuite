@@ -1,0 +1,72 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    RynthDefective: an item bar with one-touch use, and a fast weapon picker. Slots hold one
+    item each (a kit, a potion, a weapon...): clicking a slot or pressing its key uses it without
+    selecting anything in the game; a slot that loses its exact item takes another carried item
+    of the same name. The picker lists every carried weapon and wand by kind, with a search box,
+    favourites and the recently used, and wields one with one click. Keys are the engine's
+    hotkeys running /rdef use <slot or item name>; /rdef. An independent implementation of the
+    ideas of Defective, the Decal plugin by Hazridi / Aun (no code from it). UI: the engine's
+    script windows (ImGui), no Avalonia.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <OutputType>Library</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IlcOptimizationPreference>Size</IlcOptimizationPreference>
+    <StripSymbols>false</StripSymbols>
+    <RootNamespace>RynthCore.Plugin.RynthDefective</RootNamespace>
+    <AssemblyName>RynthCore.Plugin.RynthDefective</AssemblyName>
+    <Platforms>x86</Platforms>
+    <!-- Plugin manifest (embedded in the DLL; Plugins\Directory.Build.targets). minEngineApi is the
+         highest API use NOT behind a Has*/version check. Script windows (v71, HasUi, op level 2 for
+         pictures) are checked first; so are the UseDone count (v63), wield/refusal info (v70) and
+         the chat parser the key binding goes through. Below v71 it still uses items (/rdef use). -->
+    <RynthPluginMinEngineApi>66</RynthPluginMinEngineApi>
+    <RynthPluginDescription>Draws the Shortcuts bar (the game's 18 slots and its own), the Game Panels buttons and the Selection window: one-touch kits, potions, weapons and spells by slot or key, and a fast weapon picker. Settings: the bar's gear or /rdef settings.</RynthPluginDescription>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- What RynthAi is doing (read only), so a weapon swap stays out of its way. -->
+    <Compile Include="..\Shared\RynthAiActivityApi.cs" Link="Shared\RynthAiActivityApi.cs" />
+    <Compile Include="..\Shared\RynthAiYieldApi.cs" Link="Shared\RynthAiYieldApi.cs" />
+    <!-- An older RynthAi without RynthAi.Activity: its RynthAi.Status macro bit instead. -->
+    <Compile Include="..\Shared\RynthAiStatusApi.cs" Link="Shared\RynthAiStatusApi.cs" />
+    <!-- Install-folder resolver (env, HKCU, HKLM, default C:\Games). Read only; same file as RynthCore src\Shared. -->
+    <Compile Include="..\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+    <!-- How a chat command answers (2026-10-28): the shared reply queue and colours. -->
+    <Compile Include="..\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Spell slots (2026-10-28): spell names and whom a spell is cast on, from RynthAi's spell table
+         (linked as RynthInventory and RynthOracle link it; Model/Spells.cs reads it). -->
+    <EmbeddedResource Include="..\RynthCore.Plugin.RynthAi\Combat\SpellData.txt" LogicalName="RynthDefective.SpellData.txt" Link="Shared\SpellData.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The shortcut bar (2026-10-22): drawn with ImGui.NET bound to the engine's cimgui, in the
+         engine's look (Shared\RynthUi; plugin API v90 hosts the frameless window and gives AC's
+         shortcut slots, keys and item pictures). -->
+    <Compile Include="..\Shared\ImGuiNativeBinding.cs" Link="Shared\ImGuiNativeBinding.cs" />
+    <Compile Include="..\Shared\SafeImGui.cs" Link="Shared\SafeImGui.cs" />
+    <Compile Include="..\Shared\RynthUi\RynthUi.cs" Link="Shared\RynthUi\RynthUi.cs" />
+    <Compile Include="..\Shared\RynthUi\RynthIcons.cs" Link="Shared\RynthUi\RynthIcons.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+    <TrimmerRootAssembly Include="ImGui.NET" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+  </ItemGroup>
+
+</Project>

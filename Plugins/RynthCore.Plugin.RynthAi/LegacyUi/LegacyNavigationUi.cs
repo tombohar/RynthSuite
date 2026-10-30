@@ -3,6 +3,7 @@ using System.IO;
 using System.Numerics;
 using ImGuiNET;
 using RynthCore.PluginSdk;
+using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthAi.LegacyUi;
 
@@ -34,14 +35,14 @@ internal sealed class LegacyNavigationUi
         }
 
         string activeNavName = string.IsNullOrEmpty(_settings.CurrentNavPath) ? "None (Unsaved)" : Path.GetFileName(_settings.CurrentNavPath);
-        ImGui.TextColored(new Vector4(1, 1, 0, 1), $"Active Nav: {activeNavName}");
+        SafeImGui.TextColored(new Vector4(1, 1, 0, 1), $"Active Nav: {activeNavName}");
 
         if (!string.IsNullOrEmpty(_settings.NavStatusLine))
         {
             var statusColor = _settings.NavIsStuck
                 ? new Vector4(0.91f, 0.70f, 0.20f, 1.00f)   // amber
                 : new Vector4(0.25f, 0.85f, 0.45f, 1.00f);  // green
-            ImGui.TextColored(statusColor, _settings.NavStatusLine);
+            SafeImGui.TextColored(statusColor, _settings.NavStatusLine);
         }
 
         ImGui.Spacing();
@@ -62,6 +63,7 @@ internal sealed class LegacyNavigationUi
             ImGui.PushStyleColor(ImGuiCol.ButtonActive,  new Vector4(0.08f, 0.28f, 0.08f, 1f));
             if (ImGui.Button("Start Navigation", new Vector2(-1, 28)))
             {
+                _settings.RearmFinishedNavRoute();   // a finished Once route runs again
                 _settings.IsMacroRunning  = true;
                 _settings.EnableNavigation = true;
                 if (_settings.BotAction != "Navigating")
@@ -97,8 +99,8 @@ internal sealed class LegacyNavigationUi
         if (ImGui.Button("Add Waypoint", new Vector2(100, 25)))
         {
             // Stop any active turn motion so the character doesn't keep spinning
-            _host.SetMotion(0x6500000D, false); // TurnRight
-            _host.SetMotion(0x6500000E, false); // TurnLeft
+            _host.SetMotionBy("UI", 0x6500000D, false); // TurnRight
+            _host.SetMotionBy("UI", 0x6500000E, false); // TurnLeft
 
             if (_host.HasGetPlayerPose && _host.TryGetPlayerPose(out _, out float x, out float y, out float z, out _, out _, out _, out _))
             {
@@ -108,7 +110,7 @@ internal sealed class LegacyNavigationUi
                     {
                         NS = ns,
                         EW = ew,
-                                Z = z
+                                Z = z / 240.0
                     };
                     InsertPoint(newPt);
                 }
@@ -142,7 +144,7 @@ internal sealed class LegacyNavigationUi
 
             for (int ri = 0; ri < ids.Length; ri++)
             {
-                string name = $"Spell {ids[ri]}";
+                string name = NavPoint.RecallName(ids[ri]);
                 if (ImGui.Selectable($"{name} ({ids[ri]})"))
                 {
                     if (_host.HasGetPlayerPose && _host.TryGetPlayerPose(out _, out float x, out float y, out float z, out _, out _, out _, out _))
@@ -154,7 +156,7 @@ internal sealed class LegacyNavigationUi
                                 Type = NavPointType.Recall,
                                 NS = ns,
                                 EW = ew,
-                                Z = z,
+                                Z = z / 240.0,
                                 SpellId = ids[ri]
                             };
                             InsertPoint(newPt);
@@ -179,18 +181,8 @@ internal sealed class LegacyNavigationUi
         ImGui.SameLine();
         if (ImGui.Button("Save Route", new Vector2(100, 25)))
         {
-            if (!string.IsNullOrEmpty(_settings.CurrentNavPath))
-            {
-                try 
-                { 
-                    _settings.CurrentRoute.Save(_settings.CurrentNavPath); 
-                    _host.Log("Route saved."); 
-                } 
-                catch (Exception ex)
-                {
-                    _host.Log($"Failed to save route: {ex.Message}");
-                }
-            }
+            _host.WriteToChat(SaveRoute(), 1);
+            OnSettingsChanged?.Invoke();
         }
 
         if (ImGui.BeginListBox("##RoutePoints", new Vector2(-1, 200)))
@@ -207,8 +199,7 @@ internal sealed class LegacyNavigationUi
                     if (_selectedRouteIndex == i) _selectedRouteIndex = -1;
                     else if (_selectedRouteIndex > i) _selectedRouteIndex--;
 
-                    if (_settings.ActiveNavIndex == i) _settings.ActiveNavIndex = 0;
-                    else if (_settings.ActiveNavIndex > i) _settings.ActiveNavIndex--;
+                    _settings.ActiveNavIndex = IndexAfterDelete(_settings.ActiveNavIndex, i, _settings.CurrentRoute.Points.Count);
 
                     TryAutoSaveNav();
                     UpdateRouteGraphics();
@@ -241,6 +232,11 @@ internal sealed class LegacyNavigationUi
 
     public void InsertPoint(NavPoint newPt)
     {
+        // The selection is a row of whatever route was showing when it was clicked; a
+        // meta or /ra nav load since then can have swapped in a shorter one, and
+        // Insert past the end threw in the middle of the window.
+        if (_selectedRouteIndex >= _settings.CurrentRoute.Points.Count) _selectedRouteIndex = -1;
+
         if (_addModeIdx == 0 || _settings.CurrentRoute.Points.Count == 0)
             _settings.CurrentRoute.Points.Add(newPt);
         else if (_addModeIdx == 1 && _selectedRouteIndex >= 0)
@@ -255,12 +251,93 @@ internal sealed class LegacyNavigationUi
         OnSettingsChanged?.Invoke();
     }
 
+    /// <summary>
+    /// The active waypoint after deleting waypoint <paramref name="deleted"/> (the route now
+    /// has <paramref name="newCount"/> points). Deleting the active one moves on to the one
+    /// that followed it; this used to jump back to [0], which on a Once route re-ran its
+    /// opening recall/portal and could walk the bot back across the map.
+    /// </summary>
+    internal static int IndexAfterDelete(int active, int deleted, int newCount)
+    {
+        if (newCount <= 0) return 0;
+        if (active > deleted) active--;
+        return Math.Clamp(active, 0, newCount - 1);
+    }
+
+    /// <summary>NavProfiles in the resolved RynthSuite folder. It was hard-coded to C:\Games, so with a
+    /// moved install /ra nav save &lt;name&gt; wrote where the nav picker never looks (2026-10-13).</summary>
+    public static string NavFolder => Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "NavProfiles");
+
     public void TryAutoSaveNav()
     {
-        if (!string.IsNullOrEmpty(_settings.CurrentNavPath))
+        string path = _settings.CurrentNavPath;
+        if (string.IsNullOrEmpty(path)) return;
+        try
         {
-            try { _settings.CurrentRoute.Save(_settings.CurrentNavPath); } catch { }
+            if (TryGetEmbeddedKey(path, out string key))
+                _settings.EmbeddedNavs[key] = _settings.CurrentRoute.ToLines();
+            else
+            {
+                NavRouteParser route = _settings.CurrentRoute;
+                RynthCore.Plugin.Shared.DataWriteGuard.TrySave("the nav", path, () => route.Save(path));
+            }
         }
+        catch (Exception ex) { _host.Log($"[RynthAi] Nav auto-save to {path} failed: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Saves the current route and returns the line to show in chat. With a name it
+    /// writes NavProfiles\&lt;name&gt;.nav and makes that the current nav. Without one it
+    /// writes the current nav file; a nav from the loaded meta is updated in the meta
+    /// (saving the meta keeps it); a route never saved gets a new "Route N" file.
+    /// These used to do nothing: the button only wrote to an existing file, and a
+    /// meta's nav path ("&lt;embedded:name&gt;") failed without a word.
+    /// </summary>
+    public string SaveRoute(string? name = null)
+    {
+        NavRouteParser route = _settings.CurrentRoute;
+        string path = _settings.CurrentNavPath ?? string.Empty;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                string file = name.Trim();
+                if (file.EndsWith(".nav", StringComparison.OrdinalIgnoreCase)) file = file[..^4].TrimEnd();
+                if (file.Length == 0 || file.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+                    return $"[RynthAi] '{name}' can't be used as a file name.";
+                path = Path.Combine(NavFolder, file + ".nav");
+            }
+            else if (TryGetEmbeddedKey(path, out string key))
+            {
+                _settings.EmbeddedNavs[key] = route.ToLines();
+                return $"[RynthAi] '{key}' is a nav inside the loaded meta; updated it there ({route.Points.Count} waypoints). Save the meta to keep it, or /ra nav save <name> for a separate file.";
+            }
+            else if (path.Length == 0)
+            {
+                if (route.Points.Count == 0) return "[RynthAi] No waypoints to save.";
+                int n = 1;
+                do path = Path.Combine(NavFolder, $"Route {n++}.nav"); while (File.Exists(path));
+            }
+
+            string target = path;
+            if (!RynthCore.Plugin.Shared.DataWriteGuard.TrySave("the nav", target, () => route.Save(target), out string why, callerShows: true))
+                return $"[RynthAi] Nav NOT saved to {target}: {why}";
+            _settings.CurrentNavPath = path;
+            return $"[RynthAi] Saved {route.Points.Count} waypoints to {Path.GetFileName(path)}.";
+        }
+        catch (Exception ex)
+        {
+            _host.Log($"[RynthAi] Nav save to {path} failed: {ex}");
+            return $"[RynthAi] Nav save failed: {ex.Message}";
+        }
+    }
+
+    private static bool TryGetEmbeddedKey(string path, out string key)
+    {
+        key = string.Empty;
+        if (!path.StartsWith("<embedded:", StringComparison.Ordinal) || !path.EndsWith('>')) return false;
+        key = path.Substring(10, path.Length - 11);
+        return key.Length > 0;
     }
 
     public void UpdateRouteGraphics()

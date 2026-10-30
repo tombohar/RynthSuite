@@ -52,10 +52,16 @@ public static class VTankLootParser
             idx = 1;
         }
         profile.FileVersion = fileVersion;
+        profile.DeclaredRuleCount = ruleCount;
 
         bool v1Plus = fileVersion >= 1;
 
-        while (idx < lines.Length && profile.Rules.Count < ruleCount)
+        // Past the header's count, keep going while the next lines still look like a
+        // rule: an undercounted header (T10locky.utl declared 134 of its 136 rules)
+        // would otherwise drop the last rules silently. The SalvageCombine block never
+        // matches, its third line having no ';'.
+        while (idx < lines.Length
+               && (profile.Rules.Count < ruleCount || IsStartOfNextRule(lines, idx, fileVersion)))
         {
             var rule = new VTankLootRule
             {
@@ -101,11 +107,16 @@ public static class VTankLootParser
                 var data = new List<string>();
                 if (dataLineCount < 0)
                 {
-                    // Unknown type — slurp lines until we look like the start
-                    // of the next rule. This mirrors the plugin's previous
-                    // heuristic and at least keeps the bytes preserved.
-                    while (idx < lines.Length && !IsStartOfNextRule(lines, idx, fileVersion))
-                        data.Add(lines[idx++]);
+                    // Unknown type. The v1+ length code is the byte length of the data
+                    // block (CRLF per line), so it bounds the block exactly; the old
+                    // "slurp until something looks like a rule" fallback swallowed the
+                    // rest of a multi-condition rule and the rules after it, and a
+                    // trailing unknown node ate the SalvageCombine block.
+                    if (!TryReadByLengthCode(lines, ref idx, lengthCode, data))
+                    {
+                        while (idx < lines.Length && !IsStartOfNextRule(lines, idx, fileVersion))
+                            data.Add(lines[idx++]);
+                    }
                 }
                 else
                 {
@@ -163,6 +174,39 @@ public static class VTankLootParser
         }
 
         return cfg;
+    }
+
+    /// <summary>
+    /// Reads an unknown node's data lines using its length code: each line counts its
+    /// length plus 2 for the CRLF the writer emits. Succeeds only when the lines add up
+    /// to a positive code exactly (as characters for ANSI files, or UTF-8 bytes); otherwise
+    /// <paramref name="idx"/> and <paramref name="data"/> are left untouched so the
+    /// caller can fall back to the boundary heuristic.
+    /// </summary>
+    private static bool TryReadByLengthCode(string[] lines, ref int idx, string lengthCode, List<string> data)
+    {
+        // 0 is what VTankLootWriter emits for a condition built in code, so it says
+        // nothing about the data's size.
+        if (!int.TryParse(lengthCode.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int target)
+            || target <= 0)
+            return false;
+
+        int charTotal = 0, byteTotal = 0, i = idx;
+        // UTF-8 bytes >= chars, so the char total is the last one to reach the target.
+        while (i < lines.Length && charTotal < target)
+        {
+            charTotal += lines[i].Length + 2;
+            byteTotal += System.Text.Encoding.UTF8.GetByteCount(lines[i]) + 2;
+            i++;
+            if (charTotal == target || byteTotal == target)
+            {
+                for (int j = idx; j < i; j++)
+                    data.Add(lines[j]);
+                idx = i;
+                return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>

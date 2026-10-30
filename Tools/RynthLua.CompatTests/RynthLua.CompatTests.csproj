@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    UtilityBelt-compatibility tests for RynthLua: runs UB-style Lua scripts (Scripts\*.lua)
+    against RynthLua's real Lua runtime with a fake engine (FakeHost.cs) that serves a
+    scripted world: a player with vitals, skills and inventory, a few objects, chat, a
+    vendor and a trade. No AC client, no engine, nothing written outside a temp folder.
+    The plugin itself is a NativeAOT x86 library, so its sources (and the SDK's) are
+    compiled in here directly instead of referencing the projects.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+    A filter after the usual double dash runs only the scripts whose name contains it.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>RynthLua.CompatTests</RootNamespace>
+    <!-- The plugin's own warnings belong to the plugin build. -->
+    <NoWarn>$(NoWarn);CS0649;CS0169;CS0414;CS8618</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MoonSharp" Version="2.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthLua\**\*.cs" Exclude="..\..\Plugins\RynthCore.Plugin.RynthLua\obj\**;..\..\Plugins\RynthCore.Plugin.RynthLua\bin\**" Link="Plugin\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Compile Include="..\..\Plugins\Shared\RynthAiScriptApi.cs" Link="Plugin\Shared\RynthAiScriptApi.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthAiCombatApi.cs" Link="Plugin\Shared\RynthAiCombatApi.cs" />
+    <Compile Include="..\..\Plugins\Shared\UseAudit.cs" Link="Plugin\Shared\UseAudit.cs" />
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\*.cs" Link="Sdk\%(Filename)%(Extension)" />
+    <!-- The SDK takes CurrentApiVersion from the engine's constant since plugin manifests (API v79). -->
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\Plugins\PluginContractVersion.cs" Link="Sdk\PluginContractVersion.cs" />
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.PluginCore\*.cs" Link="Sdk\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Scripts\**\*.lua" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- RynthLuaPaths.cs uses the install-folder resolver. -->
+    <Compile Include="..\..\Plugins\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+    <Compile Include="..\..\Plugins\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+  </ItemGroup>
+
+</Project>

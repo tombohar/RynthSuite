@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for RynthDefective: item kinds (kits, wands by element, shields, ammunition),
+    a slot following its item by name / wcid / material when the exact object is gone, counts and uses
+    left, the weapon picker's groups, search, kind filter, favourites and recent order, the pack list,
+    /rdef command parsing, the per-character file (round trip and odd files), the hotkey file
+    reader, the slot actions (set from selected, clear, move, bind and unbind through the engine's
+    "/rc hotkey" commands), the use controller (one action at a time, a queued request replaced by
+    the newest, the busy gates and their time limit, kits on yourself, potions, wield and the
+    stance that follows it, RynthAi's macro, refusals and time-outs), and that the windows'
+    display lists - icons and image buttons included - are accepted by the engine's own parser
+    (RynthCore src/RynthCore.Engine/UI/ScriptWindows/DisplayListParser.cs, compiled in from the
+    sibling RynthCore checkout) and that clicks reach the code that drew the button.
+    Nothing native is loaded: no AC, no ImGui context. Files go to a temp folder, never C:\Games.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>RynthDefective.Tests</RootNamespace>
+    <NoWarn>$(NoWarn);CS0649;CS0169;CS0414;CS8618</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+    <!-- The engine parser's whitelists use ImGui.NET's enums. -->
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthDefective\**\*.cs" Exclude="..\..\Plugins\RynthCore.Plugin.RynthDefective\obj\**;..\..\Plugins\RynthCore.Plugin.RynthDefective\bin\**" Link="RynthDefective\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Compile Include="..\..\Plugins\Shared\RynthAiActivityApi.cs" Link="Shared\RynthAiActivityApi.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthAiYieldApi.cs" Link="Shared\RynthAiYieldApi.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthAiStatusApi.cs" Link="Shared\RynthAiStatusApi.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+    <Compile Include="..\..\Plugins\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+    <!-- The shortcut bar, panel buttons and Selection windows (2026-10-22) draw with the shared ImGui look. -->
+    <Compile Include="..\..\Plugins\Shared\ImGuiNativeBinding.cs" Link="Shared\ImGuiNativeBinding.cs" />
+    <Compile Include="..\..\Plugins\Shared\SafeImGui.cs" Link="Shared\SafeImGui.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthUi\RynthUi.cs" Link="Shared\RynthUi\RynthUi.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthUi\RynthIcons.cs" Link="Shared\RynthUi\RynthIcons.cs" />
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\UI\ScriptWindows\DisplayListParser.cs" Link="Engine\DisplayListParser.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The plugin's spell table, under the name the plugin reads it by (spell slots). -->
+    <EmbeddedResource Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Combat\SpellData.txt" LogicalName="RynthDefective.SpellData.txt" Link="Shared\SpellData.txt" />
+  </ItemGroup>
+
+</Project>

@@ -12,19 +12,58 @@ namespace RynthCore.Plugin.RynthNav;
 // managed RynthNavPlugin instance.
 public static unsafe class PluginExports
 {
-    private static readonly RynthPluginRuntime<RynthNavPlugin> Runtime = new();
+    internal static readonly RynthPluginRuntime<RynthNavPlugin> Runtime = new();
+
+    // Typed interfaces for other plugins (host GetPluginInterface, API v68): "RynthNav.Path" v1
+    // (RynthAi plans stuck-recovery detours with it). Fixed signature: void* (const char* iface, uint version).
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginQueryInterface", CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static IntPtr QueryInterface(IntPtr ifaceAnsi, uint version)
+    {
+        try
+        {
+            string iface = ifaceAnsi == IntPtr.Zero ? "" : Marshal.PtrToStringAnsi(ifaceAnsi) ?? "";
+            return PathInterface.Query(iface, version);
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginInit", CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int Init(RynthCoreApiNative* api) => Runtime.Init(api);
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginShutdown", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static void Shutdown() => Runtime.Shutdown();
+    public static void Shutdown()
+    {
+        // An exception escaping an UnmanagedCallersOnly export fail-fasts the client under NativeAOT.
+        // Guard each step so one failure cannot skip the other.
+        RynthNavPlugin? plugin = Runtime.Plugin;   // Runtime.Shutdown drops it; the log needs its host
+        try { Runtime.Shutdown(); }
+        catch (Exception ex) { LogShutdownError(plugin, "Runtime.Shutdown", ex); }
+        try { PathInterface.Release(); }
+        catch (Exception ex) { LogShutdownError(plugin, "PathInterface.Release", ex); }
+    }
+
+    private static void LogShutdownError(RynthNavPlugin? plugin, string step, Exception ex)
+    {
+        try { plugin?.LogFromExport($"[RynthNav] Shutdown: {step} failed: {ex.GetType().Name}: {ex.Message}"); }
+        catch { /* never throw out of a native export */ }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginName", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetName() => RynthNavPlugin.NamePointer;
+    public static IntPtr GetName()
+    {
+        try { return RynthNavPlugin.NamePointer; }   // a static initializer that throws surfaces here (TypeInitializationException)
+        catch { return IntPtr.Zero; }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginVersion", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetVersion() => RynthNavPlugin.VersionPointer;
+    public static IntPtr GetVersion()
+    {
+        try { return RynthNavPlugin.VersionPointer; }
+        catch { return IntPtr.Zero; }
+    }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnLoginComplete", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnLoginComplete() => Runtime.OnLoginComplete();
@@ -37,6 +76,41 @@ public static unsafe class PluginExports
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnChatBarEnter", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnChatBarEnter(IntPtr textUtf16, IntPtr eatFlag) => Runtime.OnChatBarEnter(textUtf16, eatFlag);
+
+    // The server's lines about lifestones, ties and recalls teach RynthNav where recalls land.
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnChatWindowText", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void OnChatWindowText(IntPtr textUtf16, int chatType, IntPtr eatFlag) => Runtime.OnChatWindowText(textUtf16, chatType, eatFlag);
+
+    // Commands from other plugins (host SendPluginCommand): action "rnav", value a /rnav
+    // command without the "/rnav" ("arrow 42.1N, 33.6E", "go Holtburg"). Copied and queued.
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginApplyRemoteCommand", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void ApplyRemoteCommand(IntPtr actionAnsi, IntPtr valueAnsi)
+    {
+        try
+        {
+            string action = actionAnsi != IntPtr.Zero ? Marshal.PtrToStringAnsi(actionAnsi) ?? "" : "";
+            string value = valueAnsi != IntPtr.Zero ? Marshal.PtrToStringAnsi(valueAnsi) ?? "" : "";
+            if (action.Equals("rnav", StringComparison.OrdinalIgnoreCase)) Runtime.Plugin?.EnqueueCommand(value);
+        }
+        catch { }
+    }
+
+    // A /rnav command from the engine's RynthNav panel or the chat window's coordinate menu
+    // (UTF-8, without "/rnav"): "arrow 42.1N, 33.6E Holtburg", "go Holtburg", "fav ...".
+    // Queued; runs on the tick.
+    [UnmanagedCallersOnly(EntryPoint = "RynthNavCommand", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void Command(IntPtr utf8)
+    {
+        try { if (utf8 != IntPtr.Zero) Runtime.Plugin?.EnqueueCommand(Marshal.PtrToStringUTF8(utf8)); } catch { }
+    }
+
+    // How many times a command has asked to show the arrow: the engine polls this one int
+    // (twice a second, any thread) and opens the arrow overlay when it moves.
+    [UnmanagedCallersOnly(EntryPoint = "RynthNavArrowSeq", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int ArrowSeq()
+    {
+        try { return Runtime.Plugin?.ArrowSeq ?? 0; } catch { return 0; }
+    }
 
     // ── RynthNav panel bridge (engine RynthNavPanel reads/drives via these) ───────
     // GetStatusJson uses the alloc-new → swap → free-old pointer pattern (matches
@@ -52,6 +126,28 @@ public static unsafe class PluginExports
             string json = Runtime.Plugin?.BuildStatusJson() ?? "{}";
             IntPtr nw = Marshal.StringToHGlobalAnsi(json);
             IntPtr old = Interlocked.Exchange(ref _statusPtr, nw);
+            if (old != IntPtr.Zero) Marshal.FreeHGlobal(old);
+            return nw;
+        }
+        catch { return IntPtr.Zero; }
+    }
+
+    private static IntPtr _statusUtf8Ptr = IntPtr.Zero;
+
+    // The same JSON as RynthNavGetStatusJson, UTF-8 (0.6.1+): place and recall names keep
+    // characters the ANSI code page can't hold ("→" in a portal recall's label). The engine
+    // tries this first and falls back to the ANSI one for older RynthNavs. Its own buffer,
+    // same alloc-new → swap → free-old pattern, so either getter can be called alone.
+    [UnmanagedCallersOnly(EntryPoint = "RynthNavGetStatusJsonUtf8", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr GetStatusJsonUtf8()
+    {
+        try
+        {
+            RynthNavPlugin? plugin = Runtime.Plugin;
+            byte[] bytes = plugin != null ? plugin.BuildStatusUtf8() : new byte[] { (byte)'{', (byte)'}', 0 };
+            IntPtr nw = Marshal.AllocHGlobal(bytes.Length);
+            Marshal.Copy(bytes, 0, nw, bytes.Length);
+            IntPtr old = Interlocked.Exchange(ref _statusUtf8Ptr, nw);
             if (old != IntPtr.Zero) Marshal.FreeHGlobal(old);
             return nw;
         }

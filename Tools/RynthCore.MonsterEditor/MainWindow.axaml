@@ -3,7 +3,7 @@
         xmlns:local="clr-namespace:RynthCore.MonsterEditor"
         x:Class="RynthCore.MonsterEditor.MainWindow"
         Title="RynthAi — Monster Rules Editor"
-        Width="1060" Height="520" MinWidth="800" MinHeight="300">
+        Width="1300" Height="520" MinWidth="800" MinHeight="300">
 
     <DockPanel LastChildFill="True">
 
@@ -116,6 +116,22 @@
                     </DataTemplate></DataGridTemplateColumn.CellTemplate>
                 </DataGridTemplateColumn>
 
+                <DataGridTemplateColumn Header="Bs" Width="26" CanUserResize="False" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Classes="light" Content="Bs"
+                                      IsChecked="{Binding UseBlast, Mode=TwoWay}"
+                                      ToolTip.Tip="Blast — War/Void blast spells (a spread of projectiles; wins over Bolt)"/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Wl" Width="26" CanUserResize="False" CanUserSort="False">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <ToggleButton Classes="light" Content="Wl"
+                                      IsChecked="{Binding UseWall, Mode=TwoWay}"
+                                      ToolTip.Tip="Wall — War wall spells (a row of projectiles straight ahead; turns to face the target first). Needs Wall Range in the settings."/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
                 <!-- Name -->
                 <DataGridTemplateColumn Header="Name" Width="*" MinWidth="100">
                     <DataGridTemplateColumn.CellTemplate><DataTemplate>
@@ -130,15 +146,42 @@
                     </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
                 </DataGridTemplateColumn>
 
-                <!-- Priority -->
-                <DataGridTemplateColumn Header="P" Width="32" MinWidth="30">
+                <!-- Category (the plugin's rule group label) -->
+                <DataGridTemplateColumn Header="Category" Width="90" MinWidth="60">
                     <DataGridTemplateColumn.CellTemplate><DataTemplate>
-                        <TextBlock Text="{Binding Priority}"
-                                   HorizontalAlignment="Center"
-                                   VerticalAlignment="Center"/>
+                        <TextBlock Text="{Binding Category}" Padding="3,1" VerticalAlignment="Center"/>
                     </DataTemplate></DataGridTemplateColumn.CellTemplate>
                     <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
-                        <TextBox Text="{Binding Priority, Mode=TwoWay}" Padding="3,1"/>
+                        <TextBox Text="{Binding Category, Mode=TwoWay}" Padding="3,1"/>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- Match expression (empty = match by name only) -->
+                <DataGridTemplateColumn Header="Match" Width="150" MinWidth="80">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding MatchExpression}" Padding="3,1" VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip.Tip="Match expression: when set, the rule matches when it is true (and the name, if any, is in the target's name). Empty = by name only."/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <TextBox Text="{Binding MatchExpression, Mode=TwoWay}" Padding="3,1"/>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- Priority -->
+                <DataGridTemplateColumn Width="40" MinWidth="36">
+                    <DataGridTemplateColumn.Header>
+                        <TextBlock Text="P" ToolTip.Tip="Priority: higher is fought first. 0 = IGNORE: never attacked, even if it attacks you, and it does not hold up nav, looting or buffs."/>
+                    </DataGridTemplateColumn.Header>
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding PriorityText}"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"
+                                   ToolTip.Tip="Priority: higher is fought first. 0 = IGNORE: never attacked, even if it attacks you, and it does not hold up nav, looting or buffs."/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <TextBox Text="{Binding Priority, Mode=TwoWay}" Padding="3,1"
+                                 ToolTip.Tip="Priority: higher is fought first. 0 = IGNORE: never attacked, even if it attacks you, and it does not hold up nav, looting or buffs."/>
                     </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
                 </DataGridTemplateColumn>
 
@@ -209,6 +252,18 @@
                     <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
                         <ComboBox ItemsSource="{Binding $parent[Window].((local:MainWindow)DataContext).PetOptions}"
                                   SelectedItem="{Binding PetDamage, Mode=TwoWay}"/>
+                    </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
+                </DataGridTemplateColumn>
+
+                <!-- Kite / pull-away -->
+                <DataGridTemplateColumn Header="Kite" Width="90" MinWidth="70">
+                    <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <TextBlock Text="{Binding Kite}" Padding="3,1" VerticalAlignment="Center"
+                                   ToolTip.Tip="Default = DEFAULT row. Off = fight in place. PullAway = tag then run until pulled clear, then kill."/>
+                    </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    <DataGridTemplateColumn.CellEditingTemplate><DataTemplate>
+                        <ComboBox ItemsSource="{Binding $parent[Window].((local:MainWindow)DataContext).KiteOptions}"
+                                  SelectedItem="{Binding Kite, Mode=TwoWay}"/>
                     </DataTemplate></DataGridTemplateColumn.CellEditingTemplate>
                 </DataGridTemplateColumn>
 

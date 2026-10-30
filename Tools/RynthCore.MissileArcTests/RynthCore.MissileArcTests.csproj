@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Unit tests for RynthAi's missile arc math (MissileBallistics: the low ballistic arc a
+    missile flies, its rise above the straight line, the ceiling clearance bump). The plugin
+    itself is a NativeAOT x86 library, so the dependency-free source file is compiled in
+    here directly instead of referencing the plugin project.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <RootNamespace>RynthCore.MissileArcTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\MissileBallistics.cs" Link="Linked\MissileBallistics.cs" />
+  </ItemGroup>
+
+</Project>

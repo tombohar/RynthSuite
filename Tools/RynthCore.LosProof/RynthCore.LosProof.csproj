@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline proof for RynthAi's line-of-sight check (TargetingFSM.IsPathBlocked, the part of
+    IsTargetBlocked after the client position reads). Loads the real dat files through the
+    plugin's own GeometryLoader (read only), places a player and a monster on opposite sides
+    of dungeon walls and asks the plugin whether the target is blocked. The plugin itself is
+    a NativeAOT x86 library, so the raycasting sources are compiled in here directly.
+    pairs-6346.txt holds the positions and the ground truth (built once from the fixed loader,
+    so older builds are judged against the same walls); delete it to rebuild it.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail; an AC folder can be passed as the argument)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>RynthCore.LosProof</RootNamespace>
+    <NoWarn>$(NoWarn);CS8632</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\BoundingVolume.cs" Link="Linked\BoundingVolume.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\BlacklistManager.cs" Link="Linked\BlacklistManager.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\RynthClock.cs" Link="Linked\RynthClock.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\DungeonLOS.cs" Link="Linked\DungeonLOS.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\GeometryLoader.cs" Link="Linked\GeometryLoader.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\LandblockStructs.cs" Link="Linked\LandblockStructs.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\MissileBallistics.cs" Link="Linked\MissileBallistics.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\RaycastEngine.cs" Link="Linked\RaycastEngine.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\ScatterSystem.cs" Link="Linked\ScatterSystem.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\TargetingFSM.cs" Link="Linked\TargetingFSM.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+    <ProjectReference Include="..\..\Shared\RynthCore.TerrainData\RynthCore.TerrainData.csproj" />
+  </ItemGroup>
+
+</Project>

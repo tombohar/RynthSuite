@@ -33,6 +33,10 @@ public class SpellManager
     public Dictionary<string, int> SpellDictionary { get; private set; } =
         new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
+    // All ids per name (SpellDictionary keeps one). Lets TryGetId find the id this
+    // character actually knows when a name has several (weapon masteries, Item Tinkering).
+    private Dictionary<string, List<int>> _nameToIds = new(StringComparer.OrdinalIgnoreCase);
+
     // Map base spell names to their exact Level 7 Lore counterparts
     private readonly Dictionary<string, string[]> LoreNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -66,7 +70,9 @@ public class SpellManager
         { "Armor Tinkering Expertise", new[] { "Jibril's Blessing" } },
         { "Item Tinkering Expertise", new[] { "Yoshi's Blessing" } },
         { "Weapon Tinkering Expertise", new[] { "Koga's Blessing" } },
-        { "Mana Conversion Mastery", new[] { "Nuhmidura's Blessing" } },
+        { "Mana Conversion Mastery", new[] { "Nuhmudira's Blessing" } },
+        { "Two Handed Combat Mastery", new[] { "Blessing of T'ing" } },
+        { "Magic Item Tinkering Expertise", new[] { "Celdiseth's Blessing" } },
         { "Sprint", new[] { "Saladur's Blessing" } },
         { "Jumping Mastery", new[] { "Jahannan's Blessing" } },
         { "Fealty", new[] { "Odif's Blessing", "Odif's Boon" } },
@@ -113,6 +119,9 @@ public class SpellManager
             if (!SpellDatabase.IsLoaded)
                 SpellDatabase.Load(msg => _host.WriteToChat(msg, 2));
             SpellDictionary = SpellDatabase.BuildNameToIdMap();
+            _nameToIds = SpellDatabase.BuildNameToIdsMap();
+            // ACECustom catalog: school/level/target for the Spells window and buff profiles.
+            SpellCatalog.EnsureLoaded(msg => _host.WriteToChat(msg, 2));
             _host.WriteToChat($"[RynthAi] Magic System Online: {SpellDictionary.Count} spells loaded.", 1);
         }
         catch (Exception ex)
@@ -167,7 +176,29 @@ public class SpellManager
         _ => "I"
     };
 
-    public int GetDynamicSelfBuffId(string baseSpellName, AcSkillType magicSkill)
+    /// <summary>
+    /// The LOWEST known tier of <paramref name="baseSpellName"/> above the buff tier the skill
+    /// allows, 0 when none. For heals when nothing at or under the allowed tier is known: vitae
+    /// can drop Life Magic under a tier line while the character only knows higher tiers, and a
+    /// heal that may fizzle beats none (Drakkon died twice, 2026-10-06).
+    /// </summary>
+    public int GetSelfSpellIdAboveAllowedTier(string baseSpellName, AcSkillType magicSkill)
+    {
+        RefreshKnownSpells();
+        int maxTier = GetHighestBuffSpellTier(magicSkill);
+        string cleanBase = baseSpellName.Replace(" Self", "").Trim();
+        BaseNameAliases.TryGetValue(cleanBase, out string? alias);
+        for (int tier = maxTier + 1; tier <= 8; tier++)
+        {
+            if (TryGetTierId(cleanBase, tier, out int id)) return id;
+            if (alias != null && TryGetTierId(alias, tier, out int idAlias)) return idAlias;
+        }
+        return 0;
+    }
+
+    /// <param name="skip">Levels to pass over (a level the server refused for missing components):
+    /// the next lower known level is returned instead.</param>
+    public int GetDynamicSelfBuffId(string baseSpellName, AcSkillType magicSkill, Func<int, bool>? skip = null)
     {
         RefreshKnownSpells(); // keep the authoritative inventory current (throttled)
 
@@ -176,36 +207,54 @@ public class SpellManager
         int maxTier = GetHighestBuffSpellTier(magicSkill);
         string cleanBase = baseSpellName.Replace(" Self", "").Trim();
 
+        BaseNameAliases.TryGetValue(cleanBase, out string? alias);
+
         for (int tier = maxTier; tier >= 1; tier--)
         {
-            if (tier == 8)
-            {
-                if (TryGetId($"Incantation of {cleanBase} Self", out int id1)) return id1;
-                if (TryGetId($"Incantation of {cleanBase}", out int id2)) return id2;
-                if (TryGetId($"Aura of Incantation of {cleanBase} Self", out int id3)) return id3;
-                if (TryGetId($"Aura of Incantation of {cleanBase}", out int id4)) return id4;
-            }
-            else if (tier == 7)
-            {
-                if (LoreNames.TryGetValue(cleanBase, out string[]? lores))
-                    foreach (string lore in lores)
-                        if (TryGetId(lore, out int idL)) return idL;
-
-                if (TryGetId($"{cleanBase} Self VII", out int id7a)) return id7a;
-                if (TryGetId($"{cleanBase} VII", out int id7b)) return id7b;
-                if (TryGetId($"Aura of {cleanBase} Self VII", out int id7c)) return id7c;
-                if (TryGetId($"Aura of {cleanBase} VII", out int id7d)) return id7d;
-            }
-            else
-            {
-                string numeral = GetRomanNumeral(tier);
-                if (TryGetId($"{cleanBase} Self {numeral}", out int idNum1)) return idNum1;
-                if (TryGetId($"{cleanBase} {numeral}", out int idNum2)) return idNum2;
-                if (TryGetId($"Aura of {cleanBase} Self {numeral}", out int idNum3)) return idNum3;
-                if (TryGetId($"Aura of {cleanBase} {numeral}", out int idNum4)) return idNum4;
-            }
+            if (TryGetTierId(cleanBase, tier, out int id) && (skip == null || !skip(id))) return id;
+            if (alias != null && TryGetTierId(alias, tier, out int idAlias) && (skip == null || !skip(idAlias))) return idAlias;
         }
         return 0;
+    }
+
+    // The spell data spells some families differently from the buff list: the
+    // bludgeon bane is "Bludgeon Bane I-VI" / "Incantation of Bludgeon Bane", so
+    // "Bludgeoning Bane" only resolved at tier 7 (Tusker's Bane).
+    private static readonly Dictionary<string, string> BaseNameAliases = new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "Bludgeoning Bane", "Bludgeon Bane" },
+    };
+
+    private bool TryGetTierId(string cleanBase, int tier, out int id)
+    {
+        if (tier == 8)
+        {
+            if (TryGetId($"Incantation of {cleanBase} Self", out id)) return true;
+            if (TryGetId($"Incantation of {cleanBase}", out id)) return true;
+            if (TryGetId($"Aura of Incantation of {cleanBase} Self", out id)) return true;
+            if (TryGetId($"Aura of Incantation of {cleanBase}", out id)) return true;
+        }
+        else if (tier == 7)
+        {
+            if (LoreNames.TryGetValue(cleanBase, out string[]? lores))
+                foreach (string lore in lores)
+                    if (TryGetId(lore, out id)) return true;
+
+            if (TryGetId($"{cleanBase} Self VII", out id)) return true;
+            if (TryGetId($"{cleanBase} VII", out id)) return true;
+            if (TryGetId($"Aura of {cleanBase} Self VII", out id)) return true;
+            if (TryGetId($"Aura of {cleanBase} VII", out id)) return true;
+        }
+        else
+        {
+            string numeral = GetRomanNumeral(tier);
+            if (TryGetId($"{cleanBase} Self {numeral}", out id)) return true;
+            if (TryGetId($"{cleanBase} {numeral}", out id)) return true;
+            if (TryGetId($"Aura of {cleanBase} Self {numeral}", out id)) return true;
+            if (TryGetId($"Aura of {cleanBase} {numeral}", out id)) return true;
+        }
+        id = 0;
+        return false;
     }
 
     /// <summary>
@@ -249,7 +298,17 @@ public class SpellManager
         spellId = 0;
         if (!SpellDictionary.TryGetValue(exactName, out int id)) return false;
         if (_knownSpellIds.Count == 0) return false;     // cold — don't guess
-        if (!_knownSpellIds.Contains(id)) return false;  // char doesn't know it
+        if (!_knownSpellIds.Contains(id))
+        {
+            // Same name, another id (as TryGetId): the map keeps the LAST id of a name, and
+            // war names have duplicates, e.g. "Acid Blast III" is 99 (the one players learn)
+            // and 3653, "Flame Bolt I" is 27 and four others. A char who knew 99 never cast it.
+            if (!_nameToIds.TryGetValue(exactName, out List<int>? ids)) return false;
+            id = 0;
+            foreach (int alt in ids)
+                if (_knownSpellIds.Contains(alt)) { id = alt; break; }
+            if (id == 0) return false;                   // char doesn't know it
+        }
         spellId = id;
         return true;
     }
@@ -272,6 +331,19 @@ public class SpellManager
     /// didn't execute (off-thread busy-count leak), NOT "unknown/no comps".
     /// </summary>
     public bool IsKnownSpellId(int id) => _knownSpellIds.Contains(id);
+
+    /// <summary>The next RefreshKnownSpells reads the spellbook at once (a spell was just learned).</summary>
+    public void InvalidateKnownSpells() => _lastKnownRefreshUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// Copy of the known-spell snapshot for the render thread (the Spells window). Call it on the
+    /// pump thread: RefreshKnownSpells refills the live set in place there.
+    /// </summary>
+    public HashSet<int> CopyKnownSpellIds()
+    {
+        RefreshKnownSpells();
+        return new HashSet<int>(_knownSpellIds);
+    }
 
     /// <summary>
     /// Refresh the known-spell inventory from the engine's main-thread
@@ -335,6 +407,12 @@ public class SpellManager
         if (_knownSpellIds.Count > 0)
         {
             if (_knownSpellIds.Contains(spellId)) return true;
+            // Same name, another id: an archer who knows the bow line of Missile
+            // Weapon Mastery (472) failed every tier because the map held the
+            // thrown line (544).
+            if (_nameToIds.TryGetValue(exactName, out List<int>? ids))
+                foreach (int alt in ids)
+                    if (_knownSpellIds.Contains(alt)) { spellId = alt; return true; }
             spellId = 0;
             return false;
         }

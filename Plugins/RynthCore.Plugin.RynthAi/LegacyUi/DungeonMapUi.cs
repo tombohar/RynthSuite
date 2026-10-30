@@ -1,9 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Numerics;
-using ImGuiNET;
-using RynthCore.Plugin.RynthAi.Maps;
 using RynthCore.Plugin.RynthAi.Raycasting;
 using RynthCore.PluginSdk;
 using RynthCore.Plugin.RynthAi;
@@ -11,22 +8,20 @@ using RynthCore.Plugin.RynthAi;
 namespace RynthCore.Plugin.RynthAi.LegacyUi;
 
 /// <summary>
-/// Dungeon map: uses physics floor polygons from the dat for accurate corner coverage.
-/// Rasterise floor polygons into a typed 2D grid, then:
-///   • Fill   — merge grid rows into horizontal strips, draw AddRectFilled.
-///   • Edges  — emit a coloured line on every filled cell face bordering empty space.
-///
-/// CellType colouring:
-///   Flat      → light-blue fill + light-blue edge
-///   SlopeUp   → green fill + green edge   (avg vertex Z > layerZ)
-///   SlopeDown → red fill   + red edge     (avg vertex Z &lt; layerZ)
+/// The dungeon geometry cache behind the radar snapshot (RynthRadarUi.BuildSnapshotJson),
+/// which feeds the engine's Radar and Dungeon Map faces. Uses physics floor polygons from
+/// the dat for accurate corner coverage: they are rasterised into a typed 2D grid, then
+///   • Fill   — grid rows merged into strips (_fillStrips);
+///   • Edges  — every filled cell face bordering empty space (_outerEdgesRaw, and merged
+///              into the fewest lines in _outerEdges).
+/// CellType: Flat, SlopeUp (avg vertex Z above the layer), SlopeDown (below).
+/// This was also RynthAi's plugin-drawn Dungeon Map window (with baked D3D9 floor
+/// textures); that window is the engine's DungeonMapFace now, so nothing here draws.
+/// The floor grids are also baked to disk (Maps/DungeonMapBake) for DrakRemote's /map.
 /// </summary>
 internal sealed class DungeonMapUi
 {
-    private readonly RynthCoreHost _host;
-    private readonly LegacyUiSettings _settings;
     private MainLogic? _raycast;
-    private WorldObjectCache? _objectCache;
 
     internal uint _cachedLandblock;
 
@@ -40,16 +35,8 @@ internal sealed class DungeonMapUi
     internal Dictionary<float, List<(float x0, float y0, float x1, float y1, CellType type)>>? _fillStrips;
     // Per-layer floor cell lookup used to build visited strips.
     internal Dictionary<float, Dictionary<(int, int), CellType>>? _floorCells;
-    // Flat cells the player has walked through this session (grid coords at GridCell resolution).
-    private readonly HashSet<(int gx, int gy)> _visitedCells = new();
     internal List<float>? _zLayers;
-    // Per-layer D3D9 textures: fill + edges baked in, O(1) vertices per layer.
-    internal Dictionary<float, DungeonMapTexture>? _layerTextures;
-    // Visited flat cells merged into strips — rebuilt only when _visitedCells grows,
-    // so drawing stays O(strips) not O(cells). Shared with RynthRadarUi.
-    internal Dictionary<float, List<(float x0, float y0, float x1, float y1)>>? _visitedFillStrips;
-    private int _lastVisitedCount = -1;
-    internal int _autoLayerIdx;
+
     /// <summary>Force the landblock cache to be built. Used by RynthRadarUi to share walls/fills.</summary>
     internal void EnsureCache(uint landblock)
     {
@@ -59,60 +46,35 @@ internal sealed class DungeonMapUi
 
     internal int BestLayerIdxFor(float playerZ) => BestLayerIdx(playerZ);
 
-    private readonly HashSet<int> _visibleLayers = new();
+    // Last indoor landblock TickBake handed to the bake (0 = none yet).
+    private uint _bakeCheckLandblock;
 
-    private float _zoom = 5.0f;
-    private Vector2 _pan;
-    private bool _autoFollow = true;
-    private bool _show1U1D   = true;  // show current floor ± 1 (default)
-    private bool _open = true;
-    private bool _autoHidden;         // true when we auto-hid the map because player went outdoors
-    public bool IsAutoHidden => _autoHidden;
-
-    // Toggle-stabilisation: when toolbar is visible we track both the full window
-    // rect and the canvas rect.  On hide we snap the window to the canvas rect so
-    // it sits exactly over the map area; on show we restore the full window rect.
-    private bool    _prevHideToolbar;
-    private Vector2 _fullWindowPos;    // window pos  when toolbar is visible
-    private Vector2 _fullWindowSize;   // window size when toolbar is visible
-    private Vector2 _canvasPos;        // canvas top-left when toolbar is visible
-    private Vector2 _canvasSize;       // canvas size      when toolbar is visible
-
-    // Edge colours
-    private static readonly uint ColBg           = ImGui.ColorConvertFloat4ToU32(new Vector4(0.04f, 0.07f, 0.12f, 1.00f));
-    private static readonly uint ColBorder       = ImGui.ColorConvertFloat4ToU32(new Vector4(0.20f, 0.30f, 0.40f, 1.00f));
-    private static readonly uint ColFlat         = ImGui.ColorConvertFloat4ToU32(new Vector4(0.55f, 0.80f, 1.00f, 1.00f));
-    private static readonly uint ColSlopeUp      = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.35f, 0.25f, 1.00f)); // red  — leads to higher floor
-    private static readonly uint ColSlopeDown    = ImGui.ColorConvertFloat4ToU32(new Vector4(0.25f, 1.00f, 0.35f, 1.00f)); // green — leads to lower floor
-    private static readonly uint ColPlayer        = ImGui.ColorConvertFloat4ToU32(new Vector4(0.20f, 1.00f, 0.40f, 1.00f));
-    private static readonly uint ColPortal        = ImGui.ColorConvertFloat4ToU32(new Vector4(0.90f, 0.45f, 1.00f, 1.00f)); // purple
-    private static readonly uint ColPortalRing    = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.75f, 1.00f, 0.70f));
-    private static readonly uint ColPortalLabel   = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.88f, 1.00f, 1.00f));
-    private static readonly uint ColDoor          = ImGui.ColorConvertFloat4ToU32(new Vector4(0.75f, 0.55f, 0.25f, 1.00f)); // tan
-    private static readonly uint ColDoorRing      = ImGui.ColorConvertFloat4ToU32(new Vector4(0.90f, 0.75f, 0.50f, 0.70f));
-    private static readonly uint ColDoorLabel     = ImGui.ColorConvertFloat4ToU32(new Vector4(0.95f, 0.85f, 0.65f, 1.00f));
-    private static readonly uint ColMonster       = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.25f, 0.20f, 1.00f)); // red
-    private static readonly uint ColMonsterRing   = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.55f, 0.50f, 0.70f));
-    private static readonly uint ColNpc           = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.85f, 0.20f, 1.00f)); // yellow-gold
-    private static readonly uint ColNpcRing       = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.95f, 0.55f, 0.70f));
-    private static readonly uint ColCreatureLabel = ImGui.ColorConvertFloat4ToU32(new Vector4(1.00f, 0.90f, 0.90f, 1.00f));
-    // Fill colours (semi-transparent)
-    private static readonly uint ColFlatFill        = ImGui.ColorConvertFloat4ToU32(new Vector4(0.18f, 0.55f, 0.22f, 0.40f)); // green — unvisited
-    private static readonly uint ColFlatFillVisited = ImGui.ColorConvertFloat4ToU32(new Vector4(0.30f, 0.42f, 0.58f, 0.72f)); // slate blue — visited
-    private static readonly uint ColSlopeUpFill     = ImGui.ColorConvertFloat4ToU32(new Vector4(0.55f, 0.12f, 0.08f, 0.40f));
-    private static readonly uint ColSlopeDownFill   = ImGui.ColorConvertFloat4ToU32(new Vector4(0.10f, 0.50f, 0.15f, 0.40f));
+    /// <summary>
+    /// Game-thread tick (throttled by the caller): when the player is indoors in a landblock not
+    /// seen yet, bake its floor plans to disk for the StatusAgent's /map, whether or not a Radar
+    /// or Dungeon Map panel is open (only those build this cache). One pose read here; the dat
+    /// read, rasterise and disk work run on a pool thread, once per landblock per session.
+    /// Also logs what the background bakes reported.
+    /// </summary>
+    internal void TickBake(RynthCoreHost host)
+    {
+        Maps.DungeonMapBake.DrainLog(host.Log);
+        if (!host.HasGetPlayerPose
+            || !host.TryGetPlayerPose(out uint cellId, out _, out _, out _, out _, out _, out _, out _))
+            return;
+        uint landblock = cellId >> 16;
+        bool isIndoor = (cellId & 0xFFFF) >= 0x100 && landblock != 0;
+        if (!isIndoor || landblock == _bakeCheckLandblock) return;
+        var los = _raycast?.GeometryLoader?.DungeonLOS;
+        if (los is null) return; // dats still loading; try again next tick
+        _bakeCheckLandblock = landblock;
+        Maps.DungeonMapBake.RequestFromDat(los, landblock);
+    }
 
     private const float GridCell             = 0.5f;
     private const float FloorNormalThreshold = 0.4f;  // |Nz|/|N| — must exceed to be floor-like
     private const float FlatNormalThreshold  = 0.95f; // |Nz|/|N| — must exceed to be flat (not a ramp)
     private const byte  NotFloor            = 255;    // sentinel returned by ClassifyPoly
-
-    /// <summary>Called immediately whenever a map setting is changed by the user.</summary>
-    public Action? OnSettingChanged { get; set; }
-
-    public DungeonMapUi(RynthCoreHost host, LegacyUiSettings settings) { _host = host; _settings = settings; }
-
-    public void SetWorldObjectCache(WorldObjectCache cache) => _objectCache = cache;
 
     public void SetRaycast(MainLogic raycast)
     {
@@ -120,152 +82,7 @@ internal sealed class DungeonMapUi
         _outerEdges = null;
         _fillStrips = null;
         _floorCells = null;
-        _visitedCells.Clear();
         _cachedLandblock = 0;
-    }
-
-    public void Render()
-    {
-        // Check indoor/outdoor before creating the ImGui window.
-        // Auto-hide when outdoors (or in portalspace), auto-show when returning indoors.
-        bool isIndoor = false;
-        if (_host.HasGetPlayerPose && _host.TryGetPlayerPose(
-                out uint preCellId, out _, out _, out _, out _, out _, out _, out _))
-        {
-            isIndoor = (preCellId & 0xFFFF) >= 0x100 && (preCellId >> 16) != 0;
-        }
-
-        if (!isIndoor)
-        {
-            if (!_autoHidden)
-            {
-                _autoHidden = true;
-                DashWindows.ShowDungeonMap = false;
-            }
-            return;
-        }
-
-        if (_autoHidden)
-        {
-            _autoHidden = false;
-            _open = true;
-            DashWindows.ShowDungeonMap = true;
-        }
-
-        // Snapshot map-specific settings so we can detect changes and save immediately.
-        bool  snapDoors     = _settings.MapShowDoors;
-        bool  snapCreatures = _settings.MapShowCreatures;
-        bool  snapToolbar   = _settings.MapShowToolbar;
-        float snapOpacity   = _settings.MapBgOpacity;
-        bool  snapRotate    = _settings.MapRotateWithPlayer;
-
-        float op          = _settings.MapBgOpacity;
-        bool  hideToolbar = !_settings.MapShowToolbar;
-
-        // FirstUseEver must come BEFORE any Always override — each SetNextWindowSize call
-        // overwrites the previous one, so Always must be last to win.
-        ImGui.SetNextWindowSize(new Vector2(480, 520), ImGuiCond.FirstUseEver);
-
-        // On toggle: snap the window to the canvas rect (hide) or full window rect (show).
-        bool stateChanged = hideToolbar != _prevHideToolbar;
-        _prevHideToolbar = hideToolbar;
-        if (stateChanged)
-        {
-            if (hideToolbar && _canvasSize.X > 0)
-            {
-                // Shrink to exactly where the canvas was — no title bar / toolbar chrome.
-                ImGui.SetNextWindowPos(_canvasPos,  ImGuiCond.Always);
-                ImGui.SetNextWindowSize(_canvasSize, ImGuiCond.Always);
-            }
-            else if (!hideToolbar && _fullWindowSize.X > 0)
-            {
-                // Restore the full window including toolbar and title bar.
-                ImGui.SetNextWindowPos(_fullWindowPos,  ImGuiCond.Always);
-                ImGui.SetNextWindowSize(_fullWindowSize, ImGuiCond.Always);
-            }
-        }
-
-        // Remove border and padding when toolbar is hidden so no empty chrome is visible.
-        int styleVarCount = 0;
-        if (hideToolbar)
-        {
-            ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
-            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
-            styleVarCount = 2;
-        }
-
-        // Apply opacity to title bar colours too — SetNextWindowBgAlpha only covers the content area.
-        var titleCol = new Vector4(0.08f, 0.12f, 0.18f, op);
-        ImGui.PushStyleColor(ImGuiCol.TitleBg,        titleCol);
-        ImGui.PushStyleColor(ImGuiCol.TitleBgActive,  new Vector4(0.10f, 0.16f, 0.24f, op));
-
-        ImGui.SetNextWindowBgAlpha(op);
-
-        ImGuiWindowFlags flags = ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse;
-        if (hideToolbar) flags |= ImGuiWindowFlags.NoTitleBar;
-
-        bool beginVisible = ImGui.Begin("Dungeon Map##RynthAiDungeonMap", ref _open, flags);
-        if (styleVarCount > 0) ImGui.PopStyleVar(styleVarCount);
-        ImGui.PopStyleColor(2);
-
-        if (!beginVisible) { ImGui.End(); return; }
-        if (!_open) { DashWindows.ShowDungeonMap = false; ImGui.End(); return; }
-
-        // Track full window rect every frame when toolbar is visible.
-        if (!hideToolbar)
-        {
-            _fullWindowPos  = ImGui.GetWindowPos();
-            _fullWindowSize = ImGui.GetWindowSize();
-        }
-
-        if (_raycast is null || !_raycast.IsInitialized)
-        {
-            ImGui.TextDisabled(_raycast is null
-                ? "Raycasting not yet initialised — loading DAT files..."
-                : $"Raycasting failed: {_raycast.StatusMessage}");
-            ImGui.End(); return;
-        }
-
-        if (!_host.HasGetPlayerPose || !_host.TryGetPlayerPose(
-                out uint cellId, out float px, out float py, out float pz,
-                out _, out _, out _, out _))
-        { ImGui.TextDisabled("Player position unavailable."); ImGui.End(); return; }
-
-        // Indoor check already handled before window creation — this is a safety fallback.
-        if ((cellId & 0xFFFF) < 0x100)
-        { ImGui.End(); return; }
-
-        uint landblock = cellId >> 16;
-        if (landblock != _cachedLandblock || _outerEdges is null)
-            RefreshMap(landblock);
-
-        if (_outerEdges is null || _outerEdges.Count == 0)
-        { ImGui.TextDisabled($"No dungeon geometry for 0x{landblock:X4}."); ImGui.End(); return; }
-
-        float gx = ((landblock >> 8) & 0xFF) * 192.0f;
-        float gy =  (landblock        & 0xFF) * 192.0f;
-
-        if (!hideToolbar)
-        {
-            if (ImGui.SmallButton("^##tbToggle")) _settings.MapShowToolbar = false;
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Hide settings");
-            ImGui.SameLine(0, 8);
-            RenderToolbar(pz);
-        }
-
-        RenderCanvas(px + gx, py + gy, pz, hideToolbar);
-
-        // Save immediately when any map setting changes.
-        if (_settings.MapShowDoors        != snapDoors     ||
-            _settings.MapShowCreatures    != snapCreatures ||
-            _settings.MapShowToolbar      != snapToolbar   ||
-            _settings.MapRotateWithPlayer != snapRotate    ||
-            MathF.Abs(_settings.MapBgOpacity - snapOpacity) > 0.001f)
-        {
-            OnSettingChanged?.Invoke();
-        }
-
-        ImGui.End();
     }
 
     // ── Data refresh ─────────────────────────────────────────────────────────
@@ -273,19 +90,10 @@ internal sealed class DungeonMapUi
     private void RefreshMap(uint landblock)
     {
         _cachedLandblock = landblock;
-        _pan = Vector2.Zero;
         _outerEdges = null;
         _outerEdgesRaw = null;
         _fillStrips  = null;
         _floorCells  = null;
-        _visitedFillStrips = null;
-        _visitedCells.Clear();
-        _lastVisitedCount = -1;
-        if (_layerTextures is not null)
-        {
-            foreach (var t in _layerTextures.Values) t.Dispose();
-            _layerTextures = null;
-        }
 
         var los = _raycast?.GeometryLoader?.DungeonLOS;
         if (los is null) return;
@@ -295,127 +103,14 @@ internal sealed class DungeonMapUi
         var portalPolys = los.GetDungeonMapPolygons(landblock);
         if (floorPolys.Count == 0 && portalPolys.Count == 0) return;
 
-        var zSet = new SortedSet<float>();
-        foreach (var p in floorPolys)  zSet.Add((float)Math.Round(p.CellZ, 1));
-        foreach (var p in portalPolys) zSet.Add((float)Math.Round(p.CellZ, 1));
-        _zLayers = new List<float>(zSet);
-
-        _autoLayerIdx = 0;
-        _visibleLayers.Clear();
-        if (_show1U1D)
-        {
-            _visibleLayers.Add(0);
-            if (_zLayers.Count > 1) _visibleLayers.Add(1);
-        }
-        else
-        {
-            for (int i = 0; i < _zLayers.Count; i++) _visibleLayers.Add(i);
-        }
+        _zLayers = LayerZs(floorPolys, portalPolys);
 
         _outerEdges = new Dictionary<float, List<(float, float, float, float, CellType)>>(_zLayers.Count);
         _fillStrips  = new Dictionary<float, List<(float, float, float, float, CellType)>>(_zLayers.Count);
 
-        const float LayerTol = 1.0f;
-
         foreach (float layerZ in _zLayers)
         {
-            var filled = new Dictionary<(int, int), CellType>();
-
-            foreach (var poly in floorPolys)
-            {
-                if (MathF.Abs(poly.CellZ - layerZ) > LayerTol) continue;
-                var verts = poly.Vertices;
-                if (verts == null || verts.Length < 3) continue;
-
-                CellType type = ClassifyPoly(verts, layerZ);
-                if ((byte)type == NotFloor) continue; // physics floor polys are upward-facing; skip any edge cases
-
-                RasterizeXY(verts, filled, type);
-            }
-
-            // ── Portal gap-closing (width-matched bridges) ───────────────
-            // For each pair of portals within 5 units, fill a rectangle
-            // bridge between them.  Width = actual doorway opening derived
-            // from the portal polygon's larger XY bounding-box dimension.
-            {
-                var portals = new List<(float cx, float cy, float halfW)>();
-                var pDedup  = new HashSet<(int, int)>();
-                foreach (var poly in portalPolys)
-                {
-                    if (!poly.IsPortal) continue;
-                    if (MathF.Abs(poly.CellZ - layerZ) > LayerTol) continue;
-                    var verts = poly.Vertices;
-                    if (verts == null || verts.Length < 3) continue;
-                    float cx = 0, cy = 0;
-                    float xMin = verts[0].X, xMax = verts[0].X;
-                    float yMin = verts[0].Y, yMax = verts[0].Y;
-                    for (int k = 0; k < verts.Length; k++)
-                    {
-                        cx += verts[k].X; cy += verts[k].Y;
-                        if (verts[k].X < xMin) xMin = verts[k].X;
-                        if (verts[k].X > xMax) xMax = verts[k].X;
-                        if (verts[k].Y < yMin) yMin = verts[k].Y;
-                        if (verts[k].Y > yMax) yMax = verts[k].Y;
-                    }
-                    cx /= verts.Length; cy /= verts.Length;
-                    float halfW = MathF.Max(xMax - xMin, yMax - yMin) * 0.5f;
-                    halfW = MathF.Max(halfW, 1.0f); // minimum 1 unit wide
-                    if (pDedup.Add(((int)MathF.Round(cx), (int)MathF.Round(cy))))
-                        portals.Add((cx, cy, halfW));
-                }
-
-                const float ConnectDist = 5f;
-
-                for (int a = 0; a < portals.Count; a++)
-                for (int b = a + 1; b < portals.Count; b++)
-                {
-                    float ddx = portals[b].cx - portals[a].cx;
-                    float ddy = portals[b].cy - portals[a].cy;
-                    float distSq = ddx * ddx + ddy * ddy;
-                    if (distSq > ConnectDist * ConnectDist) continue;
-
-                    float dist  = MathF.Sqrt(distSq);
-                    float hw    = MathF.Max(portals[a].halfW, portals[b].halfW);
-
-                    // Normalised A→B direction, then perpendicular scaled by half-width
-                    float normDx = dist > 0.001f ? ddx / dist : 1f;
-                    float normDy = dist > 0.001f ? ddy / dist : 0f;
-                    float perpX  = -normDy * hw;
-                    float perpY  =  normDx * hw;
-
-                    float pax = portals[a].cx, pay = portals[a].cy;
-                    float pbx = portals[b].cx, pby = portals[b].cy;
-
-                    // 4 corners of the bridge quad
-                    float c0x = pax - perpX, c0y = pay - perpY;
-                    float c1x = pax + perpX, c1y = pay + perpY;
-                    float c2x = pbx + perpX, c2y = pby + perpY;
-                    float c3x = pbx - perpX, c3y = pby - perpY;
-
-                    float bbMinX = MathF.Min(MathF.Min(c0x, c1x), MathF.Min(c2x, c3x));
-                    float bbMaxX = MathF.Max(MathF.Max(c0x, c1x), MathF.Max(c2x, c3x));
-                    float bbMinY = MathF.Min(MathF.Min(c0y, c1y), MathF.Min(c2y, c3y));
-                    float bbMaxY = MathF.Max(MathF.Max(c0y, c1y), MathF.Max(c2y, c3y));
-
-                    int gcxMin2 = (int)MathF.Floor(bbMinX / GridCell);
-                    int gcxMax2 = (int)MathF.Ceiling(bbMaxX / GridCell);
-                    int gcyMin2 = (int)MathF.Floor(bbMinY / GridCell);
-                    int gcyMax2 = (int)MathF.Ceiling(bbMaxY / GridCell);
-
-                    for (int gcy2 = gcyMin2; gcy2 <= gcyMax2; gcy2++)
-                    for (int gcx2 = gcxMin2; gcx2 <= gcxMax2; gcx2++)
-                    {
-                        float testX = (gcx2 + 0.5f) * GridCell;
-                        float testY = (gcy2 + 0.5f) * GridCell;
-                        if (PointInConvexQuad(testX, testY,
-                                c0x, c0y, c1x, c1y, c2x, c2y, c3x, c3y))
-                        {
-                            var key = (gcx2, gcy2);
-                            if (!filled.ContainsKey(key)) filled[key] = CellType.Flat;
-                        }
-                    }
-                }
-            }
+            var filled = RasterizeLayer(floorPolys, portalPolys, layerZ);
 
             if (filled.Count == 0) continue;
 
@@ -496,24 +191,150 @@ internal sealed class DungeonMapUi
             if (strips.Count > 0) _fillStrips[layerZ] = strips;
         }
 
-        // ── Per-layer floor textures (fill + edges baked, O(1) vertices each) ──
-        if (_floorCells is not null && _host.D3DDevice != IntPtr.Zero)
-        {
-            var texDict = new Dictionary<float, DungeonMapTexture>(_floorCells.Count);
-            foreach (var (lz, cells) in _floorCells)
-            {
-                int idx = _zLayers!.IndexOf(lz);
-                var tex = DungeonMapTexture.GetOrBuild(_host.D3DDevice, cells, landblock, idx);
-                if (tex != null) texDict[lz] = tex;
-            }
-            _layerTextures = texDict.Count > 0 ? texDict : null;
-        }
+        // Disk floor plans for DrakRemote (StatusAgent /map). Once per landblock, off this
+        // thread; a plan that is already on disk with the same bytes is left alone.
+        Maps.DungeonMapBake.Request(landblock, _zLayers, _floorCells);
     }
 
-    // Reduce a colour to ~25 % opacity for non-current-floor rendering.
-    // ImGui packs colours as 0xAABBGGRR; the alpha is in bits 31–24.
-    private static uint DimCol(uint c) =>
-        ((uint)((c >> 24 & 0xFF) * 0.25f) << 24) | (c & 0x00FFFFFFu);
+    /// <summary>The floor heights (cell Z rounded to 0.1) of a landblock's polygons, ascending.
+    /// A layer's index in this list is the layer number in the baked map file names.</summary>
+    internal static List<float> LayerZs(List<DungeonLOS.MapPolygon> floorPolys, List<DungeonLOS.MapPolygon> portalPolys)
+    {
+        var zSet = new SortedSet<float>();
+        foreach (var p in floorPolys)  zSet.Add((float)Math.Round(p.CellZ, 1));
+        foreach (var p in portalPolys) zSet.Add((float)Math.Round(p.CellZ, 1));
+        return new List<float>(zSet);
+    }
+
+    /// <summary>
+    /// The typed floor-cell grid of one layer (GridCell squares): physics floor polygons
+    /// rasterised, plus width-matched bridges between nearby portals. Pure; no state.
+    /// </summary>
+    internal static Dictionary<(int, int), CellType> RasterizeLayer(
+        List<DungeonLOS.MapPolygon> floorPolys, List<DungeonLOS.MapPolygon> portalPolys, float layerZ)
+    {
+        const float LayerTol = 1.0f;
+        var filled = new Dictionary<(int, int), CellType>();
+
+        foreach (var poly in floorPolys)
+        {
+            if (MathF.Abs(poly.CellZ - layerZ) > LayerTol) continue;
+            var verts = poly.Vertices;
+            if (verts == null || verts.Length < 3) continue;
+
+            CellType type = ClassifyPoly(verts, layerZ);
+            if ((byte)type == NotFloor) continue; // physics floor polys are upward-facing; skip any edge cases
+
+            RasterizeXY(verts, filled, type);
+        }
+
+        // ── Portal gap-closing (width-matched bridges) ───────────────
+        // For each pair of portals within 5 units, fill a rectangle
+        // bridge between them.  Width = actual doorway opening derived
+        // from the portal polygon's larger XY bounding-box dimension.
+        {
+            var portals = new List<(float cx, float cy, float halfW)>();
+            var pDedup  = new HashSet<(int, int)>();
+            foreach (var poly in portalPolys)
+            {
+                if (!poly.IsPortal) continue;
+                if (MathF.Abs(poly.CellZ - layerZ) > LayerTol) continue;
+                var verts = poly.Vertices;
+                if (verts == null || verts.Length < 3) continue;
+                float cx = 0, cy = 0;
+                float xMin = verts[0].X, xMax = verts[0].X;
+                float yMin = verts[0].Y, yMax = verts[0].Y;
+                for (int k = 0; k < verts.Length; k++)
+                {
+                    cx += verts[k].X; cy += verts[k].Y;
+                    if (verts[k].X < xMin) xMin = verts[k].X;
+                    if (verts[k].X > xMax) xMax = verts[k].X;
+                    if (verts[k].Y < yMin) yMin = verts[k].Y;
+                    if (verts[k].Y > yMax) yMax = verts[k].Y;
+                }
+                cx /= verts.Length; cy /= verts.Length;
+                float halfW = MathF.Max(xMax - xMin, yMax - yMin) * 0.5f;
+                halfW = MathF.Max(halfW, 1.0f); // minimum 1 unit wide
+                if (pDedup.Add(((int)MathF.Round(cx), (int)MathF.Round(cy))))
+                    portals.Add((cx, cy, halfW));
+            }
+
+            const float ConnectDist = 5f;
+
+            for (int a = 0; a < portals.Count; a++)
+            for (int b = a + 1; b < portals.Count; b++)
+            {
+                float ddx = portals[b].cx - portals[a].cx;
+                float ddy = portals[b].cy - portals[a].cy;
+                float distSq = ddx * ddx + ddy * ddy;
+                if (distSq > ConnectDist * ConnectDist) continue;
+
+                float dist  = MathF.Sqrt(distSq);
+                float hw    = MathF.Max(portals[a].halfW, portals[b].halfW);
+
+                // Normalised A→B direction, then perpendicular scaled by half-width
+                float normDx = dist > 0.001f ? ddx / dist : 1f;
+                float normDy = dist > 0.001f ? ddy / dist : 0f;
+                float perpX  = -normDy * hw;
+                float perpY  =  normDx * hw;
+
+                float pax = portals[a].cx, pay = portals[a].cy;
+                float pbx = portals[b].cx, pby = portals[b].cy;
+
+                // 4 corners of the bridge quad
+                float c0x = pax - perpX, c0y = pay - perpY;
+                float c1x = pax + perpX, c1y = pay + perpY;
+                float c2x = pbx + perpX, c2y = pby + perpY;
+                float c3x = pbx - perpX, c3y = pby - perpY;
+
+                float bbMinX = MathF.Min(MathF.Min(c0x, c1x), MathF.Min(c2x, c3x));
+                float bbMaxX = MathF.Max(MathF.Max(c0x, c1x), MathF.Max(c2x, c3x));
+                float bbMinY = MathF.Min(MathF.Min(c0y, c1y), MathF.Min(c2y, c3y));
+                float bbMaxY = MathF.Max(MathF.Max(c0y, c1y), MathF.Max(c2y, c3y));
+
+                int gcxMin2 = (int)MathF.Floor(bbMinX / GridCell);
+                int gcxMax2 = (int)MathF.Ceiling(bbMaxX / GridCell);
+                int gcyMin2 = (int)MathF.Floor(bbMinY / GridCell);
+                int gcyMax2 = (int)MathF.Ceiling(bbMaxY / GridCell);
+
+                for (int gcy2 = gcyMin2; gcy2 <= gcyMax2; gcy2++)
+                for (int gcx2 = gcxMin2; gcx2 <= gcxMax2; gcx2++)
+                {
+                    float testX = (gcx2 + 0.5f) * GridCell;
+                    float testY = (gcy2 + 0.5f) * GridCell;
+                    if (PointInConvexQuad(testX, testY,
+                            c0x, c0y, c1x, c1y, c2x, c2y, c3x, c3y))
+                    {
+                        var key = (gcx2, gcy2);
+                        if (!filled.ContainsKey(key)) filled[key] = CellType.Flat;
+                    }
+                }
+            }
+        }
+
+        return filled;
+    }
+
+    /// <summary>
+    /// The layer heights and per-layer floor grids of a landblock, the same ones RefreshMap
+    /// builds, without touching this instance's cache. Used by the background map bake. Layers
+    /// with no cells are left out of the dictionary (but keep their index in the list).
+    /// </summary>
+    internal static (List<float> ZLayers, Dictionary<float, Dictionary<(int, int), CellType>> Cells) BuildFloorCells(
+        DungeonLOS los, uint landblock)
+    {
+        var floorPolys  = los.GetDungeonMapFloorPolygons(landblock);
+        var portalPolys = los.GetDungeonMapPolygons(landblock);
+        var cells = new Dictionary<float, Dictionary<(int, int), CellType>>();
+        if (floorPolys.Count == 0 && portalPolys.Count == 0) return (new List<float>(), cells);
+        var zLayers = LayerZs(floorPolys, portalPolys);
+        foreach (float layerZ in zLayers)
+        {
+            var filled = RasterizeLayer(floorPolys, portalPolys, layerZ);
+            if (filled.Count > 0) cells[layerZ] = filled;
+        }
+        return (zLayers, cells);
+    }
 
     // Merge collinear/adjacent axis-aligned edge segments into the fewest possible lines.
     // A 10-unit straight wall built from 20 half-unit grid edges becomes 1 line.
@@ -634,29 +455,6 @@ internal sealed class DungeonMapUi
         return result;
     }
 
-    private void RebuildVisitedStrips()
-    {
-        _lastVisitedCount = _visitedCells.Count;
-        if (_floorCells is null || _visitedCells.Count == 0 || _zLayers is null)
-        {
-            _visitedFillStrips = null;
-            return;
-        }
-
-        var result = new Dictionary<float, List<(float, float, float, float)>>(_zLayers.Count);
-        foreach (var (layerZ, cells) in _floorCells)
-        {
-            var flatVisited = new List<(int, int)>();
-            foreach (var ((gx, gy), ctype) in cells)
-                if (ctype == CellType.Flat && _visitedCells.Contains((gx, gy)))
-                    flatVisited.Add((gx, gy));
-            if (flatVisited.Count == 0) continue;
-            var strips = BuildVisitedStripsFrom(flatVisited);
-            if (strips.Count > 0) result[layerZ] = strips;
-        }
-        _visitedFillStrips = result.Count > 0 ? result : null;
-    }
-
     // Classify a polygon as Flat / SlopeUp / SlopeDown, or NotFloor if vertical.
     private static CellType ClassifyPoly(Raycasting.Vector3[] verts, float layerZ)
     {
@@ -768,537 +566,6 @@ internal sealed class DungeonMapUi
 
     // ── Toolbar ──────────────────────────────────────────────────────────────
 
-    // Returns true if the last-drawn item's right edge + gap + nextWidth fits before the window's right edge.
-    private static bool FitsOnLine(float nextWidth, float gap = 8f)
-    {
-        float itemRight   = ImGui.GetItemRectMax().X;
-        float windowRight = ImGui.GetWindowPos().X + ImGui.GetWindowSize().X
-                            - ImGui.GetStyle().WindowPadding.X;
-        return itemRight + gap + nextWidth < windowRight;
-    }
-
-    private void RenderToolbar(float playerZ)
-    {
-        // ── 1U1D toggle ───────────────────────────────────────────────────
-        bool was1U1D = _show1U1D;
-        if (was1U1D)
-        {
-            ImGui.PushStyleColor(ImGuiCol.Button,        new Vector4(0.15f, 0.45f, 0.70f, 1.0f));
-            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.20f, 0.58f, 0.88f, 1.0f));
-            ImGui.PushStyleColor(ImGuiCol.ButtonActive,  new Vector4(0.10f, 0.34f, 0.58f, 1.0f));
-        }
-        if (ImGui.SmallButton("1U1D##1u1d"))
-        {
-            _show1U1D = !_show1U1D;
-            if (_show1U1D && _zLayers is not null)
-            {
-                _visibleLayers.Clear();
-                if (_autoLayerIdx > 0) _visibleLayers.Add(_autoLayerIdx - 1);
-                _visibleLayers.Add(_autoLayerIdx);
-                if (_autoLayerIdx < _zLayers.Count - 1) _visibleLayers.Add(_autoLayerIdx + 1);
-            }
-        }
-        if (was1U1D) ImGui.PopStyleColor(3);
-
-        // ── Floor buttons ─────────────────────────────────────────────────
-        if (_zLayers is not null && _zLayers.Count > 1)
-        {
-            float floorsWidth = 52f + _zLayers.Count * 26f + 60f; // "Floors:" + Fn buttons + All/Here
-            if (FitsOnLine(floorsWidth, 10f)) ImGui.SameLine(0, 10);
-
-            ImGui.Text("Floors:");
-            ImGui.SameLine();
-            for (int i = 0; i < _zLayers.Count; i++)
-            {
-                if (i > 0) ImGui.SameLine();
-                bool on = _visibleLayers.Contains(i);
-                bool isCurrent = i == _autoLayerIdx;
-                if (on && isCurrent)
-                    ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.10f, 0.65f, 0.30f, 1.0f));
-                else if (on)
-                    ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.15f, 0.45f, 0.70f, 1.0f));
-                if (ImGui.SmallButton($"F{i + 1}##floor{i}"))
-                {
-                    _show1U1D = false;
-                    if (on) _visibleLayers.Remove(i); else _visibleLayers.Add(i);
-                }
-                if (on) ImGui.PopStyleColor();
-            }
-            ImGui.SameLine(0, 6);
-            if (ImGui.SmallButton("All##floorAll"))
-            {
-                _show1U1D = false;
-                _visibleLayers.Clear();
-                for (int i = 0; i < _zLayers.Count; i++) _visibleLayers.Add(i);
-            }
-            ImGui.SameLine();
-            if (ImGui.SmallButton("Here##floorHere"))
-            {
-                _show1U1D = false;
-                _visibleLayers.Clear();
-                _visibleLayers.Add(BestLayerIdx(playerZ));
-            }
-        }
-
-        // ── Zoom ──────────────────────────────────────────────────────────
-        if (FitsOnLine(130f, 12f)) ImGui.SameLine(0, 12);
-        ImGui.Text("Zoom:");
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(80);
-        ImGui.SliderFloat("##mapzoom", ref _zoom, 1.0f, 20.0f, "%.1fx");
-        if (!float.IsFinite(_zoom)) _zoom = 5.0f;
-
-        // ── Follow / Rotate / Reset ───────────────────────────────────────
-        if (FitsOnLine(180f, 12f)) ImGui.SameLine(0, 12);
-        ImGui.Checkbox("Follow##mapfollow", ref _autoFollow);
-        ImGui.SameLine(0, 6);
-        ImGui.Checkbox("Rotate##maprotate", ref _settings.MapRotateWithPlayer);
-        ImGui.SameLine(0, 6);
-        if (ImGui.SmallButton("Reset##mapreset"))
-        { _pan = Vector2.Zero; _zoom = 5.0f; _autoFollow = true; _show1U1D = true; }
-
-        // ── Doors / Creatures ─────────────────────────────────────────────
-        if (FitsOnLine(148f, 12f)) ImGui.SameLine(0, 12);
-        ImGui.Checkbox("Doors##mapDoors", ref _settings.MapShowDoors);
-        ImGui.SameLine(0, 6);
-        ImGui.Checkbox("Creatures##mapCreatures", ref _settings.MapShowCreatures);
-
-        // ── Opacity ───────────────────────────────────────────────────────
-        if (FitsOnLine(130f, 12f)) ImGui.SameLine(0, 12);
-        ImGui.Text("Opacity:");
-        ImGui.SameLine(0, 4);
-        ImGui.SetNextItemWidth(70);
-        ImGui.SliderFloat("##mapOpacity", ref _settings.MapBgOpacity, 0f, 1f, "%.2f");
-        _settings.MapBgOpacity = Math.Clamp(_settings.MapBgOpacity, 0f, 1f);
-
-    }
-
     // ── Canvas ────────────────────────────────────────────────────────────────
 
-    private void RenderCanvas(float playerWX, float playerWY, float playerZ, bool showExpandBtn = false)
-    {
-        Vector2 canvasSize = ImGui.GetContentRegionAvail();
-        if (canvasSize.X < 50 || canvasSize.Y < 50) return;
-
-        Vector2 origin = ImGui.GetCursorScreenPos();
-
-        // Record canvas screen rect while toolbar is visible so we can snap to it on hide.
-        if (!showExpandBtn)
-        {
-            _canvasPos  = origin;
-            _canvasSize = canvasSize;
-        }
-        Vector2 centre = origin + canvasSize * 0.5f;
-
-        ImDrawListPtr dl = ImGui.GetWindowDrawList();
-
-        // Only the canvas background scales with opacity — fills and edges stay full colour.
-        uint colBgDyn = SetAlpha(ColBg, _settings.MapBgOpacity);
-
-        dl.AddRectFilled(origin, origin + canvasSize, colBgDyn);
-        dl.AddRect(origin, origin + canvasSize, ColBorder);
-        dl.PushClipRect(origin, origin + canvasSize, true);
-
-        if (_autoFollow) _pan = Vector2.Zero;
-
-        if (_zLayers is not null)
-        {
-            int best = BestLayerIdx(playerZ);
-            if (best != _autoLayerIdx)
-            {
-                _autoLayerIdx = best;
-                if (_show1U1D)
-                {
-                    _visibleLayers.Clear();
-                    if (best > 0) _visibleLayers.Add(best - 1);
-                    _visibleLayers.Add(best);
-                    if (best < _zLayers.Count - 1) _visibleLayers.Add(best + 1);
-                }
-                else if (_autoFollow) { _visibleLayers.Clear(); _visibleLayers.Add(best); }
-            }
-        }
-
-        Span<float> visZ = stackalloc float[_zLayers?.Count ?? 0];
-        int visCount = 0;
-        if (_zLayers is not null)
-            foreach (int idx in _visibleLayers)
-                if (idx >= 0 && idx < _zLayers.Count)
-                    visZ[visCount++] = _zLayers[idx];
-
-        float cxMin = origin.X, cxMax = origin.X + canvasSize.X;
-        float cyMin = origin.Y, cyMax = origin.Y + canvasSize.Y;
-        const float Margin = 20f;
-
-        float currentLayerZ = (_zLayers is not null && _autoLayerIdx < _zLayers.Count)
-            ? _zLayers[_autoLayerIdx] : float.NaN;
-
-        bool rotate = _settings.MapRotateWithPlayer;
-        float sinH = 0f, cosH = 1f;
-        if (rotate && _host.HasGetPlayerHeading && _host.TryGetPlayerHeading(out float mapHeading))
-        {
-            float hRad = mapHeading * MathF.PI / 180f;
-            sinH = MathF.Sin(hRad);
-            cosH = MathF.Cos(hRad);
-        }
-
-        // ── Paint visited flat cells under player each frame ─────────────
-        if (!float.IsNaN(currentLayerZ))
-        {
-            const int PaintRadius = 2;
-            int pgx = (int)MathF.Floor(playerWX / GridCell);
-            int pgy = (int)MathF.Floor(playerWY / GridCell);
-            for (int dy = -PaintRadius; dy <= PaintRadius; dy++)
-            for (int dx = -PaintRadius; dx <= PaintRadius; dx++)
-                _visitedCells.Add((pgx + dx, pgy + dy));
-        }
-
-        // Rebuild visited strips only when new cells were added — O(cells) once, O(1) each frame.
-        if (_visitedCells.Count != _lastVisitedCount)
-            RebuildVisitedStrips();
-
-        // ── Floor texture (fill + edges baked, O(1) vertices per layer) ──
-        // Falls back to fill-strip geometry when texture creation failed.
-        if (_layerTextures is not null)
-        {
-            for (int vi = 0; vi < visCount; vi++)
-            {
-                if (!_layerTextures.TryGetValue(visZ[vi], out var tex)) continue;
-                if (tex.TexId == IntPtr.Zero) continue;
-                bool isCurrent = MathF.Abs(visZ[vi] - currentLayerZ) < 0.01f;
-                uint tint = isCurrent ? 0xFFFFFFFFu : 0x40FFFFFFu;
-
-                // Project the four world corners of the texture (NW/NE/SE/SW)
-                var pNW = Project(tex.WorldX0, tex.WorldY1, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                var pNE = Project(tex.WorldX1, tex.WorldY1, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                var pSE = Project(tex.WorldX1, tex.WorldY0, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                var pSW = Project(tex.WorldX0, tex.WorldY0, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-
-                float qxMin = MathF.Min(MathF.Min(pNW.X, pNE.X), MathF.Min(pSE.X, pSW.X));
-                float qxMax = MathF.Max(MathF.Max(pNW.X, pNE.X), MathF.Max(pSE.X, pSW.X));
-                float qyMin = MathF.Min(MathF.Min(pNW.Y, pNE.Y), MathF.Min(pSE.Y, pSW.Y));
-                float qyMax = MathF.Max(MathF.Max(pNW.Y, pNE.Y), MathF.Max(pSE.Y, pSW.Y));
-                if (qxMax < cxMin - Margin || qxMin > cxMax + Margin ||
-                    qyMax < cyMin - Margin || qyMin > cyMax + Margin) continue;
-
-                // UV: NW=(0,0), NE=(1,0), SE=(1,1), SW=(0,1)  (row 0 = northernmost = top of texture)
-                dl.AddImageQuad(tex.TexId, pNW, pNE, pSE, pSW,
-                    new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(1f, 1f), new Vector2(0f, 1f), tint);
-            }
-        }
-        else if (_fillStrips is not null)
-        {
-            for (int vi = 0; vi < visCount; vi++)
-            {
-                if (!_fillStrips.TryGetValue(visZ[vi], out var strips)) continue;
-                bool isCurrent = MathF.Abs(visZ[vi] - currentLayerZ) < 0.01f;
-
-                foreach (var (x0, y0, x1, y1, type) in strips)
-                {
-                    var fp00 = Project(x0, y0, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                    var fp10 = Project(x1, y0, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                    var fp11 = Project(x1, y1, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                    var fp01 = Project(x0, y1, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                    float fxMin = MathF.Min(fp00.X, MathF.Min(fp10.X, MathF.Min(fp11.X, fp01.X)));
-                    float fxMax = MathF.Max(fp00.X, MathF.Max(fp10.X, MathF.Max(fp11.X, fp01.X)));
-                    float fyMin = MathF.Min(fp00.Y, MathF.Min(fp10.Y, MathF.Min(fp11.Y, fp01.Y)));
-                    float fyMax = MathF.Max(fp00.Y, MathF.Max(fp10.Y, MathF.Max(fp11.Y, fp01.Y)));
-
-                    if (fxMax < cxMin - Margin || fxMin > cxMax + Margin ||
-                        fyMax < cyMin - Margin || fyMin > cyMax + Margin) continue;
-
-                    uint fillCol = type switch
-                    {
-                        CellType.SlopeUp   => ColSlopeUpFill,
-                        CellType.SlopeDown => ColSlopeDownFill,
-                        _                  => ColFlatFill,
-                    };
-                    if (!isCurrent) fillCol = DimCol(fillCol);
-
-                    if (rotate) dl.AddQuadFilled(fp00, fp10, fp11, fp01, fillCol);
-                    else        dl.AddRectFilled(new Vector2(fxMin, fyMin), new Vector2(fxMax, fyMax), fillCol);
-                }
-            }
-        }
-
-        // ── Visited flat cell overlay (current floor only, drawn as merged strips) ──
-        // Uses _visitedFillStrips (rebuilt lazily) to keep vertex count O(strips), not O(cells).
-        if (_visitedFillStrips is not null && !float.IsNaN(currentLayerZ)
-            && _visitedFillStrips.TryGetValue(currentLayerZ, out var visitedStrips))
-        {
-            foreach (var (x0, y0, x1, y1) in visitedStrips)
-            {
-                var vp00 = Project(x0, y0, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                var vp10 = Project(x1, y0, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                var vp11 = Project(x1, y1, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                var vp01 = Project(x0, y1, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                float vxMin = MathF.Min(vp00.X, MathF.Min(vp10.X, MathF.Min(vp11.X, vp01.X)));
-                float vxMax = MathF.Max(vp00.X, MathF.Max(vp10.X, MathF.Max(vp11.X, vp01.X)));
-                float vyMin = MathF.Min(vp00.Y, MathF.Min(vp10.Y, MathF.Min(vp11.Y, vp01.Y)));
-                float vyMax = MathF.Max(vp00.Y, MathF.Max(vp10.Y, MathF.Max(vp11.Y, vp01.Y)));
-
-                if (vxMax < cxMin - Margin || vxMin > cxMax + Margin ||
-                    vyMax < cyMin - Margin || vyMin > cyMax + Margin) continue;
-
-                if (rotate) dl.AddQuadFilled(vp00, vp10, vp11, vp01, ColFlatFillVisited);
-                else        dl.AddRectFilled(new Vector2(vxMin, vyMin), new Vector2(vxMax, vyMax), ColFlatFillVisited);
-            }
-        }
-
-        // ── Outer edges (fallback only — skipped when textures are available) ──
-        if (_layerTextures is null && _outerEdges is not null)
-        {
-            for (int vi = 0; vi < visCount; vi++)
-            {
-                if (!_outerEdges.TryGetValue(visZ[vi], out var edges)) continue;
-                bool isCurrent = MathF.Abs(visZ[vi] - currentLayerZ) < 0.01f;
-
-                foreach (var (ax, ay, bx, by, type) in edges)
-                {
-                    var ep0 = Project(ax, ay, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                    var ep1 = Project(bx, by, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-
-                    if (MathF.Max(ep0.X, ep1.X) < cxMin - Margin || MathF.Min(ep0.X, ep1.X) > cxMax + Margin ||
-                        MathF.Max(ep0.Y, ep1.Y) < cyMin - Margin || MathF.Min(ep0.Y, ep1.Y) > cyMax + Margin)
-                        continue;
-
-                    uint col = type switch
-                    {
-                        CellType.SlopeUp   => ColSlopeUp,
-                        CellType.SlopeDown => ColSlopeDown,
-                        _                  => ColFlat,
-                    };
-                    if (!isCurrent) col = DimCol(col);
-
-                    dl.AddLine(ep0, ep1, col, 1.5f);
-                }
-            }
-        }
-
-        // ── Teleport portals ──────────────────────────────────────────────
-        if (_objectCache != null && _host.HasGetObjectPosition && _host.HasGetItemType)
-        {
-            const uint TypePortal    = 0x10000u;
-            const uint STypePortalDest = 38u;
-            float gxLB = ((_cachedLandblock >> 8) & 0xFF) * 192f;
-            float gyLB = (_cachedLandblock & 0xFF) * 192f;
-
-            foreach (var wo in _objectCache.GetLandscapeObjects())
-            {
-                // Static GUIDs only (portals/lifestones are below 0x80000000)
-                if ((uint)wo.Id >= 0x80000000u) continue;
-                if (!_host.TryGetItemType((uint)wo.Id, out uint flags)) continue;
-                if ((flags & TypePortal) == 0) continue;
-                if (!_host.TryGetObjectPosition((uint)wo.Id, out uint portalCellId,
-                        out float portalX, out float portalY, out _)) continue;
-                if ((portalCellId >> 16) != _cachedLandblock) continue;
-
-                float worldX = portalX + gxLB;
-                float worldY = portalY + gyLB;
-                var   ps    = Project(worldX, worldY, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                float psx   = ps.X, psy = ps.Y;
-
-                if (psx < cxMin - 20 || psx > cxMax + 20 ||
-                    psy < cyMin - 20 || psy > cyMax + 20) continue;
-
-                var psc = new Vector2(psx, psy);
-                dl.AddCircleFilled(psc, 5f, ColPortal);
-                dl.AddCircle(psc, 7f, ColPortalRing, 12, 1.5f);
-
-                string label = wo.Name;
-                if (_host.TryGetObjectStringProperty((uint)wo.Id, STypePortalDest, out string dest)
-                    && !string.IsNullOrEmpty(dest))
-                    label = dest.Length > 22 ? dest.Substring(0, 22) + "…" : dest;
-                dl.AddText(new Vector2(psx + 9f, psy - 7f), ColPortalLabel, label);
-            }
-        }
-
-        // ── Doors ─────────────────────────────────────────────────────────
-        if (_settings.MapShowDoors && _objectCache != null && _host.HasGetObjectPosition)
-        {
-            float gxLBd = ((_cachedLandblock >> 8) & 0xFF) * 192f;
-            float gyLBd = (_cachedLandblock & 0xFF) * 192f;
-
-            foreach (var wo in _objectCache.GetLandscapeObjects())
-            {
-                if ((uint)wo.Id >= 0x80000000u) continue;
-                if (!IsDoorName(wo.Name)) continue;
-                if (!_host.TryGetObjectPosition((uint)wo.Id, out uint dCellId,
-                        out float dox, out float doy, out _)) continue;
-                if ((dCellId >> 16) != _cachedLandblock) continue;
-
-                float dwx = dox + gxLBd;
-                float dwy = doy + gyLBd;
-                var   ds  = Project(dwx, dwy, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                float dsx = ds.X, dsy = ds.Y;
-
-                if (dsx < cxMin - 20 || dsx > cxMax + 20 ||
-                    dsy < cyMin - 20 || dsy > cyMax + 20) continue;
-
-                // Diamond symbol
-                const float Dr = 5.0f;
-                dl.AddQuadFilled(
-                    new Vector2(dsx,      dsy - Dr),
-                    new Vector2(dsx + Dr, dsy),
-                    new Vector2(dsx,      dsy + Dr),
-                    new Vector2(dsx - Dr, dsy),
-                    ColDoor);
-                dl.AddQuad(
-                    new Vector2(dsx,          dsy - Dr - 1.5f),
-                    new Vector2(dsx + Dr + 1.5f, dsy),
-                    new Vector2(dsx,          dsy + Dr + 1.5f),
-                    new Vector2(dsx - Dr - 1.5f, dsy),
-                    ColDoorRing, 1.2f);
-                dl.AddText(new Vector2(dsx + 8f, dsy - 7f), ColDoorLabel, wo.Name.Length > 20 ? wo.Name[..20] + "…" : wo.Name);
-            }
-        }
-
-        // ── Creatures & NPCs ──────────────────────────────────────────────
-        if (_settings.MapShowCreatures && _objectCache != null && _host.HasGetObjectPosition)
-        {
-            const uint STypeCreatureType = 2u;
-            const int  CreatureTypeNpc   = 14;
-            bool canQueryCreatureType    = _host.HasGetObjectIntProperty;
-            float gxLBc = ((_cachedLandblock >> 8) & 0xFF) * 192f;
-            float gyLBc = (_cachedLandblock & 0xFF) * 192f;
-
-            foreach (var wo in _objectCache.GetLandscape())
-            {
-                if (!_host.TryGetObjectPosition((uint)wo.Id, out uint cCellId,
-                        out float cox, out float coy, out _)) continue;
-                if ((cCellId >> 16) != _cachedLandblock) continue;
-
-                float cwx = cox + gxLBc;
-                float cwy = coy + gyLBc;
-                var   csp = Project(cwx, cwy, playerWX, playerWY, centre, _zoom, _pan, rotate, sinH, cosH);
-                float csx = csp.X, csy = csp.Y;
-
-                if (csx < cxMin - 20 || csx > cxMax + 20 ||
-                    csy < cyMin - 20 || csy > cyMax + 20) continue;
-
-                bool isNpc = canQueryCreatureType
-                             && _host.TryGetObjectIntProperty((uint)wo.Id, STypeCreatureType, out int ct)
-                             && ct == CreatureTypeNpc;
-
-                var csc = new Vector2(csx, csy);
-                if (isNpc)
-                {
-                    dl.AddCircleFilled(csc, 4f, ColNpc);
-                    dl.AddCircle(csc, 6f, ColNpcRing, 10, 1.2f);
-                }
-                else
-                {
-                    dl.AddCircleFilled(csc, 4f, ColMonster);
-                    dl.AddCircle(csc, 6f, ColMonsterRing, 10, 1.0f);
-                }
-
-                string clabel = wo.Name.Length > 20 ? wo.Name[..20] + "…" : wo.Name;
-                dl.AddText(new Vector2(csx + 7f, csy - 7f), ColCreatureLabel, clabel);
-            }
-        }
-
-        // ── Player dot + heading ──────────────────────────────────────────
-        var playerScreen = new Vector2(centre.X + _pan.X, centre.Y + _pan.Y);
-        dl.AddCircleFilled(playerScreen, 4.0f, ColPlayer);
-
-        if (_host.HasGetPlayerHeading && _host.TryGetPlayerHeading(out float heading))
-        {
-            Vector2 tip;
-            if (rotate)
-            {
-                // Map rotates with player — heading arrow always points up.
-                tip = playerScreen + new Vector2(0f, -10f);
-            }
-            else
-            {
-                float rad = heading * MathF.PI / 180.0f;
-                tip = playerScreen + new Vector2(MathF.Cos(rad) * 10f, -MathF.Sin(rad) * 10f);
-            }
-            dl.AddLine(playerScreen, tip, ColPlayer, 1.5f);
-        }
-
-        dl.PopClipRect();
-
-        // Expand button rendered BEFORE InvisibleButton so ImGui gives it
-        // input priority over the canvas drag area.  SetCursorScreenPos is
-        // restored afterward so InvisibleButton still covers the full canvas.
-        if (showExpandBtn)
-        {
-            ImGui.SetCursorScreenPos(origin + new Vector2(4, 4));
-            if (ImGui.SmallButton("v##tbToggle")) _settings.MapShowToolbar = true;
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Show settings");
-            ImGui.SetCursorScreenPos(origin);
-        }
-
-        // InvisibleButton captures mouse so the window title-bar drag handler
-        // never sees the click — prevents the window from moving when panning.
-        ImGui.InvisibleButton("##mapcanvas", canvasSize);
-
-        // Tell the backend to block mouse events from reaching the game when
-        // the cursor is over the canvas (fixes click-through to AC world).
-        bool hovered = ImGui.IsItemHovered();
-        if (hovered) ImGui.SetNextFrameWantCaptureMouse(true);
-
-        if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left))
-        {
-            Vector2 delta = ImGui.GetIO().MouseDelta;
-            if (float.IsFinite(delta.X) && float.IsFinite(delta.Y))
-            {
-                _autoFollow = false;
-                _pan += delta;
-            }
-        }
-
-        // Scroll-wheel zoom: check mouse position directly against canvas bounds.
-        // IsWindowHovered can return false if another item is active, so we bypass it.
-        {
-            float wheel = ImGui.GetIO().MouseWheel;
-            if (float.IsFinite(wheel) && wheel != 0f)
-            {
-                var mp = ImGui.GetIO().MousePos;
-                if (mp.X >= origin.X && mp.X <= origin.X + canvasSize.X &&
-                    mp.Y >= origin.Y && mp.Y <= origin.Y + canvasSize.Y)
-                {
-                    _zoom = Math.Clamp(_zoom + wheel * 0.5f, 1.0f, 20.0f);
-                    ImGui.SetNextFrameWantCaptureMouse(true);
-                }
-            }
-        }
-    }
-
-    // Project a world point to canvas screen coords, optionally rotating around the player.
-    // AC convention: heading 0=east, 90=north (CCW from east).
-    // Rotate mode: player's forward direction points screen-up.
-    //   screen_right  = sinH*dx - cosH*dy
-    //   screen_forward = cosH*dx + sinH*dy  (negated for screen-Y, which increases downward)
-    // This matches RynthRadarUi.ProjectWorld exactly.
-    private static Vector2 Project(float wx, float wy, float playerWX, float playerWY,
-        Vector2 centre, float zoom, Vector2 pan, bool rotate, float sinH, float cosH)
-    {
-        float dx = wx - playerWX;
-        float dy = wy - playerWY;
-        if (rotate)
-        {
-            float rx = sinH * dx - cosH * dy;   // screen-right
-            float ry = cosH * dx + sinH * dy;   // screen-forward (screen-up = -ry)
-            dx = rx; dy = ry;
-        }
-        return new Vector2(centre.X + dx * zoom + pan.X, centre.Y - dy * zoom + pan.Y);
-    }
-
-    // Sets the alpha byte of an ImGui ABGR colour to the given 0-1 value.
-    private static uint SetAlpha(uint col, float alpha)
-    {
-        uint a = (uint)(Math.Clamp(alpha, 0f, 1f) * 255f);
-        return (col & 0x00FFFFFF) | (a << 24);
-    }
-
-    private static bool IsDoorName(string name)
-    {
-        if (string.IsNullOrEmpty(name)) return false;
-        return name.Contains("Door",       StringComparison.OrdinalIgnoreCase)
-            || name.Contains("Gate",       StringComparison.OrdinalIgnoreCase)
-            || name.Contains("Portcullis", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("Hatch",      StringComparison.OrdinalIgnoreCase)
-            || name.Contains("Trapdoor",   StringComparison.OrdinalIgnoreCase);
-    }
 }

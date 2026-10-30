@@ -15,14 +15,95 @@
     <RootNamespace>RynthCore.Plugin.RynthAi</RootNamespace>
     <AssemblyName>RynthCore.Plugin.RynthAi</AssemblyName>
     <Platforms>x86</Platforms>
+    <!-- Plugin manifest (embedded in the DLL; Plugins\Directory.Build.targets). minEngineApi is the
+         highest API use NOT behind a Has*/version check. Every call above v66 (vendor v67, plugin interfaces v68, use/weenie results and wield v70, trade v72, instance ids v73, VTank state v74, CloseContainer v76) is behind a Has*/version check with a fallback. -->
+    <RynthPluginMinEngineApi>66</RynthPluginMinEngineApi>
+    <RynthPluginDescription>The bot: combat, buffs, looting, navigation routes and metas.</RynthPluginDescription>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Plugins it can use when they are loaded (looked up at run time; optional, so they never block or reorder it). -->
+    <RynthPluginDependency Include="RynthNav" Optional="true" />
+    <RynthPluginDependency Include="RynthLua" Optional="true" />
+    <RynthPluginDependency Include="RynthNet" Optional="true" />
+    <!-- The Infinite Leaftide features (the Mini Remote's ILT tabs) since 2026-10-13. -->
+    <RynthPluginDependency Include="RynthILT" Optional="true" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- UB damage-insights seed schema, shared with the Monster Editor importer. -->
+    <Compile Include="..\..\Shared\UbMobSeed.cs" Link="Shared\UbMobSeed.cs" />
+    <!-- Interfaces shared with other RynthSuite plugins (RynthLua uses RynthAi.Script, RynthNet RynthAi.Status). -->
+    <Compile Include="..\Shared\RynthAiScriptApi.cs" Link="Shared\RynthAiScriptApi.cs" />
+    <!-- RynthNet reads the bot state through RynthAi.Status. -->
+    <Compile Include="..\Shared\RynthAiStatusApi.cs" Link="Shared\RynthAiStatusApi.cs" />
+    <!-- RynthSort reads what the bot is doing through RynthAi.Activity (read only). -->
+    <Compile Include="..\Shared\RynthAiActivityApi.cs" Link="Shared\RynthAiActivityApi.cs" />
+    <Compile Include="..\Shared\RynthAiYieldApi.cs" Link="Shared\RynthAiYieldApi.cs" />
+    <!-- RynthLua's scripts choose attack and heal spells through RynthAi.Combat. -->
+    <Compile Include="..\Shared\RynthAiCombatApi.cs" Link="Shared\RynthAiCombatApi.cs" />
+    <!-- RynthNav's navmesh path queries (stuck-recovery detours outdoors). -->
+    <Compile Include="..\Shared\RynthNavPathApi.cs" Link="Shared\RynthNavPathApi.cs" />
+    <!-- Reading our hits out of the combat log (victim + amount); RynthTracker reads the same lines. -->
+    <Compile Include="..\Shared\CombatText.cs" Link="Shared\CombatText.cs" />
+    <!-- One logged, guarded way to use an object (who used what, and why). -->
+    <Compile Include="..\Shared\UseAudit.cs" Link="Shared\UseAudit.cs" />
+    <!-- Movement calls logged with the subsystem that sent them (stuck-cast diagnosis, 2026-10-05). -->
+    <Compile Include="..\Shared\MoveAudit.cs" Link="Shared\MoveAudit.cs" />
+    <!-- One server action at a time, paced on the server's answers (stuck use/cast, 2026-10-06). -->
+    <Compile Include="..\Shared\ActionPacer.cs" Link="Shared\ActionPacer.cs" />
+    <!-- Text in the world on the Nav3D buffer (waypoint labels; RynthNav's path markers use it too). -->
+    <Compile Include="..\Shared\Nav3DText.cs" Link="Shared\Nav3DText.cs" />
+    <!-- Server signal vs a player's copy of it (chat type + line-start anchor). -->
+    <Compile Include="..\Shared\ChatSource.cs" Link="Shared\ChatSource.cs" />
+    <!-- Server commands a server plugin sends for a section (RynthILT's /fship for Fellowship), and their buttons. -->
+    <Compile Include="..\Shared\ServerCommandShare.cs" Link="Shared\ServerCommandShare.cs" />
+    <Compile Include="..\Shared\ServerCommandPanel.cs" Link="Shared\ServerCommandPanel.cs" />
+    <!-- Mini Remote session stats: RynthTracker's code, so the two show the same numbers (2026-10-11). -->
+    <Compile Include="..\Shared\KillCounter.cs" Link="Shared\KillCounter.cs" />
+    <Compile Include="..\Shared\TrackerSessionStore.cs" Link="Shared\TrackerSessionStore.cs" />
+    <Compile Include="..\Shared\SessionStats.cs" Link="Shared\SessionStats.cs" />
+    <Compile Include="..\Shared\SessionStatsTracker.cs" Link="Shared\SessionStatsTracker.cs" />
+    <!-- ImGui.NET bound to the engine's cimgui (RynthILT links the same file). -->
+    <Compile Include="..\Shared\ImGuiNativeBinding.cs" Link="Shared\ImGuiNativeBinding.cs" />
+    <!-- ImGui text calls for non-literal text ('%' escaped; RynthILT links the same file). -->
+    <Compile Include="..\Shared\SafeImGui.cs" Link="Shared\SafeImGui.cs" />
+    <!-- The engine's look for RynthAi's own windows (the instrument dashboard, 2026-10-21; RynthNet links them too). -->
+    <Compile Include="..\Shared\RynthUi\RynthUi.cs" Link="Shared\RynthUi\RynthUi.cs" />
+    <Compile Include="..\Shared\RynthUi\RynthIcons.cs" Link="Shared\RynthUi\RynthIcons.cs" />
+    <!-- A server plugin's part of the Mini Remote (RynthServer.Hub) and RynthAi.Hub (what server plugins borrow). -->
+    <Compile Include="..\Shared\RynthServerHubApi.cs" Link="Shared\RynthServerHubApi.cs" />
+    <Compile Include="..\Shared\RynthAiHubApi.cs" Link="Shared\RynthAiHubApi.cs" />
+    <!-- Save failures said in chat with the reason and the fix (2026-10-13; RynthILT links it too). -->
+    <Compile Include="..\Shared\DataWriteGuard.cs" Link="Shared\DataWriteGuard.cs" />
+    <!-- The active server (plugin API v86 GetServerStateJson) and its owner's "RynthServer.Profile"
+         JSON: the Mini Remote's Crafting tab shows the server's own salvage from it. -->
+    <Compile Include="..\Shared\EngineServerState.cs" Link="Shared\EngineServerState.cs" />
+    <Compile Include="..\Shared\ServerStateClient.cs" Link="Shared\ServerStateClient.cs" />
+    <Compile Include="..\Shared\RynthServerProfileApi.cs" Link="Shared\RynthServerProfileApi.cs" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Offline tests (Tools\RynthCore.RynthAiHostTests) reach internal types. Test-only; no runtime effect. -->
+    <InternalsVisibleTo Include="RynthCore.RynthAiHostTests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="Combat\SpellData.txt" />
+    <!-- ACECustom spell catalog (Tools\Generate-SpellCatalog.ps1): Spells window + buff profiles. -->
+    <EmbeddedResource Include="Combat\SpellCatalog.tsv" />
+    <!-- Creature weaknesses (ops/rynth-creature-resists.py builds both). -->
+    <EmbeddedResource Include="CreatureData\creature_resists.tsv" />
+    <EmbeddedResource Include="CreatureData\creature_types.txt" />
+    <!-- Creature weakness table (wcid -> damage multipliers) from the world database. Built in,
+         and also copied next to the DLL as Data\creature_weakness.json; a copy in
+         C:\Games\RynthSuite\RynthAi\Data wins over the built-in one. -->
+    <EmbeddedResource Include="Data\creature_weakness.json" />
+    <None Include="Data\creature_weakness.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
@@ -55,5 +136,10 @@
   <Target Name="RemoveBundledImGuiNativeFromPublish" AfterTargets="Publish" Condition="'$(PublishDir)' != ''">
     <Delete Files="$(PublishDir)cimgui.dll" Condition="Exists('$(PublishDir)cimgui.dll')" />
   </Target>
+
+  <ItemGroup>
+    <!-- Install-folder resolver (env, HKCU, HKLM, default C:\Games). Read only; same file as RynthCore src\Shared. -->
+    <Compile Include="..\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+  </ItemGroup>
 
 </Project>

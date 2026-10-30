@@ -63,6 +63,7 @@ internal static class AfFileParser
 
                 if (trimmed.StartsWith("STATE:"))
                 {
+                    result.DeclaredStates.Add(ExtractBraceContent(lines[idx], out _));
                     ParseState(lines, ref idx, result.Rules);
                 }
                 else if (trimmed.StartsWith("NAVDATA:"))
@@ -99,6 +100,7 @@ internal static class AfFileParser
         idx++; // consume STATE: line
 
         bool pendingDisabled = false;   // set by a "~~ @disabled" marker line
+        string pendingName = "";        // set by a "~~ @name ..." marker line
         while (idx < lines.Length)
         {
             string trimmed = lines[idx].TrimStart();
@@ -113,6 +115,8 @@ internal static class AfFileParser
             {
                 if (trimmed.Equals("~~ @disabled", StringComparison.OrdinalIgnoreCase))
                     pendingDisabled = true;
+                else if (TryRuleName(trimmed, out string name))
+                    pendingName = name;
                 idx++;
                 continue;
             }
@@ -120,8 +124,9 @@ internal static class AfFileParser
             // Look for IF: line
             if (trimmed.StartsWith("IF:"))
             {
-                var rule = new MetaRule { State = stateName, Enabled = !pendingDisabled };
+                var rule = new MetaRule { State = stateName, Enabled = !pendingDisabled, Name = pendingName };
                 pendingDisabled = false;
+                pendingName = "";
                 int ifIndent = CountLeadingTabs(lines[idx]);
                 ParseIfBlock(lines, ref idx, rule, ifIndent);
                 rules.Add(rule);
@@ -133,6 +138,19 @@ internal static class AfFileParser
         }
     }
 
+    /// <summary>"~~ @name Rebuff when low" (AfFileWriter's rule name line): the name, trimmed.
+    /// "~~ @names..." or an empty "~~ @name" is just a comment.</summary>
+    internal static bool TryRuleName(string trimmedLine, out string name)
+    {
+        name = "";
+        const string marker = "~~ @name";
+        if (!trimmedLine.StartsWith(marker, StringComparison.OrdinalIgnoreCase)) return false;
+        string rest = trimmedLine.Substring(marker.Length);
+        if (rest.Length == 0 || !char.IsWhiteSpace(rest[0])) return false;
+        name = rest.Trim();
+        return name.Length > 0;
+    }
+
     private static void ParseIfBlock(string[] lines, ref int idx, MetaRule rule, int ifIndent)
     {
         // Parse condition from IF: line
@@ -142,11 +160,10 @@ internal static class AfFileParser
         idx++;
 
         // If compound condition, parse children until DO: or end of state
-        if (rule.Condition == MetaConditionType.All ||
-            rule.Condition == MetaConditionType.Any ||
-            rule.Condition == MetaConditionType.Not)
+        MetaRule? container = ChildContainer(rule);
+        if (container != null)
         {
-            rule.Children = new List<MetaRule>();
+            container.Children ??= new List<MetaRule>();
             while (idx < lines.Length)
             {
                 string trimmed = lines[idx].TrimStart();
@@ -177,11 +194,10 @@ internal static class AfFileParser
                 idx++;
 
                 // If child is compound, recursively parse its children
-                if (child.Condition == MetaConditionType.All ||
-                    child.Condition == MetaConditionType.Any ||
-                    child.Condition == MetaConditionType.Not)
+                MetaRule? childBox = ChildContainer(child);
+                if (childBox != null)
                 {
-                    child.Children = new List<MetaRule>();
+                    childBox.Children ??= new List<MetaRule>();
                     int childIndent = lineIndent;
                     while (idx < lines.Length)
                     {
@@ -204,19 +220,18 @@ internal static class AfFileParser
                         idx++;
 
                         // Support one more level of nesting
-                        if (grandchild.Condition == MetaConditionType.All ||
-                            grandchild.Condition == MetaConditionType.Any ||
-                            grandchild.Condition == MetaConditionType.Not)
+                        MetaRule? grandBox = ChildContainer(grandchild);
+                        if (grandBox != null)
                         {
-                            grandchild.Children = new List<MetaRule>();
-                            ParseNestedConditionChildren(lines, ref idx, grandchild, ci);
+                            grandBox.Children ??= new List<MetaRule>();
+                            ParseNestedConditionChildren(lines, ref idx, grandBox, ci);
                         }
 
-                        child.Children.Add(grandchild);
+                        childBox.Children.Add(grandchild);
                     }
                 }
 
-                rule.Children.Add(child);
+                container.Children.Add(child);
             }
         }
 
@@ -322,16 +337,31 @@ internal static class AfFileParser
             ParseConditionLine(ct, child);
             idx++;
 
-            if (child.Condition == MetaConditionType.All ||
-                child.Condition == MetaConditionType.Any ||
-                child.Condition == MetaConditionType.Not)
+            MetaRule? childBox = ChildContainer(child);
+            if (childBox != null)
             {
-                child.Children = new List<MetaRule>();
-                ParseNestedConditionChildren(lines, ref idx, child, ci);
+                childBox.Children ??= new List<MetaRule>();
+                ParseNestedConditionChildren(lines, ref idx, childBox, ci);
             }
 
             parent.Children.Add(child);
         }
+    }
+
+    /// <summary>
+    /// The rule that the indented condition lines under <paramref name="rule"/> belong to.
+    /// All/Any take them, and so does a bare Not (RynthAi's old two-line form). A metaf
+    /// Not carries its operand on its own line ("Not NoMobsInDist 5"), so lines follow
+    /// only when that operand is itself All/Any ("Not All" + children) — they are its.
+    /// Null when nothing may follow.
+    /// </summary>
+    private static MetaRule? ChildContainer(MetaRule rule)
+    {
+        while (rule.Condition == MetaConditionType.Not && rule.Children is { Count: 1 })
+            rule = rule.Children[0];
+        return rule.Condition is MetaConditionType.All or MetaConditionType.Any or MetaConditionType.Not
+            ? rule
+            : null;
     }
 
     // ── Line parsers ────────────────────────────────────────────────────────
@@ -374,6 +404,20 @@ internal static class AfFileParser
 
         rule.Condition = condType;
 
+        // metaf writes Not's operand on the same line: "Not NoMobsInDist 5". This used
+        // to be dropped — an empty Not never fires. (A bare "Not" with its operand on
+        // the next line is RynthAi's old form; ChildContainer still accepts it.)
+        if (condType == MetaConditionType.Not)
+        {
+            if (rest.Length > 0)
+            {
+                var operand = new MetaRule { State = rule.State };
+                ParseConditionLine(rest, operand);
+                rule.Children = new List<MetaRule> { operand };
+            }
+            return;
+        }
+
         // Parse condition data based on type
         switch (condType)
         {
@@ -384,9 +428,11 @@ internal static class AfFileParser
 
             case MetaConditionType.ChatMessageCapture:
             {
-                // ChatCapture {pattern} {replacement} — we only use the pattern
+                // ChatCapture {pattern} {colour id list, e.g. 2;4}
                 string pattern = ExtractBraceContent(rest, out int endPos);
                 rule.ConditionData = pattern;
+                string r1 = endPos > 0 && endPos < rest.Length ? rest.Substring(endPos).Trim() : "";
+                rule.ChatColors = r1.StartsWith('{') ? ExtractBraceContent(r1, out _).Trim() : "";
                 break;
             }
 
@@ -448,6 +494,8 @@ internal static class AfFileParser
             case MetaConditionType.MainManaPHE:
             case MetaConditionType.MainStamLE:
             case MetaConditionType.VitaePHE:
+            // RynthAi only: NoKillsInMins 5 (minutes, decimals allowed).
+            case MetaConditionType.NoKillsWithinMinutes:
                 // These use bare numbers (no braces): e.g. MainSlotsLE 4, BlockE F6820033
                 rule.ConditionData = ExtractBareOrBrace(rest);
                 break;
@@ -497,8 +545,17 @@ internal static class AfFileParser
 
         switch (actionType)
         {
-            case MetaActionType.SetMetaState:
             case MetaActionType.CallMetaState:
+            {
+                // CallState {ToState} {ReturnState}: the second brace is what gets
+                // pushed on the call stack (it was dropped, so Return went back to the caller).
+                rule.ActionData = ExtractBraceContent(rest, out int e1);
+                string r1 = e1 < rest.Length ? rest.Substring(e1).Trim() : "";
+                rule.CallReturnState = r1.StartsWith('{') ? ExtractBraceContent(r1, out _) : "";
+                break;
+            }
+
+            case MetaActionType.SetMetaState:
             case MetaActionType.ChatCommand:
             case MetaActionType.ExpressionAction:
             case MetaActionType.ChatExpression:
@@ -509,17 +566,11 @@ internal static class AfFileParser
             case MetaActionType.EmbeddedNavRoute:
             {
                 // EmbedNav navname {type/filename}
+                // (metaf: EmbedNav tag {name} {transform}; the tag names the NAV block.)
+                // Stray brackets go ("None]" from VTank's "[None]"), the same as on the NAV keys.
                 int braceStart = rest.IndexOf('{');
-                if (braceStart >= 0)
-                {
-                    string navName = rest.Substring(0, braceStart).Trim();
-                    // Store nav name as ActionData — will be resolved later
-                    rule.ActionData = navName;
-                }
-                else
-                {
-                    rule.ActionData = rest.Trim();
-                }
+                string navName = braceStart >= 0 ? rest.Substring(0, braceStart) : rest;
+                rule.ActionData = EmbedNavName.Clean(navName);
                 break;
             }
 
@@ -545,9 +596,11 @@ internal static class AfFileParser
 
             case MetaActionType.GetRAOption:
             {
-                string variable = ExtractBraceContent(rest, out int e1);
+                // metaf: GetOpt {Option} {Variable} (GetOpt {OpenDoors} {doors}).
+                // ActionData stays "variable;option".
+                string option = ExtractBraceContent(rest, out int e1);
                 string r1 = e1 < rest.Length ? rest.Substring(e1).Trim() : "";
-                string option = ExtractBraceContent(r1, out _);
+                string variable = ExtractBraceContent(r1, out _);
                 rule.ActionData = $"{variable};{option}";
                 break;
             }
@@ -595,6 +648,7 @@ internal static class AfFileParser
 
         if (idx < lines.Length && lines[idx].Trim() == "~~ }") idx++; // consume closer
 
+        name = EmbedNavName.Clean(name);
         if (!string.IsNullOrEmpty(name) && navLines.Count >= 3)
             navRoutes[name] = navLines;
     }
@@ -612,7 +666,7 @@ internal static class AfFileParser
 
         // Parse "navname type"
         string[] parts = afterNav.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        string navName = parts.Length > 0 ? parts[0] : "";
+        string navName = EmbedNavName.Clean(parts.Length > 0 ? parts[0] : "");
         string navType = parts.Length > 1 ? parts[1] : "circular";
         idx++;
 
@@ -680,8 +734,20 @@ internal static class AfFileParser
                     }
                     break;
 
-                case "pau": // pau seconds
-                    if (tokens.Length >= 2)
+                case "pau": // metaf: pau X Y Z PauseMs   (old RynthAi form: pau seconds)
+                    if (tokens.Length >= 5)
+                    {
+                        // The metaf form was read as "pau seconds": the X coordinate became
+                        // the pause (e.g. -62144 ms) and the point moved to 0,0,0.
+                        navFileLines.Add("3"); // type 3 = Pause
+                        navFileLines.Add(tokens[1]); // EW
+                        navFileLines.Add(tokens[2]); // NS
+                        navFileLines.Add(tokens[3]); // Z
+                        navFileLines.Add("0");
+                        double.TryParse(tokens[4], NumberStyles.Any, CultureInfo.InvariantCulture, out double pauseMs);
+                        navFileLines.Add(((int)pauseMs).ToString(CultureInfo.InvariantCulture));
+                    }
+                    else if (tokens.Length >= 2)
                     {
                         navFileLines.Add("3"); // type 3 = Pause
                         navFileLines.Add("0");
@@ -705,35 +771,49 @@ internal static class AfFileParser
                     }
                     break;
 
-                case "ptl": // ptl EW NS Z destEW destNS destZ objectClass {PortalName}
+                // The trailer for type 6 is exactly the 6 lines NavRouteParser reads: name,
+                // class, tie, targetEW, targetNS, targetZ. ptl wrote 5 extra "0" lines and
+                // vnd/tlk 5 more too, which NavRouteParser (and CountNavPoints) then read as
+                // an extra Point at 0,0,0 after every portal, vendor or NPC: after using a
+                // portal the bot headed for the middle of Dereth.
+                case "ptl": // metaf: ptl X Y Z TargetX TargetY TargetZ ObjectClass {Name}
+                case "tlk": // metaf: tlk X Y Z TargetX TargetY TargetZ ObjectClass {Name}
                     if (tokens.Length >= 8)
                     {
-                        navFileLines.Add("6"); // type 6 = PortalNPC
+                        navFileLines.Add("6"); // type 6 = PortalNPC (used by name; NPC talk too)
                         navFileLines.Add(tokens[1]); // EW
                         navFileLines.Add(tokens[2]); // NS
                         navFileLines.Add(tokens[3]); // Z
                         navFileLines.Add("0");
-                        string portalName = tokens.Length >= 9 ? tokens[8] : tokens[7];
-                        int objClass = 14; // Portal class
-                        int.TryParse(tokens[7], out objClass);
-                        navFileLines.Add(portalName);
+                        string targetName = tokens.Length >= 9 ? tokens[8] : tokens[7];
+                        if (!int.TryParse(tokens[7], out int objClass))
+                            objClass = nodeType == "tlk" ? 37 : 14; // NPC / Portal
+                        navFileLines.Add(targetName);
                         navFileLines.Add(objClass.ToString());
                         navFileLines.Add("False");
-                        navFileLines.Add(tokens[4]); // dest EW
-                        navFileLines.Add(tokens[5]); // dest NS
-                        navFileLines.Add(tokens[6]); // dest Z
+                        navFileLines.Add(tokens[4]); // target EW
+                        navFileLines.Add(tokens[5]); // target NS
+                        navFileLines.Add(tokens[6]); // target Z
+                    }
+                    else if (nodeType == "tlk" && tokens.Length >= 5)
+                    {
+                        // Old RynthAi form: tlk EW NS Z objectId {NPCName}
+                        navFileLines.Add("6");
+                        navFileLines.Add(tokens[1]);
+                        navFileLines.Add(tokens[2]);
+                        navFileLines.Add(tokens[3]);
                         navFileLines.Add("0");
-                        navFileLines.Add("0"); // land EW
-                        navFileLines.Add("0"); // land NS
-                        navFileLines.Add("0"); // land Z
-                        navFileLines.Add("0");
+                        navFileLines.Add(tokens.Length >= 6 ? tokens[5] : "NPC");
+                        navFileLines.Add("37"); // NPC class
+                        navFileLines.Add("False");
+                        navFileLines.Add(tokens[1]); navFileLines.Add(tokens[2]); navFileLines.Add(tokens[3]);
                     }
                     break;
 
-                case "vnd": // vnd EW NS Z vendorId {VendorName}
+                case "vnd": // metaf: vnd X Y Z TargetGUID {TargetName}
                     if (tokens.Length >= 5)
                     {
-                        navFileLines.Add("6"); // treat vendor as PortalNPC type
+                        navFileLines.Add("6"); // treat vendor as PortalNPC type (used by name)
                         navFileLines.Add(tokens[1]); // EW
                         navFileLines.Add(tokens[2]); // NS
                         navFileLines.Add(tokens[3]); // Z
@@ -742,25 +822,7 @@ internal static class AfFileParser
                         navFileLines.Add(vndName);
                         navFileLines.Add("12"); // NPC class
                         navFileLines.Add("False");
-                        navFileLines.Add("0"); navFileLines.Add("0"); navFileLines.Add("0"); navFileLines.Add("0");
-                        navFileLines.Add("0"); navFileLines.Add("0"); navFileLines.Add("0"); navFileLines.Add("0");
-                    }
-                    break;
-
-                case "tlk": // tlk EW NS Z objectId {NPCName}
-                    if (tokens.Length >= 5)
-                    {
-                        navFileLines.Add("6");
-                        navFileLines.Add(tokens[1]);
-                        navFileLines.Add(tokens[2]);
-                        navFileLines.Add(tokens[3]);
-                        navFileLines.Add("0");
-                        string tlkName = tokens.Length >= 6 ? tokens[5] : "NPC";
-                        navFileLines.Add(tlkName);
-                        navFileLines.Add("37"); // NPC class
-                        navFileLines.Add("False");
-                        navFileLines.Add("0"); navFileLines.Add("0"); navFileLines.Add("0"); navFileLines.Add("0");
-                        navFileLines.Add("0"); navFileLines.Add("0"); navFileLines.Add("0"); navFileLines.Add("0");
+                        navFileLines.Add(tokens[1]); navFileLines.Add(tokens[2]); navFileLines.Add(tokens[3]);
                     }
                     break;
 

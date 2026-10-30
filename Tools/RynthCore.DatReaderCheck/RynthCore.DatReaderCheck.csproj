@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Checks a change to the dat reader (Shared\RynthCore.TerrainData\DatDatabase.cs) against the
+    reader it replaces, on the real dat files, read only. It uses only the reader's public API, so
+    the same source builds against the old reader (check out the base commit) and the new one;
+    each build writes a manifest and "diff" compares two manifests:
+
+      manifest <AC folder> <out>   every file in client_portal.dat and client_cell_1.dat: id,
+                                   flags, offset, size and a SHA-256 of its bytes; FindFile misses
+                                   for every landblock and for a fixed set of random ids;
+                                   GetLandblockCellIds for all 65,536 landblocks; timings.
+      geo <AC folder> <out>        every dungeon landblock (and every 16th outdoor one) through
+                                   RynthAi's GeometryLoader + DungeonLOS: a digest of the LOS
+                                   volumes and map polygons, and how long each load took.
+      diff <a> <b>                 compares two manifests (timing lines, "#t", are skipped).
+
+    Run: dotnet run -c Release (after the usual separator) manifest "C:\Turbine\Asheron's Call" old.txt
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>RynthCore.DatReaderCheck</RootNamespace>
+    <NoWarn>$(NoWarn);CS8632</NoWarn>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\BoundingVolume.cs" Link="Linked\BoundingVolume.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\DungeonLOS.cs" Link="Linked\DungeonLOS.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\GeometryLoader.cs" Link="Linked\GeometryLoader.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\LandblockStructs.cs" Link="Linked\LandblockStructs.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Raycasting\ScatterSystem.cs" Link="Linked\ScatterSystem.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+    <ProjectReference Include="..\..\Shared\RynthCore.TerrainData\RynthCore.TerrainData.csproj" />
+  </ItemGroup>
+
+</Project>

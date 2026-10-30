@@ -112,6 +112,22 @@ META / SCRIPTING
         myCount (number) = 5
         myName (string) = Aluvian Warrior
 
+/ra metamgr on|off|status
+    The Meta Manager: loads another meta when a timer runs out. Rules are
+    set up in the Meta panel's Schedule view (see Docs\META_MANAGER.md).
+    Triggers: a quest's /myquests timer running out, N minutes on the
+    current meta, every N minutes, or a countdown you start. The first
+    due rule wins; the switch waits for combat, looting and buffing to end
+    (60 s at most) and never happens while the macro is stopped.
+    status lists every rule with its time left.
+/ra metamgr poll [minutes]
+    Check /myquests now, or set how often it checks (default 5, minimum 1).
+/ra metamgr start <#> [minutes] | stop <#>
+    Start (or stop) countdown rule number #, optionally for a different time.
+    Example: /ra metamgr start 2 45
+/ra metamgr reset <#|all>
+    Re-arm a rule: clears "fired" (one-shot), "holding" and an error.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DIAGNOSTICS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

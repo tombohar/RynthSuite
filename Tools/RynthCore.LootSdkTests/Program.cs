@@ -15,7 +15,7 @@ namespace RynthCore.LootSdkTests;
 // are kept as an optional bonus pass at the end.
 //
 // Run: dotnet run -c Release  (exit 0 = pass, 1 = fail)
-internal static class Program
+internal static partial class Program
 {
     private static int _asserts;
     private static int _fails;
@@ -42,6 +42,12 @@ internal static class Program
         TestVTankRoundTripProgrammatic();
         TestVTankFixtureParse();
         TestMalformedInputs();
+        RunLootEditTests(args);
+        RunLootAddTests(args);
+        RunT11Tests();
+        RunLootAddT11Tests();
+        RunLootAddAttributeTests();
+        RunUnknownNodeTests();
 
         Console.WriteLine($"\nGolden tests: {_asserts} assertions, {_fails} failed.");
 

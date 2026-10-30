@@ -1,22 +1,20 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
-using System.Numerics;
-using ImGuiNET;
 using RynthCore.PluginSdk;
 
 namespace RynthCore.Plugin.RynthAi.LegacyUi;
 
+/// <summary>
+/// The Items list logic behind the engine's Items panel (ItemsFace): add the selected
+/// weapon or consumable, fill from pack, prune. Draws nothing; its ImGui window went
+/// with the plugin render path.
+/// </summary>
 internal sealed class LegacyWeaponsUi
 {
     private readonly LegacyUiSettings _settings;
     private readonly RynthCoreHost _host;
     private WorldObjectCache? _worldFilter;
-
-    private static readonly string[] Elements =
-        { "Slash", "Pierce", "Bludgeon", "Fire", "Cold", "Lightning", "Acid", "Nether" };
-
-    private static readonly string[] ConsumableTypes =
-        { "General", "Lockpick", "HealthKit", "ManaStone", "Stamina", "Pet" };
 
     public LegacyWeaponsUi(LegacyUiSettings settings, RynthCoreHost host)
     {
@@ -25,184 +23,6 @@ internal sealed class LegacyWeaponsUi
     }
 
     public void SetWorldFilter(WorldObjectCache cache) => _worldFilter = cache;
-
-    public void Render()
-    {
-        if (!DashWindows.ShowWeapons) return;
-
-        ImGui.SetNextWindowSize(new Vector2(480, 440), ImGuiCond.FirstUseEver);
-        if (!ImGui.Begin("Items##RynthAiWeapons", ref DashWindows.ShowWeapons))
-        {
-            ImGui.End();
-            return;
-        }
-
-        // ── Weapons Section ─────────────────────────────────────────────────
-        ImGui.TextColored(LegacyDashboardRenderer.ColAmber, "Weapons");
-        ImGui.Spacing();
-
-        if (ImGui.BeginTable("WeaponsTable", 3,
-            ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.Resizable))
-        {
-            ImGui.TableSetupColumn("Item Name", ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableSetupColumn("Element",   ImGuiTableColumnFlags.WidthFixed, 100);
-            ImGui.TableSetupColumn("",          ImGuiTableColumnFlags.WidthFixed, 50);
-            ImGui.TableHeadersRow();
-
-            for (int i = 0; i < _settings.ItemRules.Count; i++)
-            {
-                var rule = _settings.ItemRules[i];
-                ImGui.TableNextRow();
-                ImGui.TableNextColumn();
-
-                bool inCache = _worldFilter?[rule.Id] != null;
-                if (inCache)
-                {
-                    ImGui.TextUnformatted(rule.Name);
-                }
-                else
-                {
-                    ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), rule.Name);
-                    ImGui.SameLine();
-                    ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 0.7f), "(Gone)");
-                    if (ImGui.IsItemHovered())
-                        ImGui.SetTooltip("Item not in inventory.\nRemove and re-add the correct weapon.");
-                }
-
-                ImGui.TableNextColumn();
-                ImGui.SetNextItemWidth(-1);
-                int elemIdx = Array.IndexOf(Elements, rule.Element);
-                if (elemIdx < 0) elemIdx = 0;
-                if (ImGui.Combo($"##Elem{i}", ref elemIdx, Elements, Elements.Length))
-                    rule.Element = Elements[elemIdx];
-
-                ImGui.TableNextColumn();
-                if (ImGui.SmallButton($"Del##w{i}"))
-                {
-                    foreach (var mr in _settings.MonsterRules)
-                        if (mr.WeaponId == rule.Id) mr.WeaponId = 0;
-                    _settings.ItemRules.RemoveAt(i);
-                    ImGui.EndTable();
-                    ImGui.End();
-                    return;
-                }
-            }
-            ImGui.EndTable();
-        }
-
-        bool canAdd = _host.HasGetSelectedItemId;
-        if (!canAdd) ImGui.BeginDisabled();
-
-        if (ImGui.Button("Add Selected Weapon", new Vector2(160, 24)))
-        {
-            AddSelectedWeapon();
-        }
-
-        if (!canAdd) ImGui.EndDisabled();
-
-        ImGui.SameLine();
-        ImGui.TextDisabled("(Click a weapon in inventory first)");
-
-        // ── Consumable Items Section ────────────────────────────────────────
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.Spacing();
-
-        ImGui.TextColored(LegacyDashboardRenderer.ColAmber, "Consumable Items");
-        ImGui.Spacing();
-
-        if (ImGui.BeginTable("ConsumablesTable", 3,
-            ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.Resizable))
-        {
-            ImGui.TableSetupColumn("Item Name", ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableSetupColumn("Type",      ImGuiTableColumnFlags.WidthFixed, 100);
-            ImGui.TableSetupColumn("",          ImGuiTableColumnFlags.WidthFixed, 50);
-            ImGui.TableHeadersRow();
-
-            for (int i = 0; i < _settings.ConsumableRules.Count; i++)
-            {
-                var rule = _settings.ConsumableRules[i];
-                ImGui.TableNextRow();
-                ImGui.TableNextColumn();
-
-                bool inCache = _worldFilter?[rule.Id] != null;
-                if (inCache)
-                {
-                    ImGui.TextUnformatted(rule.Name);
-                }
-                else
-                {
-                    ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), rule.Name);
-                    ImGui.SameLine();
-                    ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 0.7f), "(Gone)");
-                    if (ImGui.IsItemHovered())
-                        ImGui.SetTooltip("Item not in inventory.\nRemove and re-add the correct item.");
-                }
-
-                ImGui.TableNextColumn();
-                ImGui.SetNextItemWidth(-1);
-                int typeIdx = Array.IndexOf(ConsumableTypes, rule.Type);
-                if (typeIdx < 0) typeIdx = 0;
-                if (ImGui.Combo($"##CType{i}", ref typeIdx, ConsumableTypes, ConsumableTypes.Length))
-                    rule.Type = ConsumableTypes[typeIdx];
-
-                ImGui.TableNextColumn();
-                if (ImGui.SmallButton($"Del##c{i}"))
-                {
-                    _settings.ConsumableRules.RemoveAt(i);
-                    ImGui.EndTable();
-                    ImGui.End();
-                    return;
-                }
-            }
-            ImGui.EndTable();
-        }
-
-        if (!canAdd) ImGui.BeginDisabled();
-
-        if (ImGui.Button("Add Selected Consumable", new Vector2(180, 24)))
-        {
-            AddSelectedConsumable();
-        }
-
-        if (!canAdd) ImGui.EndDisabled();
-
-        ImGui.SameLine();
-        ImGui.TextDisabled("(Click an item in inventory first)");
-
-        // ── Mana Stone Tapping ──────────────────────────────────────────────
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.Spacing();
-        ImGui.TextColored(LegacyDashboardRenderer.ColAmber, "Mana Stone Tapping");
-        ImGui.Spacing();
-        ImGui.Text("Keep up to:");
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(70);
-        ImGui.DragInt("##StoneKeep", ref _settings.ManaStoneKeepCount, 0.2f, 1, 999);
-        if (_settings.ManaStoneKeepCount < 1)  _settings.ManaStoneKeepCount = 1;
-        if (_settings.ManaStoneKeepCount > 999) _settings.ManaStoneKeepCount = 999;
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Maximum number of mana stones to keep in inventory.\nStones on corpses are skipped once this count is reached.");
-        ImGui.SameLine(0, 16);
-        ImGui.Checkbox("Enable Tapping", ref _settings.EnableManaTapping);
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Use mana stones on inventory items with high MaxMana,\nthen apply the charged stone to the player to recharge gear.");
-        if (_settings.EnableManaTapping)
-        {
-            ImGui.SameLine(0, 16);
-            ImGui.Text("Min MaxMana:");
-            ImGui.SameLine();
-            ImGui.SetNextItemWidth(90);
-            ImGui.DragInt("##TapThresh", ref _settings.ManaTapMinMana, 50f, 100, 99999);
-            if (_settings.ManaTapMinMana < 100)  _settings.ManaTapMinMana = 100;
-            if (_settings.ManaTapMinMana > 99999) _settings.ManaTapMinMana = 99999;
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Only tap items whose MaxMana is at or above this value.");
-        }
-
-        ImGui.End();
-    }
 
     public void AddSelectedWeapon()
     {
@@ -215,23 +35,44 @@ internal sealed class LegacyWeaponsUi
         if (_worldFilter == null) { _host.WriteToChat("[RynthAi] Object cache not ready.", 1); return; }
 
         var wo = _worldFilter[(int)selId];
+        // A class guessed from the name before the item type was known can be wrong: ask the
+        // game for the real type before refusing (and fix the cached entry for combat too).
+        if (wo != null && !IsWeapon(wo) && !CombatManager.IsShieldItem(wo))
+            wo = _worldFilter.ReclassifyFromItemType(wo.Id) ?? wo;
         if (wo == null)
             _host.WriteToChat($"[RynthAi] Item 0x{selId:X8} not in cache — try again.", 1);
-        else if (!IsWeapon(wo))
-            _host.WriteToChat("[RynthAi] Selected item is not a weapon or wand.", 1);
+        else if (!IsWeapon(wo) && !CombatManager.IsShieldItem(wo))
+            _host.WriteToChat("[RynthAi] Selected item is not a weapon, wand or shield.", 1);
         else if (_settings.ItemRules.Any(x => x.Id == wo.Id))
             _host.WriteToChat($"[RynthAi] {wo.Name} is already in the list.", 1);
-        else
+        else if (!IsWeapon(wo))
         {
-            string element = DetectWeaponElement(wo);
+            // A shield: combat wields it in the off hand (the Monsters rule's / global Offhand setting).
             _settings.ItemRules.Add(new ItemRule
             {
-                Id      = wo.Id,
-                Name    = wo.Name,
-                Element = element,
-                Action  = "Weapon",
+                Id            = wo.Id,
+                Name          = wo.Name,
+                Element       = "",
+                ElementSource = "",
+                Action        = WeaponList.ShieldAction,
             });
-            _host.WriteToChat($"[RynthAi] Added weapon: {wo.Name} (0x{(uint)wo.Id:X8}) [{element}]", 1);
+            string shown = WeaponNames.For(_host, _worldFilter, wo.Id, wo.Name);
+            _host.WriteToChat($"[RynthAi] Added shield: {shown} (0x{(uint)wo.Id:X8}) — wielded in the off hand with a one-handed weapon (Offhand: {_settings.OffhandDefault})", 1);
+        }
+        else
+        {
+            var info = WeaponElementTracker.ReadFrom(_host, wo.Id, wo.Name);
+            _settings.ItemRules.Add(new ItemRule
+            {
+                Id            = wo.Id,
+                Name          = wo.Name,
+                Element       = info.Element,
+                ElementSource = info.Source,
+                Action        = "Weapon",
+            });
+            string shown = WeaponNames.For(_host, _worldFilter, wo.Id, wo.Name);
+            string elem = info.Unknown ? "element unknown until identified" : $"{info.Element}, from {info.Source}";
+            _host.WriteToChat($"[RynthAi] Added weapon: {shown} (0x{(uint)wo.Id:X8}) [{elem}]", 1);
         }
     }
 
@@ -263,30 +104,118 @@ internal sealed class LegacyWeaponsUi
         }
     }
 
+    /// <summary>
+    /// Adds every weapon and usable consumable in <paramref name="inventory"/> that
+    /// isn't listed yet: weapons (melee, missile, wands; the wielded one first, since
+    /// combat treats the first weapon as the default), healing kits, lockpicks and
+    /// pet essences. Mana stones are left out on purpose: listing any switches mana
+    /// tapping from "every mana stone" to "only these names".
+    /// </summary>
+    public (int Weapons, int Consumables) FillFromPack(IReadOnlyList<WorldObject> inventory, uint playerId)
+    {
+        int weapons = 0, consumables = 0;
+        var ordered = inventory
+            .OrderByDescending(wo => playerId != 0 && wo.Wielder == unchecked((int)playerId))
+            .ThenBy(wo => wo.Name, StringComparer.OrdinalIgnoreCase);
+        foreach (var wo in ordered)
+        {
+            if (IsWeapon(wo))
+            {
+                if (_settings.ItemRules.Any(x => x.Id == wo.Id)) continue;
+                var info = WeaponElementTracker.ReadFrom(_host, wo.Id, wo.Name);
+                _settings.ItemRules.Add(new ItemRule { Id = wo.Id, Name = wo.Name, Element = info.Element, ElementSource = info.Source, Action = "Weapon" });
+                weapons++;
+                continue;
+            }
+            string? type = PackConsumableType(wo);
+            if (type == null || _settings.ConsumableRules.Any(x => x.Id == wo.Id)) continue;
+            _settings.ConsumableRules.Add(new ConsumableRule { Id = wo.Id, Name = wo.Name, Type = type });
+            consumables++;
+        }
+        return (weapons, consumables);
+    }
+
+    /// <summary>
+    /// Removes weapons and consumables this character has nothing of: entries a profile
+    /// picked up from another character. Returns their names. See <see cref="CleanMissing"/>.
+    /// </summary>
+    public List<string> PruneNotOwned(IReadOnlyList<WorldObject> inventory) => CleanMissing(inventory).Removed;
+
+    /// <summary>
+    /// Clears out weapons and consumables whose item is no longer in
+    /// <paramref name="inventory"/> (owned items: main pack, side packs, wielded gear).
+    /// An entry whose item is gone, but with an unlisted item of the same name in the pack
+    /// (a new stack of kits, a replacement weapon), is re-pointed at that item instead of
+    /// removed. Returns the names removed and the names re-pointed.
+    /// </summary>
+    public (List<string> Removed, List<string> Relinked) CleanMissing(IReadOnlyList<WorldObject> inventory)
+    {
+        var removed  = new List<string>();
+        var relinked = new List<string>();
+        CleanList(_settings.ItemRules, r => r.Id, (r, id) => r.Id = id, r => r.Name, inventory, removed, relinked);
+        CleanList(_settings.ConsumableRules, r => r.Id, (r, id) => r.Id = id, r => r.Name, inventory, removed, relinked);
+        return (removed, relinked);
+    }
+
+    private static void CleanList<T>(List<T> rules, Func<T, int> getId, Action<T, int> setId, Func<T, string> getName,
+                                     IReadOnlyList<WorldObject> inventory, List<string> removed, List<string> relinked)
+    {
+        var owned = new HashSet<int>(inventory.Select(w => w.Id));
+        // Items already listed by a live entry: a gone entry is never pointed at one of them.
+        var listed = new HashSet<int>(rules.Select(getId).Where(owned.Contains));
+        rules.RemoveAll(r =>
+        {
+            if (owned.Contains(getId(r))) return false;
+            string name = getName(r);
+            var spare = inventory.FirstOrDefault(w => !listed.Contains(w.Id)
+                && string.Equals(w.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (spare != null)
+            {
+                setId(r, spare.Id);
+                listed.Add(spare.Id);
+                relinked.Add(name);
+                return false;
+            }
+            removed.Add(name);
+            return true;
+        });
+    }
+
+    internal static string? PackConsumableType(WorldObject wo)
+    {
+        switch (wo.ObjectClass)
+        {
+            case AcObjectClass.HealingKit:
+                // A kit restores the vital in its name: a Greater Mana Kit is no healing kit (DreamWeave has them).
+                if ((wo.Name ?? "").Contains("Stamina", StringComparison.OrdinalIgnoreCase)) return "StaminaKit";
+                if ((wo.Name ?? "").Contains("Mana", StringComparison.OrdinalIgnoreCase)) return "ManaKit";
+                return "HealthKit";
+            case AcObjectClass.Food:       return PotionType(wo);
+            case AcObjectClass.Lockpick:   return "Lockpick";
+            case AcObjectClass.Misc:
+            case AcObjectClass.CombatPet:
+                return wo.Name.Contains("Essence", StringComparison.OrdinalIgnoreCase) ? "Pet" : null;
+            default: return null;
+        }
+    }
+
+    /// <summary>HealthPotion / ManaPotion / StaminaPotion for a Food item named for a vital, else null.</summary>
+    internal static string? PotionType(WorldObject wo)
+    {
+        if (wo.ObjectClass != AcObjectClass.Food || string.IsNullOrEmpty(wo.Name)) return null;
+        string n = wo.Name;
+        // Field Rations restore stamina (BoostEnum 4) but don't say so in the name.
+        if (n.EndsWith("Field Rations", StringComparison.OrdinalIgnoreCase)) return "StaminaPotion";
+        if (n.Contains("Mana", StringComparison.OrdinalIgnoreCase)) return "ManaPotion";
+        if (n.Contains("Stamina", StringComparison.OrdinalIgnoreCase)) return "StaminaPotion";
+        if (n.Contains("Heal", StringComparison.OrdinalIgnoreCase) || n.Contains("Health", StringComparison.OrdinalIgnoreCase)) return "HealthPotion";
+        return null;
+    }
+
     private static bool IsWeapon(WorldObject wo) =>
         wo.ObjectClass == AcObjectClass.MeleeWeapon   ||
         wo.ObjectClass == AcObjectClass.MissileWeapon ||
         wo.ObjectClass == AcObjectClass.WandStaffOrb;
-
-    /// <summary>Auto-detect weapon element from the DamageType int property.</summary>
-    private static string DetectWeaponElement(WorldObject wo)
-    {
-        // DamageType (STypeInt 45) — AC damage type flags
-        int dt = wo.Values(LongValueKey.DamageType, 0);
-        if (dt == 0) return "Slash"; // no data — default
-
-        // Check flags in order of specificity (elemental first, then physical)
-        if ((dt & 1024) != 0) return "Nether";
-        if ((dt & 16)   != 0) return "Fire";
-        if ((dt & 8)    != 0) return "Cold";
-        if ((dt & 64)   != 0) return "Lightning";
-        if ((dt & 32)   != 0) return "Acid";
-        if ((dt & 1)    != 0) return "Slash";
-        if ((dt & 2)    != 0) return "Pierce";
-        if ((dt & 4)    != 0) return "Bludgeon";
-
-        return "Slash";
-    }
 
     /// <summary>Auto-detect consumable type from item name.</summary>
     private static string DetectConsumableType(WorldObject wo)
@@ -294,20 +223,26 @@ internal sealed class LegacyWeaponsUi
         string name = wo.Name;
         if (string.IsNullOrEmpty(name)) return "General";
 
+        // Potions and elixirs are Food: typed by the vital they restore. A mana
+        // potion used to become "ManaStone" from the word "Mana".
+        string? potion = PotionType(wo);
+        if (potion != null) return potion;
+
         // Health items
         if (name.Contains("Heal", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("Health", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("Elixir of Healing", StringComparison.OrdinalIgnoreCase))
             return "HealthKit";
 
-        // Mana items
-        if (name.Contains("Mana", StringComparison.OrdinalIgnoreCase) ||
-            name.Contains("Mana Stone", StringComparison.OrdinalIgnoreCase))
-            return "ManaStone";
+        // Mana items. A mana kit (it restores your own mana, like a stamina kit) is no stone: typed
+        // ManaStone it switched off the ordinary stones and Drakkon's gear ran dry (10-23).
+        if (name.Contains("Mana", StringComparison.OrdinalIgnoreCase))
+            return name.TrimEnd().EndsWith(" Kit", StringComparison.OrdinalIgnoreCase) ? "ManaKit" : "ManaStone";
 
-        // Stamina items
+        // Stamina items. A stamina kit is used on yourself, not drunk: its own type, so the
+        // potion step never takes it ("Stamina" is the old name for stamina potions).
         if (name.Contains("Stamina", StringComparison.OrdinalIgnoreCase))
-            return "Stamina";
+            return name.TrimEnd().EndsWith(" Kit", StringComparison.OrdinalIgnoreCase) ? "StaminaKit" : "Stamina";
 
         // Lockpicks
         if (name.Contains("Lockpick", StringComparison.OrdinalIgnoreCase) ||

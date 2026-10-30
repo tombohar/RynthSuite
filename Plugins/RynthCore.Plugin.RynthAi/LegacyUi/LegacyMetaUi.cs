@@ -5,6 +5,8 @@ using System.Linq;
 using System.Numerics;
 using ImGuiNET;
 using RynthCore.Plugin.RynthAi.Meta;
+using RynthCore.Install;
+using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthAi.LegacyUi;
 
@@ -46,7 +48,7 @@ internal sealed class LegacyMetaUi
     private string _statusMessage = "";
     private DateTime _statusTime = DateTime.MinValue;
 
-    private static readonly string MetaFolder = @"C:\Games\RynthSuite\RynthAi\MetaFiles";
+    private static readonly string MetaFolder = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "MetaFiles");
 
     /// <summary>Warnings from the most recent LoadMacroFile, so the Avalonia
     /// bridge can surface them too (it doesn't see the LoadedMeta).</summary>
@@ -137,9 +139,9 @@ internal sealed class LegacyMetaUi
                 ImGuiInputTextFlags.AllowTabInput);
 
             if (!string.IsNullOrEmpty(_sourceApplyMessage) &&
-                (DateTime.Now - _sourceApplyTime).TotalSeconds < 4)
+                (RynthClock.Now - _sourceApplyTime).TotalSeconds < 4)
             {
-                ImGui.TextColored(new Vector4(0, 1, 0.4f, 1f), _sourceApplyMessage);
+                SafeImGui.TextColored(new Vector4(0, 1, 0.4f, 1f), _sourceApplyMessage);
                 ImGui.SameLine();
             }
 
@@ -172,7 +174,7 @@ internal sealed class LegacyMetaUi
                 {
                     _sourceApplyMessage = $"Error: {ex.Message}";
                 }
-                _sourceApplyTime = DateTime.Now;
+                _sourceApplyTime = RynthClock.Now;
             }
 
             ImGui.SameLine();
@@ -180,7 +182,7 @@ internal sealed class LegacyMetaUi
             {
                 _sourceText = AfFileWriter.SaveToString(_settings.MetaRules, _settings.EmbeddedNavs);
                 _sourceApplyMessage = "Reverted to current rules.";
-                _sourceApplyTime = DateTime.Now;
+                _sourceApplyTime = RynthClock.Now;
             }
 
             RenderMetaEditorPopup();
@@ -208,7 +210,7 @@ internal sealed class LegacyMetaUi
                 bool anyFired = false;
                 foreach (var r in stateRules)
                 {
-                    if ((DateTime.Now - r.LastFiredAt).TotalMilliseconds < 1500)
+                    if ((RynthClock.Now - r.LastFiredAt).TotalMilliseconds < 1500)
                     {
                         anyFired = true;
                         break;
@@ -243,7 +245,7 @@ internal sealed class LegacyMetaUi
 
                     ImGui.TableNextRow();
 
-                    double fadeMs = (DateTime.Now - rule.LastFiredAt).TotalMilliseconds;
+                    double fadeMs = (RynthClock.Now - rule.LastFiredAt).TotalMilliseconds;
                     bool isFlashing = fadeMs < 1500;
                     if (isFlashing)
                     {
@@ -324,6 +326,9 @@ internal sealed class LegacyMetaUi
                             ConditionData = rule.ConditionData,
                             Action = rule.Action,
                             ActionData = rule.ActionData,
+                            CallReturnState = rule.CallReturnState,
+                            ChatColors = rule.ChatColors,
+                            Name = rule.Name,
                             Children = CloneChildren(rule.Children),
                             ActionChildren = CloneChildren(rule.ActionChildren)
                         };
@@ -341,7 +346,7 @@ internal sealed class LegacyMetaUi
                             : rule.Children;
                         int childCount = actionList?.Count ?? 0;
                         bool expanded = _expandedRuleIndices.Contains(globalIdx);
-                        ImGui.TextColored(new Vector4(1, 1, 0, 1), $"All: [{childCount} actions] (right-click to expand)");
+                        SafeImGui.TextColored(new Vector4(1, 1, 0, 1), $"All: [{childCount} actions] (right-click to expand)");
                         if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
                             ToggleExpand();
 
@@ -352,7 +357,7 @@ internal sealed class LegacyMetaUi
                                 var child = actionList[ai];
                                 string childText = child.Action.ToString() +
                                     (string.IsNullOrEmpty(child.ActionData) ? "" : $": {child.ActionData}");
-                                ImGui.TextDisabled($"   {ai + 1}. {childText}");
+                                SafeImGui.TextDisabled($"   {ai + 1}. {childText}");
                                 if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
                                     ToggleExpand();
                             }
@@ -362,13 +367,13 @@ internal sealed class LegacyMetaUi
                              !string.IsNullOrEmpty(rule.ActionData) && rule.ActionData.Contains(';'))
                     {
                         var parts = rule.ActionData.Split(';');
-                        ImGui.Text($"EmbeddedNavRoute: {parts[0]} ({parts[1]} pts)");
+                        SafeImGui.Text($"EmbeddedNavRoute: {parts[0]} ({parts[1]} pts)");
                         if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
                             ToggleExpand();
                     }
                     else
                     {
-                        ImGui.Text(rule.Action.ToString() +
+                        SafeImGui.Text(rule.Action.ToString() +
                             (string.IsNullOrEmpty(rule.ActionData) ? "" : $": {rule.ActionData}"));
                         if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
                             ToggleExpand();
@@ -413,7 +418,9 @@ internal sealed class LegacyMetaUi
             {
                 if (ImGui.Selectable(state, _settings.CurrentState == state))
                 {
-                    if (_settings.CurrentState == state) _settings.ForceStateReset = true;
+                    // Always a fresh entry (like SetState): the seconds-in-state timer
+                    // and the old state's watchdog must not carry over to the new state.
+                    _settings.ForceStateReset = true;
                     _settings.CurrentState = state;
                 }
             }
@@ -436,6 +443,7 @@ internal sealed class LegacyMetaUi
                 if (!string.IsNullOrWhiteSpace(_newStateName))
                 {
                     _settings.CurrentState = _newStateName;
+                    _settings.ForceStateReset = true;
                     _newStateName = "";
                 }
                 ImGui.CloseCurrentPopup();
@@ -550,7 +558,7 @@ internal sealed class LegacyMetaUi
                 ImGui.SameLine();
             }
 
-            ImGui.TextColored(new Vector4(1, 1, 0, 1), $"{rule.Condition} Sub-Conditions");
+            SafeImGui.TextColored(new Vector4(1, 1, 0, 1), $"{rule.Condition} Sub-Conditions");
             ImGui.Indent(15f);
 
             for (int i = 0; i < rule.Children.Count; i++)
@@ -634,7 +642,7 @@ internal sealed class LegacyMetaUi
                     if (!string.IsNullOrEmpty(sName))
                     {
                         ImGui.SameLine();
-                        ImGui.TextColored(new Vector4(0, 1, 1, 1), $"({sName})");
+                        SafeImGui.TextColored(new Vector4(0, 1, 1, 1), $"({sName})");
                     }
                 }
 
@@ -692,6 +700,9 @@ internal sealed class LegacyMetaUi
                         break;
                     case MetaConditionType.VitaePHE:
                         condHint = "Vitae penalty % (e.g. 5)";
+                        break;
+                    case MetaConditionType.NoKillsWithinMinutes:
+                        condHint = "Minutes without a kill (e.g. 5 or 2.5)";
                         break;
                 }
             }
@@ -1015,6 +1026,9 @@ internal sealed class LegacyMetaUi
                 ConditionData  = r.ConditionData,
                 Action         = r.Action,
                 ActionData     = r.ActionData,
+                CallReturnState = r.CallReturnState,
+                ChatColors     = r.ChatColors,
+                Name           = r.Name,
                 Children       = CloneChildren(r.Children),
                 ActionChildren = CloneChildren(r.ActionChildren)
             });
@@ -1064,8 +1078,8 @@ internal sealed class LegacyMetaUi
             _openSavePopup = true;
 
         // Status message
-        if (!string.IsNullOrEmpty(_statusMessage) && (DateTime.Now - _statusTime).TotalSeconds < 5)
-            ImGui.TextColored(new Vector4(0, 1, 0, 1), _statusMessage);
+        if (!string.IsNullOrEmpty(_statusMessage) && (RynthClock.Now - _statusTime).TotalSeconds < 5)
+            SafeImGui.TextColored(new Vector4(0, 1, 0, 1), _statusMessage);
 
         // Save popup
         if (_openSavePopup)
@@ -1130,7 +1144,8 @@ internal sealed class LegacyMetaUi
         }
     }
 
-    internal void LoadMacroFile(string filePath)
+    /// <summary>Loads a .met/.af (empty path clears). False when nothing was loaded; <see cref="LastLoadStatus"/> says why.</summary>
+    internal bool LoadMacroFile(string filePath)
     {
         if (string.IsNullOrEmpty(filePath))
         {
@@ -1143,8 +1158,8 @@ internal sealed class LegacyMetaUi
             _settings.CurrentState = "Default";
             _settings.ForceStateReset = true;
             _statusMessage = "Macro cleared.";
-            _statusTime = DateTime.Now;
-            return;
+            _statusTime = RynthClock.Now;
+            return true;
         }
 
         try
@@ -1159,18 +1174,20 @@ internal sealed class LegacyMetaUi
             else
             {
                 _statusMessage = "Unsupported file type";
-                _statusTime = DateTime.Now;
-                return;
+                _statusTime = RynthClock.Now;
+                return false;
             }
 
             LastLoadWarnings = loaded.Warnings;
-            if (loaded.Rules.Count == 0)
+            // A blank meta (a state, no rules) loads: it clears the old rules. Anything else
+            // without rules (a profile, an empty file) is refused as before.
+            if (loaded.Rules.Count == 0 && !loaded.IsBlank)
             {
                 _statusMessage = loaded.Warnings.Count > 0
                     ? $"No rules parsed — {loaded.Warnings.Count} warning(s): {loaded.Warnings[0]}"
                     : "No rules found (profile?)";
-                _statusTime = DateTime.Now;
-                return;
+                _statusTime = RynthClock.Now;
+                return false;
             }
 
             lock (_settings.MetaRulesLock)
@@ -1180,8 +1197,9 @@ internal sealed class LegacyMetaUi
                 foreach (var kvp in loaded.EmbeddedNavs)
                     _settings.EmbeddedNavs[kvp.Key] = kvp.Value;
             }
-            _settings.CurrentState = loaded.Rules[0].State;
+            _settings.CurrentState = loaded.StartState;
             _settings.ForceStateReset = true;
+            _settings.MetaCallStackReset = true;
             _settings.CurrentMetaPath = filePath;
 
             string name = Path.GetFileNameWithoutExtension(filePath);
@@ -1189,14 +1207,29 @@ internal sealed class LegacyMetaUi
             _statusMessage = loaded.Warnings.Count == 0
                 ? $"Loaded {loaded.Rules.Count} rules / {stateCount} states / {loaded.EmbeddedNavs.Count} navs from {name}"
                 : $"Loaded {loaded.Rules.Count} rules / {stateCount} states from {name} — {loaded.Warnings.Count} warning(s): {loaded.Warnings[0]}";
-            _statusTime = DateTime.Now;
+            _statusTime = RynthClock.Now;
+            return true;
         }
         catch (Exception ex)
         {
             _statusMessage = $"Load error: {ex.Message}";
-            _statusTime = DateTime.Now;
+            _statusTime = RynthClock.Now;
+            return false;
         }
     }
+
+    /// <summary>The status line of the last load (why it failed, or what it loaded).</summary>
+    internal string LastLoadStatus => _statusMessage ?? string.Empty;
+
+    /// <summary>
+    /// Lists MetaFiles again once the panel has listed it (a meta /ra meta load just created shows
+    /// in the picker, selected). Before the panel's first draw it lists itself then.
+    /// </summary>
+    internal void RefreshFileListIfShown()
+    {
+        if (_macroFiles.Count > 0) RefreshMacroFileList();
+    }
+
 
     private void TryAutoSaveMeta()
     {
@@ -1214,11 +1247,12 @@ internal sealed class LegacyMetaUi
                 path = Path.ChangeExtension(path, ".af");
                 _settings.CurrentMetaPath = path;
                 _statusMessage = $"Converted .met → {Path.GetFileName(path)} for editing (original .met left untouched)";
-                _statusTime = DateTime.Now;
+                _statusTime = RynthClock.Now;
             }
 
             lock (_settings.MetaRulesLock)
-                AfFileWriter.Save(path, _settings.MetaRules, _settings.EmbeddedNavs);
+                RynthCore.Plugin.Shared.DataWriteGuard.TrySave("the meta", path,
+                    () => AfFileWriter.Save(path, _settings.MetaRules, _settings.EmbeddedNavs));
         }
         catch { }
     }
@@ -1230,23 +1264,31 @@ internal sealed class LegacyMetaUi
             if (string.IsNullOrWhiteSpace(_saveName))
             {
                 _statusMessage = "Enter a file name";
-                _statusTime = DateTime.Now;
+                _statusTime = RynthClock.Now;
                 return;
             }
 
-            Directory.CreateDirectory(MetaFolder);
             string filePath = Path.Combine(MetaFolder, _saveName + ".af");
+            bool saved;
+            string why;
             lock (_settings.MetaRulesLock)
-                AfFileWriter.Save(filePath, _settings.MetaRules, _settings.EmbeddedNavs);
+                saved = RynthCore.Plugin.Shared.DataWriteGuard.TrySave("the meta", filePath,
+                    () => AfFileWriter.Save(filePath, _settings.MetaRules, _settings.EmbeddedNavs), out why);
+            if (!saved)
+            {
+                _statusMessage = $"Couldn't save {filePath}: {why}";
+                _statusTime = RynthClock.Now;
+                return;
+            }
 
             _statusMessage = $"Saved to {_saveName}.af";
-            _statusTime = DateTime.Now;
+            _statusTime = RynthClock.Now;
             RefreshMacroFileList();
         }
         catch (Exception ex)
         {
             _statusMessage = $"Save error: {ex.Message}";
-            _statusTime = DateTime.Now;
+            _statusTime = RynthClock.Now;
         }
     }
 }

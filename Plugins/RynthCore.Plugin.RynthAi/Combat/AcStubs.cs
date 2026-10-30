@@ -23,6 +23,11 @@ public enum LongValueKey
     MaximumHealth          = 39,  // creature base max HP (STypeInt 39)
     CreatureType           = 62,  // creature type / species ID
 
+    // AUGMENTATION_INCREASED_SPELL_DURATION — Archmage's Endurance, stacks 5x.
+    // Each rank adds +20% enchantment duration. Verified against Chorizite
+    // AcClient/STypes.cs STypeInt ordinal 238.
+    AugmentationIncreasedSpellDuration = 238,
+
     // Legacy alias kept for call-site compatibility
     EquippedSlots          = 10,
 }
@@ -34,6 +39,8 @@ public enum LongValueKey
 public enum StringValueKey
 {
     Name = 1,
+    // ACECustom puts the T11 "Modifiers:" block of armor, clothing and jewelry here.
+    Use = 14,
     ShortDesc = 15,
     LongDesc = 16,
     PluralName = 20,
@@ -42,19 +49,22 @@ public enum StringValueKey
 
 /// <summary>
 /// STypeFloat keys used with TryGetObjectDoubleProperty / WorldObjectCache.GetDoubleProperty.
-/// Values match Chorizite's STypeFloat sequential enum.
+/// Values match ACE's PropertyFloat and Chorizite's STypeFloat (UNDEF = 0). WeaponOffense and
+/// DamageMod were 61/62 until 2026-10-05 (61 is EconRecoveryInterval), so a native "damage
+/// percent" loot rule read the weapon's attack mod; PowerLevel/AccuracyLevel were 86/87.
 /// </summary>
 public enum DoubleValueKey
 {
     DamageVariance = 22,
     CurrentPowerMod = 23,
     AccuracyMod = 24,
+    MaximumVelocity = 26,   // missile launcher launch speed (m/s); known once appraised
     WeaponDefense = 29,
     UseRadius = 54,
-    WeaponOffense = 61,
-    DamageMod = 62,
-    PowerLevel = 86,
-    AccuracyLevel = 87,
+    WeaponOffense = 62,
+    DamageMod = 63,
+    PowerLevel = 92,
+    AccuracyLevel = 93,
 }
 
 // ── Combat mode int constants (matches acclient.exe CM_Combat enum) ────────
@@ -101,17 +111,87 @@ public class WorldObject
     // Set by WorldObjectCache when it creates/updates this object
     internal WorldObjectCache? Cache { get; set; }
 
-    public int Values(LongValueKey key, int defaultValue)
-        => Cache?.GetIntProperty(Id, (uint)key, defaultValue) ?? defaultValue;
+    /// <summary>
+    /// Values that answer Values() before any live read (AutoVendor: a vendor-list item
+    /// built from the engine's vendor snapshot, or an item's known name). Null = live only.
+    /// </summary>
+    internal ItemPropertyOverlay? Overlay { get; set; }
+
+    public int Values(LongValueKey key, int defaultValue) => Values((int)key, defaultValue);
 
     public int Values(int key, int defaultValue)
-        => Cache?.GetIntProperty(Id, (uint)key, defaultValue) ?? defaultValue;
+    {
+        // T11 virtual keys are computed from the item's text, never stored on the object.
+        if (RynthCore.Loot.T11.T11Keys.IsVirtual(key))
+            return Loot.T11ItemSupport.VirtualValue(this, key, defaultValue);
+
+        // Decal's synthetic keys that are a plain int property (MaxDamage = Damage 44, Coverage =
+        // ClothingPriority 4, ...) read as that property, from the overlay or live. The icon and
+        // spell ones are data ids: WorldObjectCache.GetIntProperty answers them.
+        uint decalStype = WorldObjectCache.DecalIntStype(unchecked((uint)key));
+        if (decalStype != 0)
+            return Values(unchecked((int)decalStype), defaultValue);
+
+        var o = Overlay;
+        if (o != null)
+        {
+            if (o.Ints.TryGetValue(unchecked((uint)key), out int v)) return v;
+            if (!o.LiveFallback) return Loot.T11ItemSupport.StrippedValue(this, key, defaultValue);
+        }
+        if (Cache == null) return Loot.T11ItemSupport.StrippedValue(this, key, defaultValue);
+
+        // T11 appraisals omit the item-aug wield gate (158-160) and modifier-carried ratings
+        // (370-379); an absent or zero value there falls back to what the item's text says.
+        if (RynthCore.Loot.T11.T11Keys.IsStrippedKey(key))
+        {
+            int live = Cache.GetIntProperty(Id, (uint)key, int.MinValue);
+            if (live != int.MinValue && live != 0) return live;
+            return Loot.T11ItemSupport.StrippedValue(this, key, live == int.MinValue ? defaultValue : 0);
+        }
+        return Cache.GetIntProperty(Id, (uint)key, defaultValue);
+    }
 
     public string Values(StringValueKey key, string defaultValue)
-        => Cache?.GetStringProperty(Id, (uint)key, defaultValue) ?? defaultValue;
+    {
+        var o = Overlay;
+        if (o != null)
+        {
+            if (o.Strings.TryGetValue((uint)key, out string? v)) return v;
+            if (!o.LiveFallback) return NameOr(key, defaultValue);
+        }
+        string s = Cache?.GetStringProperty(Id, (uint)key, defaultValue) ?? defaultValue;
+        return string.IsNullOrEmpty(s) ? NameOr(key, defaultValue) : s;
+    }
+
+    // The server doesn't put the name in the appraisal's string properties, so a
+    // StringValue(Name) loot condition compared against "" and every name rule failed
+    // (healing-kit Keep # rules never looted; 2026-09-28). Fall back to the object's name.
+    private string NameOr(StringValueKey key, string defaultValue)
+        => key == StringValueKey.Name && !string.IsNullOrEmpty(Name) ? Name : defaultValue;
 
     public double Values(DoubleValueKey key, double defaultValue)
-        => Cache?.GetDoubleProperty(Id, (uint)key, defaultValue) ?? defaultValue;
+    {
+        var o = Overlay;
+        if (o != null)
+        {
+            if (o.Doubles.TryGetValue((uint)key, out double v)) return v;
+            if (!o.LiveFallback) return defaultValue;
+        }
+        return Cache?.GetDoubleProperty(Id, (uint)key, defaultValue) ?? defaultValue;
+    }
+}
+
+/// <summary>
+/// Fixed property values for a <see cref="WorldObject"/>. With LiveFallback off, a key
+/// that isn't here reads as the caller's default instead of the client object's value
+/// (a vendor-list item carries only what the vendor snapshot holds).
+/// </summary>
+internal sealed class ItemPropertyOverlay
+{
+    public Dictionary<uint, int> Ints { get; } = new();
+    public Dictionary<uint, string> Strings { get; } = new();
+    public Dictionary<uint, double> Doubles { get; } = new();
+    public bool LiveFallback { get; init; }
 }
 
 // ── SpellInfo stub ────────────────────────────────────────────────────────
@@ -188,7 +268,9 @@ public class SpellInfo
         { "Jibril's Blessing", "Armor Tinkering Expertise" },
         { "Yoshi's Blessing", "Item Tinkering Expertise" },
         { "Koga's Blessing", "Weapon Tinkering Expertise" },
-        { "Nuhmidira's Blessing", "Mana Conversion Mastery" },
+        { "Nuhmudira's Blessing", "Mana Conversion Mastery" },
+        { "Blessing of T'ing", "Two Handed Combat Mastery" },
+        { "Celdiseth's Blessing", "Magic Item Tinkering Expertise" },
         { "Saladur's Blessing", "Sprint" },
         { "Jahannan's Blessing", "Jumping Mastery" },
         { "Odif's Blessing", "Fealty" }, { "Odif's Boon", "Fealty" },
@@ -274,6 +356,11 @@ public class SpellInfo
             if (n.StartsWith("Aura of ", StringComparison.OrdinalIgnoreCase))
             { n = n[8..].Trim(); changed = true; }
         }
+
+        // 3b. The spell data spells tiers 1-6 and 8 of the bludgeon bane "Bludgeon Bane";
+        //     tier 7 (Tusker's Bane) maps to "Bludgeoning Bane". One family for all.
+        if (n.Equals("Bludgeon Bane", StringComparison.OrdinalIgnoreCase))
+            n = "Bludgeoning Bane";
 
         // 4. Strip " Self" / " Other" target suffixes, then lowercase
         n = n.Replace(" Self", "").Replace(" Other", "").Trim().ToLowerInvariant();
@@ -423,6 +510,7 @@ public class CharacterSkills
         AcSkillType.HeavyWeapons         => 44,
         AcSkillType.LightWeapons         => 45,
         AcSkillType.FinesseWeapons       => 46,
+        AcSkillType.MissileWeapons       => 47,
         AcSkillType.TwoHandedCombat      => 41,
         AcSkillType.Shield               => 48,
         AcSkillType.DualWield            => 49,

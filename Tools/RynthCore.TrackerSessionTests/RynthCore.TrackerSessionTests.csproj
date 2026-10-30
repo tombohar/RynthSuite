@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Tests for RynthTracker's session persistence (TrackerSessionStore: the line format,
+    the same-process/same-character/recent restore rule, the file save/load/cleanup and the
+    reload-gap rule for the Rise baselines). The plugin itself is a NativeAOT x86 library,
+    so the dependency-free source file is compiled in here directly instead of referencing
+    the plugin project. File tests use a temp folder, never %LOCALAPPDATA%\RynthCore.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <RootNamespace>RynthCore.TrackerSessionTests</RootNamespace>
+    <!-- RynthAiHubApi.cs (linked below) declares function-pointer fields. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- One session (2026-10-13): RynthTracker's snapshot of RynthAi's session ("RynthAi.Hub"). -->
+    <Compile Include="..\..\Plugins\Shared\RynthAiHubApi.cs" Link="Linked\RynthAiHubApi.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthTracker\TrackerSnapshot.cs" Link="Linked\TrackerSnapshot.cs" />
+    <Compile Include="..\..\Plugins\Shared\TrackerSessionStore.cs" Link="Linked\TrackerSessionStore.cs" />
+    <Compile Include="..\..\Plugins\Shared\KillCounter.cs" Link="Linked\KillCounter.cs" />
+    <Compile Include="..\..\Plugins\Shared\CombatText.cs" Link="Linked\CombatText.cs" />
+    <Compile Include="..\..\Plugins\Shared\SessionStats.cs" Link="Linked\SessionStats.cs" />
+  </ItemGroup>
+
+</Project>

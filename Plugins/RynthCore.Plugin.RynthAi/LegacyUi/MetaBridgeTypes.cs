@@ -12,6 +12,9 @@ internal sealed class MetaRuleDto
     public List<MetaRuleDto> Children { get; set; } = new();
     public List<MetaRuleDto> ActionChildren { get; set; } = new();
     public bool Enabled { get; set; } = true;
+    /// <summary>The rule's name; null from an engine without rule names (an update then keeps the
+    /// name the rule has, so a mismatched engine never wipes names).</summary>
+    public string? Name { get; set; }
 }
 
 internal sealed class MetaCommand
@@ -22,4 +25,6 @@ internal sealed class MetaCommand
     public string Path { get; set; } = string.Empty;
     public string Text { get; set; } = string.Empty;
     public MetaRuleDto? Rule { get; set; }
+    /// <summary>The Meta Manager's mm_add / mm_update rule.</summary>
+    public RynthCore.Plugin.RynthAi.Meta.MetaScheduleRule? ScheduleRule { get; set; }
 }

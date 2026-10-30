@@ -1,0 +1,75 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    RynthOracle: a RynthCore port of the Decal plugin "Oracle of Dereth" by Advis Eveldan
+    (GitHub: advis61), MIT. See THIRD_PARTY_NOTICES.md in this folder.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <OutputType>Library</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IlcOptimizationPreference>Size</IlcOptimizationPreference>
+    <StripSymbols>false</StripSymbols>
+    <RootNamespace>RynthCore.Plugin.RynthOracle</RootNamespace>
+    <AssemblyName>RynthCore.Plugin.RynthOracle</AssemblyName>
+    <Platforms>x86</Platforms>
+    <!-- Plugin manifest (embedded in the DLL; Plugins\Directory.Build.targets). minEngineApi is the
+         highest API use NOT behind a Has*/version check. Script windows (v71, HasUi) draw its window and titles/server info (v75) are guarded with fallbacks; below v71 it runs without a window (/ro status), as on an engine with ImGui off. -->
+    <RynthPluginMinEngineApi>66</RynthPluginMinEngineApi>
+    <RynthPluginDescription>Quests (with the Legendary and exploration marker trackers, and the active server plugin's quest pack), character and titles.</RynthPluginDescription>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
+    <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Oracle of Dereth's curated lists (MIT, by Advis Eveldan / advis61), bundled so the plugin works offline. -->
+    <EmbeddedResource Include="Resources\quests.csv" LogicalName="RynthOracle.quests.csv" />
+    <!-- A server's own quests are its server plugin's pack (Resources\quests.<server id>.csv there, offered
+         through "RynthServer.QuestPack"; the three packs that were here moved out on 2026-10-21). -->
+    <EmbeddedResource Include="Resources\augmentations.csv" LogicalName="RynthOracle.augmentations.csv" />
+    <EmbeddedResource Include="Resources\augquests.csv" LogicalName="RynthOracle.augquests.csv" />
+    <EmbeddedResource Include="Resources\society.csv" LogicalName="RynthOracle.society.csv" />
+    <EmbeddedResource Include="Resources\titles.csv" LogicalName="RynthOracle.titles.csv" />
+    <EmbeddedResource Include="Resources\markers.csv" LogicalName="RynthOracle.markers.csv" />
+    <!-- Legendary Key quests, rows of the Quests tab (list and notes: the "Arwic John Route" sheet). -->
+    <EmbeddedResource Include="Resources\legendary.csv" LogicalName="RynthOracle.legendary.csv" />
+    <!-- Spell names and durations: RynthAi's spell table, shared rather than copied. -->
+    <EmbeddedResource Include="..\RynthCore.Plugin.RynthAi\Combat\SpellData.txt" LogicalName="RynthOracle.SpellData.txt" Link="Shared\SpellData.txt" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Fellowship reader (client memory, VirtualQuery-guarded), shared source with RynthAi. -->
+    <Compile Include="..\RynthCore.Plugin.RynthAi\Combat\FellowshipTracker.cs" Link="Shared\FellowshipTracker.cs" />
+    <!-- Its timing clock (RynthClock: intervals that don't jump when the clocks change, 2026-10-21). -->
+    <Compile Include="..\RynthCore.Plugin.RynthAi\RynthClock.cs" Link="Shared\RynthClock.cs" />
+    <!-- RynthAi's session stats ("RynthAi.Hub" SessionStats): the Character tab's session rates
+         count the same session as the Mini Remote's Session Stats. -->
+    <Compile Include="..\Shared\RynthAiHubApi.cs" Link="Shared\RynthAiHubApi.cs" />
+    <Compile Include="..\Shared\RynthAiSessionClient.cs" Link="Shared\RynthAiSessionClient.cs" />
+    <!-- RynthCore's server list (API v86) and the active server's settings from its plugin
+         ("RynthServer.Profile"): which server this is, overrides included. -->
+    <Compile Include="..\Shared\RynthServerProfileApi.cs" Link="Shared\RynthServerProfileApi.cs" />
+    <Compile Include="..\Shared\EngineServerState.cs" Link="Shared\EngineServerState.cs" />
+    <Compile Include="..\Shared\ServerStateClient.cs" Link="Shared\ServerStateClient.cs" />
+    <!-- "RynthServer.QuestPack": the active server plugin's quest pack, merged into the Quests list. -->
+    <Compile Include="..\Shared\RynthServerQuestPackApi.cs" Link="Shared\RynthServerQuestPackApi.cs" />
+    <Compile Include="..\Shared\ServerQuestPackClient.cs" Link="Shared\ServerQuestPackClient.cs" />
+    <!-- How a chat command answers (2026-10-28): the shared reply queue and colours. -->
+    <Compile Include="..\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="THIRD_PARTY_NOTICES.md" CopyToPublishDirectory="PreserveNewest" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

@@ -12,6 +12,8 @@ namespace RynthCore.Loot;
 /// </summary>
 public sealed class SalvageCombineSettings
 {
+    // Always written: LootJsonContext skips default values, and a skipped false would load back as true.
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.Never)]
     public bool Enabled { get; set; } = true;
 
     /// <summary>Default bands applied to materials with no per-material override.</summary>

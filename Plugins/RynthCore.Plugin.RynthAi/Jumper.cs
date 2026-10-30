@@ -1,6 +1,7 @@
 using System;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.PluginSdk;
+using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthAi;
 
@@ -33,7 +34,58 @@ internal sealed class Jumper
     private bool _pausedNav;
     private bool _prevEnableNavigation;
 
+    // Face only (/mt face, /ub face; ub-IT's DoFace): navigation is held while turning, the turn
+    // is sent again every 100 ms until the heading is within 1 degree, and given up after 5 s.
+    private bool _faceOnly;
+    private DateTime _lastFaceTurnAt;
+    private const double FaceToleranceDeg = 1.0;
+    private static readonly TimeSpan FaceRetry = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan FaceTimeout = TimeSpan.FromSeconds(5);
+
     public bool IsBusy => _isTurning || _needToJump || _charging || _waitingForJump;
+
+    /// <summary>Turns to <paramref name="heading"/> (any degrees; normalized to 0-360), holding nav meanwhile.</summary>
+    public bool Face(double heading)
+    {
+        if (IsBusy && !_faceOnly)
+        {
+            _chat("[RynthAi] You are jumping. Try again later.");
+            return false;
+        }
+        if (!_host.HasTurnToHeading)
+        {
+            _chat("[RynthAi] TurnToHeading not available.");
+            return false;
+        }
+        _targetHeading = (float)(((heading % 360) + 360) % 360);
+        if (!_faceOnly) PauseNav();
+        _faceOnly = true;
+        _isTurning = true;
+        _turningStartedAt = _lastFaceTurnAt = DateTime.UtcNow;
+        _host.TurnToHeadingBy("Face", _targetHeading);
+        RynthLog.Write(LogCat.Jumper, $"[Jumper] Face -> {_targetHeading:F1}");
+        return true;
+    }
+
+    /// <summary>The face turn: done within <see cref="FaceToleranceDeg"/>, else turn again; nav back when done.</summary>
+    private void TickFace()
+    {
+        DateTime now = DateTime.UtcNow;
+        if (now - _lastFaceTurnAt < FaceRetry) return;
+        _lastFaceTurnAt = now;
+        bool read = PlayerCompass.TryGet(_host, out float current);
+        double off = read ? Math.Abs(((current - _targetHeading) % 360 + 540) % 360 - 180) : 0;
+        if (read && off >= FaceToleranceDeg && now - _turningStartedAt < FaceTimeout)
+        {
+            _host.TurnToHeadingBy("Face", _targetHeading);
+            return;
+        }
+        _isTurning = _faceOnly = false;
+        RestoreNav();
+        RynthLog.Write(LogCat.Jumper, read && off >= FaceToleranceDeg
+            ? $"[Jumper] Face {_targetHeading:F1}: still {off:F1} deg off after {FaceTimeout.TotalSeconds:0} s, gave up"
+            : $"[Jumper] Face {_targetHeading:F1} done (heading {(read ? current.ToString("F1") : "?")})");
+    }
 
     public Jumper(RynthCoreHost host, LegacyUiSettings settings, Action<string> chat)
     {
@@ -44,6 +96,12 @@ internal sealed class Jumper
 
     public bool Start(string directionLetters, float? faceHeading, int msToHoldDown)
     {
+        // A face still turning (a meta's "/mt face 90" then "/ub jumpw 90") gives way to the jump.
+        if (_faceOnly)
+        {
+            _faceOnly = _isTurning = false;
+            RestoreNav();
+        }
         if (IsBusy)
         {
             _chat("[RynthAi] You are already jumping. Try again later.");
@@ -76,7 +134,7 @@ internal sealed class Jumper
         }
         else
         {
-            _targetHeading = _host.TryGetPlayerHeading(out float curr) ? curr : 0f;
+            _targetHeading = PlayerCompass.TryGet(_host, out float curr) ? curr : 0f;
         }
 
         PauseNav();
@@ -87,12 +145,12 @@ internal sealed class Jumper
         {
             _turningStartedAt = DateTime.UtcNow;
             if (_host.HasTurnToHeading)
-                _host.TurnToHeading(_targetHeading);
-            _host.Log($"[Jumper] Start turn->{_targetHeading:F0} letters='{directionLetters}' hold={_msToHoldDown}ms");
+                _host.TurnToHeadingBy("Jump", _targetHeading);
+            RynthLog.Write(LogCat.Jumper, $"[Jumper] Start turn->{_targetHeading:F0} letters='{directionLetters}' hold={_msToHoldDown}ms");
         }
         else
         {
-            _host.Log($"[Jumper] Start jump (no turn) letters='{directionLetters}' hold={_msToHoldDown}ms");
+            RynthLog.Write(LogCat.Jumper, $"[Jumper] Start jump (no turn) letters='{directionLetters}' hold={_msToHoldDown}ms");
         }
         return true;
     }
@@ -100,7 +158,7 @@ internal sealed class Jumper
     public void Cancel()
     {
         RestoreNav();
-        _isTurning = _needToJump = _charging = _waitingForJump = false;
+        _isTurning = _needToJump = _charging = _waitingForJump = _faceOnly = false;
         _addW = _addX = _addZ = _addC = _addShift = false;
     }
 
@@ -110,14 +168,19 @@ internal sealed class Jumper
 
         try
         {
+            if (_faceOnly)
+            {
+                TickFace();
+                return;
+            }
             // TurnToHeading is an instant quaternion snap; the heading read
             // doesn't always reflect it immediately, so just wait a short
             // settle window rather than polling for a match.
             if (_isTurning && DateTime.UtcNow - _turningStartedAt >= TimeSpan.FromMilliseconds(150))
             {
                 _isTurning = false;
-                if (_host.TryGetPlayerHeading(out float current))
-                    _host.Log($"[Jumper] Turn done heading={current:F1}");
+                if (PlayerCompass.TryGet(_host, out float current))
+                    RynthLog.Write(LogCat.Jumper, $"[Jumper] Turn done heading={current:F1}");
             }
 
             if (_needToJump && !_isTurning)
@@ -140,12 +203,12 @@ internal sealed class Jumper
                 RestoreNav();
                 _waitingForJump = false;
                 _addW = _addX = _addZ = _addC = _addShift = false;
-                _host.Log("[Jumper] Settle complete -> idle");
+                RynthLog.Write(LogCat.Jumper, "[Jumper] Settle complete -> idle");
             }
         }
         catch (Exception ex)
         {
-            _host.Log($"[Jumper] Tick exception: {ex.GetType().Name}: {ex.Message}");
+            RynthLog.Write(LogCat.Jumper, $"[Jumper] Tick exception: {ex.GetType().Name}: {ex.Message}");
             Cancel();
         }
     }
@@ -165,7 +228,7 @@ internal sealed class Jumper
             started = _host.CommenceJump();
             _charging = started;
             _chargeStartedAt = DateTime.UtcNow;
-            _host.Log($"[Jumper] CommenceJump ok={started} hold={_msToHoldDown}ms " +
+            RynthLog.Write(LogCat.Jumper, $"[Jumper] CommenceJump ok={started} hold={_msToHoldDown}ms " +
                       $"w={_addW} x={_addX} z={_addZ} c={_addC} shift={_addShift}");
         }
         else
@@ -173,12 +236,21 @@ internal sealed class Jumper
             started = _host.HasTapJump && _host.TapJump();
             _waitingForJump = started;
             _jumpStartedAt = DateTime.UtcNow;
-            _host.Log($"[Jumper] TapJump fallback ok={started} " +
+            RynthLog.Write(LogCat.Jumper, $"[Jumper] TapJump fallback ok={started} " +
                       $"w={_addW} x={_addX} z={_addZ} c={_addC} shift={_addShift}");
         }
 
         if (!started)
+        {
+            // Deep-audit finding #7 (2026-06-18): a rejected jump (both hook
+            // paths unavailable/failed) left every flag false -> IsBusy false
+            // on the very next Tick(), but PauseNav() from Start() was never
+            // undone. Nav stayed force-disabled for the rest of the session —
+            // a real "bot just stands there" cause with no error visible to
+            // the user beyond this one chat line. Restore nav on the spot.
             _chat("[RynthAi] Jump hooks unavailable.");
+            RestoreNav();
+        }
     }
 
     private void ReleaseJump()
@@ -190,13 +262,13 @@ internal sealed class Jumper
         if (_host.HasLaunchJumpWithMotion)
         {
             released = _host.LaunchJumpWithMotion(_addShift, _addW, _addX, _addZ, _addC);
-            _host.Log($"[Jumper] LaunchJumpWithMotion ok={released} charged={_msToHoldDown}ms " +
+            RynthLog.Write(LogCat.Jumper, $"[Jumper] LaunchJumpWithMotion ok={released} charged={_msToHoldDown}ms " +
                       $"w={_addW} x={_addX} z={_addZ} c={_addC} shift={_addShift}");
         }
         else
         {
             released = _host.HasDoJump && _host.DoJump(true);
-            _host.Log($"[Jumper] DoJump fallback ok={released} charged={_msToHoldDown}ms");
+            RynthLog.Write(LogCat.Jumper, $"[Jumper] DoJump fallback ok={released} charged={_msToHoldDown}ms");
         }
     }
 

@@ -113,6 +113,13 @@ public sealed class VTankLootProfile
 
     public List<VTankLootRule> Rules { get; set; } = new();
 
+    /// <summary>
+    /// The rule count in the file's header, or -1 when not loaded from a file. The parser
+    /// keeps reading rules that follow past this count, so it can be lower than
+    /// <see cref="Rules"/>.Count for a file whose header was written wrong.
+    /// </summary>
+    public int DeclaredRuleCount { get; set; } = -1;
+
     /// <summary>Optional SalvageCombine block at the end of the file.</summary>
     public SalvageCombineSettings? SalvageCombine { get; set; }
 }

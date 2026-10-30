@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline tests for RynthNav's travel logic: route planning with recalls (over small fake
+    portal graphs), the recall list a character gets, the recall memory and its chat
+    messages, the Atlas search, the arrow's chain, favorites/recent and the coordinate
+    parser. The plugin is a NativeAOT x86 library, so its host-free source files are
+    compiled in here directly.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <RootNamespace>RynthNav.RouteTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\RynthNav.PortalGraph\PortalRoute.cs" Link="Linked\PortalRoute.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\NavCoords.cs" Link="Linked\NavCoords.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\Atlas.cs" Link="Linked\Atlas.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\AtlasStore.cs" Link="Linked\AtlasStore.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\NavReplies.cs" Link="Linked\NavReplies.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\ArrowGuide.cs" Link="Linked\ArrowGuide.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\RecallMemory.cs" Link="Linked\RecallMemory.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\RecallPlanner.cs" Link="Linked\RecallPlanner.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\NavDataConfig.cs" Link="Linked\NavDataConfig.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\Entrance.cs" Link="Linked\Entrance.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\TownNet.cs" Link="Linked\TownNet.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\PortalAvoid.cs" Link="Linked\PortalAvoid.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\TravelPlan.cs" Link="Linked\TravelPlan.cs" />
+    <!-- The goto's autorun, sent when it changes (AutoRunGateTests). -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\AutoRunGate.cs" Link="Linked\AutoRunGate.cs" />
+    <!-- The planned trip, its path, the path markers and "save as nav route" (TripExportTests). -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\TripPlan.cs" Link="Linked\TripPlan.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\TripPath.cs" Link="Linked\TripPath.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\PathMarkers.cs" Link="Linked\PathMarkers.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\NavRouteExport.cs" Link="Linked\NavRouteExport.cs" />
+    <Compile Include="..\..\Plugins\Shared\Nav3DText.cs" Link="Linked\Nav3DText.cs" />
+    <!-- RynthAi's own nav reader/writer: the saved route is read back the way RynthAi reads it. -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\LegacyUi\NavRouteParser.cs" Link="Linked\NavRouteParser.cs" />
+  </ItemGroup>
+
+</Project>

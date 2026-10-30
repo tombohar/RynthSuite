@@ -29,6 +29,31 @@
             </MenuItem>
         </Menu>
 
+        <!-- Profile folder switch: which folder Open / Save start in. Follows the open file. -->
+        <Border DockPanel.Dock="Top" Background="#080C10" Padding="8,4">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+                <TextBlock Text="Profiles:" VerticalAlignment="Center" Margin="0,0,4,0"
+                           Foreground="{StaticResource FgMuted}" FontSize="11"/>
+                <ToggleButton Content="Loot"
+                              IsChecked="{Binding UseLootFolder, Mode=OneWay}"
+                              Command="{Binding SetProfileFolder}" CommandParameter="Loot"
+                              Padding="8,2"/>
+                <ToggleButton Content="AutoVendor"
+                              IsChecked="{Binding UseAutoVendorFolder, Mode=OneWay}"
+                              Command="{Binding SetProfileFolder}" CommandParameter="AutoVendor"
+                              Padding="8,2"/>
+                <TextBlock Text="{Binding ProfileFolderHint}" VerticalAlignment="Center" Margin="8,0,0,0"
+                           Foreground="{StaticResource FgMuted}" FontSize="11"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Shown while an AutoVendor profile is open: the same actions mean buy/sell here. -->
+        <Border DockPanel.Dock="Top" Background="#1A2A1A" BorderBrush="#2E4A2E" BorderThickness="0,0,0,1"
+                Padding="8,4" IsVisible="{Binding IsAutoVendorProfile}">
+            <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="#CFE8CF"
+                       Text="AutoVendor profile: Keep = buy all it can afford · Keep # = buy until you have N · Sell = sell matching items from your pack. Name the file after the vendor (exactly as shown in game), or default.utl for any vendor without its own profile."/>
+        </Border>
+
         <!-- Keyboard shortcuts -->
         <DockPanel.KeyBindings>
             <KeyBinding Gesture="Ctrl+N"        Command="{Binding FileNew}"/>

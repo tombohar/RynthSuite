@@ -15,21 +15,18 @@
     <RootNamespace>RynthCore.Plugin.RynthChat</RootNamespace>
     <AssemblyName>RynthCore.Plugin.RynthChat</AssemblyName>
     <Platforms>x86</Platforms>
+    <!-- Plugin manifest (embedded; see Plugins\Directory.Build.targets). Nothing above the SDK baseline. -->
+    <RynthPluginMinEngineApi>66</RynthPluginMinEngineApi>
+    <RynthPluginDescription>A chat window that sorts messages into tabs.</RynthPluginDescription>
   </PropertyGroup>
-
-  <ItemGroup>
-    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <TrimmerRootAssembly Include="ImGui.NET" />
-  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
     <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
   </ItemGroup>
 
+  <!-- RynthChat no longer references ImGui.NET (it never drew with it). These stay so a
+       cimgui.dll left in bin\ or publish\ by an older build never ships beside the plugin. -->
   <Target Name="RemoveBundledImGuiNativeFromBuild" AfterTargets="Build">
     <Delete Files="$(OutputPath)cimgui.dll" Condition="Exists('$(OutputPath)cimgui.dll')" />
   </Target>

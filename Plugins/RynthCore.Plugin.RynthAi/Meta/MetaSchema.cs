@@ -72,6 +72,8 @@ internal static class MetaSchema
         new(MetaConditionType.MainManaPHE,                        "MainManaPHE",         "Main Mana % >="),
         new(MetaConditionType.MainStamLE,                         "MainStamLE",          "Main Stam <="),
         new(MetaConditionType.VitaePHE,                           "VitaePHE",            "Vitae % >="),
+        // RynthAi only: VTank and metaf have no such condition (see AfFileWriter).
+        new(MetaConditionType.NoKillsWithinMinutes,               "NoKillsInMins",       "No Kills Within Minutes"),
     };
 
     // Index == (int)MetaActionType.

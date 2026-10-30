@@ -16,6 +16,16 @@ namespace RynthCore.Plugin.RynthAi;
 [JsonSerializable(typeof(NavCommand))]
 [JsonSerializable(typeof(MetaRuleDto))]
 [JsonSerializable(typeof(MetaCommand))]
+[JsonSerializable(typeof(RynthCore.Plugin.RynthAi.Meta.MetaScheduleConfig))]
+// UB seed, translation, diagnostics, Mini Remote, HUD and item info files persist through this
+// context (NativeAOT cannot reflect).
+[JsonSerializable(typeof(RynthCore.CreatureSeed.UbMobSeedFile))]
+[JsonSerializable(typeof(RynthCore.Plugin.RynthAi.Translate.TranslateSettings))]
+[JsonSerializable(typeof(RynthCore.Plugin.RynthAi.RynthLogConfig))]
+[JsonSerializable(typeof(RynthCore.Plugin.RynthAi.Huds.HudState))]
+[JsonSerializable(typeof(RynthCore.Plugin.RynthAi.MiniRemote.MiniRemoteState))]
+[JsonSerializable(typeof(RynthCore.Plugin.RynthAi.MiniRemote.LegacyHubFile))]
+[JsonSerializable(typeof(RynthCore.Plugin.RynthAi.BuffProfile))]
 [JsonSourceGenerationOptions(
     WriteIndented = true,
     IncludeFields = true,

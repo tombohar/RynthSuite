@@ -15,6 +15,12 @@
     <RootNamespace>RynthCore.Plugin.RynthVision</RootNamespace>
     <AssemblyName>RynthCore.Plugin.RynthVision</AssemblyName>
     <Platforms>x86</Platforms>
+    <!-- Plugin manifest (embedded in the DLL; Plugins\Directory.Build.targets). minEngineApi is the
+         highest API use NOT behind a Has*/version check. Only the v60/v61 Nav3D calls, behind HasNav3DTriangle;
+         the Vision window (2026-10-27: declared only on v91, Ui/VisionManifest.HostsWindow; older engines keep
+         their own Vision panel) and the light itself (v91, HasAmbientLight) are checked too. -->
+    <RynthPluginMinEngineApi>66</RynthPluginMinEngineApi>
+    <RynthPluginDescription>Shows unclimbable slopes, impassable water and your radar range in the world, and lights dark dungeons.</RynthPluginDescription>
     <!-- Publish straight to the plugin's launcher-registered home so a bare
          `dotnet publish` lands where the engine hot-reloads it. Build still
          uses bin\; only publish is redirected. Deploy-RynthCore.ps1 points its
@@ -23,25 +29,23 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <TrimmerRootAssembly Include="ImGui.NET" />
-  </ItemGroup>
-
-  <ItemGroup>
     <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
     <ProjectReference Include="..\..\..\RynthCore\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
     <ProjectReference Include="..\..\Shared\RynthCore.TerrainData\RynthCore.TerrainData.csproj" />
   </ItemGroup>
-
-  <Target Name="RemoveBundledImGuiNativeFromBuild" AfterTargets="Build">
-    <Delete Files="$(OutputPath)cimgui.dll" Condition="Exists('$(OutputPath)cimgui.dll')" />
-  </Target>
-
-  <Target Name="RemoveBundledImGuiNativeFromPublish" AfterTargets="Publish" Condition="'$(PublishDir)' != ''">
-    <Delete Files="$(PublishDir)cimgui.dll" Condition="Exists('$(PublishDir)cimgui.dll')" />
-  </Target>
+  <ItemGroup>
+    <!-- The Vision window (2026-10-27): RynthVision draws it with ImGui.NET bound to the engine's cimgui,
+         in the engine's look (Shared\RynthUi; RynthCore hosts it in its Vision panel's place). -->
+    <Compile Include="..\Shared\ImGuiNativeBinding.cs" Link="Shared\ImGuiNativeBinding.cs" />
+    <Compile Include="..\Shared\SafeImGui.cs" Link="Shared\SafeImGui.cs" />
+    <Compile Include="..\Shared\RynthUi\RynthUi.cs" Link="Shared\RynthUi\RynthUi.cs" />
+    <Compile Include="..\Shared\RynthUi\RynthIcons.cs" Link="Shared\RynthUi\RynthIcons.cs" />
+    <!-- How a chat command answers (2026-10-28): the shared reply queue and colours. -->
+    <Compile Include="..\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+    <TrimmerRootAssembly Include="ImGui.NET" />
+  </ItemGroup>
 
 </Project>

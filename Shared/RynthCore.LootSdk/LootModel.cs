@@ -95,6 +95,8 @@ public sealed class LootRule : System.ComponentModel.INotifyPropertyChanged
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.Never)]
     public bool       Enabled   { get; set; } = true;
     public LootAction Action    { get; set; } = LootAction.Keep;
+    // Always written: the context skips default values, and a skipped "Keep # 0" would load back as 1.
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.Never)]
     public int        KeepCount { get; set; } = 1;
 
     public List<LootCondition> Conditions { get; set; } = new();
