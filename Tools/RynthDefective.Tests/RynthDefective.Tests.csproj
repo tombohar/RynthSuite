@@ -11,7 +11,9 @@
     stance that follows it, RynthAi's macro, refusals and time-outs), and that the windows'
     display lists - icons and image buttons included - are accepted by the engine's own parser
     (RynthCore src/RynthCore.Engine/UI/ScriptWindows/DisplayListParser.cs, compiled in from the
-    sibling RynthCore checkout) and that clicks reach the code that drew the button.
+    sibling RynthCore checkout) and that clicks reach the code that drew the button; the quantity box
+    (counts, max and half, a vendor's price and the most you can buy, every refusal, split / give / buy
+    against a scripted world).
     Nothing native is loaded: no AC, no ImGui context. Files go to a temp folder, never C:\Games.
     Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
   -->

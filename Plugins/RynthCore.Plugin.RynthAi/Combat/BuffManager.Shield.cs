@@ -233,7 +233,7 @@ public partial class BuffManager
             // Cast on the shield in this run: done, unless a higher level is castable now.
             if (_shieldRunLevels.TryGetValue(spell.Family, out int ran)) return UpgradeParked(spell.Family) || level <= ran;
             if (!_isAutoBatchRebuff) return false;
-            rebufferSecOverride = Math.Max(_settings.RebuffTopOffSecondsRemaining, _settings.RebuffSecondsRemaining);
+            rebufferSecOverride = Math.Max(_settings.RebuffTopOffSecondsRemaining, BatchRebuffLineSec);
         }
         int rebufferSec = Math.Max(0, rebufferSecOverride ?? _settings.RebuffSecondsRemaining);
         if (!_shieldSpellTimers.TryGetValue(ShieldKey(shieldId, spell.Family), out ItemSpellRecord? rec)) return false;

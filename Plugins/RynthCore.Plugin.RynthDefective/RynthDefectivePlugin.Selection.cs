@@ -48,7 +48,11 @@ public sealed partial class RynthDefectivePlugin
         System.Threading.Volatile.Write(ref _selectionDrawnMs, Environment.TickCount64);
         try
         {
-            _selectionWindow ??= new SelectionWindow(Host, id => QueueBar(() => { if (!Host.UseObject(id)) Print("That can't be used now."); }));
+            _selectionWindow ??= new SelectionWindow(Host, id => QueueBar(() => { if (!Host.UseObject(id)) Print("That can't be used now."); }))
+            {
+                Quantity = _qty,
+                QuantityAction = (click, n) => QueueBar(() => RunQuantityClick(click, n)),
+            };
             wantHeight = _selectionWindow.Draw(_selectionView);
             _selectionFailures = 0;
             return 1;
@@ -86,11 +90,16 @@ public sealed partial class RynthDefectivePlugin
             Host.QueryHealth(sel);
         }
 
+        // The quantity box (a stack, or an item in the open vendor's list).
+        Quantity.QuantityView? qty = QuantityViewNow();
+
         string where = string.Empty;
         float relative = float.NaN;
         Items.CarriedItem? carried = null;
         foreach (var it in _session.Items()) if (it.Id == sel) { carried = it; break; }
-        if (carried != null) where = CarriedText(carried);
+        if (qty?.Subject.Mode == Quantity.QtyMode.Vendor && qty.Subject.Quote is { } quote)
+            where = "the vendor's" + (quote.UnitPrice > 0 ? $" · {quote.UnitPrice.ToString("N0", CultureInfo.InvariantCulture)} {quote.Currency} each" : "");
+        else if (carried != null) where = CarriedText(carried);
         else if (Host.TryGetObjectPosition(sel, out uint oc, out float ox, out float oy, out float oz) && oc != 0
                  && Host.TryGetPlayerPose(out uint pc, out float px, out float py, out float pz, out float qw, out _, out _, out float qz) && pc != 0)
         {
@@ -106,12 +115,13 @@ public sealed partial class RynthDefectivePlugin
             where = $"{dist.ToString(dist < 10 ? "0.0" : "0", CultureInfo.InvariantCulture)} yd {Compass(bearing)}";
         }
         // Not carried (on the ground, in a corpse or chest): AC's own stack size.
-        if (carried == null && Host.TryGetObjectIntProperty(sel, StackSizeProperty, out int stack) && stack > 1)
+        if (carried == null && qty?.Subject.Mode != Quantity.QtyMode.Vendor
+            && Host.TryGetObjectIntProperty(sel, StackSizeProperty, out int stack) && stack > 1)
             where = "stack of " + stack.ToString("N0", CultureInfo.InvariantCulture) + (where.Length > 0 ? " · " + where : "");
 
         HealthSeen? h = _health;
         float health = h != null && h.Id == sel ? h.Ratio : -1f;
-        return new SelectionView(true, sel, name, where, relative, health, h?.Current ?? 0, h?.Max ?? 0);
+        return new SelectionView(true, sel, name, where, relative, health, h?.Current ?? 0, h?.Max ?? 0) { Qty = qty };
     }
 
     private const uint StackSizeProperty = 12;   // PropertyInt.StackSize

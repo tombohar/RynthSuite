@@ -1,9 +1,10 @@
 // ============================================================================
 //  RynthSuite - Plugins/Shared/SessionStatsTracker.cs
 //  Feeds a SessionStats from the game: the player's properties every 0.5 s,
-//  kill notices, chat, corpses and the player's health, and keeps the session
-//  across plugin reloads (TrackerSessionStore). RynthTracker and RynthAi's
-//  Mini Remote each own one, so both show the same numbers (2026-10-11).
+//  kill notices, chat, corpses, and the player's health and death counter
+//  every tick, and keeps the session across plugin reloads
+//  (TrackerSessionStore). RynthTracker and RynthAi's Mini Remote each own one,
+//  so both show the same numbers (2026-10-11).
 //
 //  Threading: every call except RequestReset and View runs on the pump
 //  thread. RequestReset only sets a flag (any thread); View is an immutable
@@ -24,6 +25,8 @@ internal sealed class SessionStatsTracker
     private const uint Int64RadianceEarned = 9101;     // Aelrynth Bank mod session totals
     private const uint Int64LuminanceBanked = 9102;
     private const uint Int64LuminanceDrawn = 9103;
+    // The server's death counter (PropertyInt). The engine serves the player's own record to any thread.
+    private const uint IntNumDeaths = 43;
 
     private const long PollIntervalMs = 500;
     private static readonly TimeSpan SaveInterval = TimeSpan.FromSeconds(30);
@@ -149,12 +152,9 @@ internal sealed class SessionStatsTracker
             if (_pendingCorpses[i].Id == objectId) _pendingCorpses.RemoveAt(i);
     }
 
-    /// <summary>The player's health reaching 0 is a death (maxHealth &gt; 0 skips spurious 0/0 packets at login).</summary>
-    public void OnUpdateHealth(uint targetId, uint currentHealth, uint maxHealth)
-    {
-        if (_active && targetId == _playerId && currentHealth == 0 && maxHealth > 0)
-            _stats.OnPlayerDied();
-    }
+    // Deaths are read every tick (CheckDeaths), not from OnUpdateHealth: the engine never sends the
+    // player's own health through it (that is a target's health: 0x01C0 and creature vitals), so the
+    // death count stayed 0 (2026-10-30).
 
     // ── Tick (pump thread) ───────────────────────────────────────────────────
 
@@ -180,6 +180,7 @@ internal sealed class SessionStatsTracker
         }
         if (!_active) return;
 
+        CheckDeaths();
         CheckPendingCorpses(now);
 
         long nowMs = Environment.TickCount64;
@@ -210,6 +211,27 @@ internal sealed class SessionStatsTracker
 
     private long? Read(uint stype)
         => _host.TryGetObjectQuadProperty(_playerId, stype, out long value) ? value : null;
+
+    /// <summary>
+    /// The player's health from the engine's vitals (the same reading RynthAi's death hold uses),
+    /// then the server's death counter, in the order the server sends them (SessionStats counts
+    /// each death once). Every tick: the health reads 0 for a few seconds only.
+    /// </summary>
+    private void CheckDeaths()
+    {
+        int before = _stats.Deaths;
+        if (_host.HasGetPlayerVitals
+            && _host.TryGetPlayerVitals(out uint health, out uint maxHealth, out _, out _, out _, out _))
+            _stats.OnPlayerHealth(health, maxHealth);
+        if (_host.HasGetObjectIntProperty
+            && _host.TryGetObjectIntProperty(_playerId, IntNumDeaths, out int numDeaths))
+            _stats.OnDeathCount(numDeaths);
+        if (_stats.Deaths != before)
+        {
+            _view = _stats.View(DateTime.UtcNow);   // shown at once, not at the next poll
+            _host.Log($"{_tag} Death counted ({_stats.Deaths} this session).");
+        }
+    }
 
     /// <summary>Reads the names of newly created objects; a "Corpse of X" goes to the kill counter.</summary>
     private void CheckPendingCorpses(DateTime now)

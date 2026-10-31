@@ -107,6 +107,9 @@ internal sealed class HudController
     /// <summary>The Mini Remote's session stats (the same SessionStats code as RynthTracker); null if it failed to start.</summary>
     public RynthCore.Plugin.Shared.SessionStatsTracker? SessionStats { get; init; }
 
+    /// <summary>Opens or closes the Monster Stats window (the Session Stats view's "Monster stats" button); null without one.</summary>
+    public Action? ToggleMonsterStats { get; init; }
+
     /// <summary>Latest pack view (render thread safe).</summary>
     public HudPackSnapshot Pack => _pack;
 

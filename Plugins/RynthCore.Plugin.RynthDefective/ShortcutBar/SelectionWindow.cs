@@ -9,6 +9,8 @@
 //
 //    the name row  drag to move; Ctrl+wheel: bigger or smaller (30-250%);
 //                  right-click: hide it (Settings > UI > Toolbar, /rdef selection).
+//    the quantity  under a stack or a vendor's item (2026-10-30): how many, and
+//                  Split / Give / Buy that many (SelectionWindow.Quantity.cs).
 //
 //  AC's render thread; reads the view the tick built (SelectionView).
 // ============================================================================
@@ -17,6 +19,7 @@ using System;
 using System.Globalization;
 using System.Numerics;
 using ImGuiNET;
+using RynthCore.Plugin.RynthDefective.Quantity;
 using RynthCore.Plugin.Shared;
 using RynthCore.Plugin.Shared.RynthUi;
 using RynthCore.PluginSdk;
@@ -36,9 +39,12 @@ internal sealed record SelectionView(
     uint Max)
 {
     public static readonly SelectionView NotReady = new(false, 0, string.Empty, string.Empty, float.NaN, -1f, 0, 0);
+
+    /// <summary>The quantity box for a stack or a vendor's item; null = none.</summary>
+    public QuantityView? Qty { get; init; }
 }
 
-internal sealed class SelectionWindow
+internal sealed partial class SelectionWindow
 {
     public const string Title = "Selection";
 
@@ -90,7 +96,10 @@ internal sealed class SelectionWindow
 
         float pad = Px(Pad), icon = Px(Icon);
         float height = MathF.Ceiling(2 * pad + icon);
-        Vector2 max = origin + new Vector2(width, height);
+        // The quantity box under it (a stack, or a vendor's item): one background for both.
+        QuantityView? qty = v.Ready && v.Id != 0 ? v.Qty : null;
+        float qtyH = QuantityHeight(qty);
+        Vector2 max = origin + new Vector2(width, height + qtyH);
         dl.AddRectFilled(origin, max, A(_bg, 0.94f), Px(Radius));
         dl.AddRect(origin, max, _line, Px(Radius));
 
@@ -165,9 +174,11 @@ internal sealed class SelectionWindow
         dl.AddText(uf, Fs(uf), new Vector2(MathF.Round(up.X + (useW - uw) * 0.5f), MathF.Round(up.Y + (Px(UseH) - Fs(uf)) * 0.5f)), hot ? _text : _dim, "USE");
         if (use) _use(v.Id);
 
+        if (qty != null && qtyH > 0) DrawQuantity(dl, qty, new Vector2(origin.X, origin.Y + height), width);
+
         ImGui.SetCursorScreenPos(origin);
-        ImGui.Dummy(new Vector2(width, height));
-        return height;
+        ImGui.Dummy(new Vector2(width, height + qtyH));
+        return height + qtyH;
     }
 
     /// <summary>Text cut with "..." to <paramref name="room"/> pixels.</summary>

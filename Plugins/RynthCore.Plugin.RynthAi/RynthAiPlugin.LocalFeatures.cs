@@ -133,6 +133,7 @@ public sealed partial class RynthAiPlugin
             () => _combatManager?.activeTargetId ?? 0)
         {
             SessionStats = _sessionStats,
+            ToggleMonsterStats = MonsterStatsWindowWanted ? ToggleMonsterStatsWindow : null,
         };
         if (_translateUi != null) _huds.Translate = _translateUi;
 
@@ -192,6 +193,8 @@ public sealed partial class RynthAiPlugin
         catch (Exception ex) { Host.Log($"[RynthAi] diagnostics pump: {ex.Message}"); }
         try { _sessionStats?.Tick(); }
         catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats tick"); }
+        try { TickMonsterStats(); }   // after the session's tick: follows its start (RynthAiPlugin.MonsterStats.cs)
+        catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "monster stats tick"); }
         try { _serverHub?.Tick(); }
         catch (Exception ex) { RynthLog.Exception(LogCat.UI, ex, "server plugin hub lookup"); }
         try { _miniRemote?.Tick(); }
@@ -481,7 +484,7 @@ public sealed partial class RynthAiPlugin
     {
         if (!_initialized || !_loginComplete) return null;
         return Huds.SectionsManifest.Build(Huds.SectionsManifest.Views(), Huds.SectionsManifest.OwnSections,
-            dashboard: DashboardWindowWanted);
+            dashboard: DashboardWindowWanted, monsterStats: MonsterStatsWindowWanted);
     }
     /// <summary>Chat Translate window in the dashboard colours (no-op while hidden).</summary>
     private void RenderTranslateWindow()

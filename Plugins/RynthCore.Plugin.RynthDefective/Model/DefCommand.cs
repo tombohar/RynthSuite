@@ -2,16 +2,27 @@ using System;
 
 namespace RynthCore.Plugin.RynthDefective.Model;
 
-internal enum DefVerb { Toggle, Help, Use, Set, Clear, Bind, Unbind, Weapons, Favourite, Slots, List, Status, Error, Panels, Selection, Settings, Spell, Corpses }
+internal enum DefVerb { Toggle, Help, Use, Set, Clear, Bind, Unbind, Weapons, Favourite, Slots, List, Status, Error, Panels, Selection, Settings, Spell, Corpses,
+    Quantity, Split, Give, Buy }
 
-/// <summary>A parsed "/rdef ..." line. Use: <see cref="Slot"/> (1-based) or <see cref="Text"/> (an item name).</summary>
-internal sealed record DefCommand(DefVerb Verb, int Slot = 0, string Text = "", string Error = "");
+/// <summary>
+/// A parsed "/rdef ..." line. Use: <see cref="Slot"/> (1-based) or <see cref="Text"/> (an item name).
+/// The quantity box's verbs (qty, split, give, buy): <see cref="Amount"/> (null = the box's number) and
+/// <see cref="Text"/> (split: the pack; buy: the item's name).
+/// </summary>
+internal sealed record DefCommand(DefVerb Verb, int Slot = 0, string Text = "", string Error = "", QtyAmount? Amount = null);
 
 internal static class DefCommandParser
 {
     public const string Usage =
         "/rdef [use <slot or item name> | set <slot> [item name] | spell <slot> <spell name> | clear <slot> | bind <slot> <key> | unbind <slot> | "
-        + "weapons [search] | fav | slots <count> | list | status | settings | panels (the game panel buttons) | selection | corpses [clear]]";
+        + "weapons [search] | fav | slots <count> | list | status | settings | panels (the game panel buttons) | selection | corpses [clear] | "
+        + "qty [number|max|half] | split [number] [into <pack>] | give [number] | buy [number] [item name]]";
+
+    public const string QtyUsage = "Usage: /rdef qty <number|max|half>, e.g. /rdef qty 25 (the Selection window's number)";
+    public const string SplitUsage = "Usage: /rdef split [number|max|half] [into <pack>], e.g. /rdef split 25  or  /rdef split 25 into Sack";
+    public const string GiveUsage = "Usage: /rdef give [number|max|half], e.g. /rdef give 10 (to the last player or NPC you selected)";
+    public const string BuyUsage = "Usage: /rdef buy [number|max|half] [item name], e.g. /rdef buy 25  or  /rdef buy 25 Mana Scarab (a vendor open)";
 
     /// <summary>Parses the arguments after "/rdef" (blank = show or hide the bar).</summary>
     public static DefCommand Parse(string? args)
@@ -68,6 +79,31 @@ internal static class DefCommandParser
                 return int.TryParse(rest, out int count) && count >= DefSettings.SlotsMin && count <= DefSettings.SlotCountMax
                     ? new DefCommand(DefVerb.Slots, count)
                     : Fail($"How many slots? {DefSettings.SlotsMin} to {DefSettings.SlotCountMax}, e.g. /rdef slots 10");
+            // The quantity box (2026-10-30, Quantity/QuantityController.cs).
+            case "qty": case "quantity": case "amount":
+            {
+                if (rest.Length == 0) return new DefCommand(DefVerb.Quantity);
+                return QuantityRules.TryParse(rest, out QtyAmount q, out string why)
+                    ? new DefCommand(DefVerb.Quantity, Amount: q)
+                    : Fail(why + " " + QtyUsage);
+            }
+            case "split":
+            {
+                if (!QuantityRules.TryParseLeading(rest, out QtyAmount? q, out string tail, out string why)) return Fail(why + " " + SplitUsage);
+                string into = StripWord(tail, "into", "in", "to");
+                return new DefCommand(DefVerb.Split, Text: into, Amount: q);
+            }
+            case "give":
+            {
+                if (!QuantityRules.TryParseLeading(rest, out QtyAmount? q, out string tail, out string why)) return Fail(why + " " + GiveUsage);
+                if (tail.Length > 0) return Fail($"'{tail}' isn't a quantity. {GiveUsage}");
+                return new DefCommand(DefVerb.Give, Amount: q);
+            }
+            case "buy":
+            {
+                if (!QuantityRules.TryParseLeading(rest, out QtyAmount? q, out string tail, out string why)) return Fail(why + " " + BuyUsage);
+                return new DefCommand(DefVerb.Buy, Text: StripWord(tail, "of"), Amount: q);
+            }
             default:
                 // "/rdef Stamina Kit" is a shorthand for use.
                 return new DefCommand(DefVerb.Use, Text: a);
@@ -91,4 +127,14 @@ internal static class DefCommandParser
     }
 
     private static DefCommand Fail(string error) => new(DefVerb.Error, Error: error);
+
+    /// <summary>The text without a leading word ("into Sack" -> "Sack").</summary>
+    private static string StripWord(string text, params string[] words)
+    {
+        string t = text.Trim();
+        foreach (string w in words)
+            if (t.Length > w.Length && t.StartsWith(w, StringComparison.OrdinalIgnoreCase) && char.IsWhiteSpace(t[w.Length]))
+                return t[(w.Length + 1)..].Trim();
+        return t;
+    }
 }

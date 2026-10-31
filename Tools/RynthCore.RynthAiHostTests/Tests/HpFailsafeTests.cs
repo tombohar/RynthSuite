@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using RynthCore.Loot; // AcObjectClass
 using RynthCore.Plugin.RynthAi;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.Plugin.Shared;
@@ -71,6 +72,31 @@ internal static class HpFailsafeTests
         Check.False(c.ContainsKey("Diamond Scarab"), "Diamond Scarabs never count");
         Check.Eq(c.GetValueOrDefault("Mana Scarab"), 1, "a Mana Scarab counts");
         Check.Eq(c.Count, 2, "only tapers and scarabs (not 'Scarab Shell Armor')");
+
+        // 2026-10-30: the "Mechanical Scarab" jewelry counted as a scarab kind, and once it had left the
+        // pack the macro stopped as "Mechanical Scarab 0". Only spell components count now.
+        var mixed = new[]
+        {
+            new WorldObject(11, "Mechanical Scarab", AcObjectClass.Jewelry),
+            new WorldObject(12, "Mechanical Scarab"),
+            new WorldObject(13, "Ornate Taper", AcObjectClass.Jewelry),
+            new WorldObject(14, "Lead Scarab", AcObjectClass.SpellComponent),
+            new WorldObject(15, "Obsidian Scarab", AcObjectClass.SpellComponent),
+            new WorldObject(16, "Gold Scarab"),
+            new WorldObject(17, "Diamond Scarab", AcObjectClass.SpellComponent),
+            new WorldObject(18, "Prismatic Taper", AcObjectClass.SpellComponent),
+        };
+        var m = RynthAiPlugin.CountComponents(mixed);
+        Check.False(m.ContainsKey("Mechanical Scarab"), "jewelry named '... Scarab' is no component, class known or not");
+        Check.Eq(m.GetValueOrDefault(RynthAiPlugin.TaperKey), 1, "a taper counts only as a spell component (not jewelry)");
+        Check.Eq(m.GetValueOrDefault("Lead Scarab"), 1, "a scarab spell component counts");
+        Check.Eq(m.GetValueOrDefault("Obsidian Scarab"), 1, "a spell component scarab counts whatever its kind (a server's own)");
+        Check.Eq(m.GetValueOrDefault("Gold Scarab"), 1, "a real scarab name counts before its class is known");
+        Check.False(m.ContainsKey("Diamond Scarab"), "Diamond Scarabs still never count");
+        Check.Eq(m.Count, 4, "tapers, Lead, Obsidian and Gold only");
+        var seenMixed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        RynthAiPlugin.LowComponents(m, seenMixed, 0, 1);
+        Check.False(seenMixed.Contains("Mechanical Scarab"), "the jewelry never becomes a kind that can run low");
     }
 
     // Drakkon, 2026-10-14: 15% health in melee among Depraved Shadows, the kit at 3% (under Kit Min

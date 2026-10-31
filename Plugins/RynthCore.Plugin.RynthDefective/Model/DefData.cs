@@ -111,6 +111,12 @@ internal sealed class DefSettings
     /// the picker opens from the settings window, the bar's right-click menu and /rdef weapons.
     /// </summary>
     public bool WeaponsButtonOnBar;
+    /// <summary>
+    /// The quantity box under a stack or a vendor's item in the Selection window (2026-10-30): how many,
+    /// and Split / Give / Buy that many. On (the default, and what a file from before reads as).
+    /// /rdef qty, split, give and buy work either way.
+    /// </summary>
+    public bool QuantityBox = true;
     public bool BarOpen;
     public bool PickerOpen;
 

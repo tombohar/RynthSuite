@@ -68,6 +68,7 @@ internal sealed class DefStore
             st.SwapWhileBotRuns = Bool(s, "swapWhileBotRuns", st.SwapWhileBotRuns);
             st.WeaponsButtonOnBar = Bool(s, "weaponsButtonOnBar", st.WeaponsButtonOnBar);   // missing (a file from before 2026-10-29): off
             st.IndependentBar = Bool(s, "independentBar", st.IndependentBar);   // missing (a file from before 2026-10-27): off
+            st.QuantityBox = Bool(s, "quantityBox", st.QuantityBox);   // missing (a file from before 2026-10-30): on
             st.BarOpen = Bool(s, "barOpen", st.BarOpen);
             st.PickerOpen = Bool(s, "pickerOpen", st.PickerOpen);
             st.Clamp();
@@ -166,6 +167,7 @@ internal sealed class DefStore
             w.WriteBoolean("swapWhileBotRuns", s.SwapWhileBotRuns);
             w.WriteBoolean("weaponsButtonOnBar", s.WeaponsButtonOnBar);
             w.WriteBoolean("independentBar", s.IndependentBar);
+            w.WriteBoolean("quantityBox", s.QuantityBox);
             w.WriteBoolean("barOpen", s.BarOpen);
             w.WriteBoolean("pickerOpen", s.PickerOpen);
             w.WriteEndObject();

@@ -48,9 +48,7 @@ public static unsafe class PluginExports
     public static void OnChatWindowText(IntPtr textUtf16, int chatType, IntPtr eatFlag)
         => Runtime.OnChatWindowText(textUtf16, chatType, eatFlag);
 
-    [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnUpdateHealth", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static void OnUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth)
-        => Runtime.OnUpdateHealth(targetId, healthRatio, currentHealth, maxHealth);
+    // No RynthPluginOnUpdateHealth (0.4.2): deaths come from the vitals the session reads each tick.
 
     // Corpses (0.3.0): a kill a ring, wall or chain spell made without a kill notice is found by its corpse.
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnCreateObject", CallConvs = new[] { typeof(CallConvCdecl) })]

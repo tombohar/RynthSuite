@@ -244,13 +244,19 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         RynthCore.Plugin.Shared.UseAudit.WorldUseHold = SalvagePanelHold;
         // "The door is locked!" comes as a transient string (ACE Door.ActOnUse): the door logic picks a
         // lock only when the server says so (DoorInteractionController). The chat line is the fallback.
+        // The four combat events (hits and evades both ways, by name) feed the Monster Stats
+        // (RynthAiPlugin.MonsterStats.cs); without the stream melee and missile go uncounted there.
+        _combatEventsStreaming = false;
         try
         {
             if (Host.HasServerMessages)
             {
-                int sm = Host.SetServerMessageInterest(ReadOnlySpan<uint>.Empty,
-                    new uint[] { RynthCore.PluginSdk.Net.GameEventType.TransientString });
-                if (sm != 1) Host.Log($"[RynthAi] Server messages: not streaming ({sm}); locked doors are read from chat only.");
+                var events = new uint[1 + MonsterStats.CombatEvents.GameEvents.Length];
+                events[0] = RynthCore.PluginSdk.Net.GameEventType.TransientString;
+                MonsterStats.CombatEvents.GameEvents.CopyTo(events, 1);
+                int sm = Host.SetServerMessageInterest(ReadOnlySpan<uint>.Empty, events);
+                _combatEventsStreaming = sm == 1;
+                if (sm != 1) Host.Log($"[RynthAi] Server messages: not streaming ({sm}); locked doors are read from chat only, and the Monster Stats count no melee or missile attacks.");
             }
         }
         catch (Exception ex) { Host.Log($"[RynthAi] Server messages: {ex.Message}"); }
@@ -286,6 +292,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         long t0 = Environment.TickCount64;
         try { _dashboard?.SaveSettings(); } catch { }
         try { _sessionStats?.Shutdown(); } catch { }
+        try { ShutdownMonsterStats(); } catch { }   // kept for the next copy, with the session
         try { GameInput.Shutdown(); } catch { }   // keys still held for /mt movement | jump | strafe
         // Release the Monster Editor process handle (if the toggle button
         // launched one) rather than leaking it on plugin unload/hot-reload.
@@ -341,6 +348,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         Log("RynthAi: logout — tearing down session.");
         try { _dashboard?.SaveSettings(); } catch { }
         try { _sessionStats?.OnLogout(); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats logout"); }
+        try { OnLogoutMonsterStats(); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "monster stats logout"); }
         Loot.T11ItemSupport.Reset();
         // A real logout: the next OnLoginComplete is a fresh login, not a hot reload.
         ClearInGameMarker();
@@ -757,7 +765,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _combatManager.JumpBusy = () => _jumper?.IsBusy == true;
         _buffManager?.SetStaleBusyCallback(OnCombatBusyStale);   // a heal ahead of a leftover busy count
         if (_buffManager != null)
+        {
             _buffManager.OffhandStowed = id => _combatManager?.NoteOffhandStowed(id);
+            _buffManager.IdleForTopOff = IdleForBuffTopOff;   // Rebuff When Idle's early top-off (RynthAiPlugin.Chores.cs)
+        }
         _combatManager.SetCharacterSkills(_charSkills);
         _combatManager.SetPlayerId(_playerId);
         _combatManager.SetDamageStores(_creatureStore, _damageStore);
@@ -1104,7 +1115,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         ["DunPatrolSightYd"] = (DungeonPatrolOptions.SightMin, DungeonPatrolOptions.SightMax),
         ["T2Speed"] = (0.1, 5), ["T2WalkWithinYd"] = (1, 50), ["T2DistanceTo"] = (0.1, 10), ["T2ReissueMs"] = (100, 10000),
         ["T2MaxRangeYd"] = (50, 2000), ["T2MaxLandblocks"] = (1, 20),
-        ["RebuffSecondsRemaining"] = (30, 1800), ["RebuffTopOffSecondsRemaining"] = (30, 3600),
+        ["RebuffSecondsRemaining"] = (30, 1800), ["RebuffTopOffSecondsRemaining"] = (30, 3600), ["RebuffIdleMarginMinutes"] = (0, 60),
         ["AutoVendorTries"] = (1, 20), ["AutoVendorTriesTime"] = (500, 30000),
         ["BuffMinSkillLevelTier1"] = (1, 500), ["BuffMinSkillLevelTier2"] = (1, 500), ["BuffMinSkillLevelTier3"] = (1, 500), ["BuffMinSkillLevelTier4"] = (1, 500),
         ["BuffMinSkillLevelTier5"] = (1, 500), ["BuffMinSkillLevelTier6"] = (1, 500), ["BuffMinSkillLevelTier7"] = (1, 500), ["BuffMinSkillLevelTier8"] = (1, 500),
@@ -2409,6 +2420,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         try { NoteServerPolicyChat(text); } catch { }   // DreamWeave's Thread lines (ServerPolicy)
         try { NoteDoorServerText(text); } catch { }   // "The door is locked!" (the door logic)
         try { _sessionStats?.OnChatWindowText(text); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats chat"); }
+        try { NoteMonsterStatsChat(text, chatType); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "monster stats chat"); }
         // The Meta Manager eats the reply to its own /myquests poll (only that).
         bool mmEat = false;
         try { mmEat = MetaScheduleChat(text); } catch { }
@@ -2441,6 +2453,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         // Mini Remote stats count every notice, as RynthTracker does (an empty message is still a kill).
         try { _sessionStats?.OnKillNotification(deathMessage); }
         catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats kill"); }
+        try { NoteMonsterStatsKill(deathMessage); }
+        catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "monster stats kill"); }
         if (string.IsNullOrEmpty(deathMessage)) return;
         _killClock.RecordKill();    // the only kill source: KillerNotification goes to the killer alone
         NoteBoostLootKill();        // before combat sees the kill: its next target waits for the corpse
@@ -2494,7 +2508,6 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     public override void OnUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth)
     {
         float prevRatio = _objectCache?.GetHealthRatio(unchecked((int)targetId)) ?? -1f;
-        _sessionStats?.OnUpdateHealth(targetId, currentHealth, maxHealth);
         _objectCache?.OnUpdateHealth(targetId, healthRatio);
         _combatManager?.NoteServerHealth(unchecked((int)targetId), healthRatio);   // kill-shot evidence (fight target only)
         _dashboard?.OnUpdateHealth(targetId, healthRatio, currentHealth, maxHealth);
@@ -2786,6 +2799,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
               .Append("\"petLabel\":").Append(JsonStr(PetChoiceLabel(pet))).Append(',')
               .Append(WeakJson(wcid, name, wcids));
             if (wcids.Length > 1) sb.Append("\"wcids\":[").Append(string.Join(",", wcids)).Append("],");
+            // Its evades and resists both ways since login (RynthAiPlugin.MonsterStats.cs): the line under
+            // the monster on an engine that draws it; an older one ignores the field.
+            sb.Append(MonsterStatsJsonFor(name));
             sb.Append("\"key\":").Append(JsonStr(wcid.ToString())).Append(',')
               .Append("\"tiers\":[");
 
@@ -3222,9 +3238,11 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         return sb.ToString();
     }
 
-    /// <summary>Master reset from the Damage panel: zero all learned stats, keep names + manual overrides. Persists.</summary>
+    /// <summary>Master reset from the Damage panel: zero all learned stats, keep names + manual overrides. Persists.
+    /// The evades and resists under each monster (RynthAiPlugin.MonsterStats.cs) start over too.</summary>
     public void ClearMonsterStats()
     {
+        RequestMonsterStatsReset();
         if (_damageStore == null) return;
         _damageStore.ClearAllStats();
         _damageStore.SaveIfDirty();
@@ -4009,6 +4027,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "fellowinfo":   HandleFellowshipInfoCommand(); break;
             case "dumpinv":      HandleDumpInventoryCommand(); break;
             case "combat":       HandleCombatStateCommand(); break;
+            case "mstats":       HandleMonsterStatsCommand(parts); break;   // RynthAiPlugin.MonsterStats.cs
             case "why":          HandleWhyCommand(); break;
             case "ghost":
             case "ghosts":       HandleGhostsCommand(cmd, parts); break;

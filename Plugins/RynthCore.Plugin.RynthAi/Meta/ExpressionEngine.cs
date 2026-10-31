@@ -3698,6 +3698,7 @@ internal sealed partial class ExpressionEngine
             ["RebuffSecondsRemaining"] = (() => I(s.RebuffSecondsRemaining), v => { if (int.TryParse(v, out int i)) s.RebuffSecondsRemaining = i; }),
             ["BlacklistTimeoutSec"]    = (() => I(s.BlacklistTimeoutSec),    v => { if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out double d) && d >= 0) s.BlacklistTimeoutSec = (int)Math.Round(d); }),
             ["RebuffTopOffSecondsRemaining"] = (() => I(s.RebuffTopOffSecondsRemaining), v => { if (int.TryParse(v, out int i)) s.RebuffTopOffSecondsRemaining = i; }),
+            ["RebuffIdleMarginMinutes"]      = (() => I(s.RebuffIdleMarginMinutes),      v => { if (int.TryParse(v, out int i)) s.RebuffIdleMarginMinutes = Math.Max(0, i); }),
             ["CastBuffsOverItemBuffs"]       = (() => B(s.CastBuffsOverItemBuffs),       v => s.CastBuffsOverItemBuffs       = ToDouble(v) != 0),
             ["FastBuffChain"]                = (() => B(s.FastBuffChain),                v => s.FastBuffChain                = ToDouble(v) != 0),
             ["SkipUnusableBuffs"]            = (() => B(s.SkipUnusableBuffs),            v => s.SkipUnusableBuffs            = ToDouble(v) != 0),

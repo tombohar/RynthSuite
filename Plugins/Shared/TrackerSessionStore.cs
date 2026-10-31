@@ -90,6 +90,12 @@ internal sealed class TrackerSessionState
     public long OwnSinceBank;
     /// <summary>Luminance of the last five minutes, oldest first: (UTC ticks, amount).</summary>
     public List<(long AtTicks, long Amount)> RecentLum = new();
+
+    // Added 2026-10-30 (deaths from the vitals and NumDeaths). Optional in the file, like the above.
+    /// <summary>The server's death counter (PropertyInt 43, NumDeaths) baseline.</summary>
+    public long? DeathCountBase;
+    /// <summary>A death counted from health 0 whose NumDeaths rise hadn't been read yet.</summary>
+    public bool DeathOpen;
 }
 
 internal static class TrackerSessionStore
@@ -152,6 +158,8 @@ internal static class TrackerSessionStore
         Line(sb, "bankincome", s.BankIncome.ToString(Ic));
         Line(sb, "ownsincebank", s.OwnSinceBank.ToString(Ic));
         Line(sb, "recentlum", Recent(s.RecentLum));
+        Line(sb, "deathsbase", Opt(s.DeathCountBase));
+        Line(sb, "deathopen", s.DeathOpen ? "1" : "0");
         Line(sb, "end", "1");   // a torn write never parses
         return sb.ToString();
     }
@@ -204,7 +212,10 @@ internal static class TrackerSessionStore
             (!map.ContainsKey("lumown") || Long(map, "lumown", out s.LumOwn)) &&
             (!map.ContainsKey("bankincome") || Long(map, "bankincome", out s.BankIncome)) &&
             (!map.ContainsKey("ownsincebank") || Long(map, "ownsincebank", out s.OwnSinceBank)) &&
-            (!map.ContainsKey("recentlum") || ParseRecent(map["recentlum"], s.RecentLum));
+            (!map.ContainsKey("recentlum") || ParseRecent(map["recentlum"], s.RecentLum)) &&
+            // The 2026-10-30 keys may be absent too.
+            (!map.ContainsKey("deathsbase") || OptLong(map, "deathsbase", out s.DeathCountBase)) &&
+            (!map.ContainsKey("deathopen") || Bool(map, "deathopen", out s.DeathOpen));
         if (!ok) return false;
 
         // Ticks outside DateTime's range would throw when the plugin builds a DateTime.

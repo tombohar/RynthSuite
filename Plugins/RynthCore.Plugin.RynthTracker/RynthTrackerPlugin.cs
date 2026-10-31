@@ -16,10 +16,14 @@ namespace RynthCore.Plugin.RynthTracker;
 // RynthOracle and RynthILT count the same session from the same start, and Reset starts that one
 // over. Without RynthAi (or before its login) the Tracker's own session, kept running all along,
 // is shown instead.
+//
+// Deaths (0.4.2, 2026-10-30): counted from the player's vitals and the server's death counter,
+// read each tick (SessionStatsTracker). They used to wait for the player's health in
+// OnUpdateHealth, which the engine never sends for the player, so the count stayed 0.
 public sealed class RynthTrackerPlugin : RynthPluginBase
 {
     internal static readonly IntPtr NamePointer    = Marshal.StringToHGlobalAnsi("RynthTracker");
-    internal static readonly IntPtr VersionPointer = Marshal.StringToHGlobalAnsi("0.4.1");   // previous release: 0.4.0
+    internal static readonly IntPtr VersionPointer = Marshal.StringToHGlobalAnsi("0.4.2");   // previous release: 0.4.1
 
     private SessionStatsTracker? _session;
     private readonly RynthAiSessionClient _ai = new();
@@ -62,9 +66,6 @@ public sealed class RynthTrackerPlugin : RynthPluginBase
     public override void OnCreateObject(uint objectId) => _session?.OnCreateObject(objectId);
 
     public override void OnDeleteObject(uint objectId) => _session?.OnDeleteObject(objectId);
-
-    public override void OnUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth)
-        => _session?.OnUpdateHealth(targetId, currentHealth, maxHealth);
 
     public override void OnTick()
     {

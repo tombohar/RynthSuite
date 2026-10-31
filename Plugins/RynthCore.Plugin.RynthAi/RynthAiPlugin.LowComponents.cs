@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using RynthCore.Loot; // AcObjectClass
 using RynthCore.Plugin.RynthAi.LegacyUi;
 
 namespace RynthCore.Plugin.RynthAi;
@@ -26,6 +27,14 @@ public sealed partial class RynthAiPlugin
 
     internal const string TaperKey = "tapers";
 
+    // The scarab kinds a spell can use (Diamond is left out of the check). Only for an item whose
+    // class isn't known yet: one known to be something else never counts.
+    private static readonly HashSet<string> ScarabKinds = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Lead Scarab", "Iron Scarab", "Copper Scarab", "Silver Scarab", "Gold Scarab",
+        "Pyreal Scarab", "Platinum Scarab", "Mana Scarab",
+    };
+
     /// <summary>Every tick with the safety checks; does the work every LowCompsCheckMs.</summary>
     private void CheckLowComponents(LegacyUiSettings s)
     {
@@ -50,16 +59,25 @@ public sealed partial class RynthAiPlugin
         Log("[RynthAi] " + line);
     }
 
-    /// <summary>Tapers (every kind together, under <see cref="TaperKey"/>) and each scarab kind but Diamond, by stack size.</summary>
+    /// <summary>
+    /// Tapers (every kind together, under <see cref="TaperKey"/>) and each scarab kind but Diamond, by stack size.
+    /// Spell components only: an item of another class never counts, whatever its name (the "Mechanical
+    /// Scarab" jewelry stopped the macro as "Mechanical Scarab 0" once it had left the pack, 2026-10-30).
+    /// An item whose class isn't known yet counts only under a real component's name.
+    /// </summary>
     internal static Dictionary<string, int> CountComponents(IEnumerable<WorldObject> inventory)
     {
         var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var wo in inventory)
         {
-            string name = wo?.Name ?? "";
+            if (wo == null) continue;
+            bool component = wo.ObjectClass == AcObjectClass.SpellComponent;
+            if (!component && wo.ObjectClass != AcObjectClass.Unknown) continue;
+            string name = wo.Name ?? "";
             string? key = name.EndsWith(" Taper", StringComparison.OrdinalIgnoreCase) ? TaperKey
                 : name.EndsWith(" Scarab", StringComparison.OrdinalIgnoreCase)
-                  && !name.StartsWith("Diamond", StringComparison.OrdinalIgnoreCase) ? name
+                  && !name.StartsWith("Diamond", StringComparison.OrdinalIgnoreCase)
+                  && (component || ScarabKinds.Contains(name)) ? name
                 : null;
             if (key == null) continue;
             int n = Math.Max(1, wo!.Values(LongValueKey.StackCount, 1));

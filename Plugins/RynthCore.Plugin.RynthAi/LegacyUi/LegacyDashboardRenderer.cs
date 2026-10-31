@@ -1303,6 +1303,7 @@ internal sealed partial class LegacyDashboardRenderer
                 RebuffWhenIdle             = s.RebuffWhenIdle,
                 RebuffSecondsRemaining     = s.RebuffSecondsRemaining,
                 RebuffTopOffSecondsRemaining = s.RebuffTopOffSecondsRemaining,
+                RebuffIdleMarginMinutes    = s.RebuffIdleMarginMinutes,
                 CastBuffsOverItemBuffs     = s.CastBuffsOverItemBuffs,
                 SkipUnusableBuffs          = s.SkipUnusableBuffs,
                 DisabledBuffs              = new List<string>(s.DisabledBuffs),
@@ -1565,6 +1566,7 @@ internal sealed partial class LegacyDashboardRenderer
             s.RebuffWhenIdle             = p.RebuffWhenIdle;
             s.RebuffSecondsRemaining     = p.RebuffSecondsRemaining;
             if (p.RebuffTopOffSecondsRemaining > 0) s.RebuffTopOffSecondsRemaining = p.RebuffTopOffSecondsRemaining;
+            if (p.RebuffIdleMarginMinutes is int idleMargin) s.RebuffIdleMarginMinutes = Math.Max(0, idleMargin);   // absent = unchanged
             if (p.CastBuffsOverItemBuffs is bool castOverItems) s.CastBuffsOverItemBuffs = castOverItems;   // absent = unchanged
             if (p.SkipUnusableBuffs is bool skipUnusable) s.SkipUnusableBuffs = skipUnusable;   // absent = unchanged
             if (p.DisabledBuffs is { } disabledBuffs) s.DisabledBuffs = new List<string>(disabledBuffs);  // absent = unchanged
@@ -2051,6 +2053,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.RebuffWhenIdle           = tmp.RebuffWhenIdle;
         dst.RebuffSecondsRemaining   = tmp.RebuffSecondsRemaining;
         dst.RebuffTopOffSecondsRemaining = tmp.RebuffTopOffSecondsRemaining;
+        dst.RebuffIdleMarginMinutes  = tmp.RebuffIdleMarginMinutes;
         dst.CastBuffsOverItemBuffs   = tmp.CastBuffsOverItemBuffs;
         dst.FastBuffChain            = tmp.FastBuffChain;
         dst.SkipUnusableBuffs        = tmp.SkipUnusableBuffs;

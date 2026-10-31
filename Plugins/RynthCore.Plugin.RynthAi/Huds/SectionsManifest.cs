@@ -77,19 +77,28 @@ internal static class SectionsManifest
     public const string DashboardTitle = "RynthAi", DashboardSurface = "window:dashboard";
 
     /// <summary>
-    /// The manifest JSON for <paramref name="views"/> (UTF-8 text, schema version 1), with the dashboard
-    /// window when <paramref name="dashboard"/>.
+    /// The Monster Stats window (RynthAiPlugin.MonsterStats.cs, 2026-10-30): combat per kind of monster
+    /// since login, drawn by RynthAi in the engine's frame (plugin API v89), declared only where the
+    /// Damage panel doesn't show the numbers under each monster. No bar button: the Session Stats view's
+    /// "Monster stats" button and /ra mstats show open it.
     /// </summary>
-    public static string Build(IReadOnlyList<View> views, IReadOnlyList<Section> sections, bool dashboard = false)
+    public const string MonsterStatsTitle = RynthAiPlugin.MonsterStatsTitle, MonsterStatsSurface = RynthAiPlugin.MonsterStatsSurface;
+
+    /// <summary>
+    /// The manifest JSON for <paramref name="views"/> (UTF-8 text, schema version 1), with the dashboard
+    /// window when <paramref name="dashboard"/> and the Monster Stats window when <paramref name="monsterStats"/>.
+    /// </summary>
+    public static string Build(IReadOnlyList<View> views, IReadOnlyList<Section> sections, bool dashboard = false, bool monsterStats = false)
     {
         using var stream = new MemoryStream(4096);
         using (var w = new Utf8JsonWriter(stream))
         {
             w.WriteStartObject();
             w.WriteNumber("version", 1);
+            if (dashboard || monsterStats)
+                w.WriteStartArray("windows");
             if (dashboard)
             {
-                w.WriteStartArray("windows");
                 w.WriteStartObject();
                 w.WriteString("id", "dashboard");
                 w.WriteString("title", DashboardTitle);
@@ -105,8 +114,24 @@ internal static class SectionsManifest
                 w.WriteString("chrome", "none");
                 w.WriteBoolean("fitHeight", true);
                 w.WriteEndObject();
-                w.WriteEndArray();
             }
+            if (monsterStats)
+            {
+                w.WriteStartObject();
+                w.WriteString("id", "monsterstats");
+                w.WriteString("title", MonsterStatsTitle);
+                w.WriteString("surface", MonsterStatsSurface);
+                w.WriteString("icon", RynthCore.Plugin.Shared.RynthUi.RynthIcons.ChartBar);
+                w.WriteNumber("width", 560);
+                w.WriteNumber("height", 360);
+                w.WriteNumber("minWidth", 380);
+                w.WriteNumber("minHeight", 160);
+                w.WriteBoolean("bar", false);
+                w.WriteBoolean("edgeToEdge", true);
+                w.WriteEndObject();
+            }
+            if (dashboard || monsterStats)
+                w.WriteEndArray();
             w.WriteStartArray("sections");
             foreach (Section s in sections)
             {

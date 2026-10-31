@@ -161,6 +161,12 @@ public static unsafe class PluginExports
                 int drawn = plugin.RenderDashboard(popped, out want);
                 if (drawn != 1) return drawn;
             }
+            else if (name.SequenceEqual("window:monsterstats"u8))
+            {
+                // The Monster Stats window (RynthAiPlugin.MonsterStats.cs): 1 drawn, 0 not ready, -2 failed.
+                int drawn = plugin.RenderMonsterStats(popped, out want);
+                if (drawn != 1) return drawn;
+            }
             else if (name.StartsWith("section:"u8))
             {
                 // Section names are short ASCII ids (Huds/SectionsManifest.cs); anything longer isn't ours.
@@ -243,17 +249,21 @@ public static unsafe class PluginExports
     public static void OnEnchantmentRemoved(uint enchantmentId) => Runtime.OnEnchantmentRemoved(enchantmentId);
 
     // API v78 server messages: only what RynthAiPlugin asked for (SetServerMessageInterest in
-    // Initialize: the transient-text game event, for "The door is locked!"). `data` lives only
-    // during the call; the text is copied out by the parser.
+    // Initialize: the transient-text game event, for "The door is locked!", and the four combat
+    // events, for the Monster Stats). `data` lives only during the call; the parsers copy out what
+    // they keep (the text, the monster's name).
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnServerMessage", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnServerMessage(uint opcode, byte* data, int length)
     {
         try
         {
             var msg = RynthCore.PluginSdk.Net.ServerMessage.FromCallback(opcode, data, length);
-            if (msg.IsGameEvent && msg.EventType == RynthCore.PluginSdk.Net.GameEventType.TransientString
+            if (!msg.IsGameEvent) return;
+            if (msg.EventType == RynthCore.PluginSdk.Net.GameEventType.TransientString
                 && RynthCore.PluginSdk.Net.SystemText.TryParse(msg.EventBody, true, out var text))
                 Runtime.Plugin?.NoteDoorServerText(text.Text);
+            else if (MonsterStats.CombatEvents.IsCombatEvent(msg.EventType))
+                Runtime.Plugin?.NoteCombatEvent(msg.EventType, msg.EventBody);
         }
         catch { }
     }

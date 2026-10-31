@@ -27,6 +27,18 @@
 //    Fallback     "You've banked N Luminance." counts on its own only until a
 //                 bank property (9005 or 9102) is read; after that the property
 //                 covers every source and the chat line would double-count.
+//
+//  Deaths (2026-10-30), from two readings of the player each tick:
+//    health       the engine's own vitals: 0 (with a max) after a reading above
+//                 0. The player's health never comes through OnUpdateHealth (that
+//                 is a target's health), which is why the count used to stay 0.
+//                 0/0 (a login, before the vitals) is no reading.
+//    NumDeaths    the server's death counter (PropertyInt 43): a rise counts,
+//                 so a death while the plugin was unloaded (a reload) is not lost.
+//                 A character that never died has no counter until its first death.
+//  ACE sends both in one packet (Player.Die: health 0, then NumDeaths), so one
+//  death shows on both: the first to show it counts it, the other is matched to
+//  it until the player reads alive again. Kill notices never count a death.
 // ============================================================================
 using System;
 using System.Collections.Generic;
@@ -146,6 +158,13 @@ internal sealed class SessionStats
     private readonly List<(DateTime At, long Amount)> _recentLum = new();
     private long _recentLumSum;
 
+    // Deaths (see the header): the last health reading, the NumDeaths baseline, and the death
+    // each reading has counted that the other one hasn't shown yet.
+    private bool? _alive;               // null = no reading yet this session (or since a reload)
+    private TrackerRise _deathCountRise;
+    private bool _deathOpenByHealth;    // counted from health 0; its NumDeaths rise hasn't come
+    private int _deathsOpenByCount;     // counted from NumDeaths; their health 0 hasn't been read
+
     public SessionStats() => Reset(DateTime.UtcNow);
 
     public DateTime SessionStartUtc => _sessionStart;
@@ -184,6 +203,10 @@ internal sealed class SessionStats
         _movedIntoBankUntil = DateTime.MinValue;
         _recentLum.Clear();
         _recentLumSum = 0;
+        _alive = null;
+        _deathCountRise.Clear();
+        _deathOpenByHealth = false;
+        _deathsOpenByCount = 0;
     }
 
     // ── Events ───────────────────────────────────────────────────────────────
@@ -228,8 +251,41 @@ internal sealed class SessionStats
         return result;
     }
 
-    /// <summary>The player's health reached 0.</summary>
-    public void OnPlayerDied() => _deaths++;
+    /// <summary>
+    /// The player's health from the engine's vitals. 0 after a reading above 0 is a death, unless
+    /// NumDeaths already counted it; max 0 (the 0/0 before a login's vitals) is no reading. Read
+    /// before <see cref="OnDeathCount"/> in the same tick: the server sends the health first.
+    /// </summary>
+    public void OnPlayerHealth(uint current, uint max)
+    {
+        if (max == 0) return;
+        bool alive = current > 0;
+        if (alive)
+        {
+            // Alive again (or still): whatever comes from now on is a new death.
+            _deathOpenByHealth = false;
+            _deathsOpenByCount = 0;
+        }
+        else if (_alive == true)
+        {
+            if (_deathsOpenByCount > 0) _deathsOpenByCount--;
+            else { _deaths++; _deathOpenByHealth = true; }
+        }
+        _alive = alive;
+    }
+
+    /// <summary>
+    /// The server's death counter (NumDeaths). Its first read is the baseline; a rise is that many
+    /// deaths, less the one health 0 has already counted.
+    /// </summary>
+    public void OnDeathCount(int numDeaths)
+    {
+        long up = _deathCountRise.Take(numDeaths);
+        if (up <= 0) return;
+        if (_deathOpenByHealth) { _deathOpenByHealth = false; up--; }
+        _deaths += (int)up;
+        _deathsOpenByCount += (int)up;
+    }
 
     private void CountCorpseKill(DateTime now)
     {
@@ -378,6 +434,8 @@ internal sealed class SessionStats
         s.LumOwn = _lumOwn;
         s.BankIncome = _bankIncome;
         s.OwnSinceBank = _ownSinceBank;
+        s.DeathCountBase = _deathCountRise.Baseline;
+        s.DeathOpen = _deathOpenByHealth;
         s.RecentLum.Clear();
         foreach (var (at, amount) in _recentLum) s.RecentLum.Add((at.Ticks, amount));
     }
@@ -405,6 +463,11 @@ internal sealed class SessionStats
         _lumOwn = s.LumOwn;
         _bankIncome = s.BankIncome;
         _ownSinceBank = s.OwnSinceBank;
+        // The last health reading is not carried over: after an engine reload the vitals can read
+        // 0 with a max for a moment before the health is seeded, and that is no death. A death the
+        // reload hid comes in through NumDeaths' saved baseline instead.
+        _deathCountRise.Restore(s.DeathCountBase);
+        _deathOpenByHealth = s.DeathOpen;
         foreach (var (at, amount) in s.RecentLum)
         {
             _recentLum.Add((new DateTime(at, DateTimeKind.Utc), amount));

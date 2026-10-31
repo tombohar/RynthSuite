@@ -136,6 +136,8 @@ internal static partial class Program
         BankIncome = 9_000,
         OwnSinceBank = 4_000,
         RecentLum = { (Now.AddMinutes(-2).Ticks, 300), (Now.AddMinutes(-1).Ticks, 700) },
+        DeathCountBase = 17,
+        DeathOpen = true,
     };
 
     private static void SameState(TrackerSessionState a, TrackerSessionState b, string what)
@@ -165,6 +167,8 @@ internal static partial class Program
         Eq(a.BankIncome, b.BankIncome, what + " bankincome");
         Eq(a.OwnSinceBank, b.OwnSinceBank, what + " ownsincebank");
         Eq(string.Join(";", a.RecentLum), string.Join(";", b.RecentLum), what + " recentlum");
+        Eq(a.DeathCountBase, b.DeathCountBase, what + " deathsbase");
+        Eq(a.DeathOpen, b.DeathOpen, what + " deathopen");
     }
 
     // First read is the baseline; rises count; a drop only moves the baseline.
@@ -195,6 +199,8 @@ internal static partial class Program
         var s = Sample();
         s.XpBase = null; s.LumBase = null; s.RadBase = null; s.BankedBase = null; s.DrawnBase = null;
         s.BankLumBase = null;
+        s.DeathCountBase = null;
+        s.DeathOpen = false;
         s.RecentLum.Clear();
         s.MaxLevel = false;
         Check(TrackerSessionStore.TryParse(TrackerSessionStore.Serialize(s), out var back), "null baselines parse");
@@ -249,6 +255,21 @@ internal static partial class Program
         Eq(oldBack.RecentLum.Count, 0, "older save: no recent luminance");
         Check(!TrackerSessionStore.TryParse(good.Replace("lumown=5000", "lumown=x"), out _), "malformed new key rejected");
         Check(!TrackerSessionStore.TryParse(good.Replace("recentlum=", "recentlum=12"), out _), "malformed recent luminance rejected");
+
+        // A save written before the 2026-10-30 death keys (the live release's) carries on too.
+        string preDeaths = good;
+        foreach (string key in new[] { "deathsbase", "deathopen" })
+        {
+            int at = preDeaths.IndexOf("\n" + key + "=", StringComparison.Ordinal);
+            int end = preDeaths.IndexOf('\n', at + 1);
+            preDeaths = preDeaths.Remove(at, end - at);
+        }
+        Check(TrackerSessionStore.TryParse(preDeaths, out var preBack), "save without the 2026-10-30 keys parses");
+        Eq(preBack.DeathsTotal, Sample().DeathsTotal, "older save keeps its deaths");
+        Eq(preBack.DeathCountBase, (long?)null, "older save: no death counter baseline (its first read is one)");
+        Check(!preBack.DeathOpen, "older save: no death waiting for its counter");
+        Check(!TrackerSessionStore.TryParse(good.Replace("deathsbase=17", "deathsbase=?"), out _), "malformed death counter baseline rejected");
+        Check(!TrackerSessionStore.TryParse(good.Replace("deathopen=1", "deathopen=yes"), out _), "malformed death flag rejected");
     }
 
     private static void TestShouldRestore()

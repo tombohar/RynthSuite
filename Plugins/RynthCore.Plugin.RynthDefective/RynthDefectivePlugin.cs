@@ -63,6 +63,7 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
     public override int Initialize()
     {
         _reply = new CommandReply("[RynthDefective]", (t, c) => Host.WriteToChat(t, c), t => Host.Log(t));
+        InitQuantity();
         _ui.Log = msg => Host.Log(msg);
         // The shortcut bar (plugin API v90) draws with ImGui.NET bound to the engine's cimgui, in its look.
         RynthCore.Plugin.Shared.ImGuiNativeBinding.Ensure(msg => Host.Log("[RynthDefective] " + msg));
@@ -115,6 +116,7 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
         _nextIdentityTryMs = Environment.TickCount64;
         _session.Use.ResetSession();
         _world?.Reset();
+        _qty.Reset();
     }
 
     public override void OnLogout()
@@ -126,6 +128,7 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
         _session.LoggedIn = false;
         _session.Use.ResetSession();
         _world?.Reset();
+        _qty.Reset();
         _barView = RynthCore.Plugin.RynthDefective.ShortcutBar.BarSnapshot.NotReady;
         foreach (UiWindow? w in new[] { _barWindow, _pickerWindow, _settingsWindow })
             if (w != null) { w.Visible = false; w.NeedsPass = true; }
@@ -276,6 +279,13 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
             case DefVerb.Status:
                 PrintStatus();
                 break;
+            case DefVerb.Quantity:
+            case DefVerb.Split:
+            case DefVerb.Give:
+            case DefVerb.Buy:
+                // The quantity box: each answers once, at once when it can't go, else when the game answers.
+                RunQuantityCommand(c);
+                break;
         }
         MarkAllForPass();
     }
@@ -287,6 +297,8 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
             Print("RynthDefective draws the Shortcuts bar, the Game Panels buttons and the Selection window. Its settings: /rdef settings, "
                   + "or the gear on the bar; right-click the bar's title to show or hide Game Panels and Selection.");
         Print("A key for a slot: /rdef bind 1 F9 (or Edit slots in the bar). Any item by name from Settings > Hotkeys: /rc hotkey add F9 /rdef use Stamina Kit.");
+        Print("How many of a stack or a vendor's item: the box under it in the Selection window, or /rdef qty 25, then /rdef split, /rdef give "
+              + "(to the last player or NPC you selected) or /rdef buy (the selected vendor item, or /rdef buy 25 <item name>).");
     }
 
     private void PrintSlots()
@@ -440,6 +452,7 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
         if (_saveDueMs != 0 && now >= _saveDueMs) SaveNow();
         TickBar(now);
         TickSelection(now);
+        TickQuantity(now);
         TickCorpses(now);
 
         // With the shortcut bar the old script-window bar stays shut (the weapon picker is still one), and

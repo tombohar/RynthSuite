@@ -127,6 +127,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra loot add [keep|keep N|salvage|sell|read] [name|like] [preview] — add a loot rule for the selected item");
         ChatLine("[RynthAi] /ra dumpinv       — dump all inventory items (cache + direct)");
         ChatLine("[RynthAi] /ra combat        — dump combat state machine snapshot");
+        ChatLine("[RynthAi] /ra mstats [monster] — its evades, resists, hits, spells and kills this session (list | reset | show | hide)");
         ChatLine("[RynthAi] /ra why           — one-glance diagnosis of why the bot is idle/attacking");
         ChatLine("[RynthAi] /ra start | stop   — start/stop the macro from chat");
         ChatLine("[RynthAi] /ra pause [sec]    — stop the macro, auto-resume after sec (default 60)");

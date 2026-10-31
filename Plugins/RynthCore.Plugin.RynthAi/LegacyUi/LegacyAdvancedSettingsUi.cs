@@ -926,6 +926,26 @@ internal sealed class LegacyAdvancedSettingsUi
             case "Buffing":
                 ImGui.Checkbox("Enable Buffing", ref _settings.EnableBuffing);
                 ImGui.Checkbox("Rebuff When Idle", ref _settings.RebuffWhenIdle);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "Top buffs off early between fights. When the bot is idle (no target, no\n" +
+                        "monster within Monster Range, no corpse to loot), it rebuffs as soon as a\n" +
+                        "buff has 'Rebuff With' + 'Idle Margin' left, instead of waiting for\n" +
+                        "'Rebuff With'. So fewer buffs run out in the next fight.\n" +
+                        "It never stops a rebuff: a buff under 'Rebuff With' (or dispelled) is\n" +
+                        "recast as always, in a fight too. An early top-off never starts in a\n" +
+                        "fight, and one under way stops when a fight starts.");
+                if (_settings.RebuffWhenIdle)
+                {
+                    ImGui.SetNextItemWidth(180);
+                    ImGui.SliderInt("Idle Margin (minutes)", ref _settings.RebuffIdleMarginMinutes, 0, 60);
+                    if (_settings.RebuffIdleMarginMinutes < 0) _settings.RebuffIdleMarginMinutes = 0;
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip(
+                            "How much earlier than 'Rebuff With' an idle top-off may start.\n" +
+                            "Default 2: with 'Rebuff With' 300 s, an idle bot rebuffs at 7 minutes\n" +
+                            "left instead of 5. 0 = Rebuff When Idle adds nothing.");
+                }
 
                 ImGui.Spacing();
                 ImGui.SetNextItemWidth(180);

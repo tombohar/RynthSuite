@@ -524,6 +524,13 @@ internal sealed class MiniRemoteHud
             ImGui.EndTable();
         }
         RenderStatButtons(_hud.Remote());
+        // Combat per kind of monster since login: the fallback Monster Stats window, only on an engine whose
+        // Damage panel doesn't show the numbers (RynthAiPlugin.MonsterStats.cs; null otherwise).
+        if (_hud.ToggleMonsterStats is Action toggle)
+        {
+            if (ImGui.Button("Monster stats", new Vector2(Math.Max(ImGui.GetContentRegionAvail().X, 140f), 0))) toggle();
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Evades, resists, hits and kills per kind of monster since login (/ra mstats).");
+        }
     }
 
     /// <summary>One Session Stats row: label, session total, per hour (and an optional tooltip on the label).</summary>

@@ -135,6 +135,7 @@ internal static class Program
         MeleeStallTests.Register(runner);
         ServerMenuTests.Register(runner);
         MiniRemoteMoveTests.Register(runner);
+        SessionDeathTests.Register(runner);
         SectionsTests.Register(runner);
         ItemsCleanTests.Register(runner);
         DeathRecallTests.Register(runner);
@@ -146,6 +147,7 @@ internal static class Program
         PluginFixTests.Register(runner);
         BuffChainTests.Register(runner);
         ShieldBuffTests.Register(runner);
+        RebuffWhenIdleTests.Register(runner);
         LootPacingTests.Register(runner);
         CorpseCloseTests.Register(runner);
         VTankHotkeyTests.Register(runner);
@@ -167,6 +169,7 @@ internal static class Program
         TickIsolationTests.Register(runner);
         ChoresInFightTests.Register(runner);
         CommandReplyTests.Register(runner);
+        MonsterStatsTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

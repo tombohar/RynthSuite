@@ -21,6 +21,7 @@ internal static partial class Program
         TestAelrynthAndRetailLum();
         TestLumLast5Min();
         TestKillsAndXpPerKill();
+        TestDeaths();
         TestSessionStatsReloadMatches();
     }
 
@@ -169,8 +170,219 @@ internal static partial class Program
         Eq(s.Kills, 2, "corpse kill joins the kills");
         Eq(s.XpPerKill, 500L, "corpse kill takes the XP just before it: (600 + 400) / 2");
 
-        s.OnPlayerDied();
+        s.OnPlayerHealth(300, 300);
+        s.OnPlayerHealth(0, 300);
         Eq(s.View(S0.AddHours(1)).Deaths, 1, "death");
+        Eq(s.Kills, 2, "a death is no kill");
+    }
+
+    // Deaths (2026-10-30): the vitals and NumDeaths, each death once.
+
+    /// <summary>One tick of SessionStatsTracker.CheckDeaths: the vitals, then the counter (null = not readable).</summary>
+    private static void Read(SessionStats s, uint health, uint max, int? numDeaths)
+    {
+        s.OnPlayerHealth(health, max);
+        if (numDeaths is int n) s.OnDeathCount(n);
+    }
+
+    /// <summary>Capture, save text, parse, apply: a plugin reload in the middle of the session.</summary>
+    private static SessionStats Reload(SessionStats s, DateTime t)
+    {
+        var st = Sample();
+        s.CaptureInto(st, t);
+        Check(TrackerSessionStore.TryParse(TrackerSessionStore.Serialize(st), out var back), "deaths: the save parses");
+        var next = new SessionStats();
+        next.ApplyFrom(back);
+        return next;
+    }
+
+    private static void TestDeaths()
+    {
+        TestDeathSequence();
+        TestDeathCounterOrder();
+        TestDeathsWithoutCounter();
+        TestDeathsWithoutVitals();
+        TestDeathReset();
+        TestDeathsAcrossReload();
+    }
+
+    // A real death as the server sends it (ACE Player_Death: OnDeath sends the victim notice, then Die
+    // sends health 0 and NumDeaths in one packet; the corpse and the portal follow the death animation,
+    // and 3 s into portal space health comes back at 75 %), read tick by tick as the tracker reads it.
+    private static void TestDeathSequence()
+    {
+        var s = new SessionStats();
+        s.Reset(S0);
+        DateTime t = S0;
+
+        // Login: 0/0 until the player's vitals land, and a moment with the max but no health yet.
+        Read(s, 0, 0, null);
+        Read(s, 0, 0, 4);
+        Read(s, 0, 360, 4);
+        Eq(s.Deaths, 0, "login: the 0/0 packet and 0/max before the first real reading are no death");
+        Read(s, 360, 360, 4);
+        Eq(s.Deaths, 0, "login: the death counter's first read is its baseline");
+
+        // A fight: health falls and the character lands a kill. Neither is a death.
+        Read(s, 120, 360, 4);
+        s.OnKillNotice("You killed the Drudge Skulker!", t.AddSeconds(1));
+        Read(s, 40, 360, 4);
+        Eq(s.Deaths, 0, "a kill notice and low health are no death");
+        Eq(s.Kills, 1, "the kill counts");
+
+        // Die(): health 0 and NumDeaths 5 in one packet, read in the same tick.
+        Read(s, 0, 360, 5);
+        Eq(s.Deaths, 1, "health 0 and NumDeaths +1: one death");
+        for (int i = 0; i < 300; i++) Read(s, 0, 360, 5);   // ~5 s dead: the animation, the corpse, the portal
+        Eq(s.Deaths, 1, "still one through the death animation and the portal");
+        Read(s, 270, 360, 5);                               // 3 s into portal space: 75 % health
+        Read(s, 360, 360, 5);
+        Eq(s.Deaths, 1, "alive again: still one");
+        Eq(s.Kills, 1, "a death is no kill");
+
+        // The next death counts again.
+        Read(s, 200, 360, 5);
+        Read(s, 0, 360, 6);
+        Read(s, 0, 360, 6);
+        Read(s, 270, 360, 6);
+        Eq(s.Deaths, 2, "a second death");
+        Eq(s.View(S0.AddHours(1)).Deaths, 2, "the view shows them");
+    }
+
+    // The two readings of one death in either order: the pump can read the vitals just before the
+    // packet and the counter just after it, or the counter can come a tick after the health.
+    private static void TestDeathCounterOrder()
+    {
+        var s = new SessionStats();
+        s.Reset(S0);
+        Read(s, 360, 360, 10);
+
+        Read(s, 90, 360, 11);           // the vitals read before the packet, the counter after it
+        Eq(s.Deaths, 1, "counter first: counted at once");
+        Read(s, 0, 360, 11);
+        Read(s, 0, 360, 11);
+        Eq(s.Deaths, 1, "its health 0 a tick later is the same death");
+        Read(s, 270, 360, 11);
+
+        Read(s, 0, 360, 11);            // health first, the counter a tick behind
+        Eq(s.Deaths, 2, "health first: counted at once");
+        Read(s, 0, 360, 12);
+        Eq(s.Deaths, 2, "its counter rise a tick later is the same death");
+        Read(s, 270, 360, 12);
+        Eq(s.Deaths, 2, "two deaths, each once");
+    }
+
+    // A character that never died has no NumDeaths until its first death; a server may never send it.
+    private static void TestDeathsWithoutCounter()
+    {
+        var fresh = new SessionStats();
+        fresh.Reset(S0);
+        Read(fresh, 300, 300, null);
+        Read(fresh, 0, 300, 1);         // the counter appears with the first death: that read is its baseline
+        Eq(fresh.Deaths, 1, "first death of a new character: health counts it");
+        Read(fresh, 225, 300, 1);
+        Read(fresh, 0, 300, 2);
+        Read(fresh, 225, 300, 2);
+        Eq(fresh.Deaths, 2, "its second death: health and the counter, once");
+
+        var none = new SessionStats();
+        none.Reset(S0);
+        for (int d = 0; d < 3; d++)
+        {
+            Read(none, 300, 300, null);
+            Read(none, 0, 300, null);
+            Read(none, 0, 300, null);
+        }
+        Read(none, 225, 300, null);
+        Eq(none.Deaths, 3, "no death counter from the server: each health 0 counts once");
+    }
+
+    // An engine without the vitals call: the counter alone, and two deaths between two reads.
+    private static void TestDeathsWithoutVitals()
+    {
+        var s = new SessionStats();
+        s.Reset(S0);
+        s.OnDeathCount(4);
+        s.OnDeathCount(5);
+        s.OnDeathCount(5);
+        Eq(s.Deaths, 1, "counter only: a rise is a death");
+        s.OnDeathCount(7);
+        Eq(s.Deaths, 3, "counter only: a rise of two is two deaths");
+        s.OnDeathCount(3);
+        s.OnDeathCount(4);
+        Eq(s.Deaths, 4, "a drop only moves the baseline");
+    }
+
+    // Reset while dead: that death was the old session's.
+    private static void TestDeathReset()
+    {
+        var s = new SessionStats();
+        s.Reset(S0);
+        Read(s, 360, 360, 4);
+        Read(s, 0, 360, 5);
+        Eq(s.Deaths, 1, "reset: a death first");
+        s.Reset(S0.AddMinutes(1));
+        Read(s, 0, 360, 5);
+        Read(s, 270, 360, 5);
+        Eq(s.Deaths, 0, "reset while dead: that death stays in the old session");
+        Read(s, 0, 360, 6);
+        Eq(s.Deaths, 1, "the next death counts");
+    }
+
+    // Plugin reloads around a death (the session save: SessionStats.CaptureInto / ApplyFrom).
+    private static void TestDeathsAcrossReload()
+    {
+        DateTime t = S0.AddMinutes(5);
+
+        // Reloaded while dead, after the death was counted: not counted again.
+        var a = new SessionStats();
+        a.Reset(S0);
+        Read(a, 360, 360, 4);
+        Read(a, 0, 360, 5);
+        a = Reload(a, t);
+        Read(a, 0, 360, 5);
+        Read(a, 270, 360, 5);
+        Eq(a.Deaths, 1, "reload while dead: still one");
+        Read(a, 0, 360, 6);
+        Eq(a.Deaths, 2, "and the next death after the reload counts");
+
+        // Health 0 counted, then the reload before the counter was read: its rise is the same death.
+        var b = new SessionStats();
+        b.Reset(S0);
+        Read(b, 360, 360, 4);
+        Read(b, 0, 360, 4);
+        b = Reload(b, t);
+        Read(b, 0, 360, 5);
+        Read(b, 270, 360, 5);
+        Eq(b.Deaths, 1, "reload between the health and the counter: still one");
+
+        // Died while the plugin was unloaded: the counter's saved baseline counts it.
+        var c = new SessionStats();
+        c.Reset(S0);
+        Read(c, 360, 360, 4);
+        c = Reload(c, t);
+        Read(c, 0, 360, 5);
+        Read(c, 0, 360, 5);
+        Read(c, 270, 360, 5);
+        Eq(c.Deaths, 1, "died during the reload: counted once, from the counter");
+
+        // Died and came back while the plugin was unloaded.
+        var d = new SessionStats();
+        d.Reset(S0);
+        Read(d, 360, 360, 4);
+        d = Reload(d, t);
+        Read(d, 270, 360, 5);
+        Eq(d.Deaths, 1, "died and revived during the reload: counted from the counter");
+
+        // An engine reload: the vitals start at 0/0 and can read 0/max before the health is seeded.
+        var e = new SessionStats();
+        e.Reset(S0);
+        Read(e, 360, 360, 4);
+        e = Reload(e, t);
+        Read(e, 0, 0, 4);
+        Read(e, 0, 360, 4);
+        Read(e, 360, 360, 4);
+        Eq(e.Deaths, 0, "engine reload: 0/max before the health is seeded is no death");
     }
 
     // A reload (capture, save text, parse, apply) mid-session gives the same numbers as none.

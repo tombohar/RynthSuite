@@ -51,6 +51,13 @@ internal sealed class BarSettingsView
         WindowBox(w, BarTitle, "Shortcuts bar", "set.win.bar", "The item bar (/rdef). Its RynthCore bar button is the lightning bolt.");
         WindowBox(w, PanelsTitle, "Game panel buttons", "set.win.panels", "Buttons for the game's own panels: pack, spellbook, map ... (/rdef panels).");
         WindowBox(w, SelectionTitle, "Selection", "set.win.sel", "What is selected, how far and which way, and a creature's health (/rdef selection).");
+        if (WindowShown(SelectionTitle) != null)
+        {
+            w.Checkbox("Quantity box under a stack or a vendor's item", "set.qty", st.QuantityBox, v => { st.QuantityBox = v; Changed(); });
+            w.Tooltip("In the Selection window: how many, with 1 / 10 / 100 / half / max, then Split that many into a pack, "
+                      + "Give that many to the last player or NPC you selected, or Buy that many from the open vendor.\n"
+                      + "/rdef qty, /rdef split, /rdef give and /rdef buy do the same with it off. Kept for this character.");
+        }
 
         w.SeparatorText("Shortcuts bar");
         w.Checkbox("Independent of the game's toolbar", "set.indep", st.IndependentBar, v => Tell(_s.SetIndependent(v)));
@@ -86,7 +93,8 @@ internal sealed class BarSettingsView
 
         w.SeparatorText("About");
         w.TextWrapped(SettingsPanel.Credit);
-        w.TextDisabled("Commands: /rdef (show or hide the bar), /rdef settings, /rdef panels, /rdef selection, /rdef weapons, /rdef use <slot or name>, /rdef help.");
+        w.TextDisabled("Commands: /rdef (show or hide the bar), /rdef settings, /rdef panels, /rdef selection, /rdef weapons, /rdef use <slot or name>, "
+                       + "/rdef qty, /rdef split, /rdef give, /rdef buy, /rdef help.");
     }
 
     private void WindowBox(UiWindow w, string title, string label, string id, string tip)

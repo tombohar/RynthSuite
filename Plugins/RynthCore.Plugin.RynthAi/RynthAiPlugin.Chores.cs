@@ -25,6 +25,22 @@ public sealed partial class RynthAiPlugin
     }
 
     /// <summary>
+    /// Idle for Rebuff When Idle's early top-off (BuffManager.IdleForTopOff): the macro on, no fight
+    /// (the target combat is locked on, a monster within Monster Range or on top of us; read with
+    /// Enable Combat off too, so a fight by hand counts), no corpse to loot (the arbiter's looting
+    /// input, last tick) and no salvage. Navigating counts as idle: buffing pauses the route as always.
+    /// </summary>
+    internal bool IdleForBuffTopOff()
+    {
+        var s = _dashboard?.Settings;
+        if (s == null || !s.IsMacroRunning) return false;
+        var combat = _combatManager;
+        if (combat == null || combat.HasEngageableTarget || combat.IsUnderCloseAttack) return false;
+        if (_lastWantLoot || _openedContainerId != 0 || _targetCorpseId != 0) return false;
+        return _salvageManager?.IsBusy != true;
+    }
+
+    /// <summary>
     /// AutoCram / AutoStack, one tick: not while a corpse is open or claimed, and not in a fight (a
     /// pack move went out between melee swings). The manager itself waits for the busy count.
     /// </summary>

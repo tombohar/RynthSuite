@@ -319,7 +319,19 @@ public sealed class LegacyUiSettings
     /// </summary>
     [JsonPropertyName("FastWeaponSwapOn")]
     public bool FastWeaponSwap = true;
+    /// <summary>
+    /// Rebuff When Idle (VTank's "idlebufftopoff"): between fights, top buffs off early. When the bot
+    /// is idle (no fight target, no monster within Monster Range, no corpse to loot, no salvage), a
+    /// rebuff starts once a buff has RebuffSecondsRemaining + RebuffIdleMarginMinutes left instead of
+    /// waiting for RebuffSecondsRemaining. The regular rebuff is unchanged, in a fight or not.
+    /// Read by BuffManager.RebuffLineSec (nothing read it before 2026-10-30). Off by default.
+    /// </summary>
     public bool RebuffWhenIdle;
+    /// <summary>
+    /// Rebuff When Idle's margin, minutes: how much earlier than RebuffSecondsRemaining an idle
+    /// top-off may start. Default 2; 0 = the option adds nothing. A profile saved without it loads 2.
+    /// </summary>
+    public int RebuffIdleMarginMinutes = 2;
     /// <summary>
     /// Re-cast a self buff when its remaining duration drops below this many seconds.
     /// Default 300 (5 minutes). Lower values rebuff more eagerly; very low values
@@ -1290,6 +1302,8 @@ public sealed class SettingsBridgePayload
     public bool RebuffWhenIdle { get; set; }
     public int RebuffSecondsRemaining { get; set; }
     public int RebuffTopOffSecondsRemaining { get; set; } = 1200;   // absent in older files
+    // Nullable: the engine's Settings face doesn't know it; absent = unchanged (0 is a real value).
+    public int? RebuffIdleMarginMinutes { get; set; }
     // Nullable: an engine that predates the setting doesn't send it, and a save from its
     // Settings face must leave the setting alone rather than force it either way.
     public bool? CastBuffsOverItemBuffs { get; set; }

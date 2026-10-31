@@ -83,7 +83,8 @@ namespace RynthDefective.Tests
         private static void ReplyEveryVerb()
         {
             // Wrong words: the parser's error is the reply, with an example or the usage.
-            string[] wrong = { "use", "set", "set x", "set 0", "spell 3", "spell", "clear", "clear x", "bind 3", "bind", "unbind", "unbind x", "slots", "slots 99" };
+            string[] wrong = { "use", "set", "set x", "set 0", "spell 3", "spell", "clear", "clear x", "bind 3", "bind", "unbind", "unbind x", "slots", "slots 99",
+                "qty 0", "qty lots", "split 0", "give someone", "give -1", "buy 0 Mana Scarab" };
             foreach (string w in wrong)
             {
                 DefCommand c = DefCommandParser.Parse(w);
@@ -102,6 +103,8 @@ namespace RynthDefective.Tests
                 ("set 2", DefVerb.Set), ("spell 3 Heal Self VI", DefVerb.Spell), ("clear 4", DefVerb.Clear),
                 ("bind 3 F9", DefVerb.Bind), ("unbind 3", DefVerb.Unbind), ("slots 12", DefVerb.Slots),
                 ("Stamina Kit", DefVerb.Use), ("corpses", DefVerb.Corpses), ("corpses clear", DefVerb.Corpses),
+                ("qty", DefVerb.Quantity), ("qty 25", DefVerb.Quantity), ("split", DefVerb.Split), ("split 25 into Sack", DefVerb.Split),
+                ("give 10", DefVerb.Give), ("buy 25 Mana Scarab", DefVerb.Buy), ("buy max", DefVerb.Buy),
             };
             var seen = new HashSet<DefVerb>();
             foreach (var (typed, verb) in right)

@@ -89,6 +89,25 @@ buttons (All, Melee, Missile, War, Void) narrow it, and the one you leave presse
 hand is highlighted. **One click wields.** `+` in front of a row adds a favourite; favourites and the last
 weapons you wielded are listed first (they are also in their kind's group).
 
+## The quantity box
+
+Under a selected stack, or an item in an open vendor's list, the Selection window shows how many: type the
+number (the game gets no keys while the box has the keyboard) or pick 1, 10, 100, half or max.
+
+* **A stack you carry** (or one in the chest you have open): **Split N** puts N into a new stack in the main
+  pack, a side pack or the open container (*into ...* picks; the number is its free slots). One always stays in
+  the stack, so more than the stack splits all but one. **Give N** hands N (up to the whole stack) to the last
+  player or NPC you selected: select them, then the stack.
+* **An item in a vendor's list**: **Buy N**, with its price and your pyreals (or the vendor's own currency).
+  *max* is the most you can buy: what the vendor has, what you can pay for, what your packs and burden take.
+  A buy that can't go says why before anything is sent ("Not enough pyreals: 100 Mana Scarab cost 1,200, you
+  have 1,000 (you can buy 83)", "The pack is full ..."); the engine checks again before it sends.
+* Every action answers once, in chat and on the box's last line: done, the server's refusal, or no answer.
+  One action at a time.
+* The same from chat, hotkeys and metas, with the window hidden: `/rdef qty`, `/rdef split`, `/rdef give`,
+  `/rdef buy` (below). It doesn't need the Inventory panel or RynthInventory.
+* Retail AC kept this number in its toolbar; RynthCore's *Hide retail toolbar* hides it with the toolbar.
+
 ## Busy, combat and RynthAi
 
 * One item action at a time: a request waits while the client is busy, a gesture animates, RynthAi waits on
@@ -123,6 +142,11 @@ weapons you wielded are listed first (they are also in their kind's group).
 /rdef weapons [search]        show the weapon picker
 /rdef fav                     make the selected weapon a favourite (or take it out)
 /rdef slots <n>               how many slots the script-window bar shows (1-24)
+/rdef qty [n | max | half]    the quantity box's number (alone: what it is and what it's of)
+/rdef split [n] [into <pack>] split n (or the box's number) off the selected stack; pack: main, a side
+                              pack's name, or open (the chest you have open)
+/rdef give [n]                give n of the selected stack to the last player or NPC you selected
+/rdef buy [n] [item name]     buy n of the selected vendor item (or the one named) from the open vendor
 /rdef list | status | help
 ```
 
@@ -131,8 +155,8 @@ slot N is bar slot 18+N, or bar slot N when the bar is independent of the game's
 
 ## Settings
 
-Shortcuts bar: the windows shown, independent of the game's toolbar, slot picture size, allow weapon swaps
-under RynthAi, picker row icon size. Script-window bar: slots (1-24), slots per row, button size, picker row
+Shortcuts bar: the windows shown, the quantity box under the selection (on by default), independent of the
+game's toolbar, slot picture size, allow weapon swaps under RynthAi, picker row icon size. Script-window bar: slots (1-24), slots per row, button size, picker row
 icon size, item icons on/off, counts and keys on/off, allow weapon swaps under RynthAi. Kept per character
 with the slots, favourites and recent weapons in
 `<RynthSuite>\RynthDefective\characters\<server>_<character>.json`.
@@ -146,3 +170,4 @@ Pages, arrow auto-equip, gear highlight, summon cooldown counters and the war-ma
 
 RynthCore engine API 71 with ImGui for the windows (op level 2 for pictures; text buttons without it);
 API 90 for the Shortcuts bar, Game Panels and Selection. `/rdef use` works on any engine with UseObject.
+The quantity commands: splitting on any engine, giving with a count API 62, buying API 67.

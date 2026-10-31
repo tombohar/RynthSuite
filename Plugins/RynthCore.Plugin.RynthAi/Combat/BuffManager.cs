@@ -352,6 +352,57 @@ public partial class BuffManager : IDisposable
     private bool InCombatNow() => InCombatOverride?.Invoke()
         ?? _combatManager?.HasCloseThreat(System.Math.Max(1, _settings.MonsterRange)) == true;
 
+    // ── Rebuff When Idle (RebuffWhenIdle + RebuffIdleMarginMinutes; VTank's "idlebufftopoff") ──
+    // The checkbox was saved and shown since the first version but nothing read it (a player asked,
+    // 2026-10-30, whether "buff only when idle" was implemented). What it means (the owner): an earlier
+    // timer for idle moments. The regular rebuff is unchanged: a buff at or under Rebuff With
+    // (RebuffSecondsRemaining), or dispelled, is recast as always, in a fight or not. With the option
+    // on and the bot idle (IdleForTopOff: no fight target, no monster within Monster Range, no corpse
+    // to loot, no salvage), a rebuff run also starts once a buff is at or under Rebuff With plus the
+    // margin (default 2 minutes). Such an early run never starts in a fight, and one under way stops
+    // at the next safe point (no cast in flight) when the bot stops being idle; the regular rules take
+    // over. Margin 0: nothing added. Force Buff, heals and vitals are not touched.
+
+    /// <summary>The bot is idle enough for an early top-off (set by RynthAiPlugin.IdleForBuffTopOff;
+    /// tests set it). Null = never: no early top-off.</summary>
+    internal Func<bool>? IdleForTopOff { get; set; }
+
+    /// <summary>Rebuff When Idle's margin in seconds (0 when off or set to 0).</summary>
+    internal int IdleMarginSec => _settings.RebuffWhenIdle ? Math.Max(0, _settings.RebuffIdleMarginMinutes) * 60 : 0;
+
+    /// <summary>An early top-off may run now: the option is on with a margin, and the bot is idle.</summary>
+    internal bool IdleTopOffNow()
+    {
+        if (IdleMarginSec <= 0 || IdleForTopOff == null) return false;
+        try { return IdleForTopOff(); } catch { return false; }
+    }
+
+    /// <summary>The line a buff is rebuffed at now: Rebuff With, plus the idle margin while an idle
+    /// top-off may run.</summary>
+    internal int RebuffLineSec() => _settings.RebuffSecondsRemaining + (IdleTopOffNow() ? IdleMarginSec : 0);
+
+    /// <summary>The rebuff run under way was started by the idle margin alone (nothing was at or under
+    /// Rebuff With): it stops when the bot stops being idle.</summary>
+    private bool _isIdleTopOffRun;
+
+    /// <summary>The line an automatic run tops off under (with RebuffTopOffSecondsRemaining): Rebuff With,
+    /// plus the margin for an early top-off run, so the buff that started it is always in it.</summary>
+    private int BatchRebuffLineSec => _settings.RebuffSecondsRemaining + (_isIdleTopOffRun ? IdleMarginSec : 0);
+
+    /// <summary>Early top-off runs started (tests, status).</summary>
+    internal int IdleTopOffRuns { get; private set; }
+
+    /// <summary>An early top-off run stops (a fight, a corpse, salvage): the regular rules take over.</summary>
+    private void EndIdleTopOffRun()
+    {
+        _isForceRebuffing = false;
+        _isAutoBatchRebuff = false;
+        _isIdleTopOffRun = false;
+        ClearRunFamilies();
+        _chain.PassEnd("idle top-off stopped", s => _host.Log(s));
+        _host.Log("[Buff] Rebuff When Idle: the bot is no longer idle (a fight, a corpse or salvage): the early top-off stops; buffs under Rebuff With are still rebuffed as usual.");
+    }
+
     /// <summary>
     /// A spell's mana cost: its BaseMana from the portal.dat SpellTable, the most it can cost
     /// (ACE Creature.CalculateManaUsage; Mana Conversion only lowers it on a skill roll, so the
@@ -1048,6 +1099,7 @@ public partial class BuffManager : IDisposable
     {
         _isForceRebuffing = true;
         _isAutoBatchRebuff = false;
+        _isIdleTopOffRun = false;
         ClearRunFamilies();
         _buffFailCooldownUntil.Clear(); // explicit recast-all must not be blocked by stale cooldowns
         _silentNoShowCounts.Clear();    // give parked families a fresh shot on FR too
@@ -1076,6 +1128,7 @@ public partial class BuffManager : IDisposable
     {
         _isForceRebuffing = false;
         _isAutoBatchRebuff = false;
+        _isIdleTopOffRun = false;
         _isRechargingMana = false;
         _isRechargingStamina = false;
         _isHealingSelf = false;
@@ -1347,6 +1400,12 @@ public partial class BuffManager : IDisposable
 
         // A Magic stance we asked for: watch the client's mode every tick (see ObserveStance).
         ObserveStance();
+
+        // Rebuff When Idle: an early top-off run stops once the bot isn't idle (a fight, a corpse,
+        // salvage), at the first heartbeat with no cast of ours in flight (a sent cast resolves first),
+        // and before the arbiter reads NeedsAnyBuff this tick. The regular rules take over.
+        if (_isIdleTopOffRun && _isForceRebuffing && _pendingSpellId == 0 && !IdleTopOffNow())
+            EndIdleTopOffRun();
 
         // RefreshFromLiveMemory at OnLoginComplete fails when the server-time
         // packet hasn't landed yet (GetServerTime returns 0). On those
@@ -1863,6 +1922,7 @@ public partial class BuffManager : IDisposable
                 bool wasAutoBatch = _isAutoBatchRebuff;
                 _isForceRebuffing = false;
                 _isAutoBatchRebuff = false;
+                _isIdleTopOffRun = false;
                 _host.Log($"[FR] complete — cast {_forceRebuffCastFamilies.Count} spell families{(wasAutoBatch ? " (auto batch)" : "")}");
                 // Order matters: the flag must already be false (IsBuffActive
                 // short-circuits on _forceRebuffCastFamilies while it is set, so
@@ -2855,7 +2915,9 @@ public partial class BuffManager : IDisposable
     public bool NeedsAnyBuff()
     {
         if (!_settings.EnableBuffing) return false;
-        return _isForceRebuffing || AnyBuffBelowThreshold(BuildDynamicBuffList(), _settings.RebuffSecondsRemaining);
+        // RebuffLineSec: Rebuff With, plus Rebuff When Idle's margin while the bot is idle. An early
+        // top-off run ends at the heartbeat (before the arbiter) once the bot isn't idle.
+        return _isForceRebuffing || AnyBuffBelowThreshold(BuildDynamicBuffList(), RebuffLineSec());
     }
 
     // Returns true if any castable buff in the list has < thresholdSec remaining.
@@ -2904,8 +2966,18 @@ public partial class BuffManager : IDisposable
         // Auto batch-rebuff: when any buff drops below the configured threshold,
         // trigger a full rebuff so ALL timers re-align in one session rather than
         // each buff trickling in one at a time as it individually expires.
-        if (!_isForceRebuffing && AnyBuffBelowThreshold(BuildDynamicBuffList(), _settings.RebuffSecondsRemaining))
+        int rebuffLine = _isForceRebuffing ? 0 : RebuffLineSec();
+        if (!_isForceRebuffing && AnyBuffBelowThreshold(BuildDynamicBuffList(), rebuffLine))
         {
+            // Rebuff When Idle: a run the margin alone started (nothing at or under Rebuff With) is an
+            // early top-off, which stops if the bot stops being idle.
+            _isIdleTopOffRun = rebuffLine > _settings.RebuffSecondsRemaining
+                               && !AnyBuffBelowThreshold(BuildDynamicBuffList(), _settings.RebuffSecondsRemaining);
+            if (_isIdleTopOffRun)
+            {
+                IdleTopOffRuns++;
+                _host.Log($"[Buff] Rebuff When Idle: idle, and a buff has under {rebuffLine} s left (Rebuff With {_settings.RebuffSecondsRemaining} s + {_settings.RebuffIdleMarginMinutes} min): topping off early.");
+            }
             // Batch trigger — reuse FR family-tracking but do NOT clear timers.
             // ForceFullRebuff clears _ramBuffTimers, which causes an immediate
             // re-trigger: any spell that can't be resolved (spellId=0) never
@@ -3301,7 +3373,7 @@ public partial class BuffManager : IDisposable
                 return UpgradeParked(targetSpell.Family)
                        || !(CastLevelThisRun(targetSpell.Family) is int ran && ran > 0 && GetSpellLevel(targetSpell) > ran);
             if (!_isAutoBatchRebuff) return false;
-            rebufferSecOverride = Math.Max(_settings.RebuffTopOffSecondsRemaining, _settings.RebuffSecondsRemaining);
+            rebufferSecOverride = Math.Max(_settings.RebuffTopOffSecondsRemaining, BatchRebuffLineSec);
         }
 
         int targetLevel = GetSpellLevel(targetSpell);

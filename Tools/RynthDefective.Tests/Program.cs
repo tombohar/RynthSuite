@@ -104,6 +104,17 @@ namespace RynthDefective.Tests
                 Run("corpses: gone, rotted, at most 20, forget", CorpseGoneAndExpiry);
                 Run("corpses: the files, this character's and the others'", CorpseStoreFiles);
                 Run("corpses: rows: places, times, distance and the arrow", CorpseRowText);
+                Run("quantity: typed numbers, max and half", QtyParse);
+                Run("quantity: a split leaves one, a give takes up to the stack, the box keeps what was typed", QtyCounts);
+                Run("quantity: a vendor's price (stacks, notes, rounding, a player's listing)", QtyVendorPrice);
+                Run("quantity: the most you can buy (money, slots, burden, stock)", QtyVendorMax);
+                Run("quantity: why a buy can't go, and the engine's refusals in words", QtyVendorRefusals);
+                Run("quantity: /rdef qty, split, give and buy parsing", QtyCommands);
+                Run("quantity: split - refusals, the pack, the open chest, the server's answer", QtySplit);
+                Run("quantity: give - the last player or NPC selected, all of it, refusals", QtyGive);
+                Run("quantity: buy - the selected item or by name, checks first, the vendor's answer", QtyBuy);
+                Run("quantity: /rdef qty and the Selection window's view", QtyBoxAndView);
+                Run("store: the quantity box setting; files from before read it on", QtyStore);
             }
             finally
             {

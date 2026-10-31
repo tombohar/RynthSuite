@@ -31,7 +31,7 @@
          pictures) are checked first; so are the UseDone count (v63), wield/refusal info (v70) and
          the chat parser the key binding goes through. Below v71 it still uses items (/rdef use). -->
     <RynthPluginMinEngineApi>66</RynthPluginMinEngineApi>
-    <RynthPluginDescription>Draws the Shortcuts bar (the game's 18 slots and its own), the Game Panels buttons and the Selection window: one-touch kits, potions, weapons and spells by slot or key, and a fast weapon picker. Settings: the bar's gear or /rdef settings.</RynthPluginDescription>
+    <RynthPluginDescription>Draws the Shortcuts bar (the game's 18 slots and its own), the Game Panels buttons and the Selection window (with a quantity box: split, give or buy that many): one-touch kits, potions, weapons and spells by slot or key, and a fast weapon picker. Settings: the bar's gear or /rdef settings.</RynthPluginDescription>
   </PropertyGroup>
 
   <ItemGroup>

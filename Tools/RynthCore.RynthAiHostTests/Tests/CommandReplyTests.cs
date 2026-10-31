@@ -151,6 +151,8 @@ internal static class CommandReplyTests
         new(null, "/ra corpseopen", K.Act),
         new(null, "/ra fellow", K.Act),
         new(null, "/ra fellowship leader", K.Act),
+        new("/ra mstats reset", "/ra mstats", K.Act),           // no monster selected with stats: why, and the usage
+        new(null, "/ra mstats show", K.Act),                    // this rig's engine has no plugin windows: says so
         new(null, "/ra nosuchverb", K.Act),
         // ── /ra: output asked for ──
         new("/ra help", null, K.Query),
@@ -180,6 +182,8 @@ internal static class CommandReplyTests
         new("/ra fellowinfo", null, K.Query),
         new("/ra dumpinv", null, K.Query),
         new("/ra combat", null, K.Query),
+        new("/ra mstats list", "/ra mstats Nobody Here At All", K.Query),
+        new("/ra mstats help", null, K.Query),
         new("/ra why", null, K.Query),
         new("/ra ghosts", null, K.Query),
         new("/ra ghost", null, K.Query),
