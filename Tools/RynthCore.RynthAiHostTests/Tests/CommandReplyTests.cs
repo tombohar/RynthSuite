@@ -124,6 +124,7 @@ internal static class CommandReplyTests
         new(null, "/ra settings", K.Act),
         new(null, "/ra settings loadchar", K.Act),
         new(null, "/ra loot add banana", K.Act),
+        new(null, "/ra loot why", K.Act),                       // nothing selected: says so
         new(null, "/ra lootparse", K.Act),
         new(null, "/ra lootcheckinv", K.Act),
         new(null, "/ra autotrade", K.Act),

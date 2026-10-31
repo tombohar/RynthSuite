@@ -1050,6 +1050,7 @@ public partial class CombatManager : IDisposable
         PrunePredictedDeaths();   // before the loop: a predicted kill still alive is scanned again this tick
 
         _scannedTargets.Clear();
+        _passedOver.Clear();
         _nearbyNoLos = 0;
         int scanTotal = 0, scanRing = 0;   // D2 telemetry, published after the loop
         int playerId = (int)_playerId;
@@ -1133,25 +1134,49 @@ public partial class CombatManager : IDisposable
             // Priority 0 don't keep it out (attackable, alive and LOS still do).
             bool isForced = wo.Id != 0 && wo.Id == ForcedTargetId;
             if (dist > (isEngaged || isForced ? Math.Max(maxDist, DisengageDistance) : maxDist)) continue;
+            // Left out below for a reason that can hide a monster worth fighting: noted for the
+            // lock line's "passed over" (CombatManager.PassedOver.cs). In range, not the target.
+            bool notePassed = !isEngaged && dist <= maxDist;
 
             // User-configured "never attack" list — excluded from acquisition
             // entirely (an already-engaged match drops out of _scannedTargets
             // here and is released by the scan-grace timer in Think).
-            if (!isForced && IsUserBlacklistedName(wo.Name)) continue;
+            if (!isForced && IsUserBlacklistedName(wo.Name))
+            {
+                if (notePassed) NotePassedOver(wo.Id, dist, PassedOverNeverAttack);
+                continue;
+            }
 
-            if (_blacklistManager.IsBlacklisted(wo.Id)) continue;
+            if (_blacklistManager.IsBlacklisted(wo.Id))
+            {
+                if (notePassed) NotePassedOver(wo.Id, dist, PassedOverBlacklisted);
+                continue;
+            }
 
             // A ghost (the server doesn't have it for us): skipped until it shows it is real.
-            if (Ghosts.IsGhost(wo.Id)) { _ghostsSkippedInScan++; continue; }
+            if (Ghosts.IsGhost(wo.Id))
+            {
+                _ghostsSkippedInScan++;
+                if (notePassed) NotePassedOver(wo.Id, dist, PassedOverGhost);
+                continue;
+            }
 
             // Left for hitting the environment (New target): skipped for EnvironmentSkipSec.
-            if (IsEnvironmentSkipped(wo.Id)) continue;
+            if (IsEnvironmentSkipped(wo.Id))
+            {
+                if (notePassed) NotePassedOver(wo.Id, dist, PassedOverEnvironment);
+                continue;
+            }
 
             // Just killed (KillerNotification) but not yet a corpse — skip so we
             // don't re-lock and cast at it during its death animation.
             if (_recentlyKilled.ContainsKey(wo.Id)) continue;
 
-            if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable((uint)wo.Id)) continue;
+            if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable((uint)wo.Id))
+            {
+                if (notePassed) NotePassedOver(wo.Id, dist, PassedOverNotAttackable);
+                continue;
+            }
 
             // Dead but not yet reclassified as corpse — skip
             if (_worldFilter.GetHealthRatio(wo.Id) == 0f) continue;
@@ -1164,7 +1189,9 @@ public partial class CombatManager : IDisposable
             if (!isForced && PriorityOf(wo.Id) <= 0) continue;
 
             bool losBlocked = false;
-            if (_settings.EnableRaycasting && RaycastInitialized && _raycastSystem?.TargetingFSM != null)
+            if (LosBlockedOverride != null)
+                losBlocked = LosBlockedOverride(wo.Id);
+            else if (_settings.EnableRaycasting && RaycastInitialized && _raycastSystem?.TargetingFSM != null)
             {
                 RaycastCheckCount++;
                 losBlocked = _raycastSystem.TargetingFSM.IsTargetBlocked(_host, (uint)wo.Id, attackType, out var losDetail);
@@ -1177,6 +1204,7 @@ public partial class CombatManager : IDisposable
             if (losBlocked)
             {
                 _nearbyNoLos++; // in range + attackable but wall-blocked — still stops nav
+                if (notePassed) NotePassedOver(wo.Id, dist, PassedOverLos);
                 continue;
             }
 
@@ -3409,6 +3437,9 @@ public partial class CombatManager : IDisposable
         // Pick every tick: the initial pick, and a switch when the target is no longer valid,
         // a higher-priority monster is in range, or (Target Lock off) another is clearly better.
         HandleCombatTrigger();
+        // A higher-priority monster in range that isn't a candidate (behind a wall, blacklisted):
+        // one log line saying why the target stays (R-20261031-201214-8be7).
+        NotePassedOverWhileEngaged();
 
         if (activeTargetId == 0)
         {
@@ -4564,12 +4595,15 @@ public partial class CombatManager : IDisposable
     {
         int bestId = best.Id;
         _lockWasSwitch = _lockedTargetId != 0 && _lockedTargetId != bestId;
+        // A higher-priority monster that wasn't a candidate (out of sight, past Monster Range,
+        // blacklisted...): named with why, so a report shows whether the priority was ignored.
+        string passedOver = PassedOverNoteForLock(bestId, bestPriority);
         if (_lockedTargetId != 0)
             _host.Log($"[CombatTarget] switch 0x{_lockedTargetId:X8} '{_worldFilter[_lockedTargetId]?.Name}' ({switchWhy}, {DescribeTargetPos(_lockedTargetId)}) " +
-                      $"-> 0x{bestId:X8} '{_worldFilter[bestId]?.Name}' ({picked})");
+                      $"-> 0x{bestId:X8} '{_worldFilter[bestId]?.Name}' ({picked})" + passedOver);
         else
             _host.Log($"[CombatTarget] lock 0x{bestId:X8} '{_worldFilter[bestId]?.Name}' ({picked})" +
-                      (_ghostsSkippedInScan > 0 ? $" [{_ghostsSkippedInScan} ghost(s) in range skipped]" : ""));
+                      (_ghostsSkippedInScan > 0 ? $" [{_ghostsSkippedInScan} ghost(s) in range skipped]" : "") + passedOver);
 
         // [CombatLatency]: time this engagement from the lock to its first attack.
         double lockMs = Environment.TickCount64;

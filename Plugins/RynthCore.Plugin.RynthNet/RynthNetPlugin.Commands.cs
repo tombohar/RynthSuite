@@ -82,6 +82,9 @@ public sealed partial class RynthNetPlugin
             case "remote":
                 RemoteCommand(args);
                 break;
+            case "view":    // the Characters window's look: minimal (the default) or full
+                ViewCommand(args);
+                break;
             case "allow":
                 ListSetting(p => p.Allow, "allow", args, "remote commands run only if they start with one of these (empty = all)");
                 break;
@@ -179,6 +182,7 @@ public sealed partial class RynthNetPlugin
         ChatLine("/rn followme [tag] - the others /ra follow you;  /rn usesel [tag] - they use your selection");
         ChatLine("/rn status - this client;  /rn remote on|off|default - run others' commands on this character");
         ChatLine("/rn allow|deny|trust [list | add <x> | remove <x> | clear] - what may run here");
+        ChatLine("/rn view [minimal|full] - the Characters window: one line each, or every column (kept per character)");
         ChatLine("UtilityBelt's /ub bc, /ub bct and /ub netclients work too.");
     }
 

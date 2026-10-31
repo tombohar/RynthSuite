@@ -143,6 +143,16 @@ internal static class ProfileLoadTests
         Check.Eq(l.Layout, MagItemInfoSettings.LayoutOneLine, "layout");
         Check.Eq(l.ChatType, 7, "chat type");
         Check.Eq(l.Prefix, "[ii] ", "prefix");
+
+        // 2026-10-31: Describe items when selected is on by default; a saved "off" stays off.
+        Check.True(new MagItemInfoSettings().OnSelect, "Describe items when selected: on by default");
+        var off = new LegacyUiSettings();
+        off.ItemInfoSettings.OnSelect = false;
+        var offLoaded = JsonSerializer.Deserialize(JsonSerializer.Serialize(off, RynthAiJsonContext.Default.LegacyUiSettings),
+            RynthAiJsonContext.Default.LegacyUiSettings)!;
+        var offLive = new LegacyUiSettings();
+        CopySettings(offLoaded, offLive);
+        Check.False(offLive.ItemInfoSettings.OnSelect, "a saved 'off' stays off");
         Check.True(live.EnableGroundLoot, "ground loot");
         Check.False(live.PetAutoRefill, "pet auto refill");
         Check.True(live.MonsterNameBlacklist.Contains("Drudge Skulker"), "monster blacklist");

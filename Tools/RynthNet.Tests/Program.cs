@@ -29,6 +29,7 @@ internal static partial class Program
         Vitals();
         WindowChecks();
         Replies();
+        LookChecks();
 
         Console.WriteLine($"{_checks} checks, {_failed} failed");
         return _failed == 0 ? 0 : 1;

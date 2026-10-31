@@ -48,6 +48,7 @@ namespace RynthDefective.Tests
             public string? BuyRefusedWith;
             public int FreeContainers = 3;
             public long Burden = -1;
+            public VendorBank BankInfo = VendorBank.None;
 
             public bool TryGetName(uint id, out string name)
             {
@@ -123,6 +124,7 @@ namespace RynthDefective.Tests
             }
             public int FreeContainerSlots() => FreeContainers;
             public long FreeBurden() => Burden;
+            public VendorBank Bank() => BankInfo;
             public void Advance(long ms) => NowMs += ms;
         }
 
@@ -777,6 +779,176 @@ namespace RynthDefective.Tests
 
             c.Reset();
             Check(c.Into == 0 && !c.Busy && c.StatusAt(w.NowMs) == null, "logout forgets the action, the pack and the line");
+        }
+
+        // ── A server's bank (2026-10-31) ────────────────────────────────────
+        // A player report: on a server whose bank pays vendors, the box refused a buy the pack alone
+        // couldn't pay for. The server plugin's profile values say whether a bank pays and how much.
+
+        private static void QtyBankRules()
+        {
+            // The values, as the active server's plugin publishes them.
+            Eq(VendorBank.Read(null), VendorBank.None, "no profile: no bank");
+            Eq(VendorBank.Read("{\"values\":{}}"), VendorBank.None, "no bank values: no bank");
+            Eq(VendorBank.Read("{\"values\":{\"vendorBank\":0,\"vendorBankPyreals\":5000}}"), VendorBank.None, "vendorBank 0: no bank, whatever the balance");
+            Eq(VendorBank.Read("not json"), VendorBank.None, "unusable text: no bank");
+            VendorBank read = VendorBank.Read("{\"values\":{\"vendorBank\":1,\"vendorBankPyreals\":5000}}");
+            Check(read.Pays && read.Known && read.Pyreals == 5000, "a bank that pays, with its balance");
+            read = VendorBank.Read("{\"values\":{\"vendorBank\":1}}");
+            Check(read.Pays && !read.Known && read.Pyreals == -1, "a bank that pays, balance not said: unread");
+            Check(!VendorBank.Read("{\"values\":{\"vendorBank\":1,\"vendorBankPyreals\":-3}}").Known, "a negative balance: unread");
+            Eq(VendorBank.Read("{\"values\":{\"vendorBank\":1,\"vendorBankPyreals\":1e30}}").Pyreals, VendorBank.MaxPyreals, "a huge balance is capped");
+            Eq(VendorBank.Read("{\"values\":{\"vendorBank\":1,\"vendorBankPyreals\":12.9}}").Pyreals, 12L, "whole pyreals");
+
+            // No bank: today's check, word for word.
+            VendorQuote none = Scarabs(funds: 300);
+            Eq(none.Refusal(100), "Not enough pyreals: 100 Mana Scarab cost 1,200, you have 300 (you can buy 25).", "no bank: the pack's pyreals");
+            Eq(none.MaxBuy(), 25, "no bank: max is what the pack pays for");
+            Eq(none.PriceLine(25), "300 pyreals · you have 300", "no bank: the price line as before");
+            Eq(none.BankNote(100), null, "no bank: no note");
+            Eq(none.MaxNote, string.Empty, "no bank: max needs no note");
+            Eq(none.Spendable, 300L, "no bank: the pack");
+
+            // A bank that's read and covers it: pack + bank, said both ways.
+            VendorQuote covers = Scarabs(funds: 300) with { BankPays = true, BankFunds = 5000 };
+            Eq(covers.Refusal(100), null, "pack 300 + bank 5,000 pay 1,200");
+            Eq(covers.PriceLine(100), "price 1,200; pack 300 + bank 5,000", "the price line says both");
+            Eq(covers.BankNote(100), "The bank pays the 900 pyreals your pack is short.", "the bank's part");
+            Eq(covers.BankNote(25), null, "the pack alone pays 25: no note");
+            Eq(covers.MaxBuy(), 441, "max counts pack + bank: 441 (5,292), not 442 (5,304)");
+            Eq(covers.MaxNote, string.Empty, "a bank that's read: max needs no note");
+
+            // A bank that's read and doesn't cover it.
+            VendorQuote shortOf = Scarabs(funds: 300) with { BankPays = true, BankFunds = 500 };
+            Eq(shortOf.Refusal(100), "Not enough pyreals: 100 Mana Scarab cost 1,200, you have 300 in your pack + 500 in the bank (you can buy 66).",
+                "pack + bank short: both said, and how many they pay for");
+            Eq(shortOf.MaxBuy(), 66, "max: 800 at 12 is 66");
+            Eq(shortOf.BankNote(100), null, "no note for a buy that can't go");
+
+            // A bank that can't be read: money isn't held against a buy; max is stock, room and burden.
+            VendorQuote unread = Scarabs(funds: 300) with { BankPays = true, BankFunds = -1 };
+            Eq(unread.Refusal(100), null, "the server decides about the money");
+            Eq(unread.Spendable, -1L, "nothing to count against");
+            Eq(unread.BankNote(100), "Your pack has 300 of the 1,200 pyreals: the server's bank may cover it (the server decides).", "the one-line note");
+            Eq(unread.BankNote(25), null, "the pack alone pays: no note");
+            Eq(unread.PriceLine(100), "1,200 pyreals · pack 300 + the bank", "the price line");
+            Eq(unread.MaxBuy(), 5000, "max: 50 free slots of 100");
+            Eq((unread with { FreeBurden = 55 }).MaxBuy(), 11, "max: the burden");
+            Eq((unread with { FreeItemSlots = -1 }).MaxBuy(), 100, "max with nothing known: one stack");
+            Check(unread.MaxNote.Contains("can't be read", StringComparison.Ordinal), "max says what it counts");
+            string? why = unread.Refusal(6000);
+            Check(why != null && why.StartsWith("Not enough room in your packs", StringComparison.Ordinal) && why.Contains("you can buy 5,000", StringComparison.Ordinal),
+                $"room is still checked: {why}");
+            Check((unread with { Unlimited = false, Stock = 5, ListingValue = 50 }).Refusal(6)!.StartsWith("The vendor has only 5", StringComparison.Ordinal), "and the stock");
+
+            // The bank pays pyreal vendors only.
+            var altInfo = new VendorInfo { VendorId = QVendor, SellRate = 1f, AltCurrencyWcid = 1234, AltCurrencyName = "Ancient Coin", AltCurrencyHave = 3, PlayerCoins = 300 };
+            var relic = new VendorItem { ObjectId = QVScarab, Name = "Relic", UnitValue = 2, Value = 2, StackSize = 1, MaxStackSize = 0, Amount = -1, Unlimited = true };
+            VendorQuote alt = VendorQuote.From(altInfo, relic, 10, 2, -1, new VendorBank(true, 5000));
+            Check(!alt.BankPays && alt.Funds == 3 && alt.Refusal(2) != null, "the vendor's own currency: no bank");
+            var pyInfo = new VendorInfo { VendorId = QVendor, SellRate = 1f, AltCurrencyHave = -1, PlayerCoins = 300 };
+            VendorQuote py = VendorQuote.From(pyInfo, relic, 10, 2, -1, new VendorBank(true, 5000));
+            Check(py.BankKnown && py.BankFunds == 5000 && py.Spendable == 5300, "a pyreal vendor: pack + bank");
+            Check(!VendorQuote.From(pyInfo, relic, 10, 2, -1).BankPays, "and without a bank, none");
+
+            // The answers.
+            Eq(QtyReplies.BuyRefusal("costs 300 pyreals, you have 200", false), QtyReplies.VendorRefusal("costs 300 pyreals, you have 200"), "no bank: the engine's refusal as before");
+            Check(QtyReplies.BuyRefusal("costs 1200 pyreals, you have 300", true).StartsWith("RynthCore didn't send it: it costs 1200 pyreals, you have 300.", StringComparison.Ordinal),
+                "a bank was to pay: RynthCore's own money check said so");
+            Eq(QtyReplies.BuyRefusal("vendor window is closed", true), QtyReplies.VendorRefusal("vendor window is closed"), "other refusals as before");
+            Check(QtyReplies.NotSold(25, "Mana Scarab", true, 300, "pyreals").Contains("the bank may not cover 300 pyreals", StringComparison.Ordinal), "the server said no, with a bank");
+            Check(QtyReplies.NotSold(25, "Mana Scarab", false, 300, "pyreals").EndsWith("(money, room, or too busy).", StringComparison.Ordinal), "and without one, as before");
+        }
+
+        private static void QtyBankBuy()
+        {
+            // The controller: the box's max and Buy, from the window and from /rdef buy, in each case.
+            // The world: 66 free pack slots (52 + 14), burden unknown, 300 pyreals in the pack.
+            var w = QWorld();
+            var (c, said) = QController();
+            QVendorOpen(w, coins: 300);
+            w.SelectedId = QVScarab;
+            uint Last() => w.NextRequest - 1;
+
+            // No bank: refused before sending, as before; max 25.
+            int sent = w.Sent.Count;
+            c.Buy(w, QtyAmount.Of(100), "");
+            Eq(said.Last(), (false, "Not enough pyreals: 100 Mana Scarab cost 1,200, you have 300 (you can buy 25)."), "no bank: refused");
+            Eq(w.Sent.Count, sent, "nothing sent");
+            c.SetBox(w, QtyAmount.Max);
+            Eq(c.Value, 25, "no bank: the box's max");
+            c.Buy(w, QtyAmount.Max, "");
+            Eq(w.Sent.Last(), $"buy {QVScarab:X} from {QVendor:X} 25", "no bank: buy max sends 25");
+            w.Status = new VendorTradeStatus { RequestId = Last(), State = VendorTradeState.Done, Result = VendorTradeResult.Accepted, Estimate = 300, IsBuy = true };
+            c.Tick(w);
+            Eq(said.Last(), (true, "Bought 25 Mana Scarab for 300 pyreals."), "bought");
+
+            // A bank that's read and covers it.
+            w.BankInfo = new VendorBank(true, 5000);
+            c.SetBox(w, QtyAmount.Max);
+            Eq(c.Value, 441, "the box's max counts pack + bank");
+            Check(said.Last().Text.Contains("price 5,292; pack 300 + bank 5,000", StringComparison.Ordinal), $"/rdef qty says both: {said.Last().Text}");
+            Check(c.View(w)!.Subject.MaxBuy == 441, "the window's max too");
+            c.Buy(w, QtyAmount.Of(100), "");
+            Eq(w.Sent.Last(), $"buy {QVScarab:X} from {QVendor:X} 100", "100 for 1,200: sent");
+            w.Status = new VendorTradeStatus { RequestId = Last(), State = VendorTradeState.Done, Result = VendorTradeResult.Accepted, Estimate = 1200, IsBuy = true };
+            c.Tick(w);
+            Eq(said.Last(), (true, "Bought 100 Mana Scarab for 1,200 pyreals."), "bought with the bank's help");
+            DefCommand cmd = DefCommandParser.Parse("buy max Mana Scarab");
+            c.Buy(w, cmd.Amount, cmd.Text);
+            Eq(w.Sent.Last(), $"buy {QVScarab:X} from {QVendor:X} 441", "/rdef buy max: pack + bank");
+            w.Status = new VendorTradeStatus { RequestId = Last(), State = VendorTradeState.Refused, Message = "costs 5292 pyreals, you have 300" };
+            c.Tick(w);
+            Check(!said.Last().Ok && said.Last().Text.StartsWith("RynthCore didn't send it", StringComparison.Ordinal)
+                  && said.Last().Text.Contains("out of the bank", StringComparison.Ordinal), $"RynthCore's own money check, said: {said.Last().Text}");
+
+            // A bank that's read and doesn't cover it: refused before sending, both said.
+            w.BankInfo = new VendorBank(true, 500);
+            sent = w.Sent.Count;
+            c.Buy(w, QtyAmount.Of(100), "");
+            Eq(said.Last(), (false, "Not enough pyreals: 100 Mana Scarab cost 1,200, you have 300 in your pack + 500 in the bank (you can buy 66)."), "pack + bank short: refused");
+            Eq(w.Sent.Count, sent, "nothing sent");
+            c.SetBox(w, QtyAmount.Max);
+            Eq(c.Value, 66, "the box's max: 66");
+            cmd = DefCommandParser.Parse("buy 100 Mana Scarab");
+            c.Buy(w, cmd.Amount, cmd.Text);
+            Check(!said.Last().Ok && said.Last().Text.Contains("in the bank", StringComparison.Ordinal), "/rdef buy 100 replies the same");
+
+            // A bank that can't be read: sent, and the server decides.
+            w.BankInfo = new VendorBank(true);
+            c.SetBox(w, QtyAmount.Max);
+            Eq(c.Value, 6600, "the box's max: 66 free slots of 100 (money not counted)");
+            Check(said.Last().Ok && said.Last().Text.Contains("max counts the vendor's stock, your pack space and burden only", StringComparison.Ordinal),
+                $"with the note: {said.Last().Text}");
+            c.Buy(w, QtyAmount.Of(100), "");
+            Eq(w.Sent.Last(), $"buy {QVScarab:X} from {QVendor:X} 100", "100 for 1,200 with 300 in the pack: sent");
+            w.Status = new VendorTradeStatus { RequestId = Last(), State = VendorTradeState.Done, Result = VendorTradeResult.Accepted, Estimate = 1200, IsBuy = true };
+            c.Tick(w);
+            Eq(said.Last(), (true, "Bought 100 Mana Scarab for 1,200 pyreals."), "the server's bank covered it");
+            c.Buy(w, QtyAmount.Of(100), "");
+            w.Status = new VendorTradeStatus { RequestId = Last(), State = VendorTradeState.Done, Result = VendorTradeResult.AnsweredNoRefresh, IsBuy = true };
+            c.Tick(w);
+            Check(!said.Last().Ok && said.Last().Text.Contains("the bank may not cover 1,200 pyreals", StringComparison.Ordinal), $"the server's own no, reported: {said.Last().Text}");
+            c.Buy(w, QtyAmount.Of(100), "");
+            w.Status = new VendorTradeStatus { RequestId = Last(), State = VendorTradeState.Refused, Message = "costs 1200 pyreals, you have 300" };
+            c.Tick(w);
+            Check(!said.Last().Ok && said.Last().Text.StartsWith("RynthCore didn't send it", StringComparison.Ordinal), "RynthCore's own money check, said");
+            cmd = DefCommandParser.Parse("buy max Mana Scarab");
+            c.Buy(w, cmd.Amount, cmd.Text);
+            Eq(w.Sent.Last(), $"buy {QVScarab:X} from {QVendor:X} 6600", "/rdef buy max: room only");
+            w.Status = null;
+            w.Advance(QuantityController.BuyAnswerMs);
+            c.Tick(w);
+            Check(!said.Last().Ok && said.Last().Text.StartsWith("No answer about 6,600 Mana Scarab", StringComparison.Ordinal), "and it always answers");
+            c.Buy(w, QtyAmount.Of(7000), "");
+            Check(!said.Last().Ok && said.Last().Text.StartsWith("Not enough room in your packs", StringComparison.Ordinal), "room is still checked first");
+
+            // The pack alone pays: the same with any bank.
+            c.Buy(w, QtyAmount.Of(20), "");
+            Eq(w.Sent.Last(), $"buy {QVScarab:X} from {QVendor:X} 20", "20 for 240: sent");
+            w.Status = new VendorTradeStatus { RequestId = Last(), State = VendorTradeState.Done, Result = VendorTradeResult.AnsweredNoRefresh, IsBuy = true };
+            c.Tick(w);
+            Check(said.Last().Text.EndsWith("(money, room, or too busy).", StringComparison.Ordinal), "the pack paid: no bank in the answer");
         }
 
         private static void QtyStore()

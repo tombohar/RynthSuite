@@ -117,6 +117,7 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
         _session.Use.ResetSession();
         _world?.Reset();
         _qty.Reset();
+        _qtyWorld?.Reset();
     }
 
     public override void OnLogout()
@@ -129,6 +130,7 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
         _session.Use.ResetSession();
         _world?.Reset();
         _qty.Reset();
+        _qtyWorld?.Reset();
         _barView = RynthCore.Plugin.RynthDefective.ShortcutBar.BarSnapshot.NotReady;
         foreach (UiWindow? w in new[] { _barWindow, _pickerWindow, _settingsWindow })
             if (w != null) { w.Visible = false; w.NeedsPass = true; }

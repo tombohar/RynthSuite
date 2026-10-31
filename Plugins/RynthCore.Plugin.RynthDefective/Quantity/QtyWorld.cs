@@ -6,13 +6,16 @@
 //
 //  Every call is behind its Has* check: splitting (SplitStackInternal, as old
 //  as the plugin API), giving with a count (GiveObjectTo, v62), vendor trading
-//  (v67), the server's refusals (v70) and the pack column's order (v80) are
-//  each used only where the engine has them. Nothing here needs more than the
-//  live release's API 92, and the Selection window itself needs v90.
+//  (v67), the server's refusals (v70), the pack column's order (v80) and the
+//  active server's list (v86, for its plugin's bank values) are each used
+//  only where the engine has them. Nothing here needs more than the live
+//  release's API 92, and the Selection window itself needs v90.
 // ============================================================================
 
 using System;
 using System.Collections.Generic;
+using RynthCore.Plugin.RynthDefective.Model;
+using RynthCore.Plugin.Shared;
 using RynthCore.PluginSdk;
 
 namespace RynthCore.Plugin.RynthDefective.Quantity;
@@ -80,6 +83,8 @@ internal interface IQtyWorld
     int FreeContainerSlots();
     /// <summary>Burden you can still carry (three times your capacity, as ACE); -1 = unknown.</summary>
     long FreeBurden();
+    /// <summary>The active server's bank, as its plugin says (VendorBank.None: none, or nobody says).</summary>
+    VendorBank Bank();
 }
 
 /// <summary>The engine host's side (RynthCoreHost). Plugin pump thread only.</summary>
@@ -97,8 +102,20 @@ internal sealed class HostQtyWorld : IQtyWorld
     private uint[] _order = new uint[16];
     private uint _vendorId, _vendorGeneration;
     private VendorItem[] _vendorItems = Array.Empty<VendorItem>();
+    // The active server and its plugin's profile (v86 + "RynthServer.Profile"), for its bank values.
+    private readonly ServerStateClient _server = new();
+    private int _bankRevision = -1;
+    private VendorBank _bank = VendorBank.None;
 
     public HostQtyWorld(RynthCoreHost host) => _h = host;
+
+    /// <summary>Login or logout: the next server may be another (its bank read afresh).</summary>
+    public void Reset()
+    {
+        _server.Clear();
+        _bankRevision = -1;
+        _bank = VendorBank.None;
+    }
 
     public long NowMs => Environment.TickCount64;
     public uint PlayerId => _h.HasGetPlayerId ? _h.GetPlayerId() : 0;
@@ -248,5 +265,21 @@ internal sealed class HostQtyWorld : IQtyWorld
         int carried = Int(player, EncumbranceVal), cap = Int(player, EncumbranceCapacity);
         if (carried < 0 || cap <= 0) return -1;   // unknown: the engine checks with its own reading
         return Math.Max(0, 3L * cap - carried);
+    }
+
+    /// <summary>
+    /// The active server's plugin's "vendorBank" / "vendorBankPyreals" values (polled every 2 s; read
+    /// again only when the server or its profile changed). Before v86, or with no server plugin: none.
+    /// </summary>
+    public VendorBank Bank()
+    {
+        if (!_h.HasGetServerStateJson) return VendorBank.None;
+        _server.Poll(_h, NowMs);
+        if (_server.Revision != _bankRevision)
+        {
+            _bankRevision = _server.Revision;
+            _bank = VendorBank.Read(_server.ProfileJson);
+        }
+        return _bank;
     }
 }

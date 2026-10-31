@@ -47,8 +47,12 @@
 //                                       //  Void timers apply;
 //      "difficultyTier": 3,             //  the difficulty tier where the player stands (0 = the unscaled
 //                                       //  world; absent = the server has no tiers, or hasn't said yet),
-//      "difficultyHealthPercent": 5     //  and the monster health one tier adds, in percent of tier 0's
-//    }                                  //  (RynthAelrynth; RynthAi keeps learned HP and kills per tier)
+//      "difficultyHealthPercent": 5,    //  and the monster health one tier adds, in percent of tier 0's
+//                                       //  (RynthAelrynth; RynthAi keeps learned HP and kills per tier)
+//      "vendorBank": 1,                 //  the server's bank pays a pyreal vendor what the packs are short
+//                                       //  of (absent or 0 = it doesn't: readers count the packs only),
+//      "vendorBankPyreals": 5000        //  and what the bank can add beyond the pyreals the game shows
+//    }                                  //  (absent = not known: the server decides). RynthDefective's buys.
 //  }
 // ============================================================================
 
@@ -83,6 +87,22 @@ public static class RynthServerProfile
     /// so tier 3 is 1.15 times tier 0's). Absent with a tier: 0 (health doesn't scale).
     /// </summary>
     public const string ValueDifficultyHealthPercent = "difficultyHealthPercent";
+
+    /// <summary>
+    /// 1: this character's purchases from a pyreal vendor are paid from the server's bank when the
+    /// packs are short (the server's own rule, or the character's choice where the server asks for
+    /// one). Absent or 0: they aren't, and readers count the packs only (as on a retail server). A
+    /// server that already shows pack + bank as the character's pyreals while shopping needs neither
+    /// value: readers count the pyreals the game shows. (2026-10-31, RynthDefective's quantity box.)
+    /// </summary>
+    public const string ValueVendorBank = "vendorBank";
+
+    /// <summary>
+    /// With <see cref="ValueVendorBank"/>: the pyreals the bank can add to a purchase, beyond the
+    /// pyreals the game shows (whole pyreals, 0 or more). Absent (or below 0): not known, and readers
+    /// leave the money to the server.
+    /// </summary>
+    public const string ValueVendorBankPyreals = "vendorBankPyreals";
 }
 
 [StructLayout(LayoutKind.Sequential)]

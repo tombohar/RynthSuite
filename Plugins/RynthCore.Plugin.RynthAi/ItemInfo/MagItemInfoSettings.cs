@@ -53,8 +53,8 @@ public sealed class MagItemInfoSettings
     public const int SameAsHeader = -1;
 
     // ── When to print ────────────────────────────────────────────────────────
-    /// <summary>Print automatically when an item is selected.</summary>
-    public bool OnSelect;
+    /// <summary>Print automatically when an item is selected. On unless the player turned it off (2026-10-31).</summary>
+    public bool OnSelect = true;
     /// <summary>
     /// Print the selected item after a left (<see cref="ClickLeft"/>) or right (<see cref="ClickRight"/>)
     /// click in the game world / inventory — also re-prints an item that was already selected.
@@ -67,6 +67,17 @@ public sealed class MagItemInfoSettings
     public bool OnSelectOther   = true;
     /// <summary>Seconds to wait for an ID before printing partial data.</summary>
     public float IdTimeoutSec = 3f;
+
+    // ── Loot lines ───────────────────────────────────────────────────────────
+    /// <summary>
+    /// The "Looted [Keep] ..." line of an item a loot rule took also names the rule and the item's
+    /// details (one line, the fields below applied). Stackables (pyreals, notes, comps) never do.
+    /// </summary>
+    public bool LootChat = true;
+    /// <summary>Salvage is described too, short: material and workmanship only.</summary>
+    public bool LootChatSalvage;
+    /// <summary>Chat type of a described loot line, or <see cref="SameAsHeader"/> for <see cref="ChatType"/>.</summary>
+    public int LootChatType = SameAsHeader;
 
     // ── What to print ────────────────────────────────────────────────────────
     /// <summary><see cref="MagItemInfoField"/> bits that are NOT printed.</summary>
@@ -115,6 +126,7 @@ public sealed class MagItemInfoSettings
         MaxListedSpells = Math.Clamp(MaxListedSpells, 1, 64);
         if (ChatType < 0 || ChatType > 31) ChatType = 1;
         if (DetailChatType < SameAsHeader || DetailChatType > 31) DetailChatType = SameAsHeader;
+        if (LootChatType < SameAsHeader || LootChatType > 31) LootChatType = SameAsHeader;
         if (ClickTrigger is not (ClickOff or ClickLeft or ClickRight)) ClickTrigger = ClickOff;
         if (Layout is not (LayoutOneLine or LayoutPetLines)) Layout = LayoutPetLines;
         Prefix ??= string.Empty;
@@ -132,6 +144,7 @@ public sealed class MagItemInfoSettings
         OnSelectWeapons = d.OnSelectWeapons; OnSelectArmor = d.OnSelectArmor;
         OnSelectJewelry = d.OnSelectJewelry; OnSelectOther = d.OnSelectOther;
         IdTimeoutSec = d.IdTimeoutSec;
+        LootChat = d.LootChat; LootChatSalvage = d.LootChatSalvage; LootChatType = d.LootChatType;
         HiddenFields = d.HiddenFields; HiddenRatings = d.HiddenRatings;
         ShowValueAndBurden = d.ShowValueAndBurden;
         SpellMode = d.SpellMode; MaxListedSpells = d.MaxListedSpells;

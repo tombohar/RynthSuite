@@ -41,6 +41,10 @@
     <Compile Include="..\..\Plugins\Shared\RynthAiStatusApi.cs" Link="Shared\RynthAiStatusApi.cs" />
     <Compile Include="..\..\Plugins\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
     <Compile Include="..\..\Plugins\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+    <!-- The server plugin's bank values for the quantity box's buys (2026-10-31). -->
+    <Compile Include="..\..\Plugins\Shared\EngineServerState.cs" Link="Shared\EngineServerState.cs" />
+    <Compile Include="..\..\Plugins\Shared\ServerStateClient.cs" Link="Shared\ServerStateClient.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthServerProfileApi.cs" Link="Shared\RynthServerProfileApi.cs" />
     <!-- The shortcut bar, panel buttons and Selection windows (2026-10-22) draw with the shared ImGui look. -->
     <Compile Include="..\..\Plugins\Shared\ImGuiNativeBinding.cs" Link="Shared\ImGuiNativeBinding.cs" />
     <Compile Include="..\..\Plugins\Shared\SafeImGui.cs" Link="Shared\SafeImGui.cs" />

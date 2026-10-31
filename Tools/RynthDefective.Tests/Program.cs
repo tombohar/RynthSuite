@@ -114,6 +114,8 @@ namespace RynthDefective.Tests
                 Run("quantity: give - the last player or NPC selected, all of it, refusals", QtyGive);
                 Run("quantity: buy - the selected item or by name, checks first, the vendor's answer", QtyBuy);
                 Run("quantity: /rdef qty and the Selection window's view", QtyBoxAndView);
+                Run("quantity: a server's bank - its values, pack + bank, one that can't be read, max", QtyBankRules);
+                Run("quantity: buy and max with no bank, a bank that covers it, one that doesn't, one that can't be read", QtyBankBuy);
                 Run("store: the quantity box setting; files from before read it on", QtyStore);
             }
             finally

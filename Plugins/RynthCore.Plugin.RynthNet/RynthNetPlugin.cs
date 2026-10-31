@@ -230,6 +230,7 @@ public sealed partial class RynthNetPlugin : RynthPluginBase
         bool wasLoggedIn = _loggedIn;
         _loggedIn = true;
         PushIdentity();
+        SyncCharactersView();
         if (!wasLoggedIn) _nextStatusMs = 0;
     }
 
@@ -293,6 +294,7 @@ public sealed partial class RynthNetPlugin : RynthPluginBase
         _settings = RynthNetSettings.Load(out string? error);
         if (error != null) Host.Log("[RynthNet] " + error);
         PushIdentity();
+        SyncCharactersView();   // the file edited by hand: its view too
     }
 
     // ── Network events ──────────────────────────────────────────────────────

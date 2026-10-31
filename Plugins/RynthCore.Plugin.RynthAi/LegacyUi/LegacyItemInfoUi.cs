@@ -127,6 +127,29 @@ internal sealed class LegacyItemInfoUi
             s.Sanitize();
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("How long to wait for an unidentified item's appraisal\nbefore printing what is already known.");
+
+        RenderLootChat(s, "##iiLoot");
+    }
+
+    /// <summary>
+    /// "Describe looted items in chat" + "Include salvage". Shared with Advanced Settings → Looting,
+    /// so <paramref name="idSuffix"/> keeps the ImGui ids unique per window.
+    /// </summary>
+    public static void RenderLootChat(MagItemInfoSettings s, string idSuffix)
+    {
+        ImGui.Checkbox("Describe looted items in chat" + idSuffix, ref s.LootChat);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(
+                "The \"Looted\" line of an item a loot rule took names the rule and\n" +
+                "the item's details, in one line, with the fields chosen here:\n" +
+                "  Looted [Keep] Blunt Crossbow (rule \"Xbow\"): Gold, Pierce Crossbow, +22, ...\n" +
+                "Pyreals, trade notes, spell components and other stacks keep the short line.");
+        ImGui.SameLine();
+        ImGui.BeginDisabled(!s.LootChat);
+        ImGui.Checkbox("Include salvage" + idSuffix + "Salv", ref s.LootChatSalvage);
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ImGui.SetTooltip("Describe items taken for salvage too, short: material and workmanship.\nOff: a corpse full of salvage keeps its short lines.");
     }
 
     /// <summary>
@@ -270,6 +293,14 @@ internal sealed class LegacyItemInfoUi
         ImGui.EndDisabled();
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
             ImGui.SetTooltip("Chat type for lines 2-4 of the pet-style layout\n(the name line uses the colour above).");
+
+        ImGui.BeginDisabled(!s.LootChat);
+        ChatTypeCombo("Loot lines colour##iiChatLoot", ref s.LootChatType, allowSameAsHeader: true);
+        ImGui.SameLine();
+        if (ImGui.Button("Test##iiChatLootTest")) _testChatType?.Invoke(LootChatLine.ChatTypeOf(s));
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ImGui.SetTooltip("Chat type of a described \"Looted\" line\n(\"Same as name line\": the chat type above).");
 
         ImGui.SetNextItemWidth(220);
         ImGui.InputText("Line prefix##iiPrefix", ref s.Prefix, 32);

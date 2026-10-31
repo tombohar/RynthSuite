@@ -3639,6 +3639,11 @@ internal sealed partial class ExpressionEngine
             ["EscapeHazards"] = (() => B(s.EscapeHazards), v => s.EscapeHazards = ToDouble(v) != 0),
             ["TravelToOwnCorpse"] = (() => B(s.TravelToOwnCorpse), v => s.TravelToOwnCorpse = ToDouble(v) != 0),
             ["ItemInfoOnSelect"] = (() => B(s.ItemInfoSettings.OnSelect), v => s.ItemInfoSettings.OnSelect = ToDouble(v) != 0),
+            // The looter's "Looted" line names the rule and the item's details (salvage: on request).
+            ["ItemInfoLootChat"] = (() => B(s.ItemInfoSettings.LootChat), v => s.ItemInfoSettings.LootChat = ToDouble(v) != 0),
+            ["ItemInfoLootSalvage"] = (() => B(s.ItemInfoSettings.LootChatSalvage), v => s.ItemInfoSettings.LootChatSalvage = ToDouble(v) != 0),
+            // -1 = the Item Info chat type.
+            ["ItemInfoLootChatType"] = (() => I(s.ItemInfoSettings.LootChatType), v => { if (int.TryParse(v, out int i)) s.ItemInfoSettings.LootChatType = Math.Clamp(i, -1, 31); }),
             ["StopMacroWhenPackFull"] = (() => B(s.StopMacroWhenPackFull), v => s.StopMacroWhenPackFull = ToDouble(v) != 0),
             ["SummonPets"]          = (() => B(s.SummonPets),          v => s.SummonPets          = ToDouble(v) != 0),
             ["MineOnly"]            = (() => B(s.MineOnly),            v => s.MineOnly            = ToDouble(v) != 0),

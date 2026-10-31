@@ -7,7 +7,10 @@
     built from a fake game (CharactersRows.cs), the Atlas names (AtlasNames.cs), the manifest
     RynthCore hosts the window from (CharactersManifest.cs), and Shared\RynthUi\RynthIcons.cs
     against the engine's baked icons (the sibling RynthCore's ImGui\PhosphorIcons.cs, when there).
-    The window itself draws with ImGui and isn't compiled here.
+    The window's looks (Characters\CharactersLook.cs, 2026-10-31): the minimal line's layout, the
+    low-health colours, the status dot, /rn view, and the choice kept per character in
+    settings.json (RynthNetSettings.cs, with RYNTHNET_DIR pointed at a folder under this program's
+    bin, never C:\Games). The window itself draws with ImGui and isn't compiled here.
     Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
   -->
   <PropertyGroup>
@@ -25,6 +28,10 @@
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\Characters\AtlasNames.cs" Link="RynthNet\AtlasNames.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\Characters\CharactersManifest.cs" Link="RynthNet\CharactersManifest.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\CommandParser.cs" Link="RynthNet\CommandParser.cs" />
+    <!-- The window's two looks (minimal / full) and where the choice is kept (settings.json, under the test's own folder). -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\Characters\CharactersLook.cs" Link="RynthNet\CharactersLook.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\RynthNetSettings.cs" Link="RynthNet\RynthNetSettings.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
     <Compile Include="..\..\Plugins\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
     <Compile Include="..\..\Plugins\Shared\RynthUi\RynthIcons.cs" Link="Shared\RynthIcons.cs" />
   </ItemGroup>

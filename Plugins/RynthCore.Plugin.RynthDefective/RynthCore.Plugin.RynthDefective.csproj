@@ -44,6 +44,11 @@
     <Compile Include="..\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
     <!-- How a chat command answers (2026-10-28): the shared reply queue and colours. -->
     <Compile Include="..\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+    <!-- The active server (plugin API v86 GetServerStateJson) and its owner's "RynthServer.Profile"
+         values (2026-10-31): whether its bank pays vendors, and how much, for the quantity box's buys. -->
+    <Compile Include="..\Shared\EngineServerState.cs" Link="Shared\EngineServerState.cs" />
+    <Compile Include="..\Shared\ServerStateClient.cs" Link="Shared\ServerStateClient.cs" />
+    <Compile Include="..\Shared\RynthServerProfileApi.cs" Link="Shared\RynthServerProfileApi.cs" />
   </ItemGroup>
   <ItemGroup>
     <!-- Spell slots (2026-10-28): spell names and whom a spell is cast on, from RynthAi's spell table

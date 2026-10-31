@@ -256,18 +256,26 @@ internal static class VTankLootTests
         Check.False(M(sword, C(N.MinDamageGE, "20.5")), "min above");
         Check.True(M(sword, C(N.BuffedMedianDamageGE, "30")), "median 30");
         Check.False(M(sword, C(N.BuffedMedianDamageGE, "30.1")), "median above");
-        Check.True(M(sword, C(N.CalcdBuffedTinkedDamageGE, "40")), "tinked damage reads max damage");
+        // No material: it can't be tinked, so the damage over time is max + Blood Drinker's 24,
+        // 10% crits at double: (40 + 24) x (0.9 x 1.5 / 2 + 0.2) = 56
+        Check.True(M(sword, C(N.CalcdBuffedTinkedDamageGE, "56")), "tinked damage: no material, no tinks");
+        Check.False(M(sword, C(N.CalcdBuffedTinkedDamageGE, "56.01")), "tinked damage just above");
         Check.False(M(sword, C(N.DamagePercentGE, "0")), "damage percent always fails (as VTank)");
         var nodmg = new Item("Stick");
         Check.False(M(nodmg, C(N.MinDamageGE, "0")), "no max damage: min damage fails even at 0");
         Check.False(M(nodmg, C(N.BuffedMedianDamageGE, "0")), "no max damage: median fails");
-        Check.False(M(nodmg, C(N.BuffedMissileDamageGE, "0")), "no max damage: missile fails");
+        Check.False(M(nodmg, C(N.BuffedMissileDamageGE, "0")), "no damage modifier (not a launcher): missile fails");
 
-        var bow = new Item("Bow").Int(44, 50).Dbl(152, 1.2);
-        Check.True(M(bow, C(N.BuffedMissileDamageGE, "60")), "50 * elemental 1.2 = 60");
-        Check.False(M(bow, C(N.BuffedMissileDamageGE, "60.1")), "just above");
-        var weakBow = new Item("Bow").Int(44, 50).Dbl(152, 0.5);
-        Check.True(M(weakBow, C(N.BuffedMissileDamageGE, "50")), "an elemental bonus below 1 counts as 1");
+        // Missile damage = max damage + (damage mod - 1) x 100 / 3 + elemental bonus (204); a
+        // launcher has no max damage. VTank's own example: a 50 max damage bow with mod 1.15 is 55.
+        var bow = new Item("Bow").Int(44, 50).Dbl(63, 1.15);
+        Check.True(M(bow, C(N.BuffedMissileDamageGE, "55")), "50 + 15/3 = 55");
+        Check.False(M(bow, C(N.BuffedMissileDamageGE, "55.01")), "just above");
+        var xbow = new Item("Crossbow").Dbl(63, 2.65).Int(204, 22);
+        Check.True(M(xbow, C(N.BuffedMissileDamageGE, "77")), "a 385 crossbow: 165/3 + 22 = 77");
+        Check.False(M(xbow, C(N.BuffedMissileDamageGE, "77.01")), "and no more");
+        var noElem = new Item("Crossbow").Dbl(63, 2.2);
+        Check.True(M(noElem, C(N.BuffedMissileDamageGE, "40")), "no elemental bonus reads 0: 120/3 = 40");
     }
 
     private static void BuffedKeysAndRatings()
@@ -288,7 +296,7 @@ internal static class VTankLootTests
         Check.True(M(item, C(N.AnySimilarColor, "1", "2", "3", "4", "5")), "any similar colour passes");
         Check.True(M(item, C(N.SimilarColorArmorType, "1", "2", "3", "4", "5", "6")), "armor-type colour passes");
         Check.True(M(item, C(N.SlotSimilarColor, "1", "2", "3", "4", "5", "6")), "slot colour passes");
-        Check.False(M(item, C(N.CalcedBuffedTinkedTargetMeleeGE, "1", "1", "1")), "tinked target melee is not implemented: fails");
+        Check.False(M(item, C(N.CalcedBuffedTinkedTargetMeleeGE, "1", "1", "1")), "tinked target melee: no max damage, fails");
     }
 
     private static void SpellNodesNoContext()
@@ -355,6 +363,7 @@ internal static class VTankLootTests
     {
         FakeHost.Reset();
         FakeHost.Skills[(Player, 34)] = (Buffed: 400, Training: 3);
+        FakeHost.SkillLevels[(Player, 34, 1)] = 320;   // base (no enchantments)
         FakeHost.Ints[(Player, 25)] = 275;   // LEVEL
         var ctx = new VTankLootContext(FakeHost.Create(), Player);
         var item = new Item("x");
@@ -362,9 +371,11 @@ internal static class VTankLootTests
         Check.True(MC(item, ctx, C(N.CharacterSkillGE, "400", "34")), "skill 400 >= 400");
         Check.False(MC(item, ctx, C(N.CharacterSkillGE, "401", "34")), "skill 400 < 401");
         Check.False(MC(item, ctx, C(N.CharacterSkillGE, "1", "33")), "a skill the host has no value for reads 0");
-        // "Base skill" is checked against the training class (2 trained, 3 specialized).
-        Check.True(MC(item, ctx, C(N.CharacterBaseSkill, "34", "3", "3")), "specialized in [3,3]");
-        Check.False(MC(item, ctx, C(N.CharacterBaseSkill, "34", "0", "2")), "not in [0,2]");
+        // "Base skill" is the unbuffed skill level (it was the training class, 2 or 3, until 2026-10-31,
+        // so LootSnob's "Heavy Weapon 300" = base heavy in [300, 999] never matched).
+        Check.True(MC(item, ctx, C(N.CharacterBaseSkill, "34", "300", "999")), "base 320 in [300,999]");
+        Check.False(MC(item, ctx, C(N.CharacterBaseSkill, "34", "330", "999")), "base 320 not in [330,999] (buffed is 400)");
+        Check.False(MC(item, ctx, C(N.CharacterBaseSkill, "34", "3", "3")), "not the training class any more");
         Check.True(MC(item, ctx, C(N.CharacterLevelGE, "275")), "level GE at the value");
         Check.False(MC(item, ctx, C(N.CharacterLevelGE, "276")), "level GE above");
         Check.True(MC(item, ctx, C(N.CharacterLevelLE, "275")), "level LE at the value");

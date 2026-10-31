@@ -124,6 +124,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra lootparse     — inspect the selected loot profile");
         ChatLine("[RynthAi] /ra lootcheckinv  — test the loot profile against inventory");
         ChatLine("[RynthAi] /ra lootcheck     — classify selected item (on|off = auto on click)");
+        ChatLine("[RynthAi] /ra loot why      — which loot rule takes the selected item, and why the rules above it didn't");
         ChatLine("[RynthAi] /ra loot add [keep|keep N|salvage|sell|read] [name|like] [preview] — add a loot rule for the selected item");
         ChatLine("[RynthAi] /ra dumpinv       — dump all inventory items (cache + direct)");
         ChatLine("[RynthAi] /ra combat        — dump combat state machine snapshot");
@@ -1697,8 +1698,14 @@ public sealed partial class RynthAiPlugin
     private void HandleLootCommand(string[] parts)
     {
         string sub = parts.Length >= 3 ? parts[2].ToLowerInvariant() : string.Empty;
+        if (sub == "why")
+        {
+            HandleLootWhyCommand();
+            return;
+        }
         if (sub != "add")
         {
+            ChatLine("[RynthAi] /ra loot why — which loot rule takes the selected item, and why the rules above it didn't");
             ChatLine("[RynthAi] /ra loot add [keep|keep N|salvage|sell|read] [name|like] [t11] [preview] — add a loot rule for the selected item to the loot profile in use");
             ChatLine("[RynthAi]   default: exact name + class; Read for scrolls, Keep # (one full stack) for stacks, else Keep. name = name only, like = items like this. t11 = also require its T11 tier, grade and modifiers (at least this good). preview = show it, add nothing.");
             ChatLine("[RynthAi]   Also: right-click an item in the Inventory panel, or 'Add selected item' in the Loot Editor.");
@@ -1747,6 +1754,72 @@ public sealed partial class RynthAiPlugin
         else if (preview) ChatLine("[RynthAi] (preview only; /ra loot add without 'preview' adds it)");
         else if (d.Added && d.OrderNote.Length > 0) ChatLine("[RynthAi]   " + d.OrderNote);
         // An add's own chat line comes from OnLootRuleAdded.
+    }
+
+    private const int LootWhyChatLines = 10;
+
+    /// <summary>
+    /// /ra loot why: the selected item's loot decision, from the looter itself (built-in keeps and
+    /// Keep # caps included), then, for a VTank profile, the rule that takes it and, for the rules
+    /// above it that came close, the first condition that failed and the value it read. The full
+    /// list goes to the log. An item without its ID says which rule waits for it and asks for it.
+    /// </summary>
+    private void HandleLootWhyCommand()
+    {
+        if (!Host.HasGetSelectedItemId) { ReplyFail("[RynthAi] loot why: this engine can't tell RynthAi the selected item."); return; }
+        uint selected = Host.GetSelectedItemId();
+        if (selected == 0) { ReplyFail("[RynthAi] loot why: select an item first (on a corpse, the ground or in a pack), then /ra loot why."); return; }
+        WorldObject? item = _objectCache?[unchecked((int)selected)];
+        if (item == null) { ReplyFail($"[RynthAi] loot why: item 0x{selected:X8} isn't known yet; select it again in a moment."); return; }
+        LegacyUiSettings? settings = _dashboard?.Settings;
+        if (settings == null) { ReplyFail("[RynthAi] loot why: settings aren't loaded yet (log in first)."); return; }
+
+        bool hasId = !Host.HasHasAppraisalData || Host.HasAppraisalData(selected);
+        string idNote = hasId ? "identified" : "not identified yet";
+
+        bool taken = ClassifyLootItem(item, settings, preview: true, out string action, out _, out string ruleLabel, out string builtIn);
+        string looter = taken ? $"[{action}] {ruleLabel}" : "left";
+        if (builtIn.Length > 0) looter += " (" + builtIn + ")";
+
+        if (TryLoadNativeLootProfile(out _, out _))
+        {
+            ChatLine($"[RynthAi] Loot why: '{item.Name}' ({idNote}) -> {looter}. (Rule-by-rule detail is for VTank .utl profiles.)");
+            return;
+        }
+        if (!TryLoadLootProfile(string.Empty, out VTankLootProfile profile, out string path))
+            return;   // it said why
+
+        VTankLootContext ctx = new(Host, _playerId) { Cache = _objectCache };
+        Loot.LootWhy.Result why = Loot.LootWhy.Explain(profile, item, ctx, hasId);
+        string file = System.IO.Path.GetFileName(path);
+        string rule = why.Index >= 0 ? $"rule {why.Index + 1} of {profile.Rules.Count} '{why.RuleName}'" : string.Empty;
+        string decision = why.Verdict switch
+        {
+            VTankLootVerdict.Match   => $"{file}: {rule} [{why.Action}]",
+            VTankLootVerdict.NeedsId => $"{file}: {rule} needs the item's ID to decide",
+            _                        => $"{file}: no rule matches",
+        };
+        ChatLine($"[RynthAi] Loot why: '{item.Name}' ({idNote}) -> {looter}");
+        ChatLine($"[RynthAi]   {decision}");
+        Host.Log($"[LootWhy] '{item.Name}' 0x{selected:X8} {idNote} -> {looter}; {decision}");
+        if (why.Verdict == VTankLootVerdict.NeedsId && Host.HasRequestId && Host.RequestId(selected))
+            ChatLine("[RynthAi]   Asked for its ID; /ra loot why again once it's in.");
+
+        if (why.NearMisses.Count == 0)
+        {
+            ChatLine("[RynthAi]   No rule above it came close (each failed on its first condition).");
+            return;
+        }
+        ChatLine($"[RynthAi]   {why.NearMisses.Count} rule(s) above it came close; the first condition each failed:");
+        for (int i = 0; i < why.NearMisses.Count; i++)
+        {
+            var m = why.NearMisses[i];
+            string line = $"#{m.Index + 1} '{m.RuleName}': {m.Failed}";
+            Host.Log("[LootWhy]   " + line);
+            if (i < LootWhyChatLines) ChatLine("[RynthAi]   " + line);
+        }
+        if (why.NearMisses.Count > LootWhyChatLines)
+            ChatLine($"[RynthAi]   ... {why.NearMisses.Count - LootWhyChatLines} more in the log ([LootWhy] lines).");
     }
 
     private bool TryLoadNativeLootProfile(out RynthCore.Loot.LootProfile profile, out string loadedPath)

@@ -19,10 +19,21 @@
 //           can pay for, and your packs and burden take (VendorQuote.MaxBuy).
 //    box    a typed number stays as typed (1 .. MaxAmount); "max" and "half"
 //           are of what is selected: the whole stack, or the most you can buy.
+//
+//  A server's bank (2026-10-31): some servers pay a pyreal vendor from the
+//  bank when the packs are short. The active server's plugin says so in its
+//  profile values (VendorBank.Read; RynthDefective names no server):
+//    no bank             the pack's pyreals, as before;
+//    a bank that's read  pack + bank pay ("price 1,200; pack 300 + bank 5,000"),
+//                        and "max" counts both;
+//    a bank that isn't   money isn't held against a buy: it goes, and the
+//                        server decides ("the server's bank may cover it");
+//                        "max" is the vendor's stock, your room and burden.
 // ============================================================================
 
 using System;
 using System.Globalization;
+using RynthCore.Plugin.Shared;
 using RynthCore.PluginSdk;
 
 namespace RynthCore.Plugin.RynthDefective.Model;
@@ -161,12 +172,41 @@ internal static class QuantityRules
 }
 
 /// <summary>
+/// The active server's bank, as its plugin says in its profile values: whether it pays a pyreal vendor
+/// what the packs are short of (RynthServerProfile.ValueVendorBank), and the pyreals it can add
+/// (ValueVendorBankPyreals; -1 = the balance can't be read). <see cref="None"/>: no bank (or no server
+/// plugin saying so), and a buy counts the pack only.
+/// </summary>
+internal readonly record struct VendorBank(bool Pays, long Pyreals = -1)
+{
+    /// <summary>The most a bank is taken to hold (anything above reads as this): far past any server's, and exact in the profile's numbers.</summary>
+    public const long MaxPyreals = 1_000_000_000_000_000;
+
+    public static readonly VendorBank None = new(false);
+
+    /// <summary>The bank's balance is read.</summary>
+    public bool Known => Pays && Pyreals >= 0;
+
+    /// <summary>A profile JSON's bank values; <see cref="None"/> without "vendorBank" above 0 (or for unusable text). Pure.</summary>
+    public static VendorBank Read(string? profileJson)
+    {
+        double pays = ServerProfileView.Value(profileJson, RynthServerProfile.ValueVendorBank, 0);
+        if (!(pays > 0)) return None;
+        double p = ServerProfileView.Value(profileJson, RynthServerProfile.ValueVendorBankPyreals, -1);
+        long pyreals = p >= 0 ? (long)Math.Floor(Math.Min(p, MaxPyreals)) : -1;
+        return new VendorBank(true, pyreals);
+    }
+}
+
+/// <summary>
 /// One vendor item and what the player has: the box's price, its "max" and why a buy can't go. The
 /// rules are ACE's, as the engine's VendorTrade.EstimateBuy applies them (the engine checks again
 /// before it sends): a stackable item comes in stacks of MaxStack, each priced on its own
 /// (max(1, ceil(value x rate - 0.1)), promissory notes at 1.15), anything else one per slot; a
 /// limited listing (usually what another player sold, handed over whole) costs at least the whole
-/// listing. Unknown funds, slots or burden (-1) aren't held against the buy.
+/// listing. Unknown funds, slots or burden (-1) aren't held against the buy. A server's bank that
+/// pays pyreal vendors (<see cref="BankPays"/>) adds its balance to the pack's, or, when the balance
+/// can't be read, leaves the money to the server.
 /// </summary>
 internal sealed record VendorQuote
 {
@@ -193,14 +233,29 @@ internal sealed record VendorQuote
     public int FreeItemSlots { get; init; } = -1;
     public int FreeContainerSlots { get; init; } = -1;
     public long FreeBurden { get; init; } = -1;
+    /// <summary>The server's bank pays this (pyreal) vendor what the pack is short of.</summary>
+    public bool BankPays { get; init; }
+    /// <summary>The pyreals the bank can add (with <see cref="BankPays"/>); -1 = its balance can't be read.</summary>
+    public long BankFunds { get; init; } = -1;
 
     public bool Stackable => MaxStack > 0;
 
-    /// <summary>From the engine's vendor snapshot (API v67) and what the player has.</summary>
-    public static VendorQuote From(VendorInfo info, VendorItem item, int freeItemSlots, int freeContainerSlots, long freeBurden)
+    /// <summary>A bank pays, and its balance is read: pack + bank count.</summary>
+    public bool BankKnown => BankPays && BankFunds >= 0;
+
+    /// <summary>A bank pays, but its balance can't be read: the server decides about the money.</summary>
+    public bool BankUnknown => BankPays && BankFunds < 0;
+
+    /// <summary>What a buy may spend: the pack, plus a bank that's read; -1 = money isn't held against a buy (unknown, or an unread bank).</summary>
+    public long Spendable => Funds < 0 || BankUnknown ? -1 : BankKnown ? Funds + Math.Min(BankFunds, VendorBank.MaxPyreals) : Funds;
+
+    /// <summary>From the engine's vendor snapshot (API v67), what the player has, and the server's bank (pyreal vendors only).</summary>
+    public static VendorQuote From(VendorInfo info, VendorItem item, int freeItemSlots, int freeContainerSlots, long freeBurden,
+        VendorBank bank = default)
     {
         int stack = Math.Max(1, item.StackSize);
         bool alt = info.UsesAltCurrency;
+        bool bankPays = !alt && bank.Pays;
         return new VendorQuote
         {
             Name = item.Name,
@@ -220,6 +275,8 @@ internal sealed record VendorQuote
             FreeItemSlots = freeItemSlots,
             FreeContainerSlots = freeContainerSlots,
             FreeBurden = freeBurden,
+            BankPays = bankPays,
+            BankFunds = bankPays ? bank.Pyreals : -1,
         };
     }
 
@@ -268,7 +325,8 @@ internal sealed record VendorQuote
     private bool Fits(int n)
     {
         Estimate(n, out long cost, out long slots, out long burden);
-        if (Funds >= 0 && cost > Funds) return false;
+        long spend = Spendable;
+        if (spend >= 0 && cost > spend) return false;
         if (FreeSlots >= 0 && slots > FreeSlots) return false;
         if (FreeBurden >= 0 && burden > FreeBurden) return false;
         return true;
@@ -278,11 +336,12 @@ internal sealed record VendorQuote
     /// The most you can buy now: what the vendor has, you can pay for, and your packs and burden take
     /// (cost, slots and burden only grow with the count, so a halving search finds it). With nothing
     /// known to limit an unlimited item, one full stack (one, for an item that doesn't stack). 0 = not even one.
+    /// With a bank: pack + bank pay when the bank is read; an unread bank leaves only stock, room and burden.
     /// </summary>
     public int MaxBuy()
     {
         int cap = Unlimited ? QuantityRules.MaxAmount : Math.Min(Stock, QuantityRules.MaxAmount);
-        if (Unlimited && Funds < 0 && FreeSlots < 0 && FreeBurden < 0) cap = Stackable ? Math.Max(1, MaxStack) : 1;
+        if (Unlimited && Spendable < 0 && FreeSlots < 0 && FreeBurden < 0) cap = Stackable ? Math.Max(1, MaxStack) : 1;
         if (cap < 1 || !Fits(1)) return 0;
         int lo = 1, hi = cap;
         while (lo < hi)
@@ -302,8 +361,11 @@ internal sealed record VendorQuote
             return Stock < 1 ? $"The vendor has no {Name} left." : $"The vendor has only {QuantityRules.N(Stock)} {Name}.";
         Estimate(n, out long cost, out long slots, out long burden);
         string what = $"{QuantityRules.N(n)} {Name}";
-        if (Funds >= 0 && cost > Funds)
-            return $"Not enough {Currency}: {what} cost {QuantityRules.N(cost)}, you have {QuantityRules.N(Funds)}{CanBuy()}.";
+        long spend = Spendable;
+        if (spend >= 0 && cost > spend)
+            return BankKnown
+                ? $"Not enough {Currency}: {what} cost {QuantityRules.N(cost)}, you have {QuantityRules.N(Funds)} in your pack + {QuantityRules.N(BankFunds)} in the bank{CanBuy()}."
+                : $"Not enough {Currency}: {what} cost {QuantityRules.N(cost)}, you have {QuantityRules.N(Funds)}{CanBuy()}.";
         int free = FreeSlots;
         if (free >= 0 && slots > free)
         {
@@ -324,12 +386,35 @@ internal sealed record VendorQuote
         return max >= 1 ? $" (you can buy {QuantityRules.N(max)})" : string.Empty;
     }
 
-    /// <summary>The price line under the Buy button: "300 pyreals · you have 1,250".</summary>
+    /// <summary>
+    /// The price line beside the Buy button: "300 pyreals · you have 1,250"; with a bank that's read
+    /// "price 1,200; pack 300 + bank 5,000"; with one that isn't "1,200 pyreals · pack 300 + the bank".
+    /// </summary>
     public string PriceLine(int n)
     {
-        string cost = n >= 1 ? QuantityRules.N(Cost(n)) + " " + Currency : "-";
+        string price = n >= 1 ? QuantityRules.N(Cost(n)) : "-";
+        if (Funds >= 0 && BankKnown) return $"price {price}; pack {QuantityRules.N(Funds)} + bank {QuantityRules.N(BankFunds)}";
+        string cost = n >= 1 ? price + " " + Currency : "-";
+        if (Funds >= 0 && BankUnknown) return $"{cost} · pack {QuantityRules.N(Funds)} + the bank";
         return Funds >= 0 ? $"{cost} · you have {QuantityRules.N(Funds)}" : cost;
     }
+
+    /// <summary>
+    /// What the bank does for buying <paramref name="n"/>, when the pack alone is short (null otherwise,
+    /// and always without a bank): the box's one-line note.
+    /// </summary>
+    public string? BankNote(int n)
+    {
+        if (!BankPays || Funds < 0 || n < 1) return null;
+        long cost = Cost(n);
+        if (cost <= Funds) return null;
+        if (BankUnknown)
+            return $"Your pack has {QuantityRules.N(Funds)} of the {QuantityRules.N(cost)} {Currency}: the server's bank may cover it (the server decides).";
+        return cost <= Spendable ? $"The bank pays the {QuantityRules.N(cost - Funds)} {Currency} your pack is short." : null;
+    }
+
+    /// <summary>What "max" counts, when that isn't plain: "" without a bank, or with one that's read.</summary>
+    public string MaxNote => BankUnknown ? "max counts the vendor's stock, your pack space and burden only (the bank's balance can't be read)" : string.Empty;
 }
 
 /// <summary>What the quantity box's actions say (chat and the Selection window). Pure.</summary>
@@ -401,6 +486,24 @@ internal static class QtyReplies
             return $"RynthCore couldn't count your money ({m}): try again in a moment.";
         return $"The vendor didn't sell it: {m}.";
     }
+
+    /// <summary>
+    /// A buy's refusal when the server's bank was to pay part of it (<paramref name="bankMayPay"/>):
+    /// RynthCore's own money check ("costs ..., you have ...") counts only the pyreals the game shows,
+    /// so it says that and what to do; anything else as <see cref="VendorRefusal"/>.
+    /// </summary>
+    public static string BuyRefusal(string? message, bool bankMayPay)
+    {
+        string m = (message ?? string.Empty).Trim();
+        if (bankMayPay && m.StartsWith("costs ", StringComparison.Ordinal))
+            return $"RynthCore didn't send it: it {m}. RynthCore counts the pyreals the game shows, and the bank's aren't in them: take the rest out of the bank, then buy again.";
+        return VendorRefusal(m);
+    }
+
+    /// <summary>The server answered a buy without selling it.</summary>
+    public static string NotSold(int n, string name, bool bankMayPay, long cost, string currency) => bankMayPay
+        ? $"The vendor didn't sell {QuantityRules.N(n)} {name}: the server said no (your pack and the bank may not cover {QuantityRules.N(cost)} {currency}, or there's no room)."
+        : $"The vendor didn't sell {QuantityRules.N(n)} {name}: the server said no (money, room, or too busy).";
 
     private static string Cap(string s) => s.Length == 0 ? s : char.ToUpperInvariant(s[0]) + s[1..];
 }

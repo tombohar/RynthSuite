@@ -9,6 +9,9 @@
 //    open)                      or NPC you selected last
 //    an item in a vendor's list Buy N, with the price, your pyreals, the room
 //                               in your packs and your burden checked first
+//                               (a server's bank that pays vendors counts
+//                               too, or leaves the money to the server when
+//                               its balance can't be read: VendorQuote)
 //
 //  The Selection window shows the box under what is selected (QuantityRow);
 //  /rdef qty, split, give and buy do the same from chat, hotkeys and metas.
@@ -179,7 +182,7 @@ internal sealed class QuantityController
             if (p.Free < 0) { free = -1; break; }
             free += p.Free;
         }
-        return VendorQuote.From(info, item, free, w.FreeContainerSlots(), w.FreeBurden());
+        return VendorQuote.From(info, item, free, w.FreeContainerSlots(), w.FreeBurden(), w.Bank());
     }
 
     /// <summary>
@@ -256,7 +259,8 @@ internal sealed class QuantityController
     private string About(QtySubject s) => s.Mode switch
     {
         QtyMode.Stack => $" (the selected {s.Name}: a stack of {QuantityRules.N(s.Stack)}; a split takes up to {QuantityRules.N(s.Stack - 1)})",
-        QtyMode.Vendor when s.Quote != null => $" (the vendor's {s.Name}: {s.Quote.PriceLine(Value)}; you can buy {QuantityRules.N(s.MaxBuy)})",
+        QtyMode.Vendor when s.Quote != null => $" (the vendor's {s.Name}: {s.Quote.PriceLine(Value)}; you can buy {QuantityRules.N(s.MaxBuy)}"
+            + (s.Quote.MaxNote.Length > 0 ? "; " + s.Quote.MaxNote : string.Empty) + ")",
         _ => string.Empty,
     };
 
@@ -401,16 +405,18 @@ internal sealed class QuantityController
         string? refusal = q.Refusal(n);
         if (refusal != null) { Say(w, false, refusal); return; }
 
+        // The bank is to pay what the pack is short of (read or not): the answers say so.
+        bool bankMayPay = q.BankPays && q.Funds >= 0 && q.Cost(n) > q.Funds;
         uint request = w.Buy(info.VendorId, item.ObjectId, n);
         if (request == 0)
         {
-            Say(w, false, QtyReplies.VendorRefusal(w.TryGetTradeStatus(out VendorTradeStatus st) ? st.Message : null));
+            Say(w, false, QtyReplies.BuyRefusal(w.TryGetTradeStatus(out VendorTradeStatus st) ? st.Message : null, bankMayPay));
             return;
         }
         _pending = new Pending
         {
             Kind = PendingKind.Buy, Id = item.ObjectId, Name = item.Name, N = n, RequestId = request,
-            Cost = q.Cost(n), Currency = q.Currency, AtMs = w.NowMs,
+            Cost = q.Cost(n), Currency = q.Currency, AtMs = w.NowMs, BankMayPay = bankMayPay,
         };
     }
 
@@ -462,6 +468,8 @@ internal sealed class QuantityController
         public uint RequestId;
         public long Cost;
         public string Currency = string.Empty;
+        /// <summary>Buy: the server's bank was to pay what the pack is short of.</summary>
+        public bool BankMayPay;
     }
 
     /// <summary>Plugin tick: the give target, and the answer to the action in flight.</summary>
@@ -502,7 +510,7 @@ internal sealed class QuantityController
         {
             if (s.RequestId == p.RequestId)
             {
-                if (s.State == VendorTradeState.Refused) { Finish(w, false, QtyReplies.VendorRefusal(s.Message)); return; }
+                if (s.State == VendorTradeState.Refused) { Finish(w, false, QtyReplies.BuyRefusal(s.Message, p.BankMayPay)); return; }
                 if (s.State == VendorTradeState.Done)
                 {
                     if (s.Result == VendorTradeResult.Accepted)
@@ -510,7 +518,7 @@ internal sealed class QuantityController
                     else if (s.Result == VendorTradeResult.TimedOut)
                         Finish(w, false, $"No answer from the vendor about {QuantityRules.N(p.N)} {p.Name}: check your pack and {p.Currency} before trying again.");
                     else
-                        Finish(w, false, $"The vendor didn't sell {QuantityRules.N(p.N)} {p.Name}: the server said no (money, room, or too busy).");
+                        Finish(w, false, QtyReplies.NotSold(p.N, p.Name, p.BankMayPay, p.Cost, p.Currency));
                     return;
                 }
             }

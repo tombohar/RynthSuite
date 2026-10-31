@@ -197,8 +197,7 @@ public sealed partial class RynthAiPlugin
         _openedContainerAt = _chestCandidateSince != 0 ? _chestCandidateSince : now;
         _openedContainerInventoryObservedAt = _chestCandidateInvSeenAt;
         _lastLootActionAt = 0;
-        _corpseItemsEvaluated = 0;
-        _corpseItemsMatched = 0;
+        ResetLootTally();
         _corpseIdsRequested = false;
         ResetCurrentLootItem();
         _processedCorpseItems.Clear();
@@ -224,10 +223,11 @@ public sealed partial class RynthAiPlugin
         if (close)
             CloseCorpseContainer(chestId, why);
 
-        if (sayNothingMatched && _corpseItemsEvaluated > 0 && _corpseItemsMatched == 0)
+        if (sayNothingMatched)
         {
-            string chestName = _objectCache?[chestId]?.Name ?? $"0x{(uint)chestId:X8}";
-            ChatLine($"[RynthAi] Nothing in {chestName} matches the loot profile.");
+            string chestName = _objectCache?[chestId]?.Name is { Length: > 0 } cn ? cn : "the chest";
+            if (NothingLootedLine(chestName, chest: true) is { } nothingLine)
+                ChatLine(nothingLine);
         }
         LootDiag($"[RynthAi] Chest loot: done with chest 0x{(uint)chestId:X8} ({why}); not marked, so opening it again loots it again.");
 

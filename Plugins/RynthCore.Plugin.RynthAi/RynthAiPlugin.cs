@@ -902,6 +902,27 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private const long LootGraceMs = 2000;
 
     /// <summary>
+    /// Fellowship-follow steers toward a live leader position and needs no route, so it counts
+    /// as nav work in its own right: without this, turning Follow on with no route loaded would
+    /// leave the arbiter's wantNav false and NavigationEngine.Tick would never do the following.
+    /// </summary>
+    private static bool IsFollowActive(LegacyUiSettings settings)
+        => (settings.FollowMode && settings.FollowTargetId != 0)
+           || (settings.CurrentRoute != null && settings.CurrentRoute.RouteType == NavRouteType.Follow
+               && settings.CurrentRoute.FollowTargetName.Length > 0);
+
+    /// <summary>
+    /// The arbiter's WantNav input: the macro runs, navigation is on, and there is a route (or a
+    /// follow) to run. Travelling back to your corpse (RynthNav walks): RynthAi's own route waits.
+    /// Also read by BoostNavHoldsLoot, so the looter stands down for Boost Nav Priority exactly
+    /// when the arbiter's BoostNav clause can give nav the tick.
+    /// </summary>
+    private bool NavWantsTick(LegacyUiSettings settings)
+        => settings.IsMacroRunning && settings.EnableNavigation
+           && ((settings.CurrentRoute != null && settings.CurrentRoute.Points.Count > 0) || IsFollowActive(settings))
+           && !OwnCorpseTravelHoldsNav;
+
+    /// <summary>
     /// Stop nav movement once, on the transition into a non-Navigating activity.
     /// Replaces the four _*PausedNav flags: each existed only to answer "have I
     /// already issued the Stop() for this owner?", and each had to be reset from
@@ -1861,20 +1882,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     bool wantLoot = HasLootWork(settings, nowMs);
                     _lastWantLoot = wantLoot;
                     bool wantSalvage = _salvageManager != null && _salvageManager.IsBusy;
-                    bool routeLoaded = settings.CurrentRoute != null && settings.CurrentRoute.Points.Count > 0;
-
-                    // Fellowship-follow steers toward a live leader position and
-                    // needs no route, so it counts as nav work in its own right —
-                    // without this, turning Follow on with no route loaded would
-                    // leave wantNav false and NavigationEngine.Tick would never be
-                    // called to do the following.
-                    bool followActive = (settings.FollowMode && settings.FollowTargetId != 0)
-                        || (settings.CurrentRoute != null && settings.CurrentRoute.RouteType == NavRouteType.Follow
-                            && settings.CurrentRoute.FollowTargetName.Length > 0);
-                    // Travelling back to your corpse (RynthNav walks): RynthAi's own route waits.
-                    bool wantNav = settings.IsMacroRunning && settings.EnableNavigation
-                                && (routeLoaded || followActive)
-                                && !OwnCorpseTravelHoldsNav;
+                    bool followActive = IsFollowActive(settings);
+                    bool wantNav = NavWantsTick(settings);
                     // Loot starvation: a lootable corpse in range has waited LootStarveMs behind
                     // combat and no monster is within LootStarveCloseYards. A busy spawn always
                     // has a monster inside MonsterRange, so without this corpses waited until

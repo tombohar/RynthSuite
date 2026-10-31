@@ -304,8 +304,7 @@ public sealed partial class RynthAiPlugin
                 _openedContainerAt = now;
                 _openedContainerInventoryObservedAt = 0;
                 _lastLootActionAt = 0;
-                _corpseItemsEvaluated = 0;
-                _corpseItemsMatched = 0;
+                ResetLootTally();
                 _corpseIdsRequested = false;
                 ResetCurrentLootItem();
                 _processedCorpseItems.Clear();
@@ -325,7 +324,7 @@ public sealed partial class RynthAiPlugin
         }
         string note = !settings.IsMacroRunning ? " (the macro is off: this container only)"
             : !settings.EnableLooting ? " (Looting is off: this container only)"
-            : settings.BoostNavPriority ? " (Boost Nav Priority is on: this container only)" : "";
+            : BoostNavHoldsLoot(settings) ? " (Boost Nav Priority is on: this container only)" : "";
         LootDiag($"[RynthAi] LootThisCont: 0x{(uint)id:X8} '{name}' flagged{(already ? " (already open as the loot container)" : "")}.");
         ChatLine($"[RynthAi] LootThisCont: looting {name}{note}.");
     }

@@ -58,6 +58,10 @@ internal static class Program
         var runner = new Runner();
         NativeLootTests.Register(runner);
         VTankLootTests.Register(runner);
+        LootRuleMatchTests.Register(runner);
+        LootLateIdTests.Register(runner);
+        LootChatLineTests.Register(runner);
+        LootSurveyTests.Register(runner);
         PropertyDumpTests.Register(runner);
         T11LootTests.Register(runner);
         MagItemDescriberTests.Register(runner);
@@ -86,6 +90,8 @@ internal static class Program
         LootSalvageTests.Register(runner);
         LootCorpseTests.Register(runner);
         LootRetryTimingTests.Register(runner);
+        LootClaimMismatchTests.Register(runner);
+        LootNothingLineTests.Register(runner);
         ChestLootTests.Register(runner);
         OwnCorpseTests.Register(runner);
         UseRefusalTests.Register(runner);

@@ -37,8 +37,9 @@ public static unsafe class PluginExports
     {
         try
         {
-            if (Runtime.Plugin == null) return IntPtr.Zero;
-            string json = Characters.CharactersManifest.Json;
+            RynthNetPlugin? plugin = Runtime.Plugin;
+            if (plugin == null) return IntPtr.Zero;
+            string json = Characters.CharactersManifest.For(plugin.FramelessWindows);
             if (json == _sectionsJson && _sectionsPtr != IntPtr.Zero) return _sectionsPtr;
             _sectionsJson = json;
             IntPtr fresh = Marshal.StringToCoTaskMemUTF8(json);
@@ -64,9 +65,10 @@ public static unsafe class PluginExports
         {
             if (surface == null) return 0;
             string name = Marshal.PtrToStringUTF8((IntPtr)surface) ?? string.Empty;
-            if (name.EndsWith(":popout", StringComparison.Ordinal)) name = name[..^":popout".Length];
+            bool popped = name.EndsWith(":popout", StringComparison.Ordinal);
+            if (popped) name = name[..^":popout".Length];
             RynthNetPlugin? plugin = Runtime.Plugin;
-            if (plugin == null || !plugin.RenderEmbed(name, out float wantH)) return 0;
+            if (plugin == null || !plugin.RenderEmbed(name, popped, out float wantH)) return 0;
             if (wantWidth != null) *wantWidth = width;
             if (wantHeight != null) *wantHeight = wantH > 0 ? wantH : height;
             return 1;

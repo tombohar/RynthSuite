@@ -1091,6 +1091,7 @@ internal sealed class LegacyAdvancedSettingsUi
                     _settings.ItemInfoSettings.ShowWindow = !_settings.ItemInfoSettings.ShowWindow;
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Open the RynthAi Item Info window (fields, ratings, click trigger, layout).");
+                LegacyItemInfoUi.RenderLootChat(_settings.ItemInfoSettings, "##advLoot");
                 ImGui.Checkbox("Travel Back To My Corpse", ref _settings.TravelToOwnCorpse);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("After a death, travel back to where you died with RynthNav (outdoors only),\nfighting on the way, recover the corpse, then carry on. Needs the macro running.");

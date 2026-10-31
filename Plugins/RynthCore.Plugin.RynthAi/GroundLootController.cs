@@ -157,7 +157,17 @@ public sealed partial class RynthAiPlugin
                 }
                 if (now - firstAsk < GroundAppraiseWaitMs)
                     continue;
-                // Appraisal never arrived — classify best-effort, like the corpse assess window.
+                // The appraisal never arrived. A rule that decides the item needs it, so judged now
+                // its stats read 0 and a later rule (Salvage on its material) could take a keeper:
+                // leave it for now and ask again later (until 2026-10-31 it was judged best-effort).
+                // An engine that can't say whether the ID is in still judges it best-effort.
+                if (Host.HasHasAppraisalData)
+                {
+                    _groundAppraiseAt.Remove(wo.Id);
+                    _groundSkipUntil[wo.Id] = now + GroundLeaveCooldownMs;
+                    LootDiag($"[LootEval] ground '{wo.Name}' cls={wo.ObjectClass} dist={dist:F1}m appraised=False -> left for now: no ID came, and a rule that decides it needs one");
+                    continue;
+                }
             }
 
             bool keep = ClassifyItemAgainstProfile(wo, settings, out string action, out bool salvage, out string rule);
@@ -202,7 +212,11 @@ public sealed partial class RynthAiPlugin
         if (!_objectCache.IsOnGround(id) && _objectCache.GetContainerId(id) != 0)
         {
             LootDiag($"[RynthAi] Ground loot: pickup confirmed for 0x{(uint)id:X8} '{_groundTargetName}'.");
-            ChatLine($"[RynthAi] Looted [{_groundTargetAction}] {_groundTargetName} (ground)");
+            if (DescribeLootPickup(id, _groundTargetAction, _groundTargetName, _groundTargetRule,
+                    _groundTargetIsSalvage, IsStackAtSend(id), where: "ground") is { } described)
+                Host.WriteToChat(described.Line, described.ChatType);
+            else
+                ChatLine($"[RynthAi] Looted [{_groundTargetAction}] {_groundTargetName} (ground)");
             if (_groundTargetIsSalvage)
                 _salvageManager?.EnqueueItem(unchecked((uint)id));
             FinishGroundTarget(now, GroundFailCooldownMs);

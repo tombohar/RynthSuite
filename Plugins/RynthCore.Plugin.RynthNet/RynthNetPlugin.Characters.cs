@@ -7,6 +7,11 @@
 //  second while it is on screen (Characters/CharactersRows.cs). The window's
 //  clicks are queued here and run on the tick: selecting a character, and /rn
 //  tell / followme through the same queue as typed commands.
+//
+//  Its look (2026-10-31): minimal (the default) or full, per character in
+//  settings.json, switched by the window's own button or /rn view. On an engine
+//  with frameless windows (v90) the window has no engine frame and RynthNet
+//  draws both looks; on an older one the minimal look draws inside the frame.
 // ============================================================================
 
 using System;
@@ -35,20 +40,65 @@ public sealed partial class RynthNetPlugin
     private readonly ConcurrentQueue<Action> _uiActions = new();
     private HostGame? _game;
 
+    /// <summary>The look the window draws now (render thread reads; the tick and /rn view set it).</summary>
+    private volatile int _charsMode = (int)CharactersViewMode.Minimal;
+
+    /// <summary>The engine hosts frameless windows (v90): the manifest asks for one and RynthNet draws every frame.</summary>
+    internal bool FramelessWindows => Host.HasFramelessWindows;
+
+    internal CharactersViewMode CharsLook => (CharactersViewMode)_charsMode;
+
     /// <summary>RynthPluginRenderEmbed: draws <paramref name="surface"/> (":popout" already off). Render thread.</summary>
-    internal bool RenderEmbed(string surface, out float wantHeight)
+    internal bool RenderEmbed(string surface, bool popped, out float wantHeight)
     {
         wantHeight = 0;
         if (!surface.Equals(CharactersSurface, StringComparison.Ordinal)) return false;
         System.Threading.Volatile.Write(ref _charsDrawnMs, Environment.TickCount64);
         AtlasNames.EnsureLoading(Path.Combine(RynthInstallPaths.CoreDir, "NavData", "locations.json"));
         _charsWindow ??= new CharactersWindow(
+            Host,
             select: id => _uiActions.Enqueue(() => { if (id != 0) Host.SelectItem(id); }),
             tell: (name, command) => _localCommands.Enqueue(("/rn tell " + name + ", " + command, false)),
             followMeAll: () => _localCommands.Enqueue(("/rn followme", false)),
-            heading: CompassHeading);
-        _charsWindow.Draw(_charsView);
+            heading: CompassHeading,
+            setView: mode => _uiActions.Enqueue(() => SetCharactersView(mode, quiet: true)));
+        wantHeight = _charsWindow.Draw(_charsView, CharsLook, FramelessWindows, popped);
         return true;
+    }
+
+    /// <summary>
+    /// Sets this character's window look and saves it (merged with the other clients' settings). Pump
+    /// thread. Quiet (the window's own button): nothing in chat unless it couldn't be saved.
+    /// </summary>
+    private bool SetCharactersView(CharactersViewMode mode, bool quiet)
+    {
+        if (!_loggedIn)
+        {
+            // Before login there is no character to keep it for: this session only.
+            _charsMode = (int)mode;
+            return true;
+        }
+        string key = CharacterKey;
+        string name = CharactersLook.Name(mode);
+        if (!UpdateSettings(s => s.Character(key).View = name)) return false;
+        _charsMode = (int)mode;
+        if (!quiet) Host.Log("[RynthNet] Characters window: " + name + " view.");
+        return true;
+    }
+
+    /// <summary>/rn view [minimal|full|toggle]. Pump thread.</summary>
+    private void ViewCommand(string args)
+    {
+        ViewAnswer a = CharactersLook.Command(args, CharsLook, _loggedIn);
+        if (!a.Ok) { ChatFail(a.Reply); return; }
+        if (a.Changed && !SetCharactersView(a.Next, quiet: false)) return;   // UpdateSettings said why
+        ChatLine(a.Reply);
+    }
+
+    /// <summary>The look saved for the character logged in here (after login and when the file changes). Pump thread.</summary>
+    private void SyncCharactersView()
+    {
+        if (_loggedIn) _charsMode = (int)_settings.ViewFor(CharacterKey);
     }
 
     /// <summary>Plugin tick: the window's queued clicks, and its rows while it is on screen.</summary>

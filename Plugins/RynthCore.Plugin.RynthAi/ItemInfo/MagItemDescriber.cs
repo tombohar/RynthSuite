@@ -87,6 +87,10 @@ internal sealed class MagItemDescription
 {
     /// <summary>"[Material ]Name[ (DamageType Mastery)]".</summary>
     public string Title = string.Empty;
+    /// <summary>The material name ("Gold"), or "" when none or hidden; set even when the title leaves it out.</summary>
+    public string Material = string.Empty;
+    /// <summary>The title's "(DamageType Mastery)" text without the brackets, or "".</summary>
+    public string TypeMastery = string.Empty;
     public readonly List<(MagItemSection Section, string Text)> Segments = new();
 
     public void Add(MagItemSection section, string text)
@@ -266,6 +270,7 @@ internal static class MagItemDescriber
         if (material > 0 && Show(MagItemInfoField.Material))
         {
             string matName = MagItemInfoTables.Materials.TryGetValue(material, out string? m) ? m : $"material {material}";
+            d.Material = matName;
             // Loot names usually omit the material; don't double it when the name already starts with it.
             if (!item.Name.StartsWith(matName, StringComparison.OrdinalIgnoreCase))
                 sb.Append(matName).Append(' ');
@@ -281,6 +286,7 @@ internal static class MagItemDescriber
                 : string.Empty;
             string inner = $"{dmgType} {masteryName}".Trim();
             if (inner.Length > 0) sb.Append(" (").Append(inner).Append(')');
+            d.TypeMastery = inner;
         }
         d.Title = sb.ToString();
 

@@ -15,8 +15,11 @@
 //    "logRemoteCommands": true,
 //    "statusIntervalMs": 1000,
 //    "defaults": { "acceptRemoteCommands": true, "allow": [], "deny": [], "trustedSenders": [] },
-//    "characters": { "World|Name": { "tags": ["healer"], "policy": { ...same as defaults... } } }
+//    "characters": { "World|Name": { "tags": ["healer"], "policy": { ...same as defaults... },
+//                                    "view": "full" } }
 //  }
+//  "view" is how that character's Characters window looks (minimal, the default
+//  when missing, or full: Characters/CharactersLook.cs, /rn view).
 // ============================================================================
 
 using System;
@@ -24,6 +27,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Threading;
+using CharactersLook = RynthCore.Plugin.RynthNet.Characters.CharactersLook;
+using CharactersViewMode = RynthCore.Plugin.RynthNet.Characters.CharactersViewMode;
 
 namespace RynthCore.Plugin.RynthNet;
 
@@ -53,6 +58,8 @@ internal sealed class RynthNetCharacter
     public List<string> Tags = new();
     /// <summary>This character's own policy; null = the defaults.</summary>
     public RynthNetPolicy? Policy;
+    /// <summary>The Characters window's look for this character ("minimal" / "full"); null = the default (minimal).</summary>
+    public string? View;
 }
 
 internal sealed class RynthNetSettings
@@ -78,6 +85,10 @@ internal sealed class RynthNetSettings
 
     public IReadOnlyList<string> TagsFor(string key)
         => Characters.TryGetValue(key, out RynthNetCharacter? c) ? c.Tags : Array.Empty<string>();
+
+    /// <summary>The Characters window's look for the character (minimal when it has none saved).</summary>
+    public CharactersViewMode ViewFor(string key)
+        => Characters.TryGetValue(key, out RynthNetCharacter? c) ? CharactersLook.FromSetting(c.View) : CharactersViewMode.Minimal;
 
     /// <summary>The character's entry, created when missing.</summary>
     public RynthNetCharacter Character(string key)
@@ -184,6 +195,9 @@ internal sealed class RynthNetSettings
                 var c = new RynthNetCharacter { Tags = Strings(p.Value, "tags") };
                 if (p.Value.TryGetProperty("policy", out JsonElement pol) && pol.ValueKind == JsonValueKind.Object)
                     c.Policy = ParsePolicy(pol);
+                if (p.Value.TryGetProperty("view", out JsonElement view) && view.ValueKind == JsonValueKind.String
+                    && CharactersLook.TryParse(view.GetString(), out CharactersViewMode mode))
+                    c.View = CharactersLook.Name(mode);
                 s.Characters[p.Name] = c;
             }
         }
@@ -211,7 +225,7 @@ internal sealed class RynthNetSettings
             w.WriteStartObject("characters");
             foreach (var kv in Characters)
             {
-                if (kv.Value.Tags.Count == 0 && kv.Value.Policy == null) continue;
+                if (kv.Value.Tags.Count == 0 && kv.Value.Policy == null && kv.Value.View == null) continue;
                 w.WriteStartObject(kv.Key);
                 WriteList(w, "tags", kv.Value.Tags);
                 if (kv.Value.Policy != null)
@@ -219,6 +233,7 @@ internal sealed class RynthNetSettings
                     w.WritePropertyName("policy");
                     WritePolicy(w, kv.Value.Policy);
                 }
+                if (kv.Value.View != null) w.WriteString("view", kv.Value.View);
                 w.WriteEndObject();
             }
             w.WriteEndObject();

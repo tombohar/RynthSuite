@@ -71,6 +71,10 @@ internal sealed partial class SelectionWindow
             : $"Half the stack ({QuantityRules.N(QuantityRules.HalfOf(max))}).";
         if (Chip(dl, "##qty_half", "half", ref x, y, rowH, right, max >= 1, halfTip)) ctl.Value = QuantityRules.ForBox(QtyAmount.Half, max);
         string maxTip = max < 1 ? none
+            : s.Mode == QtyMode.Vendor && s.Quote is { BankUnknown: true } bq
+                ? $"The most your packs and burden take of what the vendor has ({QuantityRules.N(max)}): {bq.MaxNote}; the server decides about the money."
+            : s.Mode == QtyMode.Vendor && s.Quote is { BankKnown: true }
+                ? $"The most you can buy now ({QuantityRules.N(max)}): what the vendor has, your pack and the bank pay for, and your packs take."
             : s.Mode == QtyMode.Vendor ? $"The most you can buy now ({QuantityRules.N(max)}): what the vendor has, you can pay for and your packs take."
             : $"The whole stack ({QuantityRules.N(max)}). A split still leaves one.";
         if (Chip(dl, "##qty_max", "max", ref x, y, rowH, right, max >= 1, maxTip)) ctl.Value = QuantityRules.ForBox(QtyAmount.Max, max);
@@ -184,8 +188,10 @@ internal sealed partial class SelectionWindow
         QtySubject s = q.Subject;
         VendorQuote? quote = s.Quote;
         string? why = quote?.Refusal(value);
+        string? bank = quote?.BankNote(value);
         string tip = q.Busy ? QtyReplies.Busy
-            : why ?? (quote != null ? $"Buy {QuantityRules.N(value)} {s.Name} for {QuantityRules.N(quote.Cost(value))} {quote.Currency}. The vendor checks again before it sells." : "Buy.");
+            : why ?? (quote != null ? $"Buy {QuantityRules.N(value)} {s.Name} for {QuantityRules.N(quote.Cost(value))} {quote.Currency}. "
+                                      + (bank != null ? bank + " " : string.Empty) + "The vendor checks again before it sells." : "Buy.");
         if (Chip(dl, "##qty_buy", "Buy " + QuantityRules.N(value), ref x, y, h, right, !q.Busy, tip, primary: why == null))
             QuantityAction?.Invoke(QtyClick.Buy, value);
         if (quote == null) return;
@@ -202,6 +208,9 @@ internal sealed partial class SelectionWindow
         {
             string? why = s.Quote?.Refusal(value);
             if (why != null) { line = why; color = WarnColor; return; }
+            // The bank's part: paid from a bank that's read, or the server's to decide.
+            string? bank = s.Quote?.BankNote(value);
+            if (bank != null) { line = bank; color = s.Quote!.BankUnknown ? WarnColor : _dim; return; }
             line = s.Quote is { UnitPrice: > 0 } qq ? $"{QuantityRules.N(qq.UnitPrice)} {qq.Currency} each. /rdef buy N does the same." : "/rdef buy N does the same.";
             return;
         }

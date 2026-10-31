@@ -33,6 +33,9 @@ internal static class TargetingTests
         r.Add("targeting: lock off switches only past each scheme's margin", LockOffMargins);
         r.Add("targeting: lock off never switches with an attack at the target in flight", NoSwitchInFlight);
         r.Add("targeting: settings default to lowest health with the lock on", Defaults);
+        r.Add("targeting: a higher priority out of sight is named as passed over, once per reason", PassedOverOutOfSight);
+        r.Add("targeting: a higher priority just past Monster Range is named on the lock line", PassedOverBeyondRange);
+        r.Add("targeting: nothing is named when no higher priority was left out", PassedOverNothingHigher);
     }
 
     // ── Schemes ───────────────────────────────────────────────────────────────
@@ -233,6 +236,132 @@ internal static class TargetingTests
         Check.True(s.TargetSelection == 1 && s.TargetLock, "a save with them sets them");
         dash.ApplySettingsJson("{\"TargetSelection\":9}");
         Check.Eq(s.TargetSelection, 3, "an out-of-range choice is clamped");
+    }
+
+    // ── Passed over (R-20261031-201214-8be7) ──────────────────────────────────
+    // A report said a Priority 5 monster was ignored for Priority 1 ones; the log showed only
+    // that some monsters in range were LOS-blocked, not which. The lock line now names the best
+    // higher-priority monster that wasn't a candidate, and why. Selection itself is unchanged.
+
+    private static void PassedOverOutOfSight()
+    {
+        var t = new ScanPick(monsterRange: 10);
+        t.S.MonsterRules.Add(new MonsterRule { Name = "Boss", Priority = 5 });
+        t.Place(A, "Mob A", north: 2);
+        t.Place(Boss, "Boss", east: 3);
+        t.Blocked.Add(Boss);
+        Check.Eq(t.Tick(), A, "the Boss is behind a wall: Mob A, the only candidate, is locked");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("[CombatTarget] lock 0x80000401")
+                                       && l.Contains("[passed over 0x80000404 'Boss' priority 5, 3.0 m: line of sight blocked]")),
+            "the lock line names the Boss and why it wasn't picked");
+
+        int lines = PassedLines();
+        t.Tick();
+        t.Tick();
+        Check.Eq(PassedLines(), lines, "still behind the wall: not logged again");
+
+        FakeHost.NotAttackable.Add(Boss);
+        t.Tick();
+        Check.True(FakeHost.Logs.Any(l => l.Contains("[CombatTarget] passed over 0x80000404 'Boss' priority 5, 3.0 m: not attackable")
+                                       && l.Contains("the target stays 0x80000401 'Mob A' priority 1")),
+            "a new reason is one new line, with the target that stays");
+        int after = PassedLines();
+        t.Tick();
+        Check.Eq(PassedLines(), after, "and only once");
+
+        FakeHost.NotAttackable.Remove(Boss);
+        t.Blocked.Remove(Boss);
+        Check.Eq(t.Tick(), Boss, "in sight and attackable: the Boss takes over at once");
+        string sw = FakeHost.Logs.Last(l => l.Contains("[CombatTarget] switch"));
+        Check.True(sw.Contains("priority 1 < 5") && !sw.Contains("passed over"), "the switch says priority, with nothing passed over");
+    }
+
+    private static void PassedOverBeyondRange()
+    {
+        var t = new ScanPick(monsterRange: 10);
+        t.S.MonsterRules.Add(new MonsterRule { Name = "Boss", Priority = 5 });
+        t.Place(A, "Mob A", north: 2);
+        t.Place(Boss, "Boss", north: -12);
+        Check.Eq(t.Tick(), A, "the Boss at 12 m is past Monster Range 10: Mob A");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("[CombatTarget] lock 0x80000401")
+                                       && l.Contains("[passed over 0x80000404 'Boss' priority 5, 12.0 m: beyond Monster Range (10 m)]")),
+            "the lock line names the Boss past the range");
+
+        t = new ScanPick(monsterRange: 10);
+        t.S.MonsterRules.Add(new MonsterRule { Name = "Boss", Priority = 5 });
+        t.Place(A, "Mob A", north: 2);
+        t.Place(Boss, "Boss", north: -30);
+        t.Tick();
+        Check.False(FakeHost.Logs.Any(l => l.Contains("passed over")), "30 m out (more than 15 m past the range): not named");
+    }
+
+    private static void PassedOverNothingHigher()
+    {
+        var t = new ScanPick(monsterRange: 10);
+        t.S.MonsterRules.Add(new MonsterRule { Name = "Boss", Priority = 5 });
+        t.Place(A, "Mob A", north: 2);
+        t.Place(B, "Mob B", east: 3);
+        t.Place(C, "Mob C", north: -12);
+        t.Blocked.Add(B);
+        Check.Eq(t.Tick(), A, "Mob A is locked");
+        Check.False(FakeHost.Logs.Any(l => l.Contains("passed over")),
+            "a same-priority monster behind a wall or past the range isn't named");
+
+        t = new ScanPick(monsterRange: 10);
+        t.S.MonsterRules.Add(new MonsterRule { Name = "Boss", Priority = 5 });
+        t.Place(A, "Mob A", north: 2);
+        t.Place(Boss, "Boss", east: 3);
+        Check.Eq(t.Tick(), Boss, "the Boss in sight is the target");
+        t.Blocked.Add(Boss);
+        t.Tick();
+        Check.False(FakeHost.Logs.Any(l => l.Contains("passed over")), "the target itself out of sight isn't 'passed over'");
+    }
+
+    private static int PassedLines() => FakeHost.Logs.Count(l => l.Contains("[CombatTarget] passed over"));
+
+    /// <summary>The real scan (ScanNearbyTargets) over placed monsters, then the pick.</summary>
+    private sealed class ScanPick
+    {
+        public readonly LegacyUiSettings S;
+        public readonly HashSet<uint> Blocked = new();
+        private readonly List<uint> _ids = new();
+        private CombatManager? _c;
+        private static readonly FieldInfo LastScan =
+            typeof(CombatManager).GetField("_lastScanTime", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        public ScanPick(int monsterRange)
+        {
+            FakeHost.Reset();
+            TargetingTests.Place(Player, "Me", 96, 96, creature: false);
+            FakeHost.PlayerPose = (Lb | 0x1C, 96f, 96f, 0f);
+            S = new LegacyUiSettings { MonsterRange = monsterRange, TargetSelection = Closest, TargetLock = true };
+        }
+
+        /// <summary>A monster <paramref name="north"/>/<paramref name="east"/> m from the player.</summary>
+        public void Place(uint id, string name, double north = 0, double east = 0)
+        {
+            TargetingTests.Place(id, name, (float)(96 + east), (float)(96 + north));
+            if (!_ids.Contains(id)) _ids.Add(id);
+        }
+
+        /// <summary>One combat tick's selection: scan, pick, and the passed-over note.</summary>
+        public uint Tick()
+        {
+            if (_c == null)
+            {
+                var host = FakeHost.Create();
+                var cache = FakeHost.MakeCache(host, Player, _ids, null);
+                _c = new CombatManager(host, S, cache);
+                _c.SetPlayerId(Player);
+                _c.SetDamageStores(null, new RynthCore.Plugin.RynthAi.CreatureData.MonsterDamageStore());
+                _c.LosBlockedOverride = id => Blocked.Contains(unchecked((uint)id));
+            }
+            LastScan.SetValue(_c, DateTime.MinValue);
+            _c.ScanNearbyTargets();
+            _c.HandleCombatTrigger();
+            _c.NotePassedOverWhileEngaged();
+            return unchecked((uint)_c.activeTargetId);
+        }
     }
 
     // ── Rig ───────────────────────────────────────────────────────────────────
