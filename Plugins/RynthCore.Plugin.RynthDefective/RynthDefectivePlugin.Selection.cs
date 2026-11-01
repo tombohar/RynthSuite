@@ -9,6 +9,11 @@
 //  landblock coordinates: 192 units a landblock; the facing from the player's
 //  pose, as RynthAi's combat turns), and its health from AC's health updates
 //  (OnUpdateHealth), asked for when a creature is selected and every 2 s after.
+//  An item's mana (2026-11-01, Tom: "a bar that reports the mana status"): its
+//  ItemCurMana / ItemMaxMana from the last identify (AC identifies what is
+//  selected; asked once if it hasn't 1.5 s later), identified again every 15 s
+//  while it stays selected, so a worn item's bar follows it down.
+//  Its right-click menu's "Why this loot rule?" asks RynthAi (AskLootWhy).
 // ============================================================================
 
 using System;
@@ -24,7 +29,8 @@ public sealed partial class RynthDefectivePlugin
 
     private SelectionWindow? _selectionWindow;                     // render thread
     private volatile SelectionView _selectionView = SelectionView.NotReady;
-    private long _selectionDrawnMs = long.MinValue / 2, _nextSelectionMs, _nextHealthQueryMs;
+    private long _selectionDrawnMs = long.MinValue / 2, _nextSelectionMs, _nextHealthQueryMs, _nextManaQueryMs;
+    private bool _manaAsked;   // the selection had no identify, and one was asked for
     private uint _selectionId;
     private int _selectionFailures;
 
@@ -52,6 +58,7 @@ public sealed partial class RynthDefectivePlugin
             {
                 Quantity = _qty,
                 QuantityAction = (click, n) => QueueBar(() => RunQuantityClick(click, n)),
+                LootWhy = Host.HasSendPluginCommand ? _ => QueueBar(AskLootWhy) : null,
             };
             wantHeight = _selectionWindow.Draw(_selectionView);
             _selectionFailures = 0;
@@ -90,6 +97,32 @@ public sealed partial class RynthDefectivePlugin
             Host.QueryHealth(sel);
         }
 
+        // An item's mana, from its identify.
+        float mana = -1f;
+        uint manaCur = 0, manaMax = 0;
+        if (changed) { _manaAsked = false; _nextManaQueryMs = now + 1500; }
+        if (!creature)
+        {
+            if (Host.TryGetObjectIntProperty(sel, ItemMaxManaProperty, out int most) && most > 0)
+            {
+                Host.TryGetObjectIntProperty(sel, ItemCurManaProperty, out int cur);
+                manaMax = (uint)most;
+                manaCur = (uint)Math.Clamp(cur, 0, most);
+                mana = manaCur / (float)most;
+                if (changed) _nextManaQueryMs = now + ManaRefreshMs;   // AC identifies a new selection itself
+                else if (now >= _nextManaQueryMs)
+                {
+                    _nextManaQueryMs = now + ManaRefreshMs;
+                    Host.RequestId(sel);
+                }
+            }
+            else if (!_manaAsked && now >= _nextManaQueryMs && !(Host.HasHasAppraisalData && Host.HasAppraisalData(sel)))
+            {
+                _manaAsked = true;   // not identified by now: once, so an item with mana gets its bar
+                Host.RequestId(sel);
+            }
+        }
+
         // The quantity box (a stack, or an item in the open vendor's list).
         Quantity.QuantityView? qty = QuantityViewNow();
 
@@ -121,10 +154,25 @@ public sealed partial class RynthDefectivePlugin
 
         HealthSeen? h = _health;
         float health = h != null && h.Id == sel ? h.Ratio : -1f;
-        return new SelectionView(true, sel, name, where, relative, health, h?.Current ?? 0, h?.Max ?? 0) { Qty = qty };
+        return new SelectionView(true, sel, name, where, relative, health, h?.Current ?? 0, h?.Max ?? 0)
+        {
+            Qty = qty, Creature = creature, Mana = mana, ManaCur = manaCur, ManaMax = manaMax,
+        };
+    }
+
+    /// <summary>
+    /// The Selection menu's "Why this loot rule?": RynthAi answers for the item selected now, in its
+    /// own window (its remote command "lootwhy", the one /ra loot why window runs). Plugin tick.
+    /// </summary>
+    private void AskLootWhy()
+    {
+        if (!Host.SendPluginCommand("RynthAi", "lootwhy", "show"))
+            PrintFail("Why this loot rule? needs RynthAi, which isn't loaded.");
     }
 
     private const uint StackSizeProperty = 12;   // PropertyInt.StackSize
+    private const uint ItemCurManaProperty = 107, ItemMaxManaProperty = 108;   // PropertyInt.ItemCurMana / ItemMaxMana
+    private const long ManaRefreshMs = 15000;
 
     /// <summary>A carried item's line: how many in the stack or uses left, and where (in your pack, in hand, worn).</summary>
     private static string CarriedText(Items.CarriedItem it)

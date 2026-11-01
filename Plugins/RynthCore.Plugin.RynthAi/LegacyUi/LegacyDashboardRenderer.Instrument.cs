@@ -21,7 +21,8 @@ internal readonly record struct DashboardReadout(
     uint Health, uint MaxHealth, uint Stamina, uint MaxStamina, uint Mana, uint MaxMana,
     bool Locked, float Opacity,
     string LootPath,
-    bool TargetIsFight = false);
+    bool TargetIsFight = false,
+    int LootMode = 0);
 
 /// <summary>The loaded-files pickers: each list, and the entry in use.</summary>
 internal sealed record DashboardFiles(
@@ -30,7 +31,8 @@ internal sealed record DashboardFiles(
     string[] Loots, int LootIdx,
     string[] Metas, int MetaIdx,
     string[] Buffs, int BuffIdx,
-    string ProfileName, string NavName, string LootName, string MetaName, string BuffName);
+    string ProfileName, string NavName, string LootName, string MetaName, string BuffName,
+    int LootMode = 0);
 
 internal sealed partial class LegacyDashboardRenderer
 {
@@ -47,7 +49,8 @@ internal sealed partial class LegacyDashboardRenderer
             _settings.ShowTargetStaminaMana, _targetStamina, _targetMaxStamina, _targetMana, _targetMaxMana,
             _playerHealth, _playerMaxHealth, _playerStamina, _playerMaxStamina, _playerMana, _playerMaxMana,
             _isLocked, _bgOpacity,
-            !string.IsNullOrEmpty(_vendorProfilePath?.Invoke()) ? _vendorProfilePath!.Invoke() : _settings.CurrentLootPath ?? string.Empty);
+            !string.IsNullOrEmpty(_vendorProfilePath?.Invoke()) ? _vendorProfilePath!.Invoke() : _settings.CurrentLootPath ?? string.Empty,
+            LootMode: Loot.LootModes.Clamp(_settings.LootMode));
     }
 
     /// <summary>The five pickers' lists (copied under the lists' lock) and the entry in use. Any thread.</summary>
@@ -71,9 +74,21 @@ internal sealed partial class LegacyDashboardRenderer
             buffs, _settings.BuffProfileIdx,
             profile,
             string.IsNullOrEmpty(_settings.CurrentNavPath) ? "None" : Path.GetFileNameWithoutExtension(_settings.CurrentNavPath),
-            string.IsNullOrEmpty(_settings.CurrentLootPath) ? "None" : Path.GetFileNameWithoutExtension(_settings.CurrentLootPath),
+            LootLineName(),
             string.IsNullOrEmpty(_settings.CurrentMetaPath) ? "None" : Path.GetFileNameWithoutExtension(_settings.CurrentMetaPath),
-            string.IsNullOrEmpty(_settings.CurrentBuffProfilePath) ? BuiltInBuffProfileLabel : Path.GetFileNameWithoutExtension(_settings.CurrentBuffProfilePath));
+            string.IsNullOrEmpty(_settings.CurrentBuffProfilePath) ? BuiltInBuffProfileLabel : Path.GetFileNameWithoutExtension(_settings.CurrentBuffProfilePath),
+            Loot.LootModes.Clamp(_settings.LootMode));
+    }
+
+    /// <summary>
+    /// The LOOT line: the loot profile, or in rares mode what is looted instead (so a player can
+    /// see why nothing else is taken): "Rares + needed mana stones (LootSnob not used)".
+    /// </summary>
+    internal string LootLineName()
+    {
+        string profile = string.IsNullOrEmpty(_settings.CurrentLootPath) ? "None" : Path.GetFileNameWithoutExtension(_settings.CurrentLootPath);
+        if (!Loot.LootModes.IsRares(_settings.LootMode)) return profile;
+        return profile == "None" ? "Rares + needed mana stones" : $"Rares + needed mana stones ({profile} not used)";
     }
 
     /// <summary>

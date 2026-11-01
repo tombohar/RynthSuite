@@ -3677,6 +3677,7 @@ internal sealed partial class ExpressionEngine
             // Targeting: 0 lowest health, 1 closest, 2 farthest, 3 least turning.
             ["TargetSelection"]     = (() => I(s.TargetSelection),     v => { if (int.TryParse(v, out int i)) s.TargetSelection  = Math.Clamp(i, 0, 3); }),
             ["TargetLock"]          = (() => B(s.TargetLock),          v => s.TargetLock          = ToDouble(v) != 0),
+            ["FightSelectedTarget"] = (() => B(s.FightSelectedTarget), v => s.FightSelectedTarget = ToDouble(v) != 0),
             ["RingRange"]           = (() => I(s.RingRange),           v => { if (int.TryParse(v, out int i)) s.RingRange        = i; }),
             ["ApproachRange"]       = (() => I(s.ApproachRange),       v => { if (int.TryParse(v, out int i)) s.ApproachRange    = i; }),
             ["MinRingTargets"]      = (() => I(s.MinRingTargets),      v => { if (int.TryParse(v, out int i)) s.MinRingTargets   = i; }),
@@ -3740,6 +3741,8 @@ internal sealed partial class ExpressionEngine
             ["NavGuideLine"]        = (() => B(s.NavGuideLine),        v => s.NavGuideLine    = ToDouble(v) != 0),
             ["CurrentNavPath"]      = (() => s.CurrentNavPath,         v => s.CurrentNavPath  = v),
             ["CurrentLootPath"]     = (() => s.CurrentLootPath,        v => s.CurrentLootPath = v),
+            // Loot Mode: 0 = profile, 1 = rares and needed mana stones only (the words work too).
+            ["LootMode"]            = (() => I(Loot.LootModes.Clamp(s.LootMode)), v => { if (Loot.LootModes.TryParse(v, out int m)) s.LootMode = m; }),
             ["CurrentMetaPath"]     = (() => s.CurrentMetaPath,        v => s.CurrentMetaPath = v),
             ["OpenDoors"]           = (() => B(s.OpenDoors),           v => s.OpenDoors       = ToDouble(v) != 0),
             ["NavRecoveryEnabled"]  = (() => B(s.NavRecoveryEnabled),  v => s.NavRecoveryEnabled = ToDouble(v) != 0),

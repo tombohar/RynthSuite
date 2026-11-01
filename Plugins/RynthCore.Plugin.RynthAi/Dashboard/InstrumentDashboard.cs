@@ -69,8 +69,12 @@ internal interface IDashboardHost
     void AdjustOpacity(float delta);
     void ToggleLock();
     void SelectProfile(int kind, int index);
+    /// <summary>The Loot Mode (Loot.LootModes): the loot profile, or rares and needed mana stones only.</summary>
+    void SetLootMode(int mode);
     /// <summary>RynthSort's auto-sort: -1 RynthSort not loaded (or not logged in, or too old to say), 0 off, 1 on.</summary>
     int AutoSort { get; }
+    /// <summary>Fight the monster I select (combat setting), for the options menu's toggle.</summary>
+    bool FightSelectedTarget { get; }
     void SetAutoSort(bool on);
     /// <summary>RynthSort's own window, shown or hidden.</summary>
     void ToggleSortWindow();
@@ -363,8 +367,9 @@ internal sealed unsafe class InstrumentDashboard
         dl.PopClipRect();
 
         ImGui.SetCursorScreenPos(min);
-        ImGui.InvisibleButton("##activity", new Vector2(w, h));
-        SafeImGui.SetItemTooltip("Bot activity: " + activity + "\nMeta state: " + state);
+        // A click asks why it is doing that (or nothing): /ra why's diagnosis, in chat.
+        if (ImGui.InvisibleButton("##activity", new Vector2(w, h))) _d.Command("/ra why");
+        SafeImGui.SetItemTooltip("Bot activity: " + activity + "\nMeta state: " + state + "\nClick: why it's doing that, in chat (/ra why).");
         return y + h;
     }
 
@@ -488,7 +493,9 @@ internal sealed unsafe class InstrumentDashboard
                        && ImGui.IsMouseReleased(ImGuiMouseButton.Left);
         bool right = ImGui.IsItemClicked(ImGuiMouseButton.Right);
         bool hot = ImGui.IsItemHovered();
-        SafeImGui.SetItemTooltip((on ? s.Name + " on. Click to turn it off." : s.Name + " off. Click to turn it on.") + "\nRight-click: " + s.Right + ".");
+        string mode = i == 3 && Loot.LootModes.IsRares(_r.LootMode)
+            ? "\nLoot Mode: rares and needed mana stones only (the loot profile is not used)." : "";
+        SafeImGui.SetItemTooltip((on ? s.Name + " on. Click to turn it off." : s.Name + " off. Click to turn it on.") + mode + "\nRight-click: " + s.Right + ".");
         KeyFace(dl, s.Icon, on, hot, pos, size);
         if (clicked) _d.SetSubsystem(i, !on);
         if (right) SubsystemSettings(i);
@@ -928,6 +935,30 @@ internal sealed unsafe class InstrumentDashboard
                 ImGui.CloseCurrentPopup();
                 _d.Host.SetPanelPopOut(Title, RynthPanelPopOut.Toggle);
             }
+            // When the bot seems stuck: what it is waiting for, and the hourglass reset.
+            if (MenuItem(dl, ref p, w, "##m_why", RynthIcons.Info, "Why is it doing that?", "/ra why",
+                    "A one-glance diagnosis in chat: why the bot is idle, or what it is attacking and why."))
+            {
+                ImGui.CloseCurrentPopup();
+                _d.Command("/ra why");
+            }
+            // Fight the monster I select (also Settings > Ranges > Combat Targeting): a toggle, the
+            // command's reply says the new state.
+            bool fightSelected = _d.FightSelectedTarget;
+            if (MenuItem(dl, ref p, w, "##m_fightsel", RynthIcons.Crosshair,
+                    "Fight the monster I select", fightSelected ? "ON" : "OFF",
+                    "On: in a fight, a monster you select is fought first, until it dies, can't be reached,\n" +
+                    "or you select another or deselect (/ra fightselected). Click to turn it " + (fightSelected ? "off." : "on.")))
+            {
+                ImGui.CloseCurrentPopup();
+                _d.Command("/ra fightselected");
+            }
+            if (MenuItem(dl, ref p, w, "##m_busy", RynthIcons.Hourglass, "Clear busy", "/ra clearbusy",
+                    "The game thinks the character is still busy (the hourglass stays, nothing can be used): clear it."))
+            {
+                ImGui.CloseCurrentPopup();
+                _d.Command("/ra clearbusy");
+            }
             if (_popped)
             {
                 // Popped out the pickers are here as well (an older RynthCore's pop-out lets clicks
@@ -939,7 +970,7 @@ internal sealed unsafe class InstrumentDashboard
                 DashboardFiles files = _d.ReadFiles();
                 PickerMenu("Profile", files.Profiles, files.ProfileIdx, 3);
                 PickerMenu("Nav", files.Navs, files.NavIdx, 0);
-                PickerMenu("Loot", files.Loots, files.LootIdx, 1);
+                PickerMenu("Loot", files.Loots, files.LootIdx, 1, files.LootMode);
                 PickerMenu("Meta", files.Metas, files.MetaIdx, 2);
                 PickerMenu("Buffs", files.Buffs, files.BuffIdx, 4);
                 p = ImGui.GetCursorScreenPos();
@@ -1018,12 +1049,20 @@ internal sealed unsafe class InstrumentDashboard
     }
 
     /// <summary>A picker as a submenu (popped out, the options menu holds the pickers).</summary>
-    private void PickerMenu(string label, string[] items, int selected, int kind)
+    private void PickerMenu(string label, string[] items, int selected, int kind, int lootMode = -1)
     {
         string current = selected >= 0 && selected < items.Length ? items[selected] : "None";
+        if (Loot.LootModes.IsRares(lootMode)) current = "rares + mana stones";
         if (!ImGui.BeginMenu(label + ": " + SafeImGui.Escape(current) + "##pm" + kind)) return;
         try
         {
+            if (lootMode >= 0)
+            {
+                for (int m = 0; m < LootModeRows.Length; m++)
+                    if (ImGui.MenuItem(LootModeRows[m] + "##pmm" + m, "", Loot.LootModes.Clamp(lootMode) == m))
+                        _d.SetLootMode(m);
+                ImGui.Separator();
+            }
             if (items.Length == 0) ImGui.TextDisabled("None");
             for (int i = 0; i < items.Length; i++)
                 if (ImGui.MenuItem(SafeImGui.Escape(items[i]) + "##pmi" + kind + "_" + i, "", i == selected))
@@ -1422,7 +1461,7 @@ internal sealed unsafe class InstrumentDashboard
         y = PickerRow(dl, x0, y, w, "PROFILE", f.ProfileName, f.Profiles, f.ProfileIdx, 3, null, null, null) + Px(4);
         y = PickerRow(dl, x0, y, w, "NAV", f.NavName, f.Navs, f.NavIdx, 0, null, null, null) + Px(4);
         y = PickerRow(dl, x0, y, w, "LOOT", f.LootName, f.Loots, f.LootIdx, 1, RynthIcons.TreasureChest,
-            "Loot Editor: the loot profile in use.", () => _d.Host.SetPanelOpen("Loot Editor", RynthPanelOpen.Toggle)) + Px(4);
+            "Loot Editor: the loot profile in use.", () => _d.Host.SetPanelOpen("Loot Editor", RynthPanelOpen.Toggle), f.LootMode) + Px(4);
         y = PickerRow(dl, x0, y, w, "META", f.MetaName, f.Metas, f.MetaIdx, 2, null, null, null) + Px(4);
         y = PickerRow(dl, x0, y, w, "BUFFS", f.BuffName, f.Buffs, f.BuffIdx, 4, RynthIcons.Sparkle,
             "RynthAi Spells: the spell list and buff profiles.", _d.ToggleSpells);
@@ -1430,12 +1469,13 @@ internal sealed unsafe class InstrumentDashboard
     }
 
     private float PickerRow(ImDrawListPtr dl, float x0, float y, float w, string label, string current, string[] items, int selected,
-        int kind, string? buttonIcon, string? buttonTip, Action? button)
+        int kind, string? buttonIcon, string? buttonTip, Action? button, int lootMode = -1)
     {
         float h = Px(22), labelW = Px(44), r = Px(3);
         ImFontPtr lf = Font(RynthUiFont.Narrow9);
         Tracked(dl, lf, lf.FontSize, new Vector2(x0, MathF.Round(y + (h - lf.FontSize) * 0.5f)), _faint, label, 0.14f * lf.FontSize);
-        float fx = x0 + labelW, fw = w - labelW - (button != null ? h + Px(4) : 0);
+        // The LOOT row also has a one-click Loot Mode key (a star, lit in rares mode) left of its button.
+        float fx = x0 + labelW, fw = w - labelW - (button != null ? h + Px(4) : 0) - (lootMode >= 0 ? h + Px(4) : 0);
         Vector2 p = new(fx, y), s = new(fw, h);
         string popup = Id("##pick", kind);
         ImGui.SetCursorScreenPos(p);
@@ -1446,6 +1486,10 @@ internal sealed unsafe class InstrumentDashboard
             _pickWidth = fw;
         }
         bool hot = ImGui.IsItemHovered();
+        if (lootMode >= 0)
+            SafeImGui.SetItemTooltip(Loot.LootModes.IsRares(lootMode)
+                ? "Loot Mode: rares and needed mana stones only. The loot profile is not used; nothing else is looted.\nClick: a loot profile, or the loot mode."
+                : "Loot Mode: the loot profile.\nClick: a loot profile, or the loot mode.");
         dl.AddRectFilled(p, p + s, _inset, r);
         dl.AddRect(p, p + s, hot ? Mix(_line, _accent, 0.45f) : _line, r);
         ImFontPtr vf = Font(RynthUiFont.Narrow11);
@@ -1453,9 +1497,26 @@ internal sealed unsafe class InstrumentDashboard
         dl.AddText(vf, vf.FontSize, new Vector2(MathF.Round(fx + Px(7)), MathF.Round(y + (h - vf.FontSize) * 0.5f)), _text, current);
         dl.PopClipRect();
         DrawIcon(dl, RynthIcons.CaretDown, new Vector2(fx + fw - Px(16), y), new Vector2(Px(10), h), Px(10), _dim);
+        float bx = fx + fw + Px(4);
+        if (lootMode >= 0)
+        {
+            bool rares = Loot.LootModes.IsRares(lootMode);
+            Vector2 mp = new(bx, y), ms = new(h, h);
+            ImGui.SetCursorScreenPos(mp);
+            if (ImGui.InvisibleButton(Id("##lootmode", kind), ms))
+                _d.SetLootMode(rares ? Loot.LootModes.Profile : Loot.LootModes.Rares);
+            bool mhot = ImGui.IsItemHovered();
+            SafeImGui.SetItemTooltip(rares
+                ? "Loot Mode: rares and needed mana stones only (the loot profile is not used).\nClick: loot by the loot profile again."
+                : "Loot Mode: the loot profile.\nClick: loot only rares and needed mana stones (the loot profile is not used).");
+            dl.AddRectFilled(mp, mp + ms, rares ? Mix(_bg, _accent, 0.16f) : _key, r);
+            dl.AddRect(mp, mp + ms, rares ? _accent : _line, r);
+            DrawIcon(dl, RynthIcons.Star, mp, ms, Px(12), rares ? _accent : mhot ? _text : _dim);
+            bx += h + Px(4);
+        }
         if (button != null && buttonIcon != null)
         {
-            Vector2 bp = new(fx + fw + Px(4), y), bs = new(h, h);
+            Vector2 bp = new(bx, y), bs = new(h, h);
             ImGui.SetCursorScreenPos(bp);
             if (ImGui.InvisibleButton(Id("##fbtn", kind), bs)) button();
             bool bhot = ImGui.IsItemHovered();
@@ -1464,20 +1525,24 @@ internal sealed unsafe class InstrumentDashboard
             dl.AddRect(bp, bp + bs, _line, r);
             DrawIcon(dl, buttonIcon, bp, bs, Px(12), bhot ? _text : _dim);
         }
-        PickerPopup(popup, items, selected, kind);
+        PickerPopup(popup, items, selected, kind, lootMode);
         return y + h;
     }
 
     private Vector2 _pickAnchor;
     private float _pickWidth;
 
-    private void PickerPopup(string id, string[] items, int selected, int kind)
+    /// <summary>The LOOT picker's Loot Mode rows, above the loot profiles.</summary>
+    private static readonly string[] LootModeRows = { "Mode: the loot profile", "Mode: rares + needed mana stones only" };
+
+    private void PickerPopup(string id, string[] items, int selected, int kind, int lootMode = -1)
     {
         if (!ImGui.IsPopupOpen(id)) return;
         ImGui.SetNextWindowPos(_pickAnchor, ImGuiCond.Appearing);
         float itemH = Px(22);
-        float maxH = Math.Min(items.Length * itemH + Px(10), Math.Max(Px(60), ImGui.GetIO().DisplaySize.Y - _pickAnchor.Y - Px(20)));
-        ImGui.SetNextWindowSize(new Vector2(Math.Max(_pickWidth, Px(160)), Math.Max(maxH, Px(32))));
+        int extra = lootMode >= 0 ? LootModeRows.Length : 0;
+        float maxH = Math.Min((items.Length + extra) * itemH + (extra > 0 ? Px(9) : 0) + Px(10), Math.Max(Px(60), ImGui.GetIO().DisplaySize.Y - _pickAnchor.Y - Px(20)));
+        ImGui.SetNextWindowSize(new Vector2(Math.Max(_pickWidth, Px(extra > 0 ? 220 : 160)), Math.Max(maxH, Px(32))));
         PushPopupStyle();
         bool open = ImGui.BeginPopup(id);
         PopPopupStyle();
@@ -1487,27 +1552,44 @@ internal sealed unsafe class InstrumentDashboard
             ImDrawListPtr dl = ImGui.GetWindowDrawList();
             float w = ImGui.GetContentRegionAvail().X;
             ImFontPtr f = Font(RynthUiFont.Narrow11);
+
+            bool Row(string rowId, string text, bool isSel)
+            {
+                Vector2 p = ImGui.GetCursorScreenPos();
+                bool clicked = ImGui.InvisibleButton(rowId, new Vector2(w, itemH));
+                bool hot = ImGui.IsItemHovered();
+                if (hot || isSel) dl.AddRectFilled(p, p + new Vector2(w, itemH), isSel ? Mix(_bg, _accent, 0.16f) : _key, Px(3));
+                if (isSel) dl.AddRectFilled(new Vector2(p.X + Px(4), p.Y + itemH * 0.5f - Px(2)), new Vector2(p.X + Px(8), p.Y + itemH * 0.5f + Px(2)), _accent, Px(2));
+                dl.PushClipRect(p, p + new Vector2(w, itemH), true);
+                dl.AddText(f, f.FontSize, new Vector2(MathF.Round(p.X + Px(14)), MathF.Round(p.Y + (itemH - f.FontSize) * 0.5f)), isSel ? _accent : _text, text);
+                dl.PopClipRect();
+                return clicked;
+            }
+
+            // The loot mode first: in rares mode the profile below isn't used.
+            if (extra > 0)
+            {
+                for (int m = 0; m < LootModeRows.Length; m++)
+                    if (Row(Id("##plm", m), LootModeRows[m], Loot.LootModes.Clamp(lootMode) == m))
+                    {
+                        _d.SetLootMode(m);
+                        ImGui.CloseCurrentPopup();
+                    }
+                Vector2 sp = ImGui.GetCursorScreenPos();
+                dl.AddLine(new Vector2(sp.X, sp.Y + Px(4) + 0.5f), new Vector2(sp.X + w, sp.Y + Px(4) + 0.5f), _line);
+                ImGui.Dummy(new Vector2(w, Px(9)));
+            }
             if (items.Length == 0)
             {
                 ImGui.TextDisabled("None");
                 return;
             }
             for (int i = 0; i < items.Length; i++)
-            {
-                Vector2 p = ImGui.GetCursorScreenPos();
-                bool isSel = i == selected;
-                if (ImGui.InvisibleButton(Id("##pi", i), new Vector2(w, itemH)))
+                if (Row(Id("##pi", i), items[i], i == selected))
                 {
                     _d.SelectProfile(kind, i);
                     ImGui.CloseCurrentPopup();
                 }
-                bool hot = ImGui.IsItemHovered();
-                if (hot || isSel) dl.AddRectFilled(p, p + new Vector2(w, itemH), isSel ? Mix(_bg, _accent, 0.16f) : _key, Px(3));
-                if (isSel) dl.AddRectFilled(new Vector2(p.X + Px(4), p.Y + itemH * 0.5f - Px(2)), new Vector2(p.X + Px(8), p.Y + itemH * 0.5f + Px(2)), _accent, Px(2));
-                dl.PushClipRect(p, p + new Vector2(w, itemH), true);
-                dl.AddText(f, f.FontSize, new Vector2(MathF.Round(p.X + Px(14)), MathF.Round(p.Y + (itemH - f.FontSize) * 0.5f)), isSel ? _accent : _text, items[i]);
-                dl.PopClipRect();
-            }
         }
         finally
         {

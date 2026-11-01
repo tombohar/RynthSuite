@@ -511,6 +511,38 @@ internal static partial class Program
         Check(back.Recent.Count == AtlasStore.MaxRecent && back.Recent[0].Name == "P5", "recent survives in order");
         Near(back.Favorites[0].Ns, 42.08, 1e-9, "coordinates survive");
         Check(back.RemoveFavorite("HOLTBURG") && back.Favorites.Count == 0, "remove by name");
+
+        // Every client saves atlas.txt: a save applies this client's changes to the file on disk
+        // (MergeInto), so another client's favorite survives (2026-11-01).
+        var exp = new SavedPlace { Name = "Abandoned Experiment (Conquest)", Type = "Dungeon", Ns = 42.45, Ew = 56.05 };
+        var yaraq = new SavedPlace { Name = "Yaraq", Type = "Town", Ns = -21.5, Ew = -1.8 };
+        var a = new AtlasStore();          // the client that adds the dungeon
+        a.ToggleFavorite(exp);
+        var disk = AtlasStore.Parse(a.Serialize());
+        a.MergeInto(disk);
+        var b = AtlasStore.Parse(new AtlasStore().Serialize());   // another client, loaded before that save
+        b.Touch(yaraq);
+        b.MergeInto(AtlasStore.Parse(a.Serialize()));
+        Check(b.IsFavorite(exp), "another client's save keeps the favorite it never had");
+        Check(b.Recent.Count == 1 && b.Recent[0].Name == "Yaraq", "and puts its own trip in Recent");
+        var c = AtlasStore.Parse(b.Serialize());
+        c.RemoveFavorite("Abandoned Experiment (Conquest)");
+        c.MergeInto(AtlasStore.Parse(b.Serialize()));
+        Check(!c.IsFavorite(exp), "a removal on one client sticks (the disk copy still had it)");
+        var d = AtlasStore.Parse(b.Serialize());
+        d.ClearRecent();
+        d.MergeInto(AtlasStore.Parse(b.Serialize()));
+        Check(d.Recent.Count == 0 && d.IsFavorite(exp), "Clear recent sticks; favorites stay");
+        var e = new AtlasStore();
+        e.MergeInto(AtlasStore.Parse(b.Serialize()));
+        e.MergeInto(AtlasStore.Parse(e.Serialize()));
+        Check(e.Favorites.Count == 1 && e.Recent.Count == 1, "merging the same file twice adds nothing");
+
+        // Names find favorites, with or without a bracketed tag.
+        Check(b.FindFavorite("abandoned experiment")?.SameAs(exp) == true, "a favorite by its name without the tag");
+        Check(b.FindFavorite("Abandoned Experiment (Conquest)")?.SameAs(exp) == true, "and with it");
+        Check(b.FindFavorite("Abandoned") == null, "not by part of a word");
+        Check(b.FindFavorite("") == null, "nothing for nothing");
     }
 
     /// <summary>

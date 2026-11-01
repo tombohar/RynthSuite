@@ -657,6 +657,14 @@ public sealed partial class RynthNavPlugin
             if (at != null && given.Length > 0) { type = at.Type; _resolvedPlace = at; }
             return true;
         }
+        // A favorite by its name first: places of your own the Atlas doesn't have (a custom server's
+        // dungeon: "/rnav fav 42.45N, 56.05E Abandoned Experiment (Conquest)").
+        SavedPlace? fav = _store.FindFavorite(text);
+        if (fav != null)
+        {
+            name = fav.Name; type = fav.Type; ns = fav.Ns; ew = fav.Ew;
+            return true;
+        }
         bool hasPos = PlayerMapPos(out double pns, out double pew);
         AtlasLocation? best = _atlas.FindBest(text, hasPos, pns, pew);
         if (best == null)
@@ -852,6 +860,13 @@ public sealed partial class RynthNavPlugin
         if (_store.Version != _savedStoreVersion || force)
         {
             _savedStoreVersion = _store.Version;
+            // Every client saves this file: apply this one's changes to what is on disk now, not over it.
+            try
+            {
+                string path = NavFile("atlas.txt");
+                if (File.Exists(path)) _store.MergeInto(AtlasStore.Parse(File.ReadAllText(path)));
+            }
+            catch (Exception ex) { Host.Log($"[RynthNav] atlas.txt (merging before a save): {ex.Message}"); }
             WriteLater("atlas.txt", _store.Serialize());
         }
         if (_memory.Version != _savedMemoryVersion || force)

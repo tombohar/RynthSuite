@@ -12,8 +12,8 @@ using N = RynthCore.Loot.VTank.VTankNodeTypes;
 namespace RynthCore.RynthAiHostTests.Tests;
 
 // 2026-10-31: "a +9 bludg xbow that rynth sees as gold salvage", with LootSnob, which VTank keeps.
-// Fixtures\lootsnob-excerpt.utl is LootSnobV4's melee head, missile and void wand sections and six
-// of its Salvage rules (switched on, as players have them), in the file's own order.
+// Fixtures\lootsnob-excerpt.utl is LootSnobV4's melee head, missile and wand (No Wield, Void, War)
+// sections and six of its Salvage rules (switched on, as players have them), in the file's own order.
 // Two causes:
 //  1. "Calc'd Buffed Missile Damage" read max damage x the wand elemental modifier (152). A launcher
 //     has no max damage, so it was 0 and every one of LootSnob's 33 missile damage keeps failed; the
@@ -35,7 +35,9 @@ internal static class LootRuleMatchTests
         r.Add("loot rule match: tinked damage and tinked target melee (VTank's worked examples)", TinkedNodes);
         r.Add("loot rule match: which conditions need the ID", ConditionsNeedingId);
         r.Add("loot rule match: Decide passes over a rule a known condition fails, in any order", DecideOrder);
+        r.Add("loot rule match (R-20261101-133624-7eeb): a name rule 'Trade Note' first keeps none of a corpse's plain items, ID or not", TradeNoteRuleFirst);
         r.Add("loot rule match: /ra loot why lists the rules above that came close, with the value read", LootWhyExplains);
+        r.Add("loot rule match: /ra loot why's words, in chat and in the 'Why this loot rule?' window", LootWhyReportWords);
     }
 
     private static VTankLootProfile Excerpt()
@@ -246,6 +248,47 @@ internal static class LootRuleMatchTests
         Check.Eq(i3, -1, "index -1");
     }
 
+    // R-20261101-133624-7eeb (Conquest, 2026.10.31.3): every item on a corpse was kept by a rule named
+    // 'Trade Note' (Imperial Topaz, Frost Child Essence and Pyreal with no ID; Gloves and Flagon with
+    // it). LootSnob's 'Trade Note' is one StringValueMatch on the Name ("Trade Note", key 1): it keeps
+    // none of them, with or without the ID, here and through the whole fixture. A rule with no
+    // conditions keeps everything (VTank's unconditional rule), so a 'Trade Note' that lost its
+    // condition in the player's own profile would do exactly what the report shows.
+    private static void TradeNoteRuleFirst()
+    {
+        FakeHost.Reset();
+        static VTankLootCondition C(int node, params string[] data) => new(node, "0", data);
+        var tradeNote = new VTankLootRule { Name = "Trade Note", Action = VTankLootAction.Keep };
+        tradeNote.Conditions.Add(C(N.StringValueMatch, "Trade Note", "1"));
+        var p = new VTankLootProfile();
+        p.Rules.Add(tradeNote);
+        p.Rules.AddRange(Excerpt().Rules);
+
+        var items = new (Item Item, bool Id)[]
+        {
+            (new Item("Imperial Topaz", AcObjectClass.Gem).Int(1, 0x800).Int(19, 6094), false),
+            (new Item("Frost Child Essence (180)", AcObjectClass.Misc).Int(1, 0x80).Int(19, 9000), false),
+            (new Item("Pyreal", AcObjectClass.Money).Int(1, 0x40).Int(19, 693).Int(12, 693), false),
+            (new Item("Gloves", AcObjectClass.Clothing).Int(1, 0x4).Int(19, 24429).Int(105, 5), true),
+            (new Item("Flagon", AcObjectClass.MissileWeapon).Int(1, 0x100).Int(19, 12741).Int(105, 4), true),
+        };
+        foreach (var (item, id) in items)
+        {
+            VTankLootVerdict v = VTankLootEvaluator.Decide(p, item, Ctx(), hasIdData: id, out int idx);
+            Check.True(!(v == VTankLootVerdict.Match && idx == 0), $"{item.Wo.Name}: not kept by 'Trade Note' ({v}{(idx >= 0 ? " at " + p.Rules[idx].Name.Trim() : "")})");
+            Check.True(VTankLootEvaluator.FirstMatch(p, item, Ctx(), out int fi)?.Name != "Trade Note", $"{item.Wo.Name}: FirstMatch not 'Trade Note' ({fi})");
+        }
+        var note = new Item("Trade Note (250,000)", AcObjectClass.TradeNote).Int(1, 0x80);
+        Check.Eq(VTankLootEvaluator.Decide(p, note, Ctx(), hasIdData: false, out int ni), VTankLootVerdict.Match, "a trade note is kept with no ID");
+        Check.Eq(ni, 0, "by 'Trade Note'");
+
+        // The same rule with its condition gone keeps everything: what the report looks like.
+        var empty = new VTankLootRule { Name = "Trade Note", Action = VTankLootAction.Keep };
+        var broken = new VTankLootProfile();
+        broken.Rules.Add(empty);
+        Check.Eq(VTankLootEvaluator.FirstMatch(broken, items[0].Item, Ctx(), out _)?.Name, "Trade Note", "a 'Trade Note' with no condition keeps a topaz (unconditional rule)");
+    }
+
     private static void LootWhyExplains()
     {
         FakeHost.Reset();
@@ -267,5 +310,51 @@ internal static class LootRuleMatchTests
         LootWhy.Result wait = LootWhy.Explain(p, bare, Ctx(), hasIdData: false);
         Check.Eq(wait.Verdict, VTankLootVerdict.NeedsId, "no ID: waits");
         Check.Eq(wait.RuleName, "(M) Bow (OD +10)", "names the rule that needs it");
+    }
+
+    // 2026-10-31: the same answer as a report the chat lines and the window are both made from.
+    private static void LootWhyReportWords()
+    {
+        FakeHost.Reset();
+        VTankLootProfile p = Excerpt();
+        var plain = PlusNineXbow();
+        FakeHost.SpellIds.Remove(unchecked((uint)plain.Wo.Id));
+        LootWhy.Result why = LootWhy.Explain(p, plain, Ctx(), hasIdData: true);
+        LootWhy.Report r = LootWhy.Describe("Blunt Crossbow", true, "[Salvage] (Salv) Gold", "lootsnob.utl", p.Rules.Count, why, askedForId: false);
+        Check.True(r.Ok && r.RuleDetail, "a VTank profile: rule-by-rule");
+        Check.Eq(r.Headline, "'Blunt Crossbow' (identified) -> [Salvage] (Salv) Gold", "the headline: the item, its ID, the looter");
+        Check.True(r.Decision.StartsWith($"lootsnob.utl: rule {why.Index + 1} of {p.Rules.Count} '(Salv) Gold' [", StringComparison.Ordinal), $"the decision names the rule ({r.Decision})");
+        Check.Eq(r.NearMisses.Count, why.NearMisses.Count, "every near miss is in the report (the window lists them all)");
+
+        var lines = LootWhy.ChatLines(r, 2);
+        Check.Eq(lines[0], "[RynthAi] Loot why: " + r.Headline, "chat line 1: the headline");
+        Check.Eq(lines[1], "[RynthAi]   " + r.Decision, "chat line 2: the decision");
+        Check.True(lines[2].Contains($"{r.NearMisses.Count} rule(s) above it came close"), "then how many came close");
+        Check.Eq(lines[3], "[RynthAi]   " + LootWhy.NearMissLine(r.NearMisses[0]), "then each, as #N 'name': failed");
+        Check.True(r.NearMisses.Count <= 2 || lines[^1].Contains($"{r.NearMisses.Count - 2} more in the log"), "past the chat's limit: the rest are counted (the log has them)");
+        Check.Eq(lines.Count, 3 + Math.Min(2, r.NearMisses.Count) + (r.NearMisses.Count > 2 ? 1 : 0), "no other lines");
+        Check.True(LootWhy.NearMissLine(new LootWhy.NearMiss(4, "Rule", "x: read 1")) == "#5 'Rule': x: read 1", "a near miss counts from 1");
+
+        LootWhy.Result wait = LootWhy.Explain(p, PlusNineXbow(withId: false), Ctx(), hasIdData: false);
+        LootWhy.Report w = LootWhy.Describe("Blunt Crossbow", false, "left", "lootsnob.utl", p.Rules.Count, wait, askedForId: true);
+        Check.True(w.Decision.EndsWith("needs the item's ID to decide", StringComparison.Ordinal) && w.Headline.Contains("(not identified yet)"), "no ID: which rule waits for it");
+        Check.True(LootWhy.ChatLines(w, 10).Contains("[RynthAi]   Asked for its ID; /ra loot why again once it's in."), "and that it asked for it");
+
+        LootWhy.Report native = LootWhy.Describe("Blunt Crossbow", true, "[Keep] Xbows", "", 0, null, false);
+        Check.False(native.RuleDetail, "RynthAi's own (.json) profile: no rule-by-rule detail");
+        var one = LootWhy.ChatLines(native, 10);
+        Check.Eq(one.Count, 1, "one chat line");
+        Check.True(one[0].EndsWith("(Rule-by-rule detail is for VTank .utl profiles.)", StringComparison.Ordinal), "that says so");
+
+        LootWhy.Report rares = LootWhy.ModeOnly("Blunt Crossbow", true, "left", "Loot Mode: Rares and needed mana stones only (the loot profile isn't used)");
+        Check.True(rares.Ok && !rares.RuleDetail, "rares mode: the mode decides, no rule detail");
+        Check.Eq(LootWhy.ChatLines(rares, 10).Single(),
+            "[RynthAi] Loot why: 'Blunt Crossbow' (identified) -> left. Loot Mode: Rares and needed mana stones only (the loot profile isn't used).",
+            "chat: one line naming the Loot Mode, not the .utl note");
+
+        LootWhy.Report fail = LootWhy.Report.Fail("select an item first");
+        Check.False(fail.Ok, "a failed report");
+        Check.Eq(fail.Headline, "select an item first", "its headline is the reason");
+        Check.Eq(LootWhy.ChatLines(fail, 10).Single(), "[RynthAi] loot why: select an item first", "chat: one line, the reason");
     }
 }

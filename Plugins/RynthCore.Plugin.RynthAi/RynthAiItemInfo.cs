@@ -217,8 +217,11 @@ public sealed partial class RynthAiPlugin
         {
             LegacyUi.LegacyUiSettings? settings = _dashboard?.Settings;
             WorldObject? wo = _objectCache?[itemId];
-            if (!_lootInspectMode || settings == null || wo == null || string.IsNullOrEmpty(settings.CurrentLootPath)) return "";
-            if (!ClassifyLootItem(wo, settings, preview: true, out string action, out _, out string rule, out string builtIn))
+            bool rares = settings != null && Loot.LootModes.IsRares(settings.LootMode);
+            if (!_lootInspectMode || settings == null || wo == null || (!rares && string.IsNullOrEmpty(settings.CurrentLootPath))) return "";
+            bool taken = ClassifyLootItem(wo, settings, preview: true, out string action, out _, out string rule, out string builtIn);
+            if (!taken && rares) return " | Loot: leave" + (builtIn.Length > 0 ? " - " + builtIn : "");
+            if (!taken)
                 // A rule can match and still not take it (its Keep # reached, a Read rule on a non-scroll).
                 return rule.Length > 0 ? $" | Loot: leave ({rule} matched, not taken)" : " | Loot: no rule matched";
             if (builtIn.Length > 0) return $" | Loot: [{action}] built-in - {builtIn}";

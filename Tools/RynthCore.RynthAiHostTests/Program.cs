@@ -60,6 +60,8 @@ internal static class Program
         VTankLootTests.Register(runner);
         LootRuleMatchTests.Register(runner);
         LootLateIdTests.Register(runner);
+        LootWandTests.Register(runner);
+        LootRaresModeTests.Register(runner);
         LootChatLineTests.Register(runner);
         LootSurveyTests.Register(runner);
         PropertyDumpTests.Register(runner);
@@ -119,6 +121,8 @@ internal static class Program
         InstallPathsTests.Register(runner);
         PetRefillTests.Register(runner);
         AutoStackTests.Register(runner);
+        AutoVendorSplitTests.Register(runner);
+        AutoVendorZeroRateTests.Register(runner);
         BackAwayTests.Register(runner);
         ServerPluginForwardTests.Register(runner);
         IgnoreMonsterTests.Register(runner);
@@ -147,6 +151,7 @@ internal static class Program
         DeathRecallTests.Register(runner);
         InventoryAttributeFilterTests.Register(runner);
         StuckCastTests.Register(runner);
+        KillNoticeTests.Register(runner);
         PacerEdgeTests.Register(runner);
         RecoveryRetryTests.Register(runner);
         HpFailsafeTests.Register(runner);
@@ -155,8 +160,10 @@ internal static class Program
         ShieldBuffTests.Register(runner);
         RebuffWhenIdleTests.Register(runner);
         LootPacingTests.Register(runner);
+        LootJumpTests.Register(runner);
         CorpseCloseTests.Register(runner);
         VTankHotkeyTests.Register(runner);
+        FightSelectedTests.Register(runner);
         OneTouchHealTests.Register(runner);
         SaveFailureTests.Register(runner);
         EnvironmentImpactTests.Register(runner);
@@ -176,6 +183,7 @@ internal static class Program
         ChoresInFightTests.Register(runner);
         CommandReplyTests.Register(runner);
         MonsterStatsTests.Register(runner);
+        MetaSaveTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

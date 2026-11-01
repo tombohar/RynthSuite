@@ -125,6 +125,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra lootcheckinv  — test the loot profile against inventory");
         ChatLine("[RynthAi] /ra lootcheck     — classify selected item (on|off = auto on click)");
         ChatLine("[RynthAi] /ra loot why      — which loot rule takes the selected item, and why the rules above it didn't");
+        ChatLine("[RynthAi] /ra loot mode [profile|rares] — loot by the loot profile, or rares and needed mana stones only");
         ChatLine("[RynthAi] /ra loot add [keep|keep N|salvage|sell|read] [name|like] [preview] — add a loot rule for the selected item");
         ChatLine("[RynthAi] /ra dumpinv       — dump all inventory items (cache + direct)");
         ChatLine("[RynthAi] /ra combat        — dump combat state machine snapshot");
@@ -1511,6 +1512,25 @@ public sealed partial class RynthAiPlugin
             RynthLog.Write(LogCat.Looting, countMessage);
         }
 
+        // A rule with no conditions is unconditional (VTank's too): it takes every item that reaches
+        // it. R-20261101-133624-7eeb (Conquest, 2026-11-01): every item on every corpse was kept by
+        // 'Trade Note', which in LootSnob is a Name match; one that has lost its condition does
+        // exactly that, silently. Said at load, with where it stands, so it can be fixed.
+        var unconditional = profile.Rules
+            .Select((r, i) => (Rule: r, Index: i))
+            .Where(x => x.Rule.Conditions.Count == 0)   // a disabled rule carries a DisabledRule node, so it isn't one
+            .ToList();
+        if (unconditional.Count > 0)
+        {
+            var first = unconditional[0];
+            string names = string.Join(", ", unconditional.Take(3).Select(x => $"'{(string.IsNullOrWhiteSpace(x.Rule.Name) ? "#" + (x.Index + 1) : x.Rule.Name.Trim())}' (rule {x.Index + 1}, {x.Rule.Action})"));
+            string uncMessage = $"[RynthAi] Loot profile '{fileName}': {unconditional.Count} rule(s) have no conditions, so they take every item that reaches them: {names}"
+                             + (unconditional.Count > 3 ? $" and {unconditional.Count - 3} more" : "")
+                             + $". Every item that no rule above rule {first.Index + 1} takes will be {first.Rule.Action}. Add a condition in the Loot Editor, or disable the rule.";
+            ChatLine(uncMessage);
+            RynthLog.Write(LogCat.Looting, uncMessage);
+        }
+
         var bad = new List<string>();
         foreach (VTankLootRule rule in profile.Rules)
         {
@@ -1700,15 +1720,27 @@ public sealed partial class RynthAiPlugin
         string sub = parts.Length >= 3 ? parts[2].ToLowerInvariant() : string.Empty;
         if (sub == "why")
         {
-            HandleLootWhyCommand();
+            string how = parts.Length >= 4 ? parts[3].ToLowerInvariant() : string.Empty;
+            if (how.Length > 0 && how is not ("window" or "show"))
+            {
+                ReplyFail($"[RynthAi] loot why: '{parts[3]}'? Usage: /ra loot why [window] (window: the answer in the Loot why window).");
+                return;
+            }
+            HandleLootWhyCommand(window: how.Length > 0);
+            return;
+        }
+        if (sub == "mode")
+        {
+            HandleLootModeCommand(parts);
             return;
         }
         if (sub != "add")
         {
-            ChatLine("[RynthAi] /ra loot why — which loot rule takes the selected item, and why the rules above it didn't");
+            ChatLine("[RynthAi] /ra loot mode [profile|rares] — what is looted: the loot profile, or rares and needed mana stones only");
+            ChatLine("[RynthAi] /ra loot why [window] — which loot rule takes the selected item, and why the rules above it didn't (window: in the Loot why window)");
             ChatLine("[RynthAi] /ra loot add [keep|keep N|salvage|sell|read] [name|like] [t11] [preview] — add a loot rule for the selected item to the loot profile in use");
             ChatLine("[RynthAi]   default: exact name + class; Read for scrolls, Keep # (one full stack) for stacks, else Keep. name = name only, like = items like this. t11 = also require its T11 tier, grade and modifiers (at least this good). preview = show it, add nothing.");
-            ChatLine("[RynthAi]   Also: right-click an item in the Inventory panel, or 'Add selected item' in the Loot Editor.");
+            ChatLine("[RynthAi]   Also: right-click an item in the Inventory panel, or 'Add selected item' in the Loot Editor; 'Why this loot rule?' there and on the Selection window's right-click.");
             return;
         }
 
@@ -1756,70 +1788,129 @@ public sealed partial class RynthAiPlugin
         // An add's own chat line comes from OnLootRuleAdded.
     }
 
+    /// <summary>
+    /// /ra loot mode [profile|rares]: the Loot Mode (Loot.LootModes), saved with the settings
+    /// profile. No word: says the mode now.
+    /// </summary>
+    private void HandleLootModeCommand(string[] parts)
+    {
+        const string usage = "/ra loot mode profile|rares (profile: the loot profile; rares: rares and needed mana stones only)";
+        var dash = _dashboard;
+        LegacyUiSettings? s = dash?.Settings;
+        if (s == null) { ReplyFail("[RynthAi] loot mode: settings aren't loaded yet (log in first). Usage: " + usage); return; }
+        if (parts.Length < 4)
+        {
+            ChatLine($"[RynthAi] Loot Mode: {LootModeLine(s)}. Usage: {usage}");
+            return;
+        }
+        string arg = string.Join(" ", parts, 3, parts.Length - 3);
+        if (!Loot.LootModes.TryParse(arg, out int mode))
+        {
+            ReplyFail($"[RynthAi] loot mode: '{arg}'? Loot Mode is still {LootModeLine(s)}. Usage: {usage}");
+            return;
+        }
+        s.LootMode = mode;
+        dash!.SaveSettings();
+        ReplyOk($"[RynthAi] Loot Mode: {LootModeLine(s)}.");
+    }
+
+    /// <summary>The dashboard's LOOT picker set the Loot Mode. Plugin tick.</summary>
+    internal void SetLootModeFromPanel(int mode)
+    {
+        var dash = _dashboard;
+        LegacyUiSettings? s = dash?.Settings;
+        if (s == null) return;
+        mode = Loot.LootModes.Clamp(mode);
+        if (s.LootMode == mode) return;
+        s.LootMode = mode;
+        dash!.SaveSettings();
+        ChatLine($"[RynthAi] Loot Mode: {LootModeLine(s)}.");
+    }
+
+    /// <summary>The mode for a chat line, with what it means for the loot profile.</summary>
+    private static string LootModeLine(LegacyUiSettings s)
+    {
+        int mode = Loot.LootModes.Clamp(s.LootMode);
+        if (!Loot.LootModes.IsRares(mode)) return Loot.LootModes.Describe(mode);
+        string profile = string.IsNullOrEmpty(s.CurrentLootPath) ? "" : $"; the loot profile {System.IO.Path.GetFileName(s.CurrentLootPath)} is not used";
+        return $"{Loot.LootModes.Describe(mode)} (mana stones up to the keep count, {s.ManaStoneKeepCount}{profile})";
+    }
+
     private const int LootWhyChatLines = 10;
 
     /// <summary>
-    /// /ra loot why: the selected item's loot decision, from the looter itself (built-in keeps and
-    /// Keep # caps included), then, for a VTank profile, the rule that takes it and, for the rules
-    /// above it that came close, the first condition that failed and the value it read. The full
-    /// list goes to the log. An item without its ID says which rule waits for it and asks for it.
+    /// /ra loot why [window]: the selected item's loot decision (<see cref="BuildLootWhyReport"/>) in
+    /// chat, or (<paramref name="window"/>: window, the "Why this loot rule?" buttons) in the Loot why
+    /// window, which then says it all instead.
     /// </summary>
-    private void HandleLootWhyCommand()
+    private void HandleLootWhyCommand(bool window = false)
     {
-        if (!Host.HasGetSelectedItemId) { ReplyFail("[RynthAi] loot why: this engine can't tell RynthAi the selected item."); return; }
+        Loot.LootWhy.Report report = BuildLootWhyReport(window);
+        if (window)
+        {
+            // The window is the answer ("Why this loot rule?" buttons, /ra loot why window).
+            ShowLootWhyWindow(report);
+            return;
+        }
+        List<string> lines = Loot.LootWhy.ChatLines(report, LootWhyChatLines);
+        if (!report.Ok)
+        {
+            ReplyFail(lines[0]);
+            return;
+        }
+        foreach (string line in lines) ChatLine(line);
+    }
+
+    /// <summary>
+    /// The selected item's loot decision, from the looter itself (built-in keeps and Keep # caps
+    /// included), then, for a VTank profile, the rule that takes it and the rules above it that came
+    /// close (all of them in the log, [LootWhy] lines). An item without its ID: asks for it.
+    /// <paramref name="window"/>: for the window, so a failure says what to do there. Pump thread.
+    /// </summary>
+    private Loot.LootWhy.Report BuildLootWhyReport(bool window)
+    {
+        if (!Host.HasGetSelectedItemId) return Loot.LootWhy.Report.Fail("this engine can't tell RynthAi the selected item.");
         uint selected = Host.GetSelectedItemId();
-        if (selected == 0) { ReplyFail("[RynthAi] loot why: select an item first (on a corpse, the ground or in a pack), then /ra loot why."); return; }
+        if (selected == 0)
+            return Loot.LootWhy.Report.Fail(window
+                ? "select an item first (on a corpse, the ground or in a pack), then Check again."
+                : "select an item first (on a corpse, the ground or in a pack), then /ra loot why.");
         WorldObject? item = _objectCache?[unchecked((int)selected)];
-        if (item == null) { ReplyFail($"[RynthAi] loot why: item 0x{selected:X8} isn't known yet; select it again in a moment."); return; }
+        if (item == null) return Loot.LootWhy.Report.Fail($"item 0x{selected:X8} isn't known yet; select it again in a moment.");
         LegacyUiSettings? settings = _dashboard?.Settings;
-        if (settings == null) { ReplyFail("[RynthAi] loot why: settings aren't loaded yet (log in first)."); return; }
+        if (settings == null) return Loot.LootWhy.Report.Fail("settings aren't loaded yet (log in first).");
+        string path = (settings.CurrentLootPath ?? string.Empty).Trim().Trim('"');
+        if (path.Length == 0) return Loot.LootWhy.Report.Fail("no loot profile is selected. Pick one on the dashboard (Loot).");
+        if (!System.IO.File.Exists(path)) return Loot.LootWhy.Report.Fail("the loot profile in use isn't there: " + path);
 
         bool hasId = !Host.HasHasAppraisalData || Host.HasAppraisalData(selected);
-        string idNote = hasId ? "identified" : "not identified yet";
-
         bool taken = ClassifyLootItem(item, settings, preview: true, out string action, out _, out string ruleLabel, out string builtIn);
         string looter = taken ? $"[{action}] {ruleLabel}" : "left";
         if (builtIn.Length > 0) looter += " (" + builtIn + ")";
 
-        if (TryLoadNativeLootProfile(out _, out _))
+        // Rares mode: its verdict is the whole answer (the loot profile isn't used).
+        if (Loot.LootModes.IsRares(settings.LootMode))
         {
-            ChatLine($"[RynthAi] Loot why: '{item.Name}' ({idNote}) -> {looter}. (Rule-by-rule detail is for VTank .utl profiles.)");
-            return;
+            Host.Log($"[LootWhy] '{item.Name}' 0x{selected:X8} {Loot.LootWhy.IdNote(hasId)} -> {looter}; Loot Mode rares");
+            return Loot.LootWhy.ModeOnly(item.Name, hasId, looter, $"Loot Mode: {LootModeLine(settings)} (the loot profile isn't used)");
         }
-        if (!TryLoadLootProfile(string.Empty, out VTankLootProfile profile, out string path))
-            return;   // it said why
+
+        if (TryLoadNativeLootProfile(out _, out _))
+            return Loot.LootWhy.Describe(item.Name, hasId, looter, string.Empty, 0, null, false);
+        if (!TryLoadLootProfile(string.Empty, out VTankLootProfile profile, out path))
+            return Loot.LootWhy.Report.Fail("the loot profile in use couldn't be read (chat says why).");
 
         VTankLootContext ctx = new(Host, _playerId) { Cache = _objectCache };
         Loot.LootWhy.Result why = Loot.LootWhy.Explain(profile, item, ctx, hasId);
-        string file = System.IO.Path.GetFileName(path);
-        string rule = why.Index >= 0 ? $"rule {why.Index + 1} of {profile.Rules.Count} '{why.RuleName}'" : string.Empty;
-        string decision = why.Verdict switch
-        {
-            VTankLootVerdict.Match   => $"{file}: {rule} [{why.Action}]",
-            VTankLootVerdict.NeedsId => $"{file}: {rule} needs the item's ID to decide",
-            _                        => $"{file}: no rule matches",
-        };
-        ChatLine($"[RynthAi] Loot why: '{item.Name}' ({idNote}) -> {looter}");
-        ChatLine($"[RynthAi]   {decision}");
-        Host.Log($"[LootWhy] '{item.Name}' 0x{selected:X8} {idNote} -> {looter}; {decision}");
-        if (why.Verdict == VTankLootVerdict.NeedsId && Host.HasRequestId && Host.RequestId(selected))
-            ChatLine("[RynthAi]   Asked for its ID; /ra loot why again once it's in.");
-
-        if (why.NearMisses.Count == 0)
-        {
-            ChatLine("[RynthAi]   No rule above it came close (each failed on its first condition).");
-            return;
-        }
-        ChatLine($"[RynthAi]   {why.NearMisses.Count} rule(s) above it came close; the first condition each failed:");
-        for (int i = 0; i < why.NearMisses.Count; i++)
-        {
-            var m = why.NearMisses[i];
-            string line = $"#{m.Index + 1} '{m.RuleName}': {m.Failed}";
-            Host.Log("[LootWhy]   " + line);
-            if (i < LootWhyChatLines) ChatLine("[RynthAi]   " + line);
-        }
-        if (why.NearMisses.Count > LootWhyChatLines)
-            ChatLine($"[RynthAi]   ... {why.NearMisses.Count - LootWhyChatLines} more in the log ([LootWhy] lines).");
+        bool asked = why.Verdict == VTankLootVerdict.NeedsId && Host.HasRequestId && Host.RequestId(selected);
+        Loot.LootWhy.Report report = Loot.LootWhy.Describe(item.Name, hasId, looter, System.IO.Path.GetFileName(path),
+            profile.Rules.Count, why, asked);
+        Host.Log($"[LootWhy] '{item.Name}' 0x{selected:X8} {Loot.LootWhy.IdNote(hasId)} -> {looter}; {report.Decision}");
+        if (report.SwitchedOff.Length > 0)
+            Host.Log("[LootWhy]   " + Loot.LootWhy.SwitchedOffLine(report.SwitchedOff));
+        foreach (Loot.LootWhy.NearMiss m in report.NearMisses)
+            Host.Log("[LootWhy]   " + Loot.LootWhy.NearMissLine(m));
+        return report;
     }
 
     private bool TryLoadNativeLootProfile(out RynthCore.Loot.LootProfile profile, out string loadedPath)
@@ -1885,11 +1976,27 @@ public sealed partial class RynthAiPlugin
         ChatLine($"[RynthAi] enableCombat={s.EnableCombat}  busy={s.BusyCount}  facing={s.FacingTarget}");
         ChatLine($"[RynthAi] targets: total={total} ring={ring} possible={poss} losBlk={losBlk}  scanned={s.ScannedCount}");
         ChatLine($"[RynthAi] active=0x{(uint)s.ActiveTargetId:X8}  locked=0x{(uint)s.LockedTargetId:X8}");
+        int forced = _combatManager.ForcedTargetId;
+        bool bySelection = _combatManager.ForcedBySelection;
+        if (forced != 0)
+        {
+            string forcedName = _objectCache?[forced]?.Name ?? $"0x{(uint)forced:X8}";
+            ChatLine(bySelection
+                ? $"[RynthAi] fighting the monster you selected: {forcedName} (Fight the monster I select{(forced == s.ActiveTargetId ? "" : "; not in reach yet")})"
+                : $"[RynthAi] target lock (/ra targetlock): {forcedName}{(forced == s.ActiveTargetId ? "" : " (not in reach yet)")}");
+        }
         // D4 record-only skip reasons: why the last combat/buff cycle did (or didn't) cast.
         ChatLine($"[RynthAi] combatSkip='{s.LastCombatSkipReason}'"
                  + (_buffManager != null ? $"  buffSkip='{_buffManager.GetStateSnapshot().LastBuffSkipReason}'" : ""));
         if (s.ScannedCount > 0)
             ChatLine($"[RynthAi] closest: '{s.ClosestScannedName}' @ {s.ClosestScannedDist:0.0}yd");
+        // A higher-priority monster the target was picked over, and why: often just Monster Range
+        // (a setting), sometimes a wall. Only monsters inside Monster Range are candidates.
+        string? passedOver = _combatManager.DescribeHigherPriorityPassedOver();
+        if (passedOver != null)
+            ChatLine($"[RynthAi] higher priority not targeted: {passedOver}"
+                     + (passedOver.Contains("beyond Monster Range", StringComparison.Ordinal)
+                        ? " - raise Monster Range (Advanced settings, Ranges) to fight it from farther" : ""));
         ChatLine($"[RynthAi] melee/missile: lastSwing={_combatManager.LastSwingEvidenceDescription}  attackRebinds={_combatManager.AttackRebinds}  "
                  + $"stallWatch episodes={_combatManager.StallEpisodes} recovered={_combatManager.StallRecoveries}");
 
@@ -1924,7 +2031,11 @@ public sealed partial class RynthAiPlugin
             !s.IsMacroRunning        ? "macro is STOPPED (start it from the panel / command)." :
             !s.EnableCombat          ? "combat is disabled in settings." :
             s.BusyCount > 0          ? "AC busy>0 — waiting on a server action (cast/use/move); try /ra clearbusy if stuck." :
-            total < 0                ? "no combat scan has run yet (cold start / just logged in)." :
+            forced != 0 && forced == s.ActiveTargetId && bySelection
+                                     ? "fighting the monster you selected (Fight the monster I select: Settings > Ranges)." :
+            forced != 0 && forced == s.ActiveTargetId
+                                     ? "fighting the target-locked monster (/ra targetlock; /ra targetlock off releases it)." :
+            total < 0              ? "no combat scan has run yet (cold start / just logged in)." :
             total == 0               ? "no monsters in the object cache (respawn-blind, or wrong area)." :
             ring  == 0               ? "monsters exist but ALL out of engage range (nav not closing distance?)." :
             poss == 0 && losBlk > 0  ? "monsters in range but LOS-blocked (behind walls)." :

@@ -38,6 +38,7 @@ public sealed partial class RynthAiPlugin
     private long _groundTargetSince;
     private long _groundPickupRequestedAt;
     private int _groundPickupAttempts;
+    private int _groundErrSeqAtSend;   // the refusal counter at the last send (a quest refusal since then)
     private string _groundTargetName = string.Empty;
     private string _groundTargetAction = string.Empty;
     private string _groundTargetRule = string.Empty;
@@ -115,8 +116,9 @@ public sealed partial class RynthAiPlugin
         if (_objectCache == null || maxMeters <= 0.25)
             return null;
         // The profile loaders chat on every failed load; a 300 ms scan must not trigger that.
+        // Rares mode loads no profile (rares and needed mana stones only).
         string profilePath = (settings.CurrentLootPath ?? string.Empty).Trim().Trim('"');
-        if (profilePath.Length == 0 || !System.IO.File.Exists(profilePath))
+        if (!Loot.LootModes.IsRares(settings.LootMode) && (profilePath.Length == 0 || !System.IO.File.Exists(profilePath)))
             return null;
 
         int playerId = unchecked((int)_playerId);
@@ -244,6 +246,17 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
+        // The server won't hand it over yet (a pickup timer, a quest flag: 2026-11-01, #rynth-issues
+        // "Stopped looting"): no retry will do better for minutes, and an answer naming no object
+        // leaves the client's request slot full (see LeaveQuestRefusedLootItem).
+        if (QuestPickupRefusedSince(_groundErrSeqAtSend, id, out uint questErr, out uint questObj))
+        {
+            LootDiag($"[RynthAi] Ground loot: the server won't hand over 0x{(uint)id:X8} '{_groundTargetName}': {QuestPickupRefusalText(questErr)} (error 0x{questErr:X}, object 0x{questObj:X8}); leaving it.");
+            EmptyClientRequestAfterAnonymousRefusal(questObj);
+            FinishGroundTarget(now, GroundFailCooldownMs);
+            return;
+        }
+
         if (now - _groundPickupRequestedAt < GroundPickupVerifyMs)
             return;
 
@@ -265,6 +278,7 @@ public sealed partial class RynthAiPlugin
 
         uint uid = unchecked((uint)_groundTargetId);
         Host.SelectItem(uid);
+        _groundErrSeqAtSend = LastWeenieErrorSeq();
         bool sent = Host.HasMoveItemExternal
             ? Host.MoveItemExternal(uid, _playerId, 0)
             : Host.UseObject(uid);

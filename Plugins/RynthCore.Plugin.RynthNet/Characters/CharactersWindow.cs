@@ -57,7 +57,7 @@ internal sealed class CharactersWindow
         "follow me, stop following, start or stop the macro. They go through RynthNet, so the other client's " +
         "remote command setting (/rn remote) decides whether they run.\n\n" +
         "The arrows-in button (or /rn view minimal) shows one line per character without the frame; " +
-        "hover it for the pencil (or /rn view full) to come back here. Kept per character.\n\n" +
+        "its pencil (or /rn view full) comes back here. Kept per character.\n\n" +
         "/rc characters opens and closes this window.";
 
     private float _k = 1f;
@@ -70,7 +70,7 @@ internal sealed class CharactersWindow
     private bool _openMenu;
 
     public CharactersWindow(RynthCoreHost host, Action<uint> select, Action<string, string> tell, Action followMeAll,
-        Func<(bool, float)> heading, Action<CharactersViewMode> setView)
+        Func<(bool, float)> heading, Action<CharactersViewMode> setView, Action? useSelectionAll = null)
     {
         _host = host;
         _select = select;
@@ -78,7 +78,11 @@ internal sealed class CharactersWindow
         _followMeAll = followMeAll;
         _heading = heading;
         _setView = setView;
+        _useSelectionAll = useSelectionAll;
     }
+
+    // "Everyone: use my selection" (/rn usesel); null = not offered.
+    private readonly Action? _useSelectionAll;
 
     /// <summary>
     /// Draws the window body into the current ImGui window in <paramref name="mode"/>'s look.
@@ -247,13 +251,13 @@ internal sealed class CharactersWindow
                 }
             }
 
-            // The pencil: back to the full look (shown while the mouse is on the window).
-            if (windowHot)
+            // The pencil: back to the full look. Always there (2026-10-31: a control you can see, not
+            // one that shows on hover), faint until the mouse is on the window.
             {
                 float bs = rowH - 2;
                 var bp = new Vector2(Math.Min(start.X + lineW + Px(4), origin.X + width - bs - 2), start.Y + 1);
-                if (IconButton("##chars_full", RynthIcons.PencilSimple, bp, new Vector2(bs, bs), Text, WithAlpha(Background, 0xE0),
-                        font: RynthUiFont.Ui11))
+                if (IconButton("##chars_full", RynthIcons.PencilSimple, bp, new Vector2(bs, bs), windowHot ? Text : Faded(Text),
+                        WithAlpha(Background, windowHot ? 0xE0u : 0x70u), font: RynthUiFont.Ui11))
                     _setView(CharactersViewMode.Full);
                 ImGui.SetItemTooltip("Edit: the full window with every column, to move or resize it (/rn view full)");
             }
@@ -632,6 +636,14 @@ internal sealed class CharactersWindow
             }
             if (ImGui.MenuItem("Everyone: follow me", "", false, canFollow)) _followMeAll();
             ImGui.SetItemTooltip("/rn followme");
+            if (_useSelectionAll != null)
+            {
+                bool hasSelection = _host.HasGetSelectedItemId && _host.GetSelectedItemId() != 0;
+                if (ImGui.MenuItem("Everyone: use my selection", "", false, hasSelection)) _useSelectionAll();
+                SafeImGui.SetItemTooltip(hasSelection
+                    ? "The other clients use what you have selected (a portal, a door, an NPC): /rn usesel"
+                    : "Select something first (a portal, a door, an NPC). /rn usesel");
+            }
             ImGui.TextDisabled("The other client's /rn remote setting decides.");
         }
         finally

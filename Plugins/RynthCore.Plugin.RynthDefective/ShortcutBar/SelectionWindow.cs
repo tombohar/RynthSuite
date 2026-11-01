@@ -3,12 +3,15 @@
 //  What is selected, as the retail toolbar showed it (Tom 2026-10-22: "people
 //  use it all the time to find things near them: doors, monsters"): its
 //  picture and name, how far and which way it is (an arrow from where you
-//  face, and the compass point), and the health bar of a creature or player.
+//  face, and the compass point), and the health bar of a creature or player,
+//  or the mana bar of an item with mana (2026-11-01, as retail showed it).
 //  USE uses it (opens a door, talks to an NPC). AC's own selection keys still
 //  pick what is selected; this only shows it.
 //
 //    the name row  drag to move; Ctrl+wheel: bigger or smaller (30-250%);
-//                  right-click: hide it (Settings > UI > Toolbar, /rdef selection).
+//                  right-click: a menu (2026-10-31): "Why this loot rule?" for
+//                  an item (RynthAi's /ra loot why, in its window) and hide it
+//                  (Settings > UI > Toolbar, /rdef selection show it again).
 //    the quantity  under a stack or a vendor's item (2026-10-30): how many, and
 //                  Split / Give / Buy that many (SelectionWindow.Quantity.cs).
 //
@@ -42,6 +45,14 @@ internal sealed record SelectionView(
 
     /// <summary>The quantity box for a stack or a vendor's item; null = none.</summary>
     public QuantityView? Qty { get; init; }
+
+    /// <summary>A creature or player (no loot rule applies to it).</summary>
+    public bool Creature { get; init; }
+
+    /// <summary>An item's mana, 0-1, or -1 when it has none known; with its points (0 = unknown).</summary>
+    public float Mana { get; init; } = -1f;
+    public uint ManaCur { get; init; }
+    public uint ManaMax { get; init; }
 }
 
 internal sealed partial class SelectionWindow
@@ -73,6 +84,7 @@ internal sealed partial class SelectionWindow
 
     private uint _bg, _key, _inset, _line, _text, _dim, _faint, _accent;
     private static readonly uint HealthColor = Argb(0xFFE0564E), HealthHigh = Argb(0xFF73D885), White = Argb(0xFFFFFFFF);
+    private static readonly uint ManaColor = Argb(0xFF4F8DF0);
     private static uint A(uint c, float alpha) => WithAlpha(c, (uint)Math.Clamp(MathF.Round(alpha * 255f), 0f, 255f));
 
     /// <summary>Draws the selection into the host's window; returns the height it needs (pixels). Render thread.</summary>
@@ -110,10 +122,11 @@ internal sealed partial class SelectionWindow
         ImGui.SetCursorScreenPos(origin);
         ImGui.InvisibleButton("##sel_drag", new Vector2(Math.Max(1, width - useW - (hasUse ? pad : 0)), height));
         _host.PanelDragWithLastItem();
-        if (ImGui.IsItemClicked(ImGuiMouseButton.Right)) _host.SetPanelOpen(Title, RynthPanelOpen.Close);
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Right)) ImGui.OpenPopup(MenuId);
         SafeImGui.SetItemTooltip(v.Id == 0
-            ? "Nothing selected. Select with a click or the game's selection keys (- and = go through what's near you).\nDrag to move; Ctrl+wheel: bigger or smaller; right-click: hide."
-            : $"{v.Name}{(v.Where.Length > 0 ? " - " + v.Where : "")}\nDrag to move; Ctrl+wheel: bigger or smaller; right-click: hide.");
+            ? "Nothing selected. Select with a click or the game's selection keys (- and = go through what's near you).\nDrag to move; Ctrl+wheel: bigger or smaller; right-click: the menu (hide it)."
+            : $"{v.Name}{(v.Where.Length > 0 ? " - " + v.Where : "")}\nDrag to move; Ctrl+wheel: bigger or smaller; right-click: the menu (why this loot rule, hide it).");
+        Menu(v);
 
         // The picture.
         Vector2 ip = origin + new Vector2(pad, pad);
@@ -135,7 +148,7 @@ internal sealed partial class SelectionWindow
             return height;
         }
 
-        // Name, then the health bar (a creature or player) and where it is.
+        // Name, then the bar (a creature's or player's health, an item's mana) and where it is.
         Clip(dl, nf, Fs(nf), new Vector2(tx, ip.Y), _text, v.Name, right - tx);
         float lineY = ip.Y + icon - Fs(sf);
         float x = tx;
@@ -145,16 +158,21 @@ internal sealed partial class SelectionWindow
             Arrow(dl, new Vector2(x + s * 0.5f, lineY + s * 0.5f), s * 0.5f, v.Relative, _accent);
             x += s + Px(3);
         }
-        if (v.Health >= 0f)
+        bool mana = v.Health < 0f && v.Mana >= 0f;
+        if (v.Health >= 0f || mana)
         {
             float barY = ip.Y + Fs(nf) + Px(3);
             float barW = right - tx, barH = Px(BarH);
             Vector2 b0 = new(tx, barY), b1 = new(tx + barW, barY + barH);
             dl.AddRectFilled(b0, b1, _inset, Px(2));
-            float f = Math.Clamp(v.Health, 0f, 1f);
-            if (f > 0f) dl.AddRectFilled(b0, new Vector2(tx + barW * f, barY + barH), f > 0.6f ? A(HealthHigh, 0.9f) : HealthColor, Px(2));
+            float f = Math.Clamp(mana ? v.Mana : v.Health, 0f, 1f);
+            uint fill = mana ? ManaColor : f > 0.6f ? A(HealthHigh, 0.9f) : HealthColor;
+            if (f > 0f) dl.AddRectFilled(b0, new Vector2(tx + barW * f, barY + barH), fill, Px(2));
             dl.AddRect(b0, b1, _line, Px(2));
-            string pct = (v.Max > 0 ? $"{v.Current}/{v.Max}  " : "") + MathF.Round(f * 100f).ToString(CultureInfo.InvariantCulture) + "%";
+            string points = mana
+                ? v.ManaMax > 0 ? v.ManaCur.ToString("N0", CultureInfo.InvariantCulture) + "/" + v.ManaMax.ToString("N0", CultureInfo.InvariantCulture) + "  " : ""
+                : v.Max > 0 ? $"{v.Current}/{v.Max}  " : "";
+            string pct = points + MathF.Round(f * 100f).ToString(CultureInfo.InvariantCulture) + "%";
             float pw = sf.CalcTextSizeA(Fs(sf), float.MaxValue, 0f, pct).X;
             dl.AddText(sf, Fs(sf), new Vector2(right - pw, lineY), _dim, pct);
             Clip(dl, sf, Fs(sf), new Vector2(x, lineY), _dim, v.Where, right - pw - Px(6) - x);
@@ -179,6 +197,42 @@ internal sealed partial class SelectionWindow
         ImGui.SetCursorScreenPos(origin);
         ImGui.Dummy(new Vector2(width, height + qtyH));
         return height + qtyH;
+    }
+
+    private const string MenuId = "##sel_menu";
+
+    /// <summary>"Why this loot rule?" for the selected item (RynthAi answers in its window); null = no RynthAi item.</summary>
+    public Action<uint>? LootWhy { get; set; }
+
+    /// <summary>The right-click menu: why this loot rule (an item, not a creature), hide the window. Render thread.</summary>
+    private void Menu(SelectionView v)
+    {
+        if (!ImGui.IsPopupOpen(MenuId)) return;
+        ImGui.PushStyleColor(ImGuiCol.PopupBg, A(_bg, 0.98f));
+        ImGui.PushStyleColor(ImGuiCol.Border, _line);
+        ImGui.PushStyleVar(ImGuiStyleVar.PopupRounding, Px(4));
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(Px(6), Px(5)));
+        bool open = ImGui.BeginPopup(MenuId);
+        ImGui.PopStyleVar(2);
+        ImGui.PopStyleColor(2);
+        if (!open) return;
+        try
+        {
+            if (v.Id != 0) SafeImGui.TextDisabled(v.Name);
+            else ImGui.TextDisabled("Nothing selected");
+            ImGui.Separator();
+            bool item = v.Ready && v.Id != 0 && !v.Creature;
+            if (LootWhy != null)
+            {
+                if (ImGui.MenuItem("Why this loot rule?", null, false, item)) LootWhy(v.Id);
+                SafeImGui.SetItemTooltip(item
+                    ? "RynthAi's loot profile: which rule takes this item, and why the rules above it didn't (/ra loot why)."
+                    : "Select an item (on a corpse, the ground or in a pack) first.");
+            }
+            if (ImGui.MenuItem("Hide the Selection window")) _host.SetPanelOpen(Title, RynthPanelOpen.Close);
+            SafeImGui.SetItemTooltip("/rdef selection, or Settings > UI > Toolbar > Selection, shows it again.");
+        }
+        finally { ImGui.EndPopup(); }
     }
 
     /// <summary>Text cut with "..." to <paramref name="room"/> pixels.</summary>

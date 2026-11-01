@@ -45,6 +45,7 @@ internal static class Program
         TestPlanBuy();
         TestPlanSell();
         TestPlanNotes();
+        TestLooseNotesAndSplits();
         TestPrices();
         TestSafety();
         TestVendorWillBuy();
@@ -478,6 +479,89 @@ internal static class Program
         var alt = Vendor(buy: 0.5f, alt: true);
         var p6 = AutoVendorPlanner.PlanNext(alt, dear, new List<SellItem> { Note(2, 1) }, Pack(0));
         Eq(p6.Kind, PlanKind.Done, "alt currency: notes kept");
+    }
+
+    // 2026-11-01, Master Raiden Stormcaller: a one-note stack matches the profile's Keep rule for the
+    // vendor's listing ("ObjectClass TradeNote, Value = 250,000"), so a loose single never reached the
+    // sell list and every plan split another note off. Loose singles now pay first; a split's result
+    // is judged from what the server did; a session that can't buy says why.
+    private static void TestLooseNotesAndSplits()
+    {
+        Console.WriteLine("\n-- loose notes, split results, why nothing was bought --");
+        var v = Vendor(buy: 0.7f, sell: 1.15f);
+        SellItem Note(uint id, int stack, string rule = "S: Trade Note") => new()
+        {
+            Id = id, Name = "Trade Note (250,000)", Value = 250_000 * stack, StackSize = stack, Class = AcObjectClass.TradeNote,
+            ItemType = 0x40000, RuleName = rule, MaxStack = 250, Wcid = 20630,
+        };
+        var tapers = new List<BuyWant> { new() { Item = L(10, "Prismatic Taper", 115, value: 100, maxStack: 5000), Amount = 36, RuleName = "B: Prismatic Tapers" } };
+
+        // The owner's profile, as RynthAi judges an identified note stack.
+        var keepListing = Rule("B: Trade Note (250,000)", VTankLootAction.Keep, null, Cond(7, "15"), Cond(12, "250000", "19"));
+        var sellNotes = Rule("S: Trade Note", VTankLootAction.Sell, null, Cond(7, "15"));
+        var rules = new List<VTankLootRule> { keepListing, sellNotes };
+        var noteFacts = new ItemFacts { Appraised = true, ObjectClass = AcObjectClass.TradeNote, ItemType = 0x40000 };
+        var forty = AutoVendorRules.Decide(rules, JudgeFake(noteFacts, "Trade Note (250,000)", new() { [19] = 10_000_000 }));
+        Check(AutoVendorRules.JudgeSell(forty).Sell, "40 notes (10,000,000): the Sell rule takes them");
+        var one = AutoVendorRules.Decide(rules, JudgeFake(noteFacts, "Trade Note (250,000)", new() { [19] = 250_000 }));
+        Eq(one.Rule?.Name, "B: Trade Note (250,000)", "one note (250,000): the listing's Keep rule matches it");
+        Check(!AutoVendorRules.JudgeSell(one).Sell, "so a single note is never on the sell list");
+
+        // A loose single (kept by that rule) pays before any split.
+        var big = Note(1, 39);
+        var loose = Note(2, 1, "loose note");
+        var p1 = AutoVendorPlanner.PlanNext(v, tapers, new List<SellItem> { big }, Pack(0), new List<SellItem> { loose });
+        Eq(p1.Kind, PlanKind.Sell, "a loose note is sold...");
+        Eq(p1.Sells.Single().Id, 2u, "...the loose one");
+        var p2 = AutoVendorPlanner.PlanNext(v, tapers, new List<SellItem> { big }, Pack(0), new List<SellItem>());
+        Eq(p2.Kind, PlanKind.Split, "none loose: split one off");
+        var otherNote = new SellItem { Id = 3, Name = "Trade Note (100,000)", Value = 100_000, StackSize = 1, Class = AcObjectClass.TradeNote, ItemType = 0x40000, MaxStack = 250, Wcid = 2626 };
+        var p3 = AutoVendorPlanner.PlanNext(v, tapers, new List<SellItem> { big }, Pack(0), new List<SellItem> { otherNote });
+        Eq(p3.Kind, PlanKind.Split, "a loose note of another kind doesn't stand in");
+        var p4 = AutoVendorPlanner.PlanNext(v, new List<BuyWant>(), new List<SellItem> { big }, Pack(0), new List<SellItem> { loose });
+        Eq(p4.Kind, PlanKind.Done, "nothing to buy: loose notes stay too");
+
+        // Why nothing was bought.
+        var p5 = AutoVendorPlanner.PlanNext(v, tapers, new List<SellItem>(), Pack(0));
+        Eq(p5.Kind, PlanKind.Done, "can't pay: done");
+        Eq(p5.Message, "can't buy 36x Prismatic Taper (rule 'B: Prismatic Tapers'): 115 pyreals each, you have 0, and nothing the profile sells is here to pay for it", "...and says why");
+        var p6 = AutoVendorPlanner.PlanNext(v, tapers, new List<SellItem>(), Pack(0), new List<SellItem> { loose });
+        Check(p6.Message.Contains("no Sell rule matches a note stack here: the loose Trade Note (250,000) (loose note) stays"), "only loose notes, no sellable note stack: says they stay");
+        var keepAll = new List<BuyWant> { new() { Item = L(11, "Trade Note (250,000)", 287_500, 250_000, cls: AcObjectClass.TradeNote, type: 0x40000), Amount = int.MaxValue } };
+        Eq(AutoVendorPlanner.PlanNext(v, keepAll, new List<SellItem>(), Pack(0)).Message, string.Empty, "a Keep (all you can afford) running out of money is no failure");
+        Check(AutoVendorPlanner.PlanNext(v, tapers, new List<SellItem>(), Pack(1_000_000, free: 1)).Kind == PlanKind.Done
+              && AutoVendorPlanner.ExplainUnmetBuy(v, tapers, new List<SellItem>(), Pack(1_000_000, free: 1)).Contains("only 1 free main-pack slot(s)"), "no room: says so");
+
+        // Where a split went.
+        var sibs = new Dictionary<uint, int> { [1] = 40, [5] = 1 };
+        var none = new HashSet<uint>();
+        var made = AutoVendorSplits.Resolve(1, 40, 39, sibs, new HashSet<uint> { 9 }, new[] { (1u, 39, true), (5u, 1, true), (9u, 1, false) }, false);
+        Eq(made.Kind, SplitOutcomeKind.NewStack, "a create of the item: the new stack");
+        Eq(made.StackId, 9u, "its id");
+        var unread = AutoVendorSplits.Resolve(25, 100, 100, sibs, new HashSet<uint> { 9 }, new[] { (1u, 100, true), (9u, 1, false) }, false);
+        Eq(unread.Kind, SplitOutcomeKind.Pending, "created but the count unreadable and the source unchanged: wait");
+        var unreadLater = AutoVendorSplits.Resolve(25, 100, 75, sibs, new HashSet<uint> { 9 }, new[] { (1u, 75, true), (9u, 1, false) }, false);
+        Eq(unreadLater.Kind, SplitOutcomeKind.NewStack, "...until the source shrank by the amount");
+        var missed = AutoVendorSplits.Resolve(1, 40, 39, sibs, none, new[] { (1u, 39, true), (9u, 1, false) }, false);
+        Eq(missed.Kind, SplitOutcomeKind.NewStack, "create missed: a new id with exactly the amount");
+        var joined = AutoVendorSplits.Resolve(1, 40, 39, sibs, none, new[] { (1u, 39, true), (5u, 2, true) }, false);
+        Eq(joined.Kind, SplitOutcomeKind.JoinedStack, "no new object, a stack that was there grew: joined");
+        Eq(joined.StackId, 5u, "the stack it joined");
+        Eq(joined.StackCount, 2, "now 2");
+        Eq(AutoVendorSplits.Resolve(1, 40, 40, sibs, none, new[] { (1u, 40, true), (5u, 1, true) }, false).Kind, SplitOutcomeKind.Pending, "nothing yet: pending");
+        Eq(AutoVendorSplits.Resolve(1, 40, 40, sibs, none, new[] { (1u, 40, true), (5u, 1, true) }, true).Kind, SplitOutcomeKind.Failed, "nothing in time: failed");
+        Eq(AutoVendorSplits.Resolve(1, 40, 39, sibs, none, new[] { (1u, 39, true), (5u, 1, true) }, false).Kind, SplitOutcomeKind.Pending, "the source shrank but the units aren't seen yet: wait");
+
+        // A server's custom letter (a writable, so Book) is never a TradeNote.
+        Eq(AutoVendorRules.JudgeObjectClass(Cond(7, "15"), AcObjectClass.Book, 0x2000), Tri.No, "Book with its type read: not a TradeNote");
+        Eq(AutoVendorRules.JudgeObjectClass(Cond(7, "15"), AcObjectClass.Book, 0), Tri.Unknown, "type unread: still unknown");
+        Eq(AutoVendorRules.JudgeObjectClass(Cond(7, "42"), AcObjectClass.Book, 0x2000), Tri.Unknown, "Book may still be a Scroll");
+        Eq(AutoVendorRules.JudgeObjectClass(Cond(7, "29"), AcObjectClass.Misc, 0x80), Tri.Unknown, "Misc may still be a healing kit");
+        Eq(AutoVendorRules.JudgeObjectClass(Cond(7, "16"), AcObjectClass.Misc, 0x80), Tri.No, "Misc is never a ManaStone");
+        Eq(AutoVendorRules.JudgeObjectClass(Cond(7, "15"), AcObjectClass.Unknown, 0x10000000), Tri.No, "an unclassified type without the note bit: not a TradeNote");
+        var letterFacts = new ItemFacts { Appraised = true, ObjectClass = AcObjectClass.Book, ItemType = 0x2000 };
+        var letter = AutoVendorRules.Decide(rules, JudgeFake(letterFacts, "Scarlet Red Letter", new() { [19] = 5 }));
+        Check(letter.Rule == null && letter.Certain, "the letter: no rule matches, nothing to log");
     }
 
     private static void TestPrices()

@@ -31,6 +31,8 @@ internal readonly struct ItemFacts
     /// <summary>Inventory item with appraisal (ID) data.</summary>
     public bool Appraised { get; init; }
     public AcObjectClass ObjectClass { get; init; }
+    /// <summary>The item's ITEM_TYPE flags (0 = not read).</summary>
+    public uint ItemType { get; init; }
     /// <summary>The item's spell list can be read (appraised and the host exposes spell ids).</summary>
     public bool HasSpellData { get; init; }
     public bool HasPalettes { get; init; }
@@ -169,11 +171,34 @@ internal static class AutoVendorRules
         }
     }
 
+    // Decal gives these classes from one ITEM_TYPE bit each (RynthAi too: WorldObjectCache.ClassifyByItemType
+    // checks them before any coarse class). An item whose type lacks the bit is never that class.
+    internal static readonly Dictionary<AcObjectClass, uint> TypeBitClasses = new()
+    {
+        [AcObjectClass.TradeNote] = 0x00040000,       // TYPE_PROMISSORY_NOTE
+        [AcObjectClass.ManaStone] = 0x00080000,       // TYPE_MANASTONE
+        [AcObjectClass.SpellComponent] = 0x00001000,  // TYPE_SPELL_COMPONENTS
+        [AcObjectClass.Gem] = 0x00000800,             // TYPE_GEM
+    };
+
     /// <summary>ObjectClass test without the evaluator: unknown for classes Decal splits further.</summary>
-    public static Tri JudgeObjectClass(VTankLootCondition cond, AcObjectClass itemClass)
+    public static Tri JudgeObjectClass(VTankLootCondition cond, AcObjectClass itemClass) => JudgeObjectClass(cond, itemClass, 0);
+
+    /// <summary>
+    /// As above, and with the item's ITEM_TYPE known a coarse class still answers No for a class that
+    /// needs a type bit the item lacks: a server's custom letter (Book, a writable) is never a TradeNote.
+    /// The owner's "S: Trade Note" rule (ObjectClass = TradeNote) read Unknown for 'Scarlet Red Letter'
+    /// and logged "needs Object Class data we don't have" at every vendor open (2026-11-01).
+    /// </summary>
+    public static Tri JudgeObjectClass(VTankLootCondition cond, AcObjectClass itemClass, uint itemType)
     {
         if (!TryKey(cond.DataLines, 0, out int target)) return Tri.Unknown;
-        if (CoarseClasses.Contains(itemClass)) return Tri.Unknown;
+        if (CoarseClasses.Contains(itemClass))
+        {
+            if (itemType != 0 && TypeBitClasses.TryGetValue((AcObjectClass)target, out uint bit) && (itemType & bit) == 0)
+                return Tri.No;
+            return Tri.Unknown;
+        }
         return (int)itemClass == target ? Tri.Yes : Tri.No;
     }
 
@@ -184,7 +209,7 @@ internal static class AutoVendorRules
     public static Tri JudgeCondition(VTankLootCondition cond, in ItemFacts f, Func<VTankLootCondition, bool> match)
     {
         if (!CanJudge(cond, f)) return Tri.Unknown;
-        if (cond.NodeType == VTankNodeTypes.ObjectClass) return JudgeObjectClass(cond, f.ObjectClass);
+        if (cond.NodeType == VTankNodeTypes.ObjectClass) return JudgeObjectClass(cond, f.ObjectClass, f.ItemType);
         try { return match(cond) ? Tri.Yes : Tri.No; }
         catch { return Tri.Unknown; }
     }

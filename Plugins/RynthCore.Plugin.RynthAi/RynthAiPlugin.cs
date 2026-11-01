@@ -1034,6 +1034,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "settingsprofile": if (int.TryParse(value, out int si)) dash.SelectProfileAtIndex(3, si); break;
             case "buffprofile":     if (int.TryParse(value, out int bi)) dash.SelectProfileAtIndex(4, bi); break;
             case "spells":          HandleSpellsCommand(value); break;   // dashboard Spells button: toggle|show|hide
+            case LootWhyAction:     HandleLootWhyCommand(window: true); break;   // "Why this loot rule?" buttons
             case "forcerebuff":  dash.RequestForceRebuff(); break;
             case "cancelrebuff": dash.RequestCancelForceRebuff(); break;
             case "clearbusy":    HandleClearBusyCommand(); break;
@@ -2320,6 +2321,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     {
         _currentTargetId = currentTargetId;
         _dashboard?.SetSelectedTarget(currentTargetId);
+        // Fight the monster I select: the player's selection (not one RynthAi just made) of a
+        // monster becomes the fight target (CombatManager.SelectedTarget.cs). Off: nothing.
+        _combatManager?.OnSelectionChanged(currentTargetId, ItemInfo.SelfSelect.IsOurs(currentTargetId));
 
         if (currentTargetId != 0)
         {
@@ -2486,6 +2490,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     {
         try { _combatManager?.OnObjectCreated(objectId); } catch { }
         _sessionStats?.OnCreateObject(objectId);
+        _autoVendor?.OnCreateObject(objectId);   // a stack split's new stack
         try
         {
             _objectCache?.OnCreateObject(objectId);

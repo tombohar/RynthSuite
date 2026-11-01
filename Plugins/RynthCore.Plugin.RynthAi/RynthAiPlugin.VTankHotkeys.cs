@@ -11,6 +11,7 @@ namespace RynthCore.Plugin.RynthAi;
 //
 //   /ra setmetastate <state>     Meta: <state>     switch the meta state (no state: list them)
 //   /ra targetlock [off]         Target lock       attack the selected monster (again / off: release)
+//   /ra fightselected [on|off]                     Fight the monster I select (no argument: toggle)
 //   /ra meleelow|meleemid|meleehigh                melee attack height
 //   /ra navaddpt                 NavAddPt          waypoint at your position (same as /ra addnavpt)
 //   /ra testitem                 TestItem          the selected item against the loot profile
@@ -52,6 +53,8 @@ public sealed partial class RynthAiPlugin
             case "setmetastate":
             case "metastate":     HandleSetMetaStateCommand(parts); return true;
             case "targetlock":    HandleTargetLockCommand(parts); return true;
+            case "fightselected":
+            case "fightselect":   HandleFightSelectedCommand(parts); return true;
             case "meleelow":      SetMeleeAttackHeight(0); return true;
             case "meleemid":
             case "meleemedium":   SetMeleeAttackHeight(1); return true;
@@ -82,6 +85,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] VTank-style commands (also hotkeys: Settings > Hotkeys, VTank-style):");
         ChatLine("[RynthAi] /ra setmetastate <state> - switch the meta state (no state: list the loaded meta's states)");
         ChatLine("[RynthAi] /ra targetlock [off] - attack the selected monster first; the same one again, or off, releases it");
+        ChatLine("[RynthAi] /ra fightselected [on|off] - Fight the monster I select: the monster you select is fought first (toggle)");
         ChatLine("[RynthAi] /ra meleelow | meleemid | meleehigh - melee attack height");
         ChatLine("[RynthAi] /ra navaddpt - add a waypoint at your position to the loaded route");
         ChatLine("[RynthAi] /ra testitem - check the selected item against the loot profile");
@@ -145,6 +149,13 @@ public sealed partial class RynthAiPlugin
 
         uint selected = Host.HasGetSelectedItemId ? Host.GetSelectedItemId() : _currentTargetId;
         int id = unchecked((int)selected);
+        // Already fought because the player selected it (Fight the monster I select): now the
+        // explicit lock, which later selections don't move.
+        if (cm.PromoteSelectedToTargetLock(id))
+        {
+            ReplyOk($"[RynthAi] Target lock: attacking {_objectCache?[id]?.Name ?? $"0x{selected:X8}"} (selecting another monster no longer moves it).");
+            return;
+        }
         if (id != 0 && id == current)
         {
             cm.ClearForcedTarget();
@@ -163,6 +174,35 @@ public sealed partial class RynthAiPlugin
         string note = s == null ? "" : !s.IsMacroRunning ? " (the macro is off: it attacks once started)"
             : !s.EnableCombat ? " (Combat is off: it attacks once Combat is on)" : "";
         ReplyOk($"[RynthAi] Target lock: attacking {name}{note}.");
+    }
+
+    // ── Fight the monster I select ───────────────────────────────────────────
+
+    private void HandleFightSelectedCommand(string[] parts)
+    {
+        var dash = _dashboard;
+        var s = dash?.Settings;
+        if (s == null) { ReplyFail("[RynthAi] Settings not ready."); return; }
+        string arg = parts.Length >= 3 ? parts[2].ToLowerInvariant() : "";
+        bool? set = arg switch
+        {
+            "" or "toggle" => !s.FightSelectedTarget,
+            "on" or "1" or "true" => true,
+            "off" or "0" or "false" => false,
+            _ => null,
+        };
+        if (set is not bool on)
+        {
+            ReplyFail($"[RynthAi] Fight the monster I select: unknown '{arg}'. Usage: /ra fightselected [on|off] (now {(s.FightSelectedTarget ? "on" : "off")}).");
+            return;
+        }
+        s.FightSelectedTarget = on;
+        dash!.SaveSettings();
+        // Off: a monster it was fighting because you selected it is let go now.
+        var cm = _combatManager;
+        if (!on && cm != null && cm.ForcedBySelection) cm.ClearForcedTarget();
+        ReplyOk(on ? "[RynthAi] Fight the monster I select: on (the monster you select in a fight is fought first)."
+                   : "[RynthAi] Fight the monster I select: off.");
     }
 
     // ── Melee attack height ──────────────────────────────────────────────────

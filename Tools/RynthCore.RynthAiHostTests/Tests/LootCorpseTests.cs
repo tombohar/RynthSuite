@@ -579,6 +579,13 @@ internal static class LootCorpseTests
         rare.Call("NoteBoostLootKill");
         combat4.HandleCombatTrigger();
         Check.Eq(combat4.activeTargetId, unchecked((int)Monster), "Loot Only Rare Corpses: no wait");
+
+        // Loot Mode rares (rares and needed mana stones only): the same.
+        var raresMode = BoostWorld(15f, withCorpse: false, out var combat5);
+        raresMode.S.LootMode = RynthCore.Plugin.RynthAi.Loot.LootModes.Rares;
+        raresMode.Call("NoteBoostLootKill");
+        combat5.HandleCombatTrigger();
+        Check.Eq(combat5.activeTargetId, unchecked((int)Monster), "Loot Mode rares: no wait");
     }
 
     private static void BoostLootWaitEndsOnKillCorpse()

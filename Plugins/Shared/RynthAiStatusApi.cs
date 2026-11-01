@@ -25,8 +25,9 @@ public unsafe struct RynthAiStatusApiV1
 
     /// <summary>
     /// The bot's state as one JSON object:
-    /// {macro,action,state,combat,buff,nav,loot,meta,navFile,metaFile,lootFile}
-    /// (action = what it is doing now: Default/Combat/Looting/Navigating/Buffing...; state = meta state).
+    /// {macro,action,state,combat,buff,nav,loot,meta,navFile,metaFile,lootFile,lootMode}
+    /// (action = what it is doing now: Default/Combat/Looting/Navigating/Buffing...; state = meta state;
+    /// lootMode = "profile" or "rares", rares and needed mana stones only, since 2026-10-31).
     /// 1 = ok, 0 = not ready (not logged in yet).
     /// </summary>
     public delegate* unmanaged[Cdecl]<byte**, int> GetStatusJson;

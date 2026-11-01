@@ -36,6 +36,9 @@ internal static class TargetingTests
         r.Add("targeting: a higher priority out of sight is named as passed over, once per reason", PassedOverOutOfSight);
         r.Add("targeting: a higher priority just past Monster Range is named on the lock line", PassedOverBeyondRange);
         r.Add("targeting: nothing is named when no higher priority was left out", PassedOverNothingHigher);
+        r.Add("targeting: lock off keeps a target that blinks out of the scan (no switch on stale values)", LockOffNoSwitchOnStale);
+        r.Add("targeting: lock off holds right after a cast goes out, before it is judged", LockOffHoldsJustSentCast);
+        r.Add("targeting: a higher priority just past Monster Range is logged once while fighting, and /ra why names it", BeyondRangeWhileEngaged);
     }
 
     // ── Schemes ───────────────────────────────────────────────────────────────
@@ -317,6 +320,59 @@ internal static class TargetingTests
         Check.False(FakeHost.Logs.Any(l => l.Contains("passed over")), "the target itself out of sight isn't 'passed over'");
     }
 
+    // ── R-20261031-201214-8be7: a switch on stale values, 124 ms after a bolt went out ─────
+
+    private static void LockOffNoSwitchOnStale()
+    {
+        var t = new Rig(Closest, false);
+        Check.Eq(t.Pick((A, 4.3, 0)), A, "A, a swarm closing in, is locked at 4.3 m");
+        Check.Eq(t.Pick((B, 2.4, 0)), A, "A blinks out of the scan (its last value 4.3 m): kept, not judged on it");
+        Check.False(FakeHost.Logs.Any(l => l.Contains("another is clearly better")), "no 'clearly better' switch");
+        Check.Eq(t.Pick((A, 1.9, 0), (B, 2.4, 0)), A, "back in the scan at 1.9 m: still A");
+        t.Advance(2000);
+        Check.Eq(t.Pick((B, 2.4, 0)), B, "gone past the scan grace: B");
+    }
+
+    private static void LockOffHoldsJustSentCast()
+    {
+        var t = new Rig(Closest, false);
+        Check.Eq(t.Pick((A, 3, 0)), A, "A is locked");
+        t.Combat.NoteCastSent(unchecked((int)A));   // the bolt went out; no judgement yet
+        Check.Eq(t.Pick((A, 3, 0), (B, 0.5, 0)), A, "a cast just sent at A: B (2.5 m closer) waits");
+        t.Combat.ReportDamageOnTarget(unchecked((int)A));
+        Check.Eq(t.Pick((A, 3, 0), (B, 0.5, 0)), B, "the cast landed: the switch goes ahead");
+
+        t = new Rig(Closest, false);
+        t.Pick((A, 3, 0));
+        t.Combat.NoteCastSent(unchecked((int)A));
+        t.Advance(4100);
+        Check.Eq(t.Pick((A, 3, 0), (B, 0.5, 0)), B, "past the 4 s flight window with nothing landed: switch");
+    }
+
+    private static void BeyondRangeWhileEngaged()
+    {
+        var t = new ScanPick(monsterRange: 10);
+        t.S.MonsterRules.Add(new MonsterRule { Name = "Boss", Priority = 5 });
+        t.Place(A, "Mob A", north: 2);
+        t.Place(Boss, "Boss", north: -40);
+        Check.Eq(t.Tick(), A, "Mob A is locked; the Boss is far off");
+        Check.False(FakeHost.Logs.Any(l => l.Contains("passed over")), "nothing named yet");
+
+        t.Place(Boss, "Boss", north: -12);   // the Boss walks up, still past Monster Range 10
+        Check.Eq(t.Tick(), A, "the Boss at 12 m is not a candidate: the target stays (intended)");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("[CombatTarget] passed over 0x80000404 'Boss' priority 5, 12.0 m: beyond Monster Range (10 m), the Monster Range setting")
+                                       && l.Contains("the target stays 0x80000401 'Mob A' priority 1")),
+            "logged: the setting is why");
+        int lines = PassedLines();
+        t.Tick();
+        Check.Eq(PassedLines(), lines, "once");
+        string? why = t.C.DescribeHigherPriorityPassedOver();
+        Check.True(why != null && why.Contains("'Boss' priority 5") && why.Contains("beyond Monster Range (10 m)"), $"/ra why names it ({why})");
+
+        t.Place(Boss, "Boss", north: -9);
+        Check.Eq(t.Tick(), Boss, "inside Monster Range: the Boss takes over at once");
+    }
+
     private static int PassedLines() => FakeHost.Logs.Count(l => l.Contains("[CombatTarget] passed over"));
 
     /// <summary>The real scan (ScanNearbyTargets) over placed monsters, then the pick.</summary>
@@ -326,6 +382,7 @@ internal static class TargetingTests
         public readonly HashSet<uint> Blocked = new();
         private readonly List<uint> _ids = new();
         private CombatManager? _c;
+        public CombatManager C => _c!;
         private static readonly FieldInfo LastScan =
             typeof(CombatManager).GetField("_lastScanTime", BindingFlags.NonPublic | BindingFlags.Instance)!;
 

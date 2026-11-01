@@ -95,6 +95,7 @@ internal static class CommandReplyTests
         new(null, "/ra igp NoSuchProfileHere", K.Act),
         new("/ra cast 1234", "/ra cast banana", K.Act),
         new("/ra targetlock off", null, K.Act),
+        new("/ra fightselected off", "/ra fightselected banana", K.Act),
         new("/ra meleelow", null, K.Act),
         new("/ra meleemid", null, K.Act),
         new("/ra meleehigh", null, K.Act),
@@ -125,6 +126,9 @@ internal static class CommandReplyTests
         new(null, "/ra settings loadchar", K.Act),
         new(null, "/ra loot add banana", K.Act),
         new(null, "/ra loot why", K.Act),                       // nothing selected: says so
+        new("/ra loot mode rares", "/ra loot mode banana", K.Act),
+        new("/ra loot mode profile", null, K.Act),
+        new("/ra loot mode", null, K.Query),
         new(null, "/ra lootparse", K.Act),
         new(null, "/ra lootcheckinv", K.Act),
         new(null, "/ra autotrade", K.Act),

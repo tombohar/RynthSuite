@@ -4,6 +4,7 @@
 //   [RynthAi] Looted [Keep] Blunt Crossbow (rule "(M) Xbow (OD +9)"): Gold, Pierce Crossbow, +22, +162%, ...
 //   [RynthAi] Looted [Salvage] Ornate Long Sword (rule "Gold any"): Gold, Craft 6     (Include salvage on)
 //   [RynthAi] Looted [Keep] Pyreal                                                     (stackables: plain)
+//   [RynthAi] Looted [Keep] Pearl of Blood Drinking (Rares mode: rare): ...            (Loot Mode rares)
 //
 // The head stays "[RynthAi] Looted [<action>] <name>": the self-test meta and players' metas match it.
 using System;
@@ -77,7 +78,10 @@ internal static class LootChatLine
         if (!identified) fields.Add("not IDed");
 
         var sb = new StringBuilder(Plain(action, name), 256);
-        string ruleText = rule.Length > 0 ? $"rule \"{rule}\"" : string.Empty;
+        // Rares mode has no rule: its reason shows as it is ("Rares mode: rare").
+        string ruleText = rule.Length == 0 ? string.Empty
+            : rule.StartsWith(RynthAi.Loot.LootModes.RulePrefix, StringComparison.Ordinal) ? rule
+            : $"rule \"{rule}\"";
         if (where.Length > 0 && ruleText.Length > 0) sb.Append(" (").Append(where).Append(", ").Append(ruleText).Append(')');
         else if (where.Length > 0 || ruleText.Length > 0) sb.Append(" (").Append(where).Append(ruleText).Append(')');
         if (fields.Count > 0) sb.Append(": ").Append(string.Join(", ", fields));

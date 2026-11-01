@@ -147,6 +147,7 @@ public partial class CombatManager
         bool atFight = castTarget == unchecked((uint)activeTargetId);
         bool judged = atFight && !area && !noJudge;
         _lastCastWasRing = !judged;   // anything else gets no per-target judgement
+        if (atFight) NoteCastSent(activeTargetId);   // the in-flight hold (Target Lock off)
         _wallFaceAt = DateTime.MinValue;
         if (judged)
         {

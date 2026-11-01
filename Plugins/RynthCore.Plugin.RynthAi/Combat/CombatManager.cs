@@ -620,6 +620,8 @@ public partial class CombatManager : IDisposable
     // or the suppression ends and the scan has it again, it counts for HasTargets,
     // HasCloseThreat (so HasEngageableTarget: combat keeps the tick, no corpse is claimed, no
     // starved loot turn) and the idle peace-mode swap. id -> when it was swapped off (TargetClock).
+    // A kill notice matched by name to a monster other than the fight target is held here the
+    // same way (SuppressGuessedDeath): the name can match the wrong one of a same-named pack.
     private readonly Dictionary<int, DateTime> _predictedDeathPending = new();
     private readonly List<int> _predictedDeathScratch = new();
 
@@ -705,6 +707,18 @@ public partial class CombatManager : IDisposable
     /// <summary>When the last offensive action was issued at
     /// <see cref="_lastAttackedTargetId"/>. Bounds the in-flight hold.</summary>
     private DateTime _lastAttackedAt = DateTime.MinValue;
+
+    /// <summary>The last offensive cast sent, at whom and when (TargetClock), before any judgement:
+    /// the in-flight hold's view of a cast that has just gone out.</summary>
+    private int _castSentTargetId;
+    private DateTime _castSentAt = DateTime.MinValue;
+
+    /// <summary>An offensive cast went out at <paramref name="targetId"/> (internal for tests).</summary>
+    internal void NoteCastSent(int targetId)
+    {
+        _castSentTargetId = targetId;
+        _castSentAt = TargetClock();
+    }
 
     // Incumbent continuity across scan gaps. ScanNearbyTargets drops a target on
     // a single bad LOS result or a transient miss — the candidate list has been
@@ -806,16 +820,23 @@ public partial class CombatManager : IDisposable
             bool over = (now - kv.Value).TotalMilliseconds > PREDICTED_SWAP_SUPPRESS_MS;
             if (alive && !over) continue;
             _predictedDeathScratch.Add(kv.Key);
+            bool guessed = _guessedDeaths.Contains(kv.Key);
             if (!alive) continue;   // health 0 or the corpse: dead after all, nothing to say
             // Alive at the end of the window: lift the swap's suppression now, whatever RynthClock
             // says (TargetClock is that clock outside tests). A confirmed kill took the id out of
             // this map in OnKillNotification, so its longer suppression is never lifted here.
             _recentlyKilled.Remove(kv.Key);
-            _host.Log($"[RynthAi] Predicted kill of 0x{(uint)kv.Key:X8} '{_worldFilter[kv.Key]?.Name}' not confirmed " +
-                      $"{(now - kv.Value).TotalSeconds:0.0} s after the swap and it is still alive: it is a target again.");
+            _host.Log(guessed
+                ? $"[RynthAi] Kill notice matched by name to 0x{(uint)kv.Key:X8} '{_worldFilter[kv.Key]?.Name}' not confirmed " +
+                  $"{(now - kv.Value).TotalSeconds:0.0} s later and it is still alive: it is a target again."
+                : $"[RynthAi] Predicted kill of 0x{(uint)kv.Key:X8} '{_worldFilter[kv.Key]?.Name}' not confirmed " +
+                  $"{(now - kv.Value).TotalSeconds:0.0} s after the swap and it is still alive: it is a target again.");
         }
         for (int i = 0; i < _predictedDeathScratch.Count; i++)
+        {
             _predictedDeathPending.Remove(_predictedDeathScratch[i]);
+            _guessedDeaths.Remove(_predictedDeathScratch[i]);
+        }
     }
 
     /// <summary>A predicted kill was hit after the swap (a damage line, which a killing blow never
@@ -824,8 +845,12 @@ public partial class CombatManager : IDisposable
     {
         if (id == 0 || !_predictedDeathPending.Remove(id)) return;
         _recentlyKilled.Remove(id);
-        _host.Log($"[RynthAi] Predicted kill of 0x{(uint)id:X8} '{_worldFilter[id]?.Name}' took a {amount}-point hit after the swap: " +
-                  "it is alive, a target again.");
+        bool guessed = _guessedDeaths.Remove(id);
+        _host.Log(guessed
+            ? $"[RynthAi] Kill notice matched by name to 0x{(uint)id:X8} '{_worldFilter[id]?.Name}', but it took a {amount}-point hit: " +
+              "it is alive, a target again."
+            : $"[RynthAi] Predicted kill of 0x{(uint)id:X8} '{_worldFilter[id]?.Name}' took a {amount}-point hit after the swap: " +
+              "it is alive, a target again.");
     }
 
     /// <summary>True only when actively attacking a specific target. Unlike HasTargets, this is false between kills even when more monsters are scanned nearby.</summary>
@@ -1051,6 +1076,7 @@ public partial class CombatManager : IDisposable
 
         _scannedTargets.Clear();
         _passedOver.Clear();
+        _beyondRange.Clear();
         _nearbyNoLos = 0;
         int scanTotal = 0, scanRing = 0;   // D2 telemetry, published after the loop
         int playerId = (int)_playerId;
@@ -1133,7 +1159,14 @@ public partial class CombatManager : IDisposable
             // Target lock (/ra targetlock): the player picked this one; the name list and
             // Priority 0 don't keep it out (attackable, alive and LOS still do).
             bool isForced = wo.Id != 0 && wo.Id == ForcedTargetId;
-            if (dist > (isEngaged || isForced ? Math.Max(maxDist, DisengageDistance) : maxDist)) continue;
+            if (dist > (isEngaged || isForced ? Math.Max(maxDist, DisengageDistance) : maxDist))
+            {
+                // Just past Monster Range: noted (no other reads here) so the fight can say when a
+                // higher-priority monster is left only because of the Monster Range setting.
+                if (!isEngaged && dist <= maxDist + PassedOverBeyondRangeM)
+                    _beyondRange.Add(new PassedOverMonster { Id = wo.Id, Distance = dist, Why = "" });
+                continue;
+            }
             // Left out below for a reason that can hide a monster worth fighting: noted for the
             // lock line's "passed over" (CombatManager.PassedOver.cs). In range, not the target.
             bool notePassed = !isEngaged && dist <= maxDist;
@@ -1275,6 +1308,7 @@ public partial class CombatManager : IDisposable
         int id = (int)objectId;
         _recentlyKilled.Remove(id);
         _predictedDeathPending.Remove(id);   // gone (died and despawned, or out of view): not a monster in range
+        _guessedDeaths.Remove(id);
         _hitAt.Remove(id);
         _blacklistManager.ForgetTarget(id);
         Ghosts.NoteDeleted(id);
@@ -1699,12 +1733,26 @@ public partial class CombatManager : IDisposable
         if (string.IsNullOrEmpty(name)) return 0;
         PruneHits(now);
         int fight = _fightTargetId;
-        if (fight != 0 && !HitInVolley(fight, now)
+        // A swing or a shot hits the one monster it was aimed at, so in Melee and Missile mode
+        // every line naming the fight target is the fight target's. The volley rule below is for
+        // spells that hurt several monsters at once. Applied to melee, a dual-wield or multi-strike
+        // weapon's second hit (about 0.3 s after the first, inside the volley window) was handed
+        // to the nearest other monster of the same name: that monster was marked hurt and "hit by
+        // us", and the next kill notice was matched to it. It was kept out of the scan for 4 s
+        // while it was alive and fighting, so the bot looted mid-fight or turned to lesser
+        // monsters (2026-11-01, a same-named pack).
+        bool singleTarget = IsSingleTargetMode();
+        if (fight != 0 && (singleTarget || !HitInVolley(fight, now))
             && string.Equals(_worldFilter[fight]?.Name, name, StringComparison.OrdinalIgnoreCase))
         {
             _hitAt[fight] = now;
             return fight;
         }
+        // Between fights (the target just died) a melee or missile line naming the last fight's
+        // monster is that fight's last hit, not a neighbour's.
+        if (singleTarget && fight == 0 && _lastFightName.Length > 0
+            && string.Equals(_lastFightName, name, StringComparison.OrdinalIgnoreCase))
+            return 0;
 
         int anchor = fight != 0 ? fight : unchecked((int)_playerId);
         int best = 0, any = 0;
@@ -1726,6 +1774,13 @@ public partial class CombatManager : IDisposable
 
     private bool HitInVolley(int id, DateTime now)
         => _hitAt.TryGetValue(id, out DateTime t) && (now - t).TotalMilliseconds <= VolleyWindowMs;
+
+    /// <summary>Melee or Missile mode: each attack hits only the monster it was aimed at.</summary>
+    private bool IsSingleTargetMode()
+    {
+        int mode = CurrentCombatMode;
+        return mode == CombatMode.Melee || mode == CombatMode.Missile;
+    }
 
     private readonly List<int> _hitPruneScratch = new();
     private void PruneHits(DateTime now)
@@ -2598,6 +2653,7 @@ public partial class CombatManager : IDisposable
         ForgetScanned(swapId);
         _predictedSwapAt[swapId] = TargetClock();   // fought again later = it didn't die (PredictionFailed)
         _predictedDeathPending[swapId] = TargetClock();   // still a monster in range until its death is confirmed
+        _guessedDeaths.Remove(swapId);
         // Queue this predicted one-shot so it's CREDITED when its death confirms —
         // we may swap away before its KillerNotification. Capture the name LIVE
         // from the world filter (_fightTargetName is often empty this early).
@@ -2647,6 +2703,18 @@ public partial class CombatManager : IDisposable
         DateTime nowKill = RynthClock.Now;
         _predictedKillPending.RemoveAll(p => p.Expiry < nowKill);
 
+        // One death, two notices: the second is an echo of the first (no kill, nobody hidden).
+        if (IsKillEcho(deathMessage, nowKill))
+        {
+            if (_killDbgCount < 1000)
+            {
+                _killDbgCount++;
+                _host.Log($"[KillDbg] how=echo of 0x{(uint)_lastConfirmedKillId:X8} " +
+                          $"(+{(nowKill - _lastConfirmedKillAt).TotalMilliseconds:0} ms) msg='{deathMessage}'");
+            }
+            return;
+        }
+
         bool recorded = false;
         string how = "miss";
         int pendingKillId = 0;   // id of the predicted one-shot this notice was credited to (tier 1)
@@ -2682,7 +2750,11 @@ public partial class CombatManager : IDisposable
         // pending until its own health, corpse or window says.
         if (pendingKillId != 0 && !(curMatches && tid != pendingKillId)
             && _predictedDeathPending.Remove(pendingKillId))
+        {
+            _guessedDeaths.Remove(pendingKillId);
             _recentlyKilled[pendingKillId] = nowKill.AddMilliseconds(RECENTLY_KILLED_SUPPRESS_MS);
+            NoteConfirmedKill(pendingKillId, nowKill);
+        }
 
         // (2) The current target died (its name is in the message).
         if (!recorded && curMatches && _fightTargetWcid != 0 && _fightCastCount > 0)
@@ -2783,11 +2855,12 @@ public partial class CombatManager : IDisposable
                        : "it hasn't been attacked yet") +
                       " — keeping the target");
             if (noticeForNeighbour)
-                _recentlyKilled[otherVictim] = nowKill.AddMilliseconds(RECENTLY_KILLED_SUPPRESS_MS);
+                SuppressGuessedDeath(otherVictim, nowKill);
         }
         else if (tid != 0 && curMatches)
         {
             _recentlyKilled[tid] = nowKill.AddMilliseconds(RECENTLY_KILLED_SUPPRESS_MS);
+            NoteConfirmedKill(tid, nowKill);
             ForgetScanned(tid);
             DropTarget("killed (KillerNotification)");
         }
@@ -2797,8 +2870,97 @@ public partial class CombatManager : IDisposable
             // Keep the scan off it while its corpse forms.
             int victim = FindRecentlyHitVictim(deathMessage, tid, nowKill);
             if (victim != 0)
-                _recentlyKilled[victim] = nowKill.AddMilliseconds(RECENTLY_KILLED_SUPPRESS_MS);
+                SuppressGuessedDeath(victim, nowKill);
         }
+    }
+
+    // ── Kill notices that name no one for sure ───────────────────────────────
+    // The notice carries only the monster's name. For the fight target that is enough (it is the
+    // monster we were hitting); for any other monster it is a guess by name among those we hit
+    // lately, and in a same-named pack the guess can be wrong.
+    //
+    // 2026-11-01 (DreamWeave, a melee character, a pack of same-named monsters): some kills
+    // brought two KillerNotifications 1-2 ms apart with different wording ("You killed X!" and
+    // "X suffers a frozen fate!") and one corpse. The second was matched by name to a live
+    // neighbour, which was kept out of the scan for 4 s: with no other monster scanned, combat
+    // let the tick go and the bot opened a corpse with that monster 3 m away hitting it, then
+    // locked it again 4 s later. If the neighbour had been the top-priority monster, lesser ones
+    // would have been fought instead.
+    //
+    // Now: a second notice for the same monster right after a confirmed kill is an echo, and a
+    // death credited by guess keeps the monster counted as a monster in range (no looting, no
+    // peace mode) until the server confirms it (corpse, deleted, health 0), for at most
+    // PREDICTED_SWAP_SUPPRESS_MS, the way a predicted kill does; a damage line on it ends that.
+
+    /// <summary>How soon after a confirmed kill a notice naming the same monster is its echo.</summary>
+    internal const double KillEchoMs = 300;
+
+    private int _lastConfirmedKillId;
+    private string _lastConfirmedKillName = "";
+    private DateTime _lastConfirmedKillAt = DateTime.MinValue;
+    // Ids in _predictedDeathPending whose death came from a kill notice matched by name (not a
+    // predicted kill-shot swap): for the log's wording only.
+    private readonly HashSet<int> _guessedDeaths = new();
+
+    private void NoteConfirmedKill(int id, DateTime now)
+    {
+        _lastConfirmedKillId = id;
+        _lastConfirmedKillName = _worldFilter[id]?.Name ?? "";
+        _lastConfirmedKillAt = now;
+    }
+
+    /// <summary>
+    /// True when <paramref name="deathMessage"/> repeats the death confirmed just before: it names
+    /// that monster, came within <see cref="KillEchoMs"/>, and no other monster of that name could
+    /// have died (none hit lately, no attack on its way at a same-named target, no predicted kill
+    /// of that name pending).
+    /// </summary>
+    private bool IsKillEcho(string deathMessage, DateTime now)
+    {
+        if (_lastConfirmedKillId == 0 || _lastConfirmedKillName.Length == 0) return false;
+        if ((now - _lastConfirmedKillAt).TotalMilliseconds > KillEchoMs) return false;
+        if (deathMessage.IndexOf(_lastConfirmedKillName, StringComparison.OrdinalIgnoreCase) < 0) return false;
+        for (int i = 0; i < _predictedKillPending.Count; i++)
+            if (!string.IsNullOrEmpty(_predictedKillPending[i].Name)
+                && deathMessage.IndexOf(_predictedKillPending[i].Name, StringComparison.OrdinalIgnoreCase) >= 0)
+                return false;
+        int tid = activeTargetId;
+        if (tid != 0 && tid != _lastConfirmedKillId && _pendingOffensiveTargetId == tid
+            && string.Equals(_worldFilter[tid]?.Name, _lastConfirmedKillName, StringComparison.OrdinalIgnoreCase))
+            return false;
+        return FindRecentlyHitVictim(deathMessage, _lastConfirmedKillId, now) == 0;
+    }
+
+    /// <summary>
+    /// A death credited by name to a monster that isn't the fight target: off the scan for the
+    /// predicted window, but still a monster in range for the fight and loot gates until its death
+    /// is confirmed (see <see cref="PredictedDeathPendingWithin"/>).
+    /// </summary>
+    private void SuppressGuessedDeath(int id, DateTime nowKill)
+    {
+        _recentlyKilled[id] = nowKill.AddMilliseconds(PREDICTED_SWAP_SUPPRESS_MS);
+        _predictedDeathPending[id] = TargetClock();
+        _guessedDeaths.Add(id);
+    }
+
+    /// <summary>The highest Priority among guessed deaths still pending and alive within
+    /// <paramref name="range"/>, or int.MinValue when there is none.</summary>
+    private int TopGuessedDeathPriority(double range)
+    {
+        if (_guessedDeaths.Count == 0) return int.MinValue;
+        DateTime now = TargetClock();
+        int me = unchecked((int)_playerId);
+        int top = int.MinValue;
+        foreach (int id in _guessedDeaths)
+        {
+            if (!_predictedDeathPending.TryGetValue(id, out DateTime at)
+                || (now - at).TotalMilliseconds > PREDICTED_SWAP_SUPPRESS_MS) continue;
+            if (!IsLiveMonster(id)) continue;
+            if (me == 0 || _worldFilter.Distance(me, id) > range) continue;
+            int p = PriorityOf(id);
+            if (p > top) top = p;
+        }
+        return top;
     }
 
     /// <summary>Test seam: engage <paramref name="targetId"/> as the fight target, as a target lock does.</summary>
@@ -4513,6 +4675,11 @@ public partial class CombatManager : IDisposable
             if (p > topAnyRange) topAnyRange = p;
             if (c.Distance <= acquireRange && p > topPriority) topPriority = p;
         }
+        // A monster whose kill notice was matched to it by name only (SuppressGuessedDeath) is off
+        // the scan for a moment but may be alive: its tier still stands, so a lesser monster
+        // isn't locked in the meantime (with nothing of that tier to pick, no lock this tick).
+        int guessedTop = TopGuessedDeathPriority(acquireRange);
+        if (guessedTop > topPriority) topPriority = guessedTop;
         bool anyInRange = topPriority != int.MinValue;
         if (!anyInRange) topPriority = topAnyRange;
 
@@ -4572,6 +4739,12 @@ public partial class CombatManager : IDisposable
 
             // Target Lock off: switch only to a clearly better one, and never with an attack
             // at the incumbent still on its way.
+            // Not while the incumbent is out of this tick's scan (inside the scan grace): its
+            // values are the last ones seen, and judging fresh candidates against them switched
+            // away from a monster closing in. R-20261031-201214-8be7: a Brier Wasp Swarm last
+            // scanned at 4.3 m, live at 1.9 m, lost to a wasp at 2.4 m as "clearly better",
+            // 124 ms after a bolt went out at it.
+            if (incInScan == null) return;
             double incKey = SchemeKey(scheme, inc);
             if (incKey - bestKey < SchemeMargin(scheme)) return;
             if (AttackInFlightAtLocked(now)) return;
@@ -4710,10 +4883,16 @@ public partial class CombatManager : IDisposable
     /// </summary>
     private bool AttackInFlightAtLocked(DateTime now)
     {
-        if (_lockedTargetId == 0 || _lastAttackedTargetId != _lockedTargetId || _lastAttackedAt == DateTime.MinValue)
-            return false;
-        if ((now - _lastAttackedAt).TotalMilliseconds > CastCommitmentWindowMs) return false;
-        if (_lastDamageDealtAt != DateTime.MinValue && _lastDamageDealtAt >= _lastAttackedAt) return false;   // it landed
+        if (_lockedTargetId == 0) return false;
+        // The last attack at it: a judged one (RecordOffensiveCast), or a cast just sent. A cast
+        // is judged only after its refusal window, so for its first half second or more the hold
+        // didn't know it had gone out, and a switch walked away from the bolt in the air
+        // (R-20261031-201214-8be7: the switch came 124 ms after the cast).
+        DateTime sent = _lastAttackedTargetId == _lockedTargetId ? _lastAttackedAt : DateTime.MinValue;
+        if (_castSentTargetId == _lockedTargetId && _castSentAt > sent) sent = _castSentAt;
+        if (sent == DateTime.MinValue) return false;
+        if ((now - sent).TotalMilliseconds > CastCommitmentWindowMs) return false;
+        if (_lastDamageDealtAt != DateTime.MinValue && _lastDamageDealtAt >= sent) return false;   // it landed
         DateTime progress = _lastDamageDealtAt != DateTime.MinValue ? _lastDamageDealtAt : _targetLockedAt;
         return progress != DateTime.MinValue && (now - progress).TotalMilliseconds <= UndamagedCommitmentMaxMs;
     }
@@ -6946,7 +7125,8 @@ public partial class CombatManager : IDisposable
             // Called each attack cycle — the client handles turn-to-face naturally.
             if (_settings.UseNativeAttack && _host.HasNativeAttack)
             {
-                _host.SelectItem(targetId);
+                // Marked as RynthAi's own pick: "Fight the monster I select" follows the player's only.
+                ItemInfo.SelfSelect.SelectAsBot(_host, targetId);
                 _host.NativeAttack(acHeight, power);
             }
             // Direct attack: raw game action (bypasses client facing)
@@ -7197,6 +7377,7 @@ public partial class CombatManager : IDisposable
                 _pendingOffensiveSpellId   = offensiveSpellId;
                 _pendingOffensiveCastAt    = RynthClock.Now;
                 _pendingOffensiveTargetId  = activeTargetId;
+                NoteCastSent(activeTargetId);
                 NoteOffensiveSeq();
                 // Environment-impact throttle: follow this cast's projectiles (rings and walls
                 // don't fly at the target, so they aren't judged).

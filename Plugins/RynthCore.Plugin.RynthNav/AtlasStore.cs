@@ -29,6 +29,12 @@ internal sealed class AtlasStore
     public List<SavedPlace> Recent { get; } = new();
     public int Version { get; private set; }
 
+    // What this client changed since its last save. Every game client runs RynthNav and saves the
+    // whole file, so a save first re-reads it and applies only these (MergeInto): a favorite added on
+    // one client is no longer wiped by another client's next recent place (2026-11-01).
+    private readonly List<SavedPlace> _addedFavs = new(), _removedFavs = new(), _touched = new();
+    private bool _recentCleared;
+
     public bool IsFavorite(SavedPlace p) => Favorites.Exists(f => f.SameAs(p));
 
     /// <summary>Adds it if it isn't there, removes it if it is. Returns true when it is now a favorite.</summary>
@@ -36,9 +42,11 @@ internal sealed class AtlasStore
     {
         int i = Favorites.FindIndex(f => f.SameAs(p));
         Version++;
-        if (i >= 0) { Favorites.RemoveAt(i); return false; }
-        if (Favorites.Count >= MaxFavorites) Favorites.RemoveAt(Favorites.Count - 1);
+        if (i >= 0) { NoteRemoved(Favorites[i]); Favorites.RemoveAt(i); return false; }
+        if (Favorites.Count >= MaxFavorites) { NoteRemoved(Favorites[^1]); Favorites.RemoveAt(Favorites.Count - 1); }
         Favorites.Add(p);
+        _removedFavs.RemoveAll(f => f.SameAs(p));
+        _addedFavs.Add(p);
         return true;
     }
 
@@ -46,9 +54,39 @@ internal sealed class AtlasStore
     {
         int i = Favorites.FindIndex(f => f.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
         if (i < 0) return false;
+        NoteRemoved(Favorites[i]);
         Favorites.RemoveAt(i);
         Version++;
         return true;
+    }
+
+    private void NoteRemoved(SavedPlace p)
+    {
+        _addedFavs.RemoveAll(f => f.SameAs(p));
+        _removedFavs.Add(p);
+    }
+
+    /// <summary>
+    /// The favorite called <paramref name="name"/> (any case), or null. A favorite named with a tag in
+    /// brackets ("Abandoned Experiment (Conquest)") answers to the name without it too.
+    /// </summary>
+    public SavedPlace? FindFavorite(string name)
+    {
+        name = name.Trim();
+        if (name.Length == 0) return null;
+        foreach (var f in Favorites)
+            if (f.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) return f;
+        foreach (var f in Favorites)
+            if (Untagged(f.Name).Equals(name, StringComparison.OrdinalIgnoreCase)) return f;
+        return null;
+    }
+
+    private static string Untagged(string name)
+    {
+        string n = name.TrimEnd();
+        if (!n.EndsWith(')')) return n;
+        int open = n.LastIndexOf(" (", StringComparison.Ordinal);
+        return open > 0 ? n.Substring(0, open).TrimEnd() : n;
     }
 
     /// <summary>Puts it first in Recent (an arrow target or a trip).</summary>
@@ -59,6 +97,8 @@ internal sealed class AtlasStore
         if (i > 0) Recent.RemoveAt(i);
         Recent.Insert(0, p);
         while (Recent.Count > MaxRecent) Recent.RemoveAt(Recent.Count - 1);
+        _touched.RemoveAll(r => r.SameAs(p));
+        _touched.Insert(0, p);
         Version++;
     }
 
@@ -66,7 +106,36 @@ internal sealed class AtlasStore
     {
         if (Recent.Count == 0) return;
         Recent.Clear();
+        _touched.Clear();
+        _recentCleared = true;
         Version++;
+    }
+
+    /// <summary>
+    /// Before a save: makes this store the file on disk (<paramref name="disk"/>, what the other clients
+    /// saved) with this client's changes since its last save applied — favorites it added or removed,
+    /// the places it went to (first in Recent), a Clear — then forgets those changes. Afterwards this
+    /// client also has the other clients' favorites.
+    /// </summary>
+    public void MergeInto(AtlasStore disk)
+    {
+        var favs = new List<SavedPlace>();
+        foreach (var f in disk.Favorites)
+            if (!_removedFavs.Exists(r => r.SameAs(f)) && !favs.Exists(x => x.SameAs(f))) favs.Add(f);
+        foreach (var f in _addedFavs)
+            if (!favs.Exists(x => x.SameAs(f))) favs.Add(f);
+        while (favs.Count > MaxFavorites) favs.RemoveAt(0);
+
+        var recent = new List<SavedPlace>(_touched);
+        if (!_recentCleared)
+            foreach (var r in disk.Recent)
+                if (!recent.Exists(x => x.SameAs(r))) recent.Add(r);
+        while (recent.Count > MaxRecent) recent.RemoveAt(recent.Count - 1);
+
+        Favorites.Clear(); Favorites.AddRange(favs);
+        Recent.Clear(); Recent.AddRange(recent);
+        _addedFavs.Clear(); _removedFavs.Clear(); _touched.Clear();
+        _recentCleared = false;
     }
 
     // ── atlas.txt ────────────────────────────────────────────────────────────

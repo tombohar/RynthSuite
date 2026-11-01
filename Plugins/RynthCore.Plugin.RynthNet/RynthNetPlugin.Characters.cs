@@ -61,7 +61,8 @@ public sealed partial class RynthNetPlugin
             tell: (name, command) => _localCommands.Enqueue(("/rn tell " + name + ", " + command, false)),
             followMeAll: () => _localCommands.Enqueue(("/rn followme", false)),
             heading: CompassHeading,
-            setView: mode => _uiActions.Enqueue(() => SetCharactersView(mode, quiet: true)));
+            setView: mode => _uiActions.Enqueue(() => SetCharactersView(mode, quiet: true)),
+            useSelectionAll: () => _localCommands.Enqueue(("/rn usesel", false)));
         wantHeight = _charsWindow.Draw(_charsView, CharsLook, FramelessWindows, popped);
         return true;
     }

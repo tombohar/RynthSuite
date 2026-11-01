@@ -21,6 +21,7 @@
   <ItemGroup>
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Vendor\AutoVendorRules.cs" Link="Linked\AutoVendorRules.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Vendor\AutoVendorPlanner.cs" Link="Linked\AutoVendorPlanner.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Vendor\AutoVendorSplits.cs" Link="Linked\AutoVendorSplits.cs" />
   </ItemGroup>
 
 </Project>

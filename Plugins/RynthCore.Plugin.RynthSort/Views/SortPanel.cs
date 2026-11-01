@@ -134,6 +134,9 @@ internal sealed class SortPanel
         uint id = p.Id;
         w.SmallButton("+ Add rule", $"add.{id:X8}", () => AddRule(rules, view, number));
         w.Tooltip("A rule sends items to this pack: items of any of its classes, or with any of its names in their name. A name beats a class.");
+        w.SameLine();
+        w.SmallButton("Empty this pack", $"unpack.{id:X8}", () => _c.StartUnpack(number));
+        w.Tooltip($"Move everything in pack {number} into the main pack. Turns auto-sort off first, so nothing moves back. Also: /rsort unpack {number}");
         int on = 0;
         foreach (SortRule r in packRules) if (r.On && !r.IsEmpty) on++;
         if (on >= 2)

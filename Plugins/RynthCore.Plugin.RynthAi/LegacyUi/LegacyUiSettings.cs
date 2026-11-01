@@ -87,6 +87,10 @@ public sealed class LegacyUiSettings
     public string CurrentNavPath = string.Empty;
     public string CurrentLootPath = string.Empty;
     public string CurrentMetaPath = string.Empty;
+    /// <summary>The meta's rules here differ from its file: the last save of an edit failed
+    /// (MetaSaver). At login this profile's copy of the rules is then used instead of the file's,
+    /// so the edit isn't lost; the next successful save clears it.</summary>
+    public bool MetaUnsaved;
 
     public int MacroSettingsIdx = 1;
     public int NavProfileIdx = 1;
@@ -136,7 +140,7 @@ public sealed class LegacyUiSettings
     public int LootOpenRetryMs = LootBaseline.OpenRetryMs;
     public int LootCorpseTimeoutMs = LootBaseline.CorpseTimeoutMs;
     public bool LootJumpEnabled = false;
-    public int LootJumpHeight = 10; // 0–100; maps to 0.0–1.0 JumpNonAutonomous extent
+    public int LootJumpHeight = 10; // kept for old profiles and metas; jump-loot uses the keyboard tap jump (fixed height)
 
     public int SalvageOpenDelayFirstMs = 400;
     public int SalvageOpenDelayFastMs = 50;
@@ -215,6 +219,18 @@ public sealed class LegacyUiSettings
     // when another is clearly better by Targeting. On by default; a profile saved before this
     // setting loads it as on.
     public bool TargetLock = true;
+    // Fight the monster I select (2026-11-01): a monster the PLAYER selects in game (a click, the
+    // radar, another plugin's Selection window) becomes the fight target ahead of the Targeting
+    // setting and the Priority tiers, until it dies, can't be reached, or the player selects
+    // another monster / deselects. The automatic form of /ra targetlock (CombatManager.SelectedTarget.cs).
+    // Off by default; a profile saved before this setting loads it as off.
+    public bool FightSelectedTarget;
+    internal const string FightSelectedTargetTip =
+        "On: in a fight, a monster YOU select (click it, or pick it on the radar or in a Selection window)\n" +
+        "is fought first, ahead of Targeting and Priority, until it dies, can't be reached, or you select\n" +
+        "another monster or deselect. The bot's own selections never count. Ignored (Priority 0) and\n" +
+        "never-attack monsters are not followed (/ra targetlock still forces them). Out to Disengage Range.\n" +
+        "/ra fightselected [on|off]";
     public int RingRange = 5;
     // Obsolete since 2026-10-20 (unused here, kept so profiles still load and carry it): the Empyrean
     // Handler lethal-ring evade is Infinite Leaftide's and lives in RynthILT now (its ILT settings,
@@ -302,6 +318,12 @@ public sealed class LegacyUiSettings
     /// <summary>Not read by the corpse looting (no rare-corpse check exists); kept so saved profiles
     /// round-trip. Hidden in Advanced Settings. The meta/MagTools option of that name sets Mine Only.</summary>
     public bool LootOnlyRareCorpses;
+    /// <summary>
+    /// Loot Mode (Loot.LootModes): 0 = Profile (the loot profile, the default), 1 = Rares and needed
+    /// mana stones only (the loot profile is not used; rares, and mana stones while the mana stone
+    /// keep count wants them). Per settings profile; the meta setting LootMode; /ra loot mode.
+    /// </summary>
+    public int LootMode;
     /// <summary>Also pick up loose ground items that match the loot profile, within the corpse max range.</summary>
     public bool EnableGroundLoot;
     public bool PeaceModeWhenIdle = true;
@@ -1249,6 +1271,7 @@ public sealed class SettingsBridgePayload
     // Nullable: an engine that predates them doesn't send them, and its save must leave them alone.
     public int? TargetSelection { get; set; }
     public bool? TargetLock { get; set; }
+    public bool? FightSelectedTarget { get; set; }
     public int RingRange { get; set; }
     public int ApproachRange { get; set; }
     public double CorpseApproachRangeMax { get; set; }
@@ -1337,6 +1360,7 @@ public sealed class SettingsBridgePayload
     public bool? LootOwnCorpse { get; set; }
     public bool? EscapeHazards { get; set; }
     public bool? TravelToOwnCorpse { get; set; }
+    public int? LootMode { get; set; }
     // Item info: describe an item in chat when it is selected (ItemInfoSettings.OnSelect).
     public bool? ItemInfoOnSelect { get; set; }
     public bool EnableAutostack { get; set; }

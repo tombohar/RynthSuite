@@ -43,6 +43,33 @@ internal static class LootAddItemTests
         r.Add("loot add: unsaved edits in the Loot Editor block the add (nothing saved behind them)", BridgeRefusesUnderEdits);
         r.Add("loot add: the popup says when RynthAi's built-in looting takes the item (Mana Tap, mana stones)", BuiltInReasons);
         r.Add("loot: Mana Tap takes a high-mana wand like any other item (they drain)", ManaTapTakesWands);
+        r.Add("loot profile load (R-20261101-133624-7eeb): a rule with no conditions is named in chat; a normal profile says nothing", UnconditionalRuleWarned);
+    }
+
+    // A 'Trade Note' that lost its Name condition keeps every item silently; loading says so.
+    private static void UnconditionalRuleWarned()
+    {
+        var bot = new Bot();
+        string broken = Temp("broken-trade-note.utl", Utl(
+            "UTL", "1", "2",
+            "Trade Note", "", "0;1",
+            "Keep pyreals", "", "0;1;1", "0", "^Pyreal$", "1"));
+        bot.S.CurrentLootPath = broken;
+        FakeHost.Chat.Clear();
+        object?[] load = { string.Empty, null, null };
+        Check.True((bool)typeof(RynthAiPlugin).GetMethod("TryLoadLootProfile", Any)!.Invoke(bot.P, load)!, "it loads");
+        string chat = bot.ChatText;
+        Check.True(chat.Contains("1 rule(s) have no conditions") && chat.Contains("'Trade Note' (rule 1, Keep)") && chat.Contains("will be Keep"),
+            "the unconditional rule is named: " + chat);
+        Check.Eq(VTankLootEvaluator.FirstMatch(bot.Get<VTankLootProfile>("_loadedLootProfile")!, bot.Item(Opal), null, out _)?.Name, "Trade Note",
+            "and it does keep a gem (what the report showed)");
+
+        var ok = new Bot();
+        ok.S.CurrentLootPath = Temp("sell-gems.utl", SellGems);
+        FakeHost.Chat.Clear();
+        object?[] load2 = { string.Empty, null, null };
+        Check.True((bool)typeof(RynthAiPlugin).GetMethod("TryLoadLootProfile", Any)!.Invoke(ok.P, load2)!, "a normal profile loads");
+        Check.False(ok.ChatText.Contains("no conditions"), "and says nothing about it");
     }
 
     // ── World and plugin ──────────────────────────────────────────────────────

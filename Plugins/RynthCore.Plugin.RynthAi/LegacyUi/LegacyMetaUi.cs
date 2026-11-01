@@ -63,7 +63,11 @@ internal sealed class LegacyMetaUi
     {
         _settings = settings;
         _navFiles = navFiles;
+        Saver = new MetaSaver(settings, null);
     }
+
+    /// <summary>Writes the meta file and keeps the result (the dashboard passes its own, which logs).</summary>
+    internal MetaSaver Saver { get; set; }
 
     public void Render()
     {
@@ -1078,7 +1082,11 @@ internal sealed class LegacyMetaUi
             _openSavePopup = true;
 
         // Status message
-        if (!string.IsNullOrEmpty(_statusMessage) && (RynthClock.Now - _statusTime).TotalSeconds < 5)
+        // A save that failed (or an edit that wasn't written) stays up, in red, until the next result.
+        bool unsaved = !Saver.LastOk && Saver.Seq > 0 && ReferenceEquals(_statusMessage, Saver.LastText);
+        if (unsaved)
+            SafeImGui.TextColored(new Vector4(1, 0.35f, 0.35f, 1), _statusMessage);
+        else if (!string.IsNullOrEmpty(_statusMessage) && (RynthClock.Now - _statusTime).TotalSeconds < 5)
             SafeImGui.TextColored(new Vector4(0, 1, 0, 1), _statusMessage);
 
         // Save popup
@@ -1155,6 +1163,8 @@ internal sealed class LegacyMetaUi
                 _settings.EmbeddedNavs.Clear();
             }
             _settings.CurrentMetaPath = string.Empty;
+            _settings.MetaUnsaved = false;
+            Saver.Note("Macro cleared.", string.Empty);
             _settings.CurrentState = "Default";
             _settings.ForceStateReset = true;
             _statusMessage = "Macro cleared.";
@@ -1201,6 +1211,8 @@ internal sealed class LegacyMetaUi
             _settings.ForceStateReset = true;
             _settings.MetaCallStackReset = true;
             _settings.CurrentMetaPath = filePath;
+            _settings.MetaUnsaved = false;   // the rules are the file's now
+            Saver.Note($"Loaded {Path.GetFileName(filePath)}", filePath);   // an old save failure isn't this meta's
 
             string name = Path.GetFileNameWithoutExtension(filePath);
             int stateCount = loaded.Rules.Select(r => r.State).Distinct(StringComparer.OrdinalIgnoreCase).Count();
@@ -1231,31 +1243,19 @@ internal sealed class LegacyMetaUi
     }
 
 
+    /// <summary>Writes the meta file after an edit here (MetaSaver: logged); the status line says
+    /// whether it was saved, or why not (used to say nothing either way).</summary>
     private void TryAutoSaveMeta()
     {
         _settings.MetaRulesStructuralVersion++;   // editor mutation → rebuild meta index
-        if (string.IsNullOrEmpty(_settings.CurrentMetaPath))
-            return;
-
-        try
-        {
-            string path = _settings.CurrentMetaPath;
-
-            // .met files can't be written — save as .af alongside
-            if (Path.GetExtension(path).Equals(".met", StringComparison.OrdinalIgnoreCase))
-            {
-                path = Path.ChangeExtension(path, ".af");
-                _settings.CurrentMetaPath = path;
-                _statusMessage = $"Converted .met → {Path.GetFileName(path)} for editing (original .met left untouched)";
-                _statusTime = RynthClock.Now;
-            }
-
-            lock (_settings.MetaRulesLock)
-                RynthCore.Plugin.Shared.DataWriteGuard.TrySave("the meta", path,
-                    () => AfFileWriter.Save(path, _settings.MetaRules, _settings.EmbeddedNavs));
-        }
-        catch { }
+        // .met files can't be written: SaveCurrent saves the .af alongside and switches to it.
+        Saver.SaveCurrent("Macro Rules edit");
+        _statusMessage = Saver.LastText;
+        _statusTime = RynthClock.Now;
     }
+
+    /// <summary>The status line's text now (the last load, save or refusal; empty after a few seconds).</summary>
+    internal string StatusLine => _statusMessage ?? string.Empty;
 
     private void SaveMacroFile()
     {
@@ -1269,19 +1269,14 @@ internal sealed class LegacyMetaUi
             }
 
             string filePath = Path.Combine(MetaFolder, _saveName + ".af");
-            bool saved;
-            string why;
-            lock (_settings.MetaRulesLock)
-                saved = RynthCore.Plugin.Shared.DataWriteGuard.TrySave("the meta", filePath,
-                    () => AfFileWriter.Save(filePath, _settings.MetaRules, _settings.EmbeddedNavs), out why);
-            if (!saved)
+            if (!Saver.SaveTo(filePath, "Macro Rules Save"))
             {
-                _statusMessage = $"Couldn't save {filePath}: {why}";
+                _statusMessage = Saver.LastText;
                 _statusTime = RynthClock.Now;
                 return;
             }
 
-            _statusMessage = $"Saved to {_saveName}.af";
+            _statusMessage = Saver.LastText;
             _statusTime = RynthClock.Now;
             RefreshMacroFileList();
         }

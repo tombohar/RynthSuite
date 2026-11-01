@@ -66,7 +66,7 @@ internal static unsafe class StatusInterface
 
 public sealed partial class RynthAiPlugin
 {
-    /// <summary>{macro,action,state,combat,buff,nav,loot,meta,navFile,metaFile,lootFile}; null before login.</summary>
+    /// <summary>{macro,action,state,combat,buff,nav,loot,meta,navFile,metaFile,lootFile,lootMode}; null before login.</summary>
     internal string? BuildBotStatusJson()
     {
         var st = _dashboard?.Settings;
@@ -86,6 +86,7 @@ public sealed partial class RynthAiPlugin
             w.WriteString("navFile", FileName(st.CurrentNavPath));
             w.WriteString("metaFile", FileName(st.CurrentMetaPath));
             w.WriteString("lootFile", FileName(st.CurrentLootPath));
+            w.WriteString("lootMode", Loot.LootModes.Word(st.LootMode));
             w.WriteEndObject();
         }
         return System.Text.Encoding.UTF8.GetString(buffer.WrittenSpan);

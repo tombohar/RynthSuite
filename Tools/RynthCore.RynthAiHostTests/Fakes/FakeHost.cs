@@ -103,6 +103,8 @@ internal static unsafe class FakeHost
     /// <summary>Opt-in: wires TapJump (the keyboard jump, 0xF61B); calls land in <see cref="TapJumps"/>.</summary>
     public static bool TapJumpCalls;
     public static int TapJumps;
+    /// <summary>Jumps and item moves in the order they were called ("tapjump", "jump", "move:XXXXXXXX").</summary>
+    public static readonly List<string> Order = new();
     /// <summary>TapJump returns 0 (the client refused the jump); the call still counts in TapJumps.</summary>
     public static bool TapJumpRefuse;
     public static int Turns;
@@ -305,7 +307,7 @@ internal static unsafe class FakeHost
         Vitals = default; BaseVitals = default; WorldName = ""; AccountName = "";
         HeadingDeg = 0; Wcids.Clear(); Spellbook.Clear(); PlayerIdValue = 0;
         Logs.Clear(); Chat.Clear(); ChatTypes.Clear(); ChatCommands.Clear(); AfterCastSpell = null;
-        AutoRunCalls.Clear(); AutoRun = false; Jumps = 0; TapJumpCalls = false; TapJumps = 0; TapJumpRefuse = false; Turns = 0; Casts.Clear(); CastRefused = false; CastsRefused = 0; StopCalls = false; Stops = 0; SetMotionCalls = false; MotionCalls.Clear(); AttackSendCalls = false; AttackCalls.Clear(); Sent.Clear(); GiveCalls = false; Gives.Clear(); GiveLands = true; GiveHandler = null;
+        AutoRunCalls.Clear(); AutoRun = false; Jumps = 0; TapJumpCalls = false; TapJumps = 0; TapJumpRefuse = false; Order.Clear(); Turns = 0; Casts.Clear(); CastRefused = false; CastsRefused = 0; StopCalls = false; Stops = 0; SetMotionCalls = false; MotionCalls.Clear(); AttackSendCalls = false; AttackCalls.Clear(); Sent.Clear(); GiveCalls = false; Gives.Clear(); GiveLands = true; GiveHandler = null;
         Uses.Clear(); IdRequests.Clear(); TargetCalls = false; HealthQueries.Clear(); IdTimes.Clear(); Moves.Clear(); Appraised.Clear(); WeaponCalls = false; ContentsCalls = false; CombatModeValue = 1;
         RequestIdAccepts = true; RefusedIdRequests = 0; UseObjectAccepts = true;
         VTankFlags = -1; VTankSeq = 0; LogCostMicros = 0;
@@ -894,10 +896,10 @@ internal static unsafe class FakeHost
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static int JumpNonAutonomous(float extent) { Jumps++; return 1; }
+    private static int JumpNonAutonomous(float extent) { Jumps++; Order.Add("jump"); return 1; }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static int TapJump() { TapJumps++; return TapJumpRefuse ? 0 : 1; }
+    private static int TapJump() { TapJumps++; Order.Add("tapjump"); return TapJumpRefuse ? 0 : 1; }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int CastSpell(uint target, int spellId) { if (CastRefused) { CastsRefused++; return 0; } Casts.Add((target, spellId)); Sent.Add($"cast {spellId}"); AfterCastSpell?.Invoke(); return 1; }
@@ -994,7 +996,7 @@ internal static unsafe class FakeHost
     private static uint GetGroundContainerId() => GroundContainer;
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static int MoveItemExternal(uint id, uint target, int amount) { ExternalMoves.Add((id, target, amount)); return 1; }
+    private static int MoveItemExternal(uint id, uint target, int amount) { ExternalMoves.Add((id, target, amount)); Order.Add($"move:{id:X8}"); return 1; }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int SalvagePanelOpen(uint tool) => 1;

@@ -232,6 +232,41 @@ public static class VTankLootEvaluator
         return VTankLootVerdict.NoMatch;
     }
 
+    /// <summary>
+    /// The first switched-off rule before <paramref name="end"/> (-1: all of them) that would take
+    /// the item if it were on: every condition but its DisabledRule node passes, the item's ID taken
+    /// as in. -1 when none would. A rule that is only a DisabledRule node (LootSnob's "leave this
+    /// disabled" separators have a name condition too) never counts. For /ra loot why and the
+    /// looter's log: a wand left because "(W) War (Max 385)" is switched off in the player's copy of
+    /// LootSnob read the same as one no rule wants (2026-11-01). <paramref name="keepsOnly"/>: Keep
+    /// and Keep # rules only (LootSnob ships its Salvage rules off, so nearly every item with a
+    /// material has a switched-off Salvage rule that would take it).
+    /// </summary>
+    public static int FirstSwitchedOffMatch(VTankLootProfile profile, WorldObject? item, VTankLootContext? ctx, int end = -1, bool keepsOnly = false)
+    {
+        if (item is null) return -1;
+        uint itemId = unchecked((uint)item.Id);
+        int stop = end < 0 || end > profile.Rules.Count ? profile.Rules.Count : end;
+        for (int i = 0; i < stop; i++)
+        {
+            VTankLootRule rule = profile.Rules[i];
+            if (rule.Enabled) continue;
+            if (keepsOnly && rule.Action != VTankLootAction.Keep && rule.Action != VTankLootAction.KeepUpTo) continue;
+            bool any = false, failed = false;
+            foreach (var cond in rule.Conditions)
+            {
+                if (cond.NodeType == VTankNodeTypes.DisabledRule) continue;
+                any = true;
+                bool ok;
+                try { ok = Match(cond, item, itemId, ctx); }
+                catch { ok = false; }
+                if (!ok) { failed = true; break; }
+            }
+            if (any && !failed) return i;
+        }
+        return -1;
+    }
+
     // STypeInts the CreateObject message carries (the engine answers them before any ID:
     // RynthCore PwdLayout.IntStypes). Everything else, workmanship (105) included, comes with the ID.
     private static readonly HashSet<int> CreateIntKeys = new()
