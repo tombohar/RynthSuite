@@ -41,8 +41,12 @@ public sealed partial class RynthAiPlugin
             _delayedCommands.RemoveAt(i--);
             try
             {
-                if (fromMeta) RunAsMeta(() => { HandleRynthChatSubmit(cmd); return true; });
-                else HandleRynthChatSubmit(cmd);
+                // A delayed line is never the player at the keyboard: the Item Tool refuses it.
+                RunItemToolUntrusted(() =>
+                {
+                    if (fromMeta) RunAsMeta(() => { HandleRynthChatSubmit(cmd); return true; });
+                    else HandleRynthChatSubmit(cmd);
+                });
             }
             catch (Exception ex) { Log($"[RynthAi] /ub delay: '{cmd}' threw {ex.Message}"); }
         }

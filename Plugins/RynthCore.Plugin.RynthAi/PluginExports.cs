@@ -757,6 +757,42 @@ public static unsafe class PluginExports
         catch { }
     }
 
+    // ── Item Tool (the engine's Item Tool panel: chest looter + Quick give) ─────────────────
+    // The panel polls the status JSON and posts its buttons' words. The command export is the
+    // panel's alone: a Quick give started through it is a button Tom pressed (the plugin treats
+    // chat lines from metas, scripts and the remote differently, RynthAiPlugin.ItemTool.cs).
+
+    private static IntPtr _itemToolPtr = IntPtr.Zero;
+
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetItemToolJson", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr GetItemToolJson()
+    {
+        try
+        {
+            string json = Runtime.Plugin?.BuildItemToolJson() ?? "{}";
+            IntPtr newPtr = Marshal.StringToHGlobalAnsi(json);
+            IntPtr oldPtr = Interlocked.Exchange(ref _itemToolPtr, newPtr);
+            if (oldPtr != IntPtr.Zero)
+                Marshal.FreeHGlobal(oldPtr);
+            return newPtr;
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginItemToolCommand", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void ItemToolCommand(IntPtr ansiArgs)
+    {
+        try
+        {
+            string args = ansiArgs != IntPtr.Zero ? (Marshal.PtrToStringAnsi(ansiArgs) ?? string.Empty) : string.Empty;
+            Runtime.Plugin?.QueueItemToolCommand(args.Trim(), trusted: true);
+        }
+        catch { /* never let a managed exception cross the native boundary */ }
+    }
+
     private static IntPtr _patrolInfoPtr = IntPtr.Zero;
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetPatrolInfoJson", CallConvs = new[] { typeof(CallConvCdecl) })]

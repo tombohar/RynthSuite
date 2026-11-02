@@ -79,6 +79,11 @@ internal interface IDashboardHost
     /// <summary>RynthSort's own window, shown or hidden.</summary>
     void ToggleSortWindow();
     void StartPatrol();
+    /// <summary>Outdoor hunting on or off (on the plugin tick), and whether it is on.</summary>
+    void ToggleHunt();
+    bool HuntActive { get; }
+    /// <summary>The small Outdoor Hunt window (its two distances) open or closed.</summary>
+    void ToggleHuntPanel();
     void ToggleSpells();
     /// <summary>The Classic (retail) look: RynthCore's own face comes back for it.</summary>
     void UseClassicLook();
@@ -369,7 +374,10 @@ internal sealed unsafe class InstrumentDashboard
         ImGui.SetCursorScreenPos(min);
         // A click asks why it is doing that (or nothing): /ra why's diagnosis, in chat.
         if (ImGui.InvisibleButton("##activity", new Vector2(w, h))) _d.Command("/ra why");
-        SafeImGui.SetItemTooltip("Bot activity: " + activity + "\nMeta state: " + state + "\nClick: why it's doing that, in chat (/ra why).");
+        // Boost Nav Priority (owner's rule, 2026-11-02): it reads Idle or Navigating, and says why.
+        SafeImGui.SetItemTooltip("Bot activity: " + activity
+            + (_r.BoostNav ? "\nBoost Nav Priority is on: RynthAi only navigates (no hunting, no looting)." : "")
+            + "\nMeta state: " + state + "\nClick: why it's doing that, in chat (/ra why).");
         return y + h;
     }
 
@@ -570,6 +578,7 @@ internal sealed unsafe class InstrumentDashboard
         (RynthIcons.GlobeHemisphereWest, "World", "World Map", "World Map: Dereth, with your position, the route and places"),
         (RynthIcons.Backpack, "Items", "Items", "Items"),
         (RynthIcons.Footprints, "Patrol", "", "Patrol. Click: start dungeon patrol. Right-click: the Patrol drawer (hazards and routes)."),
+        (RynthIcons.Crosshair, "Hunt", "", "Hunt. Click: start or stop hunting outdoors from here: walk from monster to monster round obstacles.\nRight-click: the Outdoor Hunt window (how far it looks for monsters, and how far it may roam)."),
         (RynthIcons.User, "Char", "", "Character. Click: RynthOracle's Character tab. Right-click: the character windows."),
     };
 
@@ -594,6 +603,7 @@ internal sealed unsafe class InstrumentDashboard
             bool lit = l.Label switch
             {
                 "Patrol" => prefs.IsOpen(DashboardPrefs.PatrolDrawer),
+                "Hunt" => _d.HuntActive,
                 "Char" => host.SetPanelOpen(OracleKey, RynthPanelOpen.Ask) == 1 || host.SetPanelOpen("Mini Remote", RynthPanelOpen.Ask) == 1,
                 _ => host.SetPanelOpen(l.Key, RynthPanelOpen.Ask) == 1,
             };
@@ -636,6 +646,7 @@ internal sealed unsafe class InstrumentDashboard
         switch (label)
         {
             case "Patrol": _d.StartPatrol(); break;
+            case "Hunt": _d.ToggleHunt(); break;
             case "Char":
                 if (host.SetPanelOpen(OracleKey, RynthPanelOpen.Ask) >= 0) _d.Command("/ro character");
                 else _d.Command("/rc miniremote section char");
@@ -649,6 +660,10 @@ internal sealed unsafe class InstrumentDashboard
         if (label == "Patrol")
         {
             prefs.ToggleDrawer(DashboardPrefs.PatrolDrawer);
+        }
+        else if (label == "Hunt")
+        {
+            _d.ToggleHuntPanel();
         }
         else if (label == "Char")
         {

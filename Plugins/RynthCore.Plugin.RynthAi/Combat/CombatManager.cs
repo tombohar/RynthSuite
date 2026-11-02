@@ -4622,12 +4622,27 @@ public partial class CombatManager : IDisposable
             DropTarget("combat disabled");
         }
 
-        // Combat can run in Default/Combat, can interrupt navigation unless nav boost is on,
-        // and can interrupt looting unless loot boost is on.
-        // Buffing always blocks combat — if buffs drop, the character dies.
+        // Boost Nav Priority (owner's rule, 2026-11-02): RynthAi only navigates. No hunting and no
+        // fighting back, whatever BotAction says. canRun used to block combat only while the
+        // arbiter held "Navigating", so with no route (BotAction "Default") Think ran and the bot
+        // hunted as usual with the flag on (R-20261102-041824-3f7c). The scan above still runs:
+        // it is what tells the arbiter (and the once-per-session notice) a fight is being skipped.
+        if (_settings.BoostNavPriority)
+        {
+            StandDownForBoostNav();
+            return;
+        }
+        if (_boostNavStoodDown)
+        {
+            _boostNavStoodDown = false;
+            _host.Log("[RynthAi] Combat: Boost Nav Priority is off - hunting again.");
+        }
+
+        // Combat can run in Default/Combat, can interrupt navigation, and can interrupt looting
+        // unless loot boost is on. Buffing always blocks combat — if buffs drop, the character dies.
         bool canRun = _settings.BotAction == "Default"
                    || _settings.BotAction == "Combat"
-                   || (_settings.BotAction == "Navigating" && !_settings.BoostNavPriority)
+                   || _settings.BotAction == "Navigating"
                    || (_settings.BotAction == "Looting" && !_settings.BoostLootPriority);
         if (!canRun) return;
 
@@ -4640,6 +4655,55 @@ public partial class CombatManager : IDisposable
             // recomputes from HasEngageableTarget every tick (33ms lag, picks
             // up activeTargetId set by the Think() above on the next pass).
             // See STEP 2 note in the pre-Think branch.
+        }
+    }
+
+    // True while Boost Nav Priority holds combat down (logged once each way).
+    private bool _boostNavStoodDown;
+
+    /// <summary>Host tests: combat is standing down for Boost Nav Priority.</summary>
+    internal bool BoostNavStoodDown => _boostNavStoodDown;
+
+    /// <summary>
+    /// Boost Nav Priority (owner's rule, 2026-11-02), every combat tick while the flag is on:
+    /// nothing is attacked, and a fight the flag came on in the middle of is let go cleanly. The
+    /// target is dropped (which ends a kite or an environment approach), the server's melee or
+    /// missile attack is cancelled (or it keeps swinging and walking us to the mob), a held turn
+    /// is let go, and with Peace Mode When Idle the stance goes back to Peace as it does between
+    /// fights, so nav does not run in a combat stance. No mode change while buffing (it would
+    /// fizzle the cast), while a cast resolves, or while a nav recall wants Magic mode.
+    /// </summary>
+    private void StandDownForBoostNav()
+    {
+        int mode = CurrentCombatMode;
+        if (!_boostNavStoodDown)
+        {
+            _boostNavStoodDown = true;
+            _host.Log("[RynthAi] Combat: Boost Nav Priority is on - no hunting and no fighting back, RynthAi only navigates.");
+            // The flag came on mid-fight: end the server's attack even if our record of it is gone.
+            if (mode == CombatMode.Melee || mode == CombatMode.Missile)
+                ReleaseServerAttack("Boost Nav Priority", log: false);
+        }
+        if (activeTargetId != 0 || _lockedTargetId != 0)
+            DropTarget("Boost Nav Priority is on (RynthAi only navigates)");
+        if (_serverAttackTargetId != 0)
+            ReleaseServerAttack("Boost Nav Priority", log: false);
+        ReleaseHeldTurn();
+
+        if (mode == CombatMode.NonCombat) { _idlePeaceAttempts = 0; return; }
+        if (!_settings.PeaceModeWhenIdle || _settings.BotAction == "Buffing" || BusyCount != 0
+            || RynthClock.Now < _navMagicWantedUntil || IsCastInFlight())
+            return;
+        bool peaceHeld;
+        try { peaceHeld = HoldIdlePeace?.Invoke() == true; } catch { peaceHeld = false; }
+        if (peaceHeld) return;
+        // The idle swap's backoff (ThinkCore): 500 ms for the first 4 sends, then doubling to 15 s.
+        double peaceDelayMs = Math.Min(15_000, 500 * Math.Pow(2, Math.Min(5, _idlePeaceAttempts / 4)));
+        if ((RynthClock.Now - _lastPeaceAttempt).TotalMilliseconds > peaceDelayMs
+            && _host.ChangeCombatModeFor(CombatMode.NonCombat, "Combat", "Boost Nav Priority: RynthAi only navigates (Peace Mode When Idle)"))
+        {
+            _lastPeaceAttempt = RynthClock.Now;
+            _idlePeaceAttempts++;
         }
     }
 
@@ -6126,13 +6190,26 @@ public partial class CombatManager : IDisposable
         if (inHand != 0 && inHand != targetWeaponId
             && (WieldedSlotOf(weaponObj) & OffhandRules.ShieldSlot) != 0   // the slot can read 0: WieldedSlotOf asks the weenie
             && _worldFilter[inHand] is WorldObject mainObj && MainKindOf(mainObj) == MainHandKind.OneHandedMelee
-            && _settings.ItemRules.Any(r => r.Id == inHand))
+            && _settings.ItemRules.Any(r => r.Id == inHand)
+            && DualWieldPartnerFor(targetWeaponId, inHand) is not WorldObject)
         {
             if (_offNoted.Add($"dual:{targetWeaponId}:{inHand}"))
                 _host.Log($"[EquipDiag] 0x{(uint)targetWeaponId:X8} '{weaponObj.Name}' is in the off hand beside 0x{(uint)inHand:X8} '{mainObj.Name}' — fighting with both (dual wield)");
             weaponSource = $"dual wield (wanted 0x{(uint)targetWeaponId:X8} is in the off hand)";
             targetWeaponId = inHand;
             weaponObj = mainObj;
+        }
+        // Dual wield, the chosen weapon in the off hand beside one of another element, its partner
+        // listed: the partner goes in the main hand and the pair fights together (the off hand stays).
+        else if (inHand != 0 && inHand != targetWeaponId
+            && (WieldedSlotOf(weaponObj) & OffhandRules.ShieldSlot) != 0
+            && DualWieldPartnerFor(targetWeaponId, inHand) is WorldObject partnerObj)
+        {
+            if (_offNoted.Add($"pair:{targetWeaponId}:{partnerObj.Id}"))
+                _host.Log($"[EquipDiag] 0x{(uint)targetWeaponId:X8} '{weaponObj.Name}' is in the off hand: its partner 0x{(uint)partnerObj.Id:X8} '{partnerObj.Name}' goes in the main hand (dual wield pair)");
+            weaponSource = $"dual wield pair (wanted 0x{(uint)targetWeaponId:X8} is in the off hand)";
+            targetWeaponId = partnerObj.Id;
+            weaponObj = partnerObj;
         }
 
         if (inHand != targetWeaponId && OffhandBlocksMain(targetWeaponId, _curOffhandMode))

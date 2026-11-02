@@ -114,7 +114,7 @@ internal static partial class DungeonPathfinder
     ///     ushort otherPortalId
     ///   ushort[numVisibleCells]              ← skipped
     /// </summary>
-    private static Dictionary<uint, DungeonNavNode> BuildGraph(uint landblockKey, DatDatabase cellDat)
+    internal static Dictionary<uint, DungeonNavNode> BuildGraph(uint landblockKey, DatDatabase cellDat)
     {
         var nodes = new Dictionary<uint, DungeonNavNode>();
 

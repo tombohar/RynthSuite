@@ -272,4 +272,44 @@ public sealed partial class RynthAiPlugin
         FinishChestLoot(id, how, close: false, sayNothingMatched: false);
         return true;
     }
+
+    // ── Pickup with macro off (2026-11-02) ─────────────────────────────────────────────────────
+    // A chest the player opens is looted by the loaded loot profile with the macro or Looting off
+    // (LootChestsMacroOff, on by default), the way /ra lootthis would. With both on the macro's
+    // own chest looting (above) takes it. Only a chest JudgeChest would loot: never a corpse,
+    // a vendor, a player, house storage or a pack the character carries.
+
+    private const long ManualChestWaitMs = 3000;   // for the chest's owner and name to be readable
+    private int _manualChestId;
+    private long _manualChestSince;
+
+    /// <summary>OnViewObjectContents for a non-corpse container: a chest the player may have opened.</summary>
+    private void NoteManualChestOpened(int id)
+    {
+        _manualChestId = id;
+        _manualChestSince = CorpseNowMs;
+    }
+
+    /// <summary>TickCorpseOpening, every tick: hands a chest the player opened to the looter (see above).</summary>
+    private void TakeManualChest(LegacyUiSettings settings)
+    {
+        int id = _manualChestId;
+        if (id == 0) return;
+        if (!settings.LootChestsMacroOff || (settings.IsMacroRunning && settings.EnableLooting)
+            || _chestKey?.Running == true || _forcedLootContainerId == id)
+        {
+            _manualChestId = 0;   // off, the macro's own looting has it, or the chest looter does
+            return;
+        }
+        ChestVerdict verdict = JudgeChest(id, out string why);
+        if (verdict == ChestVerdict.Wait && CorpseNowMs - _manualChestSince < ManualChestWaitMs) return;
+        _manualChestId = 0;
+        if (verdict != ChestVerdict.Loot || LootThisRefusal(id) != null)
+        {
+            LootDiag($"[RynthAi] Pickup with macro off: not looting 0x{(uint)id:X8} ({(verdict == ChestVerdict.Loot ? LootThisRefusal(id) : why)}).");
+            return;
+        }
+        LootDiag($"[RynthAi] Pickup with macro off: looting the opened chest 0x{(uint)id:X8} by the loot profile.");
+        ForceLootOpenChest(id);
+    }
 }

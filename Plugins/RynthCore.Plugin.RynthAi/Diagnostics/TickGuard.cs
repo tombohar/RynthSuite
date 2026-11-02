@@ -25,6 +25,7 @@ internal enum TickStep
     QuestTracker,
     LocalFeatures,
     GiveQueue,
+    ItemTool,
     Jumper,
     Dashboard,
     // In world.
@@ -112,6 +113,7 @@ internal sealed class TickGuard
         Add(TickStep.QuestTracker,      "quest tracker",            LogCat.Quests);
         Add(TickStep.LocalFeatures,     "HUDs and panels",          LogCat.Huds);
         Add(TickStep.GiveQueue,         "give queue",               LogCat.Inventory);
+        Add(TickStep.ItemTool,          "item tool",                LogCat.Inventory);
         Add(TickStep.Jumper,            "jumper",                   LogCat.Jumper, essential: true);
         Add(TickStep.Dashboard,         "dashboard window",         LogCat.UI);
 

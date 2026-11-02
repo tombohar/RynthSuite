@@ -14,8 +14,9 @@ public static unsafe class PluginExports
 {
     internal static readonly RynthPluginRuntime<RynthNavPlugin> Runtime = new();
 
-    // Typed interfaces for other plugins (host GetPluginInterface, API v68): "RynthNav.Path" v1
-    // (RynthAi plans stuck-recovery detours with it). Fixed signature: void* (const char* iface, uint version).
+    // Typed interfaces for other plugins (host GetPluginInterface, API v68): "RynthNav.Path" v2, also
+    // handed to v1 callers (RynthAi plans stuck-recovery detours with FindPath, and its outdoor hunting
+    // walks with FindPathEx and Raycast). Fixed signature: void* (const char* iface, uint version).
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginQueryInterface", CallConvs = new[] { typeof(CallConvCdecl) })]
     private static IntPtr QueryInterface(IntPtr ifaceAnsi, uint version)
     {

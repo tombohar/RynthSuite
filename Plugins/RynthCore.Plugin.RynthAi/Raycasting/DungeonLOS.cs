@@ -73,6 +73,9 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             public bool IsPortal;
             public bool IsFloor; // physics floor polygon — upward-facing, used by DungeonMapUiV2
             public uint CellId; // full landcell id (0xXXYYNNNN) — for per-cell "explored" tracking
+            /// <summary>The polygon's key in its CellStruct (render polygons): what an EnvCell's portal
+            /// record names as its polygon (BuildingMap finds a building's doors by it).</summary>
+            public ushort PolyKey;
         }
 
         /// <summary>
@@ -425,7 +428,8 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                             CellY     = envCell.PosY + globalOffsetY,
                             CellZ     = envCell.PosZ,
                             IsPortal  = poly.IsPortal,
-                            CellId    = cellId
+                            CellId    = cellId,
+                            PolyKey   = poly.Key,
                         });
                     }
                 }
@@ -672,6 +676,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             // Index into the EnvCell's surface palette for the polygon's front (positive) side;
             // -1 when it has none (physics polygons carry -1).
             public short PosSurface = -1;
+            public ushort Key;   // the polygon's key in its CellStruct
         }
 
         private CellGeometry GetCellGeometry(uint environmentId, uint cellStructIndex)
@@ -837,7 +842,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     var poly = renderPolygons[i];
                     if (poly.VertexIds == null || poly.VertexIds.Count < 3) continue;
 
-                    var cellPoly = new CellPolygon { IsPortal = portalIndices.Contains(poly.Key), PosSurface = poly.PosSurface };
+                    var cellPoly = new CellPolygon { IsPortal = portalIndices.Contains(poly.Key), PosSurface = poly.PosSurface, Key = poly.Key };
                     foreach (var vid in poly.VertexIds)
                     {
                         if (vertices.ContainsKey(vid))
@@ -870,7 +875,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                         foreach (var poly in physicsPolys)
                         {
                             if (poly.VertexIds == null || poly.VertexIds.Count < 3) continue;
-                            var cellPoly = new CellPolygon { PosSurface = poly.PosSurface };
+                            var cellPoly = new CellPolygon { PosSurface = poly.PosSurface, Key = poly.Key };
                             foreach (var vid in poly.VertexIds)
                             {
                                 if (vertices.ContainsKey(vid))

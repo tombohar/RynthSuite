@@ -3748,6 +3748,8 @@ internal sealed partial class ExpressionEngine
             ["NavRecoveryEnabled"]  = (() => B(s.NavRecoveryEnabled),  v => s.NavRecoveryEnabled = ToDouble(v) != 0),
             ["NavResumeNearest"]    = (() => B(s.NavResumeNearest),    v => s.NavResumeNearest   = ToDouble(v) != 0),
             ["NavOffTrackYards"]    = (() => F(s.NavOffTrackYards),    v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f)) s.NavOffTrackYards = Math.Clamp(f, 160f, 1000f); }),
+            ["OutdoorHuntRange"]    = (() => F(s.OutdoorHuntRange),    v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f)) s.OutdoorHuntRange = (float)Math.Clamp(f, RynthAiPlugin.OutdoorHuntRangeMin, RynthAiPlugin.OutdoorHuntRangeMax); }),
+            ["OutdoorHuntRadius"]   = (() => F(s.OutdoorHuntRadius),   v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f)) s.OutdoorHuntRadius = (float)Math.Clamp(f, 0, RynthAiPlugin.OutdoorHuntRadiusMax); }),
             ["NavMaxDetourAttempts"] = (() => I(s.NavMaxDetourAttempts), v => { if (int.TryParse(v, out int i)) s.NavMaxDetourAttempts = Math.Clamp(i, 1, 10); }),
             ["OpenDoorRange"]       = (() => F(s.OpenDoorRange),       v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f)) s.OpenDoorRange = f; }),
             ["BoostNavPriority"]    = (() => B(s.BoostNavPriority),    v => s.BoostNavPriority  = ToDouble(v) != 0),

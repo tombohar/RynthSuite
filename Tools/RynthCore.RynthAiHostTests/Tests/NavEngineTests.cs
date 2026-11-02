@@ -57,6 +57,13 @@ internal static class NavEngineTests
         r.Add("nav engine: a hold is checked again every 3 s, so a wrong answer doesn't hold for good", AreaRecheck);
         r.Add("nav engine: at the last waypoint before the area change it walks on through for 6 s", AreaGraceWalk);
         r.Add("nav engine: with recovery off the area is never checked", AreaRecoveryOff);
+        r.Add("nav area after a portal: a later waypoint in this area (a recall cast here, the loop's start) is carried on from", AreaCarryOnRecallHere);
+        r.Add("nav area after a portal: a route that walks into the dungeon carries on at its first waypoint inside", AreaCarryOnIntoDungeon);
+        r.Add("nav area after a portal: a Linear route looks to its end and back, and turns round for a point behind", AreaCarryOnLinearBack);
+        r.Add("nav area: at the route's own way out it still walks through, it doesn't go back to an earlier point here", AreaBoundaryNotCarried);
+        r.Add("nav area: nothing of the route here, in a dungeon: says once to load a route or press Patrol, offers Patrol", AreaNoneHereDungeon);
+        r.Add("nav area: nothing of the route here, on the landscape: says to load a route for here, no Patrol", AreaNoneHereLandscape);
+        r.Add("nav area: loading the route again over a hold says so again; a route for here (the Patrol) runs at once", AreaReloadAndPatrol);
         r.Add("nav area: the decision (same dungeon, other dungeon, landscape, off the map)", ClassifyArea);
         r.Add("nav recovery: a waypoint behind a wall is in the room whose floor holds it, not the nearest centre", ContainingCellByFloor);
 
@@ -114,6 +121,9 @@ internal static class NavEngineTests
     private sealed class FakePlanner : INavRecoveryPlanner
     {
         public NavAreaCheck Area = NavAreaCheck.Match;
+        /// <summary>Per-point answer (nav coordinates); used instead of <see cref="Area"/> when set.</summary>
+        public Func<double, double, NavAreaCheck>? AreaAt;
+        public string RouteArea = "dungeon 0x01D9", PlayerArea = "on the landscape";
         public int AreaCalls;
         public bool GivePlan;
         /// <summary>Per-target walk length (yd); null = no path. Used instead of GivePlan when set.</summary>
@@ -134,10 +144,11 @@ internal static class NavEngineTests
         public NavAreaCheck CheckArea(uint playerCell, double tNs, double tEw, out string routeArea, out string playerArea)
         {
             AreaCalls++;
-            bool mis = Area == NavAreaCheck.Mismatch;
-            routeArea = mis ? "dungeon 0x01D9" : string.Empty;
-            playerArea = mis ? "on the landscape" : string.Empty;
-            return Area;
+            var a = AreaAt != null ? AreaAt(tNs, tEw) : Area;
+            bool mis = a == NavAreaCheck.Mismatch;
+            routeArea = mis ? RouteArea : string.Empty;
+            playerArea = mis ? PlayerArea : string.Empty;
+            return a;
         }
     }
 
@@ -748,7 +759,8 @@ internal static class NavEngineTests
 
         nav.Run(12);
         Check.Eq(FakeHost.Chat.Count(c => c.Contains("different area")), 1, "still one chat line after 12 s");
-        Check.True(p.AreaCalls >= 4 && p.AreaCalls <= 5, $"asked again every 3 s while held ({p.AreaCalls} calls in 12 s)");
+        // 1 for the waypoint, 1 for the one look along the route for a waypoint here (not repeated), 4 rechecks.
+        Check.True(p.AreaCalls >= 5 && p.AreaCalls <= 6, $"asked again every 3 s while held ({p.AreaCalls} calls in 12 s)");
         Check.Eq(p.PlanTargets.Count, 0, "no detour is tried");
         Check.Eq(FakeHost.Jumps, 0, "no escape jumps");
         Check.Eq(nav.Idx, 1, "the waypoint is kept");
@@ -832,6 +844,129 @@ internal static class NavEngineTests
         nav.Run(1);
         Check.Eq(p.AreaCalls, 0, "never asked");
         Check.True(FakeHost.AutoRun, "walks toward the waypoint");
+    }
+
+    // ── Different area after a portal / a load (2026-11-01) ──────────────────
+
+    /// <summary>A planner that says Match where <paramref name="here"/> holds (yards north, east of the origin), Mismatch elsewhere.</summary>
+    private static FakePlanner AreaWhere(Func<double, double, bool> here, string routeArea = "the landscape", string playerArea = "in dungeon 0x5756")
+        => new() { AreaAt = (ns, ew) => here((ns - NS0) * 240.0, (ew - EW0) * 240.0) ? NavAreaCheck.Match : NavAreaCheck.Mismatch,
+                   RouteArea = routeArea, PlayerArea = playerArea };
+
+    /// <summary>Puts the fake character in an indoor cell of the landblock it stands in.</summary>
+    private static void Indoors() => FakeHost.PlayerPose = ((FakeHost.PlayerPose.Cell & 0xFFFF0000u) | 0x0124, FakeHost.PlayerPose.X, FakeHost.PlayerPose.Y, FakeHost.PlayerPose.Z);
+
+    private static void AreaCarryOnRecallHere()
+    {
+        // The logged case: a Circular route that starts with a recall cast in the home dungeon, then walks
+        // the landscape to a portal. Loaded (or the macro started) in the dungeon, nav was on [2] out on the
+        // landscape (the "nearest" point by map distance) and held for good.
+        FakeHost.Reset(); At(-500, -500); Indoors();
+        var recall = Pt(-500, -500, T.Recall); recall.SpellId = 4198;
+        var route = Route(RT.Circular, recall, Pt(100, 0), Pt(110, 0), Pt(120, 0));
+        var p = AreaWhere((n, e) => n < -400);
+        var nav = new Nav(route, idx: 2, planner: p);
+        nav.Tick();
+        Check.Eq(nav.Idx, 0, "carries on from [0], the recall cast here (the loop goes on to it)");
+        Check.True(FakeHost.Chat.Exists(c => c.Contains("carrying on from [0]") && c.Contains("Recall")), "says so in chat, naming the step");
+        Check.Eq(FakeHost.Chat.Count(c => c.Contains("different area")), 0, "no hold line");
+        Check.False(nav.S.NavIsStuck, "not flagged stuck");
+        Check.Eq(nav.Recovery, "none", "no area hold");
+        nav.Run(1.0);
+        Check.Eq(nav.E.GetStateSnapshot().PortalState, "FiringAction", "and casts the recall");
+    }
+
+    private static void AreaCarryOnIntoDungeon()
+    {
+        // A Once route: landscape [0]-[1], the portal at [2] (used out there), then the dungeon [3]-[4].
+        // The character went through (or was put) inside with nav still on [1]: on to [3], not a hold.
+        FakeHost.Reset(); At(-300, 0); Indoors();
+        var portal = Pt(20, 0, T.PortalNPC); portal.TargetName = "Abandoned Experiment";
+        var route = Route(RT.Once, Pt(0, 0), Pt(10, 0), portal, Pt(-290, 0), Pt(-280, 0));
+        var nav = new Nav(route, idx: 1, planner: AreaWhere((n, e) => n < -200));
+        nav.Tick();
+        Check.Eq(nav.Idx, 3, "carries on from [3], the first waypoint inside (the portal step out there is passed)");
+        nav.Run(0.5);
+        Check.True(FakeHost.AutoRun, "walks toward [3]");
+        Check.Eq(FakeHost.Chat.Count(c => c.Contains("different area")), 0, "never held");
+
+        // Nothing is walked out of order on a Once route: points before the current one are never picked.
+        FakeHost.Reset(); At(-330, 0); Indoors();   // 40 yd from [0]: not standing at the way out
+        var back = new Nav(Route(RT.Once, Pt(-290, 0), Pt(10, 0), Pt(20, 0)), idx: 1, planner: AreaWhere((n, e) => n < -200));
+        back.Tick();
+        Check.Eq(back.Idx, 1, "a Once route never goes back to [0]");
+        Check.Eq(FakeHost.Chat.Count(c => c.Contains("nothing ahead on it is here")), 1, "it holds and says nothing ahead is here");
+    }
+
+    private static void AreaCarryOnLinearBack()
+    {
+        FakeHost.Reset(); At(-330, 0); Indoors();   // 40 yd from [0]: not standing at the way out
+        var nav = new Nav(Route(RT.Linear, Pt(-290, 0), Pt(10, 0), Pt(20, 0)), idx: 1, planner: AreaWhere((n, e) => n < -200));
+        nav.Tick();
+        Check.Eq(nav.Idx, 0, "nothing ahead to the end: back from it to [0]");
+        Check.Eq(nav.E.GetStateSnapshot().LinearDir, -1, "reached heading back");
+    }
+
+    private static void AreaBoundaryNotCarried()
+    {
+        // The route walks into a portal at [1]; [0] is in this area too. Standing at [1] (the way out), it
+        // walks on through as before rather than turning back to [0].
+        FakeHost.Reset(); At(0.5, 0);
+        var nav = new Nav(Route(RT.Circular, Pt(-20, 0), Pt(0, 0), Pt(900, 0)), idx: 2, planner: AreaWhere((n, e) => n < 100, "dungeon 0x01D9", "on the landscape"));
+        nav.Tick();
+        Check.Eq(nav.Idx, 2, "keeps the waypoint past the portal");
+        Check.True(nav.S.NavStatusLine.Contains("walking on through"), "the grace walk");
+        Check.False(FakeHost.Chat.Exists(c => c.Contains("carrying on")), "no carry-on");
+    }
+
+    private static void AreaNoneHereDungeon()
+    {
+        FakeHost.Reset(); At(-500, -500); Indoors();
+        var nav = new Nav(Route(RT.Circular, Pt(100, 0), Pt(110, 0), Pt(120, 0)), idx: 1, planner: AreaWhere((n, e) => false));
+        nav.Tick();
+        Check.False(FakeHost.AutoRun, "held");
+        var lines = FakeHost.Chat.Where(c => c.Contains("different area")).ToList();
+        Check.Eq(lines.Count, 1, "one chat line");
+        Check.True(lines.Count == 1 && lines[0].Contains("nothing ahead on it is here") && lines[0].Contains("press Patrol"),
+            $"it says what to do ({(lines.Count > 0 ? lines[0] : "")})");
+        Check.True(nav.S.NavStatusLine.Contains("press Patrol") && nav.S.NavStatusLine.Contains("the landscape"), $"status says it too ({nav.S.NavStatusLine})");
+        Check.True(nav.S.NavAreaHoldOffersPatrol, "the nav window offers the Patrol button");
+        nav.Run(12);
+        Check.Eq(FakeHost.Chat.Count(c => c.Contains("different area")), 1, "still one line after 12 s of rechecks");
+        Check.Eq(nav.Idx, 1, "the waypoint is kept");
+    }
+
+    private static void AreaNoneHereLandscape()
+    {
+        FakeHost.Reset(); At(30, 0);
+        var nav = new Nav(Route(RT.Circular, Pt(0, 0), Pt(50, 0)), idx: 1, planner: new FakePlanner { Area = NavAreaCheck.Mismatch });
+        nav.Tick();
+        var line = FakeHost.Chat.FirstOrDefault(c => c.Contains("different area")) ?? "";
+        Check.True(line.Contains("load a route for here") && !line.Contains("Patrol"), $"load a route, no Patrol on the landscape ({line})");
+        Check.False(nav.S.NavAreaHoldOffersPatrol, "no Patrol button");
+    }
+
+    private static void AreaReloadAndPatrol()
+    {
+        FakeHost.Reset(); At(-500, -500); Indoors();
+        var p = AreaWhere((n, e) => n < -400);
+        var landscape = Route(RT.Circular, Pt(100, 0), Pt(110, 0));
+        var nav = new Nav(landscape, idx: 1, planner: p);
+        nav.Tick();
+        Check.Eq(FakeHost.Chat.Count(c => c.Contains("different area")), 1, "held, said once");
+
+        // The player loads the same nav file again: a new route object, the same hold - and it says so again.
+        nav.S.CurrentRoute = Route(RT.Circular, Pt(100, 0), Pt(110, 0));
+        nav.Run(0.3);
+        Check.Eq(FakeHost.Chat.Count(c => c.Contains("different area")), 2, "the load is answered: still nothing here, said again");
+
+        // Patrol (or a route for this dungeon) replaces it: walks at once, the hold and its button are gone.
+        nav.S.CurrentRoute = Route(RT.Circular, Pt(-490, -500), Pt(-480, -500));
+        nav.S.ActiveNavIndex = 0;
+        nav.Run(0.5);
+        Check.True(FakeHost.AutoRun, "walking the route for here");
+        Check.Eq(nav.Recovery, "none", "no hold");
+        Check.False(nav.S.NavAreaHoldOffersPatrol, "no Patrol button any more");
     }
 
     private static void ContainingCellByFloor()

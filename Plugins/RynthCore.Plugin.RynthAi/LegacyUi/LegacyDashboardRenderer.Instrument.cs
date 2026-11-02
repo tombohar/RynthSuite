@@ -22,7 +22,8 @@ internal readonly record struct DashboardReadout(
     bool Locked, float Opacity,
     string LootPath,
     bool TargetIsFight = false,
-    int LootMode = 0);
+    int LootMode = 0,
+    bool BoostNav = false);
 
 /// <summary>The loaded-files pickers: each list, and the entry in use.</summary>
 internal sealed record DashboardFiles(
@@ -50,7 +51,8 @@ internal sealed partial class LegacyDashboardRenderer
             _playerHealth, _playerMaxHealth, _playerStamina, _playerMaxStamina, _playerMana, _playerMaxMana,
             _isLocked, _bgOpacity,
             !string.IsNullOrEmpty(_vendorProfilePath?.Invoke()) ? _vendorProfilePath!.Invoke() : _settings.CurrentLootPath ?? string.Empty,
-            LootMode: Loot.LootModes.Clamp(_settings.LootMode));
+            LootMode: Loot.LootModes.Clamp(_settings.LootMode),
+            BoostNav: _settings.BoostNavPriority);
     }
 
     /// <summary>The five pickers' lists (copied under the lists' lock) and the entry in use. Any thread.</summary>

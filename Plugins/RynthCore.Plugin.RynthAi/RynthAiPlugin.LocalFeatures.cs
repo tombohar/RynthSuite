@@ -279,6 +279,7 @@ public sealed partial class RynthAiPlugin
             _huds?.Render();
             RenderTranslateWindow();
             RenderLootWhyWindow();
+            RenderHuntPanel();
         }
         catch (Exception ex)
         {
@@ -327,6 +328,7 @@ public sealed partial class RynthAiPlugin
             _itemInfoUi?.Render();
             _spellsUi?.Render();
             RenderLootWhyWindow();
+            RenderHuntPanel();
         }
         catch (Exception ex)
         {

@@ -42,6 +42,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
     private const int MaxTiles = 256;
     private const int MaxCorridorTiles = 220;
     private const double ArrivalUnits = 7.0;
+    private const double CornerLookaheadUnits = 6.0;  // a path corner is cut from this far out when the next is in plain view
     private const int PreviewMaxLandblocks = 3;   // preview only targets this many landblocks away (a <= 6x6 tile box)
     private const int BlindPushTicks = 45;        // ~1.5 s straight at the goal when the plan runs out short of it (crosses a seam)
     private const int NoProgressTicks = 30 * 30;  // ~30 s without getting ProgressUnits closer to the leg's goal = give up
@@ -189,6 +190,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         HideMarkers("logged out");
         _meshView.Clear(); _meshDunLb = 0;
         _trip = null; _tripPath = null;
+        ResetPathApi();
         OnLogoutTravel();
     }
 
@@ -283,7 +285,11 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         lock (_gate) _status = _tileCount > 0 ? $"{_tileCount} tiles @ 0x{centerLb:X4}" : $"no tile for 0x{centerLb:X4} — bake it";
     }
 
-    // Feed the bake-ahead watcher: player landblock + goto-target landblock.
+    // Feed the bake-ahead watcher: player landblock + goto-target landblock. Written only when it
+    // changes (2026-11-02): every client rewrote it a few times a second, and Windows Defender scans
+    // each write.
+    private string _lastPosText = "";
+
     private void WritePosFile()
     {
         try
@@ -291,7 +297,10 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
             int pX = (int)((_cellId >> 24) & 0xFF), pY = (int)((_cellId >> 16) & 0xFF);
             int tX = pX, tY = pY;
             if (_gotoActive) { tX = (int)(_gotoTew / 192.0); tY = (int)(_gotoTns / 192.0); }
-            File.WriteAllText(Path.Combine(NavDataDir, "_player.txt"), $"{pX},{pY},{tX},{tY}");
+            string text = $"{pX},{pY},{tX},{tY}";
+            if (text == _lastPosText) return;
+            File.WriteAllText(Path.Combine(NavDataDir, "_player.txt"), text);
+            _lastPosText = text;
         }
         catch { }
     }
@@ -312,6 +321,26 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
             _loadedTiles.Remove(lb);
             OnTileUnloaded(lb);
         }
+    }
+
+    /// <summary>
+    /// The "RynthNav.Path" interface's tiles: the box from (sx, sy) to (gx, gy) plus a one-tile margin
+    /// (<see cref="NavPathQuery.TileBox"/>; <paramref name="shrinkMargin"/>: without the margin when that
+    /// alone fits). False when it's more than <paramref name="maxTiles"/>; else <see cref="_query"/> is
+    /// ready (made again when a tile was added).
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.MemberNotNullWhen(true, nameof(_query))]
+    private bool LoadPathBox(double sx, double sy, double gx, double gy, int maxTiles, bool shrinkMargin)
+    {
+        EnsureNavMesh();
+        if (!NavPathQuery.TileBox(sx, sy, gx, gy, maxTiles, shrinkMargin, out int minX, out int minY, out int maxX, out int maxY)) return false;
+        bool changed = false;
+        for (int x = minX; x <= maxX; x++)
+            for (int y = minY; y <= maxY; y++)
+                changed |= !_loadedTiles.Contains((uint)((x << 8) | y)) && EnsureTile((uint)((x << 8) | y));
+        if (changed || _query == null) _query = new DtNavMeshQuery(_navMesh!);
+        _tileCount = _loadedTiles.Count;
+        return true;
     }
 
     // Load every tile in the bounding box from player to target (the route corridor).
@@ -712,16 +741,14 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         lock (_gotoGate) { path = _gotoPath; idx = _gotoIdx; }
         if (path != null)
         {
-            while (idx < path.Count)
-            {
-                double ddew = path[idx].ew - _wx, ddns = path[idx].ns - _wy;
-                // A corner is reached close up (cornerReachMetres); only the path's end uses
-                // ArrivalUnits. 7 u for every corner turned early and cut across the inside of
-                // each one, into the building it was going round (10-01 20:15).
-                double reach = idx >= path.Count - 1 ? ArrivalUnits : _cornerReach;
-                if (Math.Sqrt(ddew * ddew + ddns * ddns) < reach) idx++;
-                else break;
-            }
+            // A corner is reached close up (cornerReachMetres); only the path's end uses
+            // ArrivalUnits. 7 u for every corner turned early and cut across the inside of
+            // each one, into the building it was going round (10-01 20:15). From
+            // CornerLookaheadUnits out, a corner is also passed once the next one can be walked to
+            // straight (the navmesh's raycast: the agent radius from every wall it knows, and out
+            // of the portal circles): the walk turns smoothly instead of overshooting each corner
+            // at run speed and turning back to it (11-01).
+            idx = PathFollow.Advance(path, idx, _wx, _wy, _cornerReach, ArrivalUnits, CornerLookaheadUnits, WalkableStraight);
             lock (_gotoGate) _gotoIdx = idx;
         }
         if (path == null || idx >= path.Count)
@@ -805,6 +832,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         // New leg: fresh progress watchdog, and the old leg's walkable end no longer counts.
         ResetHub();
         ResetBlocked();
+        ResetTurn();
         _coarseHoldTicks = _graph != null ? CoarseHoldMaxTicks : 0;
         _nextAvoidMs = 0;
         _walkHaveLast = false;   // a new leg starts where the last step's teleport put us
@@ -975,8 +1003,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         // The ground we stand on first: the mesh keeps the agent radius (2 m) from walls, so close
         // up it's within that, at our height. Only then the wide search, which can pick ground on
         // the far side of a thin wall or a roof overhead, and the walk then runs into that wall.
-        _query.FindNearestPoly(startP, new RcVec3f(2.5f, 4, 2.5f), filter, out long sRef, out RcVec3f sPt, out _);
-        if (sRef == 0) _query.FindNearestPoly(startP, new RcVec3f(8, 64, 8), filter, out sRef, out sPt, out _);
+        long sRef = NavPathQuery.SnapStart(_query, startP, filter, out RcVec3f sPt);
         // A failed plan drops the old one: StepGoto must not keep following a stale path.
         if (sRef == 0) { lock (_gate) _status = "off navmesh"; lock (_gotoGate) _gotoPath = null; return; }
 
@@ -990,7 +1017,12 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         // the target is too far to be loaded yet (that probe jitters and must stay a last resort).
         double aimEw = steer?.Ew ?? _gotoTew, aimNs = steer?.Ns ?? _gotoTns;
         _aimEw = aimEw; _aimNs = aimNs;
-        var targetP = steer is { } st ? new RcVec3f(st.Ew, st.Up, st.Ns) : new RcVec3f((float)_gotoTew, (float)_wz, (float)_gotoTns);
+        // The route's last stretch ends on the ground its search ended on: the spot itself, or the
+        // nearest ground a walk can end on when the spot is fenced in (NavCoarse.ProbeReachable).
+        // Planned to the spot itself, the nearest polygon is the fenced-in one again.
+        var targetP = steer is { } st ? new RcVec3f(st.Ew, st.Up, st.Ns)
+            : _coarse != null && !double.IsNaN(_coarse.GoalUp) ? new RcVec3f((float)_coarse.GoalEw, (float)_coarse.GoalUp, (float)_coarse.GoalNs)
+            : new RcVec3f((float)_gotoTew, (float)_wz, (float)_gotoTns);
         AvoidFilter avoid = WalkFilter();
         avoid.AllowA = sRef; avoid.AllowB = 0;
         // The goal is looked up WITHOUT the portal circles: the goal's polygon is always allowed
@@ -1002,15 +1034,11 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         if (gRef == 0) gRef = FindGoalToward(aimEw, aimNs, out gPt);
         if (gRef == 0) { lock (_gate) _status = "no tile ahead — bake the route"; lock (_gotoGate) _gotoPath = null; return; }
 
-        Span<long> p = new long[512];
+        Span<long> p = new long[NavPathQuery.MaxPolys];
         avoid.AllowB = gRef;
-        _query.FindPath(sRef, gRef, sPt, gPt, avoid, p, out int pc, 512);
-        if ((pc == 0 || p[pc - 1] != gRef) && _avoid.Count > 0)
-        {
-            // No way round the portals to there: plan as before; steering still keeps out of them.
-            _query.FindPath(sRef, gRef, sPt, gPt, filter, p, out pc, 512);
-            if (!_avoidFallbackSaid) { _avoidFallbackSaid = true; Host.Log("[RynthNav] avoid: no path round the portals here; steering round them instead"); }
-        }
+        // No way round the portals to there: planned as before; steering still keeps out of them.
+        int pc = NavPathQuery.Corridor(_query, sRef, gRef, sPt, gPt, avoid, filter, _avoid.Count > 0, p, out bool fellBack, out _);
+        if (fellBack && !_avoidFallbackSaid) { _avoidFallbackSaid = true; Host.Log("[RynthNav] avoid: no path round the portals here; steering round them instead"); }
         Span<DtStraightPath> sp = new DtStraightPath[512];
         _query.FindStraightPath(sPt, gPt, p[..pc], pc, sp, out int spc, 512, 0);
         if (spc < 2) { lock (_gate) _status = "no path"; lock (_gotoGate) _gotoPath = null; return; }
@@ -1022,49 +1050,17 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         var wps = new List<(double, double)>(spc);
         for (int i = 0; i < spc; i++) wps.Add((sp[i].pos.X, sp[i].pos.Z));
         // Round any portal the path still crosses (big open-ground polygons let it cut straight over one).
+        // Every mesh test at our own height (the walker plans from where it stands).
+        float wz = (float)_wz;
         if (_avoid.Count > 0)
         {
-            var q = _query;
-            float wz = (float)_wz;
             int before = wps.Count;
-            // On the mesh = inside a polygon (the nearest point on the mesh is the point itself),
-            // not merely near one; a leg is on the mesh when every metre of it is.
-            bool OnMesh(double x, double y)
-            {
-                q.FindNearestPoly(new RcVec3f((float)x, wz, (float)y), new RcVec3f(0.5f, 24, 0.5f), filter, out long r, out RcVec3f np, out _);
-                return r != 0 && Math.Abs(np.X - x) < 0.05 && Math.Abs(np.Z - y) < 0.05;
-            }
-            bool LegOnMesh(double ax, double ay, double bx, double by)
-            {
-                double len = Math.Sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
-                int n = Math.Max(1, (int)Math.Ceiling(len));
-                for (int k = 1; k < n; k++)
-                    if (!OnMesh(ax + (bx - ax) * k / n, ay + (by - ay) * k / n)) return false;
-                return true;
-            }
-            wps = _avoid.Bend(wps, OnMesh, 12, LegOnMesh);
+            wps = NavPathQuery.BendRoundPortals(_query, _avoid, wps, filter, (_, _) => wz);
             if (wps.Count != before) Host.Log($"[RynthNav] avoid: path bent round {wps.Count - before} portal(s)");
         }
         // Walls: each corner the path turns round sits on the mesh's edge (the agent radius from a
         // building); push it out along the turn's outside bisector where the ground is walkable.
-        if (_avoidWalls && _wallClearance > 0 && wps.Count > 2)
-        {
-            var q2 = _query;
-            for (int i = 1; i < wps.Count - 1; i++)
-            {
-                var (px, py) = wps[i]; var (ax, ay) = wps[i - 1]; var (bx, by) = wps[i + 1];
-                double ux = ax - px, uy = ay - py, ul = Math.Sqrt(ux * ux + uy * uy);
-                double vx = bx - px, vy = by - py, vl = Math.Sqrt(vx * vx + vy * vy);
-                if (ul < 0.5 || vl < 0.5) continue;
-                double ox = -(ux / ul + vx / vl), oy = -(uy / ul + vy / vl), ol = Math.Sqrt(ox * ox + oy * oy);
-                if (ol < 0.05) continue;                   // straight on: no corner to clear
-                double nx = px + ox / ol * _wallClearance, ny = py + oy / ol * _wallClearance;
-                // Only onto walkable ground itself (inside a polygon), not merely near it: near it,
-                // the moved corner could sit closer to the wall than the body is wide.
-                q2.FindNearestPoly(new RcVec3f((float)nx, (float)_wz, (float)ny), new RcVec3f(0.3f, 24, 0.3f), filter, out long rr, out RcVec3f rp, out _);
-                if (rr != 0 && Math.Abs(rp.X - nx) < 0.05 && Math.Abs(rp.Z - ny) < 0.05) wps[i] = (nx, ny);
-            }
-        }
+        if (_avoidWalls) NavPathQuery.PushFromWalls(_query, wps, _wallClearance, filter, (_, _) => wz);
         lock (_gotoGate) { _gotoPath = wps; _gotoIdx = 0; }
         int rem = (int)Math.Sqrt((_gotoTew - _wx) * (_gotoTew - _wx) + (_gotoTns - _wy) * (_gotoTns - _wy));
         string via = _coarse != null && _coarse.Count > 0 ? $", route {_coarse.Crossed}/{_coarse.Count}" : "";
@@ -1075,8 +1071,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
     // Called by another plugin from its OnTick: the same pump thread as our OnTick, so
     // the navmesh is touched on the tick thread only. Loads the tiles covering start and
     // goal (plus a one-tile margin) and plans on the same query object goto uses.
-    private const int InterfaceMaxTiles = 25;          // at most a 5x5 block of tiles per call
-    private const double InterfaceGoalSlackUnits = 6.0; // a path ending farther than this from the goal is partial
+    // Version 2 (FindPathEx, Raycast): RynthNavPlugin.PathApi.cs.
 
     internal unsafe int InterfaceFindPath(double sx, double sy, double sz, double gx, double gy, double gz,
                                           double* points, int maxPoints, int* count)
@@ -1088,18 +1083,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
             return Shared.RynthNavPathApiV1.ResultNoPath;
 
         // Tiles for both ends and everything between (plus a margin), capped.
-        EnsureNavMesh();
-        int sLbX = (int)(sx / 192.0), sLbY = (int)(sy / 192.0);
-        int gLbX = (int)(gx / 192.0), gLbY = (int)(gy / 192.0);
-        int minX = Math.Max(0, Math.Min(sLbX, gLbX) - 1), maxX = Math.Min(255, Math.Max(sLbX, gLbX) + 1);
-        int minY = Math.Max(0, Math.Min(sLbY, gLbY) - 1), maxY = Math.Min(255, Math.Max(sLbY, gLbY) + 1);
-        if ((maxX - minX + 1) * (maxY - minY + 1) > InterfaceMaxTiles) return Shared.RynthNavPathApiV1.ResultNoPath;
-        bool changed = false;
-        for (int x = minX; x <= maxX; x++)
-            for (int y = minY; y <= maxY; y++)
-                changed |= !_loadedTiles.Contains((uint)((x << 8) | y)) && EnsureTile((uint)((x << 8) | y));
-        if (changed || _query == null) _query = new DtNavMeshQuery(_navMesh!);
-        _tileCount = _loadedTiles.Count;
+        if (!LoadPathBox(sx, sy, gx, gy, NavPathQuery.DefaultMaxTiles, shrinkMargin: false)) return Shared.RynthNavPathApiV1.ResultNoPath;
 
         var filter = new DtQueryDefaultFilter();
         var startP = new RcVec3f((float)sx, (float)sz, (float)sy);
@@ -1120,7 +1104,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
 
         var last = sp[spc - 1].pos;
         double slackE = last.X - gPt.X, slackN = last.Z - gPt.Z;
-        if (Math.Sqrt(slackE * slackE + slackN * slackN) > InterfaceGoalSlackUnits) return Shared.RynthNavPathApiV1.ResultNoPath;
+        if (Math.Sqrt(slackE * slackE + slackN * slackN) > NavPathQuery.GoalSlackUnits) return Shared.RynthNavPathApiV1.ResultNoPath;
 
         for (int i = 0; i < spc; i++)
         {

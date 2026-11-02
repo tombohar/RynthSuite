@@ -61,6 +61,7 @@ internal static partial class Program
         RunTravelPlan();
         RunTripExport();
         RunAutoRunGate();
+        RunSteering();
 
         Console.WriteLine();
         Console.WriteLine(_fails == 0 && _asserts > 0

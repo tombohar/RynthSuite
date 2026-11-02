@@ -31,6 +31,8 @@
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\TravelPlan.cs" Link="Linked\TravelPlan.cs" />
     <!-- The goto's autorun, sent when it changes (AutoRunGateTests). -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\AutoRunGate.cs" Link="Linked\AutoRunGate.cs" />
+    <!-- The goto's heading servo and path follower (SteeringTests). -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\WalkSteer.cs" Link="Linked\WalkSteer.cs" />
     <!-- The planned trip, its path, the path markers and "save as nav route" (TripExportTests). -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\TripPlan.cs" Link="Linked\TripPlan.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\TripPath.cs" Link="Linked\TripPath.cs" />

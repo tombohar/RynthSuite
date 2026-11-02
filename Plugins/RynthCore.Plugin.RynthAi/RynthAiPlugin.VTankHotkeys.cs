@@ -243,8 +243,10 @@ public sealed partial class RynthAiPlugin
         (s.BoostNavPriority, s.BoostLootPriority) = NextPriority(s.BoostNavPriority, s.BoostLootPriority, nav, loot, arg);
         dash!.SaveSettings();
         string On(bool b) => b ? "on" : "off";
-        ReplyOk(nav && loot ? $"[RynthAi] Boost Nav Priority {On(s.BoostNavPriority)}, Boost Loot Priority {On(s.BoostLootPriority)}."
-                 : nav ? $"[RynthAi] Boost Nav Priority {On(s.BoostNavPriority)}."
+        // Owner's rule (2026-11-02): with Boost Nav on RynthAi only navigates; say so when it comes on.
+        string navOnly = nav && s.BoostNavPriority ? " RynthAi only navigates (no hunting, no looting)." : "";
+        ReplyOk(nav && loot ? $"[RynthAi] Boost Nav Priority {On(s.BoostNavPriority)}, Boost Loot Priority {On(s.BoostLootPriority)}.{navOnly}"
+                 : nav ? $"[RynthAi] Boost Nav Priority {On(s.BoostNavPriority)}.{navOnly}"
                  : $"[RynthAi] Boost Loot Priority {On(s.BoostLootPriority)}.");
     }
 

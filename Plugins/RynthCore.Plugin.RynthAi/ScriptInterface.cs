@@ -272,6 +272,8 @@ public sealed partial class RynthAiPlugin
     }
 
     /// <summary>A RynthLua script's ai.Command(text): handled as a typed line, but it answers as a script's
-    /// (quiet when it works, errors in chat; CommandReply.cs).</summary>
-    internal void ScriptSubmitCommand(string text) => Reply.AsScript(() => { HandleRynthChatSubmit(text); return true; });
+    /// (quiet when it works, errors in chat; CommandReply.cs), and the Item Tool refuses it (a script's
+    /// line is never the player at the keyboard).</summary>
+    internal void ScriptSubmitCommand(string text)
+        => Reply.AsScript(() => { RunItemToolUntrusted(() => HandleRynthChatSubmit(text)); return true; });
 }

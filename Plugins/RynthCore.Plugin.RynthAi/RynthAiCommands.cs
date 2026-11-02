@@ -1151,6 +1151,48 @@ public sealed partial class RynthAiPlugin
         }
     }
 
+    /// <summary>
+    /// /ra navheading &lt;degrees&gt; &lt;yards&gt;: run to the point that far from here on that compass heading
+    /// (0 north, 90 east). Loads a one-point run-once route and turns navigation on. Lets a meta follow a
+    /// direction (a treasure map's "the site is to the northwest") with the nav engine, no keystrokes.
+    /// </summary>
+    private void HandleNavHeadingCommand(string[] parts)
+    {
+        var settings = _dashboard?.Settings;
+        if (settings == null) { ReplyFail("[RynthAi] Settings not ready."); return; }
+        if (parts.Length < 4
+            || !double.TryParse(parts[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double deg)
+            || !double.TryParse(parts[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double yards)
+            || yards <= 0 || yards > 2000)
+        {
+            ReplyFail("[RynthAi] Usage: /ra navheading <degrees: 0 north, 90 east> <yards, up to 2000>");
+            return;
+        }
+        if (!Host.HasGetPlayerPose || !Host.TryGetPlayerPose(out _, out _, out _, out float z, out _, out _, out _, out _)
+            || !NavCoordinateHelper.TryGetNavCoords(Host, out double ns, out double ew))
+        {
+            ReplyFail("[RynthAi] navheading: couldn't read where you are.");
+            return;
+        }
+
+        double rad = deg * Math.PI / 180.0;
+        double unit = yards / 240.0;   // nav coordinates are 240-yard units
+        var route = new NavRouteParser { RouteType = NavRouteType.Once };
+        route.Points.Add(new NavPoint
+        {
+            Type = NavPointType.Point,
+            NS = ns + Math.Cos(rad) * unit,
+            EW = ew + Math.Sin(rad) * unit,
+            Z = z / 240.0,
+        });
+        settings.CurrentNavPath = "<navheading>";
+        settings.CurrentRoute = route;
+        settings.ActiveNavIndex = 0;
+        settings.EnableNavigation = true;
+        Host.Log($"[RynthAi] navheading: {yards:0} yd on {deg:0}° -> NS {route.Points[0].NS:0.0000} EW {route.Points[0].EW:0.0000}");
+        ReplyOk($"[RynthAi] Navigating {yards:0} yd on heading {deg:0}° (to NS {route.Points[0].NS:0.000} EW {route.Points[0].EW:0.000}).");
+    }
+
     private void HandleAddNavPointCommand()
     {
         var settings = _dashboard?.Settings;
@@ -2029,6 +2071,9 @@ public sealed partial class RynthAiPlugin
         // Interpretation — the point of D2/D3: name the most likely reason it isn't attacking.
         string why =
             !s.IsMacroRunning        ? "macro is STOPPED (start it from the panel / command)." :
+            // Owner's rule (2026-11-02): with Boost Nav Priority on RynthAi only navigates.
+            _dashboard?.Settings?.BoostNavPriority == true
+                                     ? "Boost Nav Priority is on: RynthAi only navigates (no hunting, no looting). Turn it off to hunt and loot." :
             !s.EnableCombat          ? "combat is disabled in settings." :
             s.BusyCount > 0          ? "AC busy>0 — waiting on a server action (cast/use/move); try /ra clearbusy if stuck." :
             forced != 0 && forced == s.ActiveTargetId && bySelection
@@ -3101,6 +3146,7 @@ public sealed partial class RynthAiPlugin
     private void StopPatrolForServer()
     {
         _dunPatrolActive = false;
+        _dunPatrolRoute = null;
         var s = _dashboard?.Settings;
         if (s == null) return;
         s.EnableNavigation = false;
@@ -3163,7 +3209,7 @@ public sealed partial class RynthAiPlugin
         }
     }
 
-    private void BuildDunPatrol(bool isRebuild, bool settingsChanged = false, bool portalAppeared = false)
+    private void BuildDunPatrol(bool isRebuild, bool settingsChanged = false, bool portalAppeared = false, bool followedIn = false)
     {
         // The one way into the dungeon patrol (the command, the dashboard button, a meta's "Patrol", the hazard
         // reroute): where a server's owners asked for it to be off (a Thread on DreamWeave) nothing is built (ServerPolicy).
@@ -3359,7 +3405,9 @@ public sealed partial class RynthAiPlugin
         // and the hazard generation it already accounts for. OnTick rebuilds when a newer
         // hazard is sighted in this same landblock.
         _dunPatrolActive        = true;
+        _dunPatrolRoute         = route;
         _dunPatrolLandblock     = landblockKey;
+        _dunPatrolFollowTriedLb = uint.MaxValue;
         _dunPatrolHazardVersion = _objectCache?.HazardVersion ?? 0;
         _dunPatrolSettings.MarkBuilt(patrolOptions);
         MarkPatrolPortals(portals);
@@ -3367,7 +3415,11 @@ public sealed partial class RynthAiPlugin
         int hazardCount = hazards?.Count ?? 0;
         string hazardNote = hazardCount > 0 ? $", {hazardCount} hazard cell(s) avoided" : "";
         string portalNote = portals.Count > 0 ? $", kept out of {portals.Count} portal(s)" : "";
-        if (isRebuild && settingsChanged)
+        if (isRebuild && followedIn)
+        {
+            ChatLine($"[RynthAi] DunNav-Patrol: followed you into dungeon 0x{landblockKey:X4} → {route.Points.Count} waypoints, patrolling here{hazardNote}{portalNote}. Stop the macro or load a route to end it.");
+        }
+        else if (isRebuild && settingsChanged)
         {
             ChatLine($"[RynthAi] DunNav-Patrol: patrol settings changed → rebuilt from here, {route.Points.Count} waypoints ({patrolOptions.Describe()}).");
         }
@@ -3404,18 +3456,40 @@ public sealed partial class RynthAiPlugin
         // A patrol running when the character enters a Thread on DreamWeave (or one that began before the world name
         // was known): stopped the moment it is (ServerPolicy).
         if (ServerPolicy.PatrolOff(Host)) { StopPatrolForServer(); ChatLine(ServerPolicy.PatrolOffMessage); return; }
-        if (_objectCache == null) return;
 
         var settings = _dashboard?.Settings;
-        // Patrol stopped, navigation disabled, or a different (recorded) route was loaded —
-        // stand down; we only own the auto-generated, file-less circular patrol.
-        if (settings == null || !settings.IsMacroRunning || !settings.EnableNavigation
+        // A different route was loaded in the patrol's place (a nav file, a meta's route, Save As
+        // made it a recorded route): stand down, and say so when it was replaced. We only own the
+        // auto-generated, file-less circular patrol.
+        bool replaced = settings != null && _dunPatrolRoute != null && !ReferenceEquals(settings.CurrentRoute, _dunPatrolRoute);
+        if (settings == null || replaced
             || !string.IsNullOrEmpty(settings.CurrentNavPath)
             || settings.CurrentRoute?.RouteType != NavRouteType.Circular)
         {
+            if (settings != null && (replaced || !string.IsNullOrEmpty(settings.CurrentNavPath)))
+            {
+                string what = PatrolReplacementName(settings);
+                Host.Log($"[RynthAi] DunNav-Patrol: ended - {what} is the route now.");
+                if (settings.CurrentRoute?.Points.Count > 0)
+                    ChatLine($"[RynthAi] Dungeon Patrol ended: {what} is the route now. Press Patrol to patrol again.");
+            }
             _dunPatrolActive = false;
+            _dunPatrolRoute = null;
             return;
         }
+        // Macro stopped or navigation switched off: the patrol is paused, not ended. It stays the
+        // route, and starting again carries on with it (2026-11-01: a stop used to stand it down,
+        // so after a restart the patrol ran without its hazard reroutes or keep-the-waypoint rule).
+        if (!settings.IsMacroRunning || !settings.EnableNavigation)
+        {
+            _dunPatrolPrevRunningLb = uint.MaxValue;
+            _dunPatrolArrivedRunning = false;
+            return;
+        }
+
+        // The character went into another dungeon while patrolling: the patrol follows (not after a death).
+        if (TickPatrolFollow(settings)) return;
+        if (_objectCache == null) return;
 
         var patrolOptions = PatrolOptionsFrom(settings);
         bool settingsChanged = _dunPatrolSettings.ShouldRebuild(patrolOptions, Environment.TickCount64);
@@ -3439,6 +3513,87 @@ public sealed partial class RynthAiPlugin
         // A rebuild that gave up (graph not loaded, ...) keeps the old route: don't retry every tick.
         if (settingsChanged) _dunPatrolSettings.MarkBuilt(patrolOptions);
         if (portalAppeared && _dunPatrolActive) MarkPatrolPortals(PatrolPortalsIn(_dunPatrolLandblock));
+    }
+
+    /// <summary>What the patrol was replaced with, for the chat line: "nav route 'X'", "the meta's route 'X'", "another route".</summary>
+    private static string PatrolReplacementName(LegacyUiSettings s)
+    {
+        string path = s.CurrentNavPath ?? string.Empty;
+        if (path.StartsWith("<embedded:", StringComparison.Ordinal)) return $"the meta's route '{path.Substring(10).TrimEnd('>')}'";
+        if (path.Length > 0) return $"nav route '{System.IO.Path.GetFileNameWithoutExtension(path)}'";
+        return "another route";
+    }
+
+    /// <summary>What the Dungeon Patrol does when the character is in another dungeon than the one it was built for.</summary>
+    internal enum PatrolFollow
+    {
+        /// <summary>Nothing to do (same dungeon, not a dungeon, in portal space, already tried here).</summary>
+        None,
+        /// <summary>Build the patrol again here.</summary>
+        Follow,
+        /// <summary>Sent here by a death: say so, and leave it to the Patrol button.</summary>
+        AfterDeath,
+        /// <summary>Came here with the macro (or nav) off: say so, and leave it to the Patrol button.</summary>
+        CameWhileStopped,
+    }
+
+    internal const long PatrolFollowDeathMs = 120_000;
+
+    /// <summary>
+    /// The decision half of <see cref="TickPatrolFollow"/>. The patrol follows the character through a
+    /// portal (or a recall) taken while it runs into another dungeon: patrolling is the mode, and the
+    /// patrol it had is for a dungeon it is no longer in (nav would only hold on it). Never into a
+    /// building on the landscape (not a dungeon landblock), never mid-portal, once per dungeon. Not
+    /// when a death sent the character there (a lifestone dungeon is no place to start hunting on its
+    /// own), nor when it got there with the macro off (an HP-failsafe recall, travelling by hand):
+    /// those say how to patrol here instead.
+    /// </summary>
+    internal static PatrolFollow DecidePatrolFollow(uint patrolLb, uint playerCell, bool isDungeonLandblock,
+                                                    bool portaling, uint triedLb, long msSinceDeath, bool arrivedWhileRunning)
+    {
+        uint lb = playerCell >> 16;
+        if (playerCell == 0 || lb == patrolLb || (playerCell & 0xFFFF) < 0x0100) return PatrolFollow.None;
+        if (portaling || !isDungeonLandblock || lb == triedLb) return PatrolFollow.None;
+        if (msSinceDeath >= 0 && msSinceDeath < PatrolFollowDeathMs) return PatrolFollow.AfterDeath;
+        return arrivedWhileRunning ? PatrolFollow.Follow : PatrolFollow.CameWhileStopped;
+    }
+
+    /// <summary>
+    /// Running patrol, character in another dungeon: builds the patrol there (or, after a death, says
+    /// how to). True when it acted (the caller's hazard/settings checks are for the old dungeon).
+    /// </summary>
+    private bool TickPatrolFollow(LegacyUiSettings settings)
+    {
+        if (!Host.HasGetPlayerPose || !Host.TryGetPlayerPose(out uint cell, out _, out _, out _, out _, out _, out _, out _)) return false;
+        uint lb = cell >> 16;
+        if (_dunPatrolPrevRunningLb != uint.MaxValue && _dunPatrolPrevRunningLb != lb) _dunPatrolArrivedRunning = true;
+        _dunPatrolPrevRunningLb = lb;
+        if (lb == _dunPatrolLandblock) { _dunPatrolArrivedRunning = false; return false; }
+        if ((cell & 0xFFFF) < 0x0100) return false;
+        var cellDat = _raycast?.GeometryLoader?.CellDat;
+        if (cellDat == null || !cellDat.IsLoaded || _navPlanner == null) return false;   // asked again next tick
+        bool portaling = (Host.HasIsPortaling && Host.IsPortaling()) || _deathHolding;
+        long sinceDeath = _lastDeathAt == 0 ? -1 : Environment.TickCount64 - _lastDeathAt;
+        var what = DecidePatrolFollow(_dunPatrolLandblock, cell, _navPlanner.IsDungeonLandblock(lb, cellDat), portaling,
+                                      _dunPatrolFollowTriedLb, sinceDeath, _dunPatrolArrivedRunning);
+        if (what == PatrolFollow.None) return false;
+
+        uint was = _dunPatrolLandblock;
+        _dunPatrolFollowTriedLb = lb;
+        _dunPatrolArrivedRunning = false;
+        if (what != PatrolFollow.Follow)
+        {
+            string how = what == PatrolFollow.AfterDeath ? "after a death" : "with the macro off on the way";
+            Host.Log($"[RynthAi] DunNav-Patrol: in dungeon 0x{lb:X4} {how}; the patrol was for 0x{was:X4} - not following.");
+            ChatLine($"[RynthAi] Dungeon Patrol: you are in dungeon 0x{lb:X4} ({how}); the patrol was for dungeon 0x{was:X4}. Press Patrol to patrol here.");
+            return true;
+        }
+
+        Host.Log($"[RynthAi] DunNav-Patrol: the character went from dungeon 0x{was:X4} into 0x{lb:X4} - building the patrol here.");
+        BuildDunPatrol(isRebuild: true, followedIn: true);
+        if (!_dunPatrolActive || _dunPatrolLandblock != lb)
+            ChatLine($"[RynthAi] Dungeon Patrol: couldn't lay a patrol in dungeon 0x{lb:X4} from here. Press Patrol to try again.");
+        return true;
     }
 
     // ── Patrol-management info / actions (engine-side right-click flyout) ──────

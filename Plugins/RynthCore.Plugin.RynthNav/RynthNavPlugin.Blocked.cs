@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using DotRecast.Core.Numerics;
 using DotRecast.Detour;
+using RynthNav.Routing;
 
 namespace RynthCore.Plugin.RynthNav;
 
@@ -9,28 +11,38 @@ namespace RynthCore.Plugin.RynthNav;
 // little islands (Shoushi's plaza, where the Town Network drops you, 10-08); where the plan runs
 // out the walk heads straight for its goal for a moment (BlindPushTicks), and that, or a wall the
 // mesh doesn't show, used to mean running into it until the 30 s progress watchdog. Now: blocked
-// for StuckWindowMs = turn away at an angle (alternating sides), plan again, and after
-// StuckMaxTries on one leg without progress stop and say where.
+// for StuckWindowMs = turn away toward open ground (WalkSteer.UnstickHeading), remember the spot as
+// something to keep out of (the next plan bends round it, like round a portal), plan again, and
+// after StuckMaxTries on one leg without progress stop and say where.
+//
+// 11-01, at a bridge the navmesh doesn't show (flat open ground in the tile, nothing in the way):
+// it turned 120 degrees off, alternating sides, ran 1.6 s, planned the same path again and ran back
+// into the same spot, four times in 20 s, then stopped. The remembered spots now make each new
+// plan go round what it ran into.
 public sealed partial class RynthNavPlugin
 {
     private const long StuckWindowMs = 1200;       // running this long...
     private const double StuckMoveUnits = 0.6;     // ...and moved less than this = blocked (a run covers 4+ u/s)
     private const long UnstickMs = 1600;           // then turn away from it and run this long (~0.5 s of it turning)
-    private const double UnstickAngleDeg = 120.0;  // away from where it was heading, off to one side
     private const int StuckMaxTries = 4;           // blocked this often on a leg without progress = stop
+    private const double BlockedAheadUnits = 3.5;  // the remembered spot: this far ahead of where it stuck...
+    private const double BlockedRadiusUnits = 2.5; // ...this big (the character stays outside it)
+    private const int BlockedMaxSpots = 12;
+    private const double UnstickOpenUnits = 6.0;   // a way out is open ground this far along it
 
     private bool _ranLastTick;                     // the walk asked to run last tick (not standing, not turning in place)
     private double _lastDriveDeg;
     private long _stuckWinMs, _unstickUntilMs;
     private double _stuckWx, _stuckWy, _unstickDeg;
     private int _stuckTries, _stuckSide = 1;
+    private readonly List<PortalAvoid.Spot> _blockedSpots = new();
 
     /// <summary>DriveTo for the walk's own steering: remembers that it ran and which way.</summary>
     private void WalkDrive(double deg)
     {
-        DriveTo(deg);
+        DriveTo(deg, _steerOpen);
         _lastDriveDeg = deg;
-        _ranLastTick = !_turnInPlace;
+        _ranLastTick = !_steerOpen.TurnInPlace;
     }
 
     /// <summary>
@@ -53,11 +65,36 @@ public sealed partial class RynthNavPlugin
         return true;
     }
 
+    /// <summary>
+    /// A straight walk from (ax, ay) to (bx, by) stays on the navmesh (Detour's raycast along the
+    /// polygons from the one underfoot: no mesh edge, so at least the 2 m agent radius from every
+    /// wall it knows) and out of every circle being kept out of. False without a query or ground underfoot.
+    /// </summary>
+    private bool WalkableStraight(double ax, double ay, double bx, double by)
+    {
+        if (_query == null) return false;
+        for (int i = 0; i < _avoid.Count; i++)
+        {
+            PortalAvoid.Spot s = _avoid.Spots[i];
+            if (PortalAvoid.SegmentDistance(s.X, s.Y, ax, ay, bx, by) < s.R + PortalAvoid.SteerMargin) return false;
+        }
+        // The default filter: the circles were checked above (the avoid filter drops every big
+        // polygon that merely reaches into one, which would read as a wall far from the line).
+        var filter = new DtQueryDefaultFilter();
+        var start = new RcVec3f((float)ax, (float)_wz, (float)ay);
+        _query.FindNearestPoly(start, new RcVec3f(2.5f, 4, 2.5f), filter, out long sRef, out RcVec3f sPt, out _);
+        if (sRef == 0) return false;
+        Span<long> path = stackalloc long[64];
+        var st = _query.Raycast(sRef, sPt, new RcVec3f((float)bx, sPt.Y, (float)by), filter, out float t, out _, path, out _, 64);
+        return st.Succeeded() && t >= 1.0f;
+    }
+
     /// <summary>A new leg (or goto): nothing blocked yet.</summary>
     private void ResetBlocked()
     {
         _ranLastTick = false;
         _stuckWinMs = 0; _unstickUntilMs = 0; _stuckTries = 0;
+        _blockedSpots.Clear();
     }
 
     /// <summary>
@@ -71,7 +108,7 @@ public sealed partial class RynthNavPlugin
         _ranLastTick = false;
         if (_unstickUntilMs > now)
         {
-            DriveTo(_unstickDeg);
+            DriveTo(_unstickDeg, _steerOpen);
             lock (_gate) _status = $"blocked: stepping round it ({_stuckTries}/{StuckMaxTries})";
             return true;
         }
@@ -97,12 +134,23 @@ public sealed partial class RynthNavPlugin
             FinishGoto($"stopped: blocked at {at} ({StuckMaxTries} tries to get round it; something in the way the map doesn't show) ({why})");
             return true;
         }
+        // Remember what it ran into, so the next plans go round it (RefreshAvoid adds these).
+        double rad = _lastDriveDeg * Math.PI / 180.0;
+        if (_blockedSpots.Count >= BlockedMaxSpots) _blockedSpots.RemoveAt(0);
+        _blockedSpots.Add(new PortalAvoid.Spot(_wx + Math.Sin(rad) * BlockedAheadUnits, _wy + Math.Cos(rad) * BlockedAheadUnits,
+                                               BlockedRadiusUnits, "something in the way"));
+        RefreshAvoid(force: true);
+
         _stuckSide = -_stuckSide;
-        _unstickDeg = ((_lastDriveDeg + 180.0 - _stuckSide * (180.0 - UnstickAngleDeg)) % 360.0 + 360.0) % 360.0;
+        _unstickDeg = WalkSteer.UnstickHeading(_lastDriveDeg, _stuckSide, h =>
+        {
+            double r = h * Math.PI / 180.0;
+            return WalkableStraight(_wx, _wy, _wx + Math.Sin(r) * UnstickOpenUnits, _wy + Math.Cos(r) * UnstickOpenUnits);
+        });
         _unstickUntilMs = now + UnstickMs;
         Host.Log($"[RynthNav] walk: blocked at {at} heading {_lastDriveDeg:F0} (moved {moved:F1}u in {StuckWindowMs / 1000.0:F1} s); "
-               + $"turning to {_unstickDeg:F0} and planning again ({_stuckTries}/{StuckMaxTries})");
-        DriveTo(_unstickDeg);
+               + $"turning to {_unstickDeg:F0}, keeping out of that spot ({_blockedSpots.Count} so far) and planning again ({_stuckTries}/{StuckMaxTries})");
+        DriveTo(_unstickDeg, _steerOpen);
         lock (_gate) _status = $"blocked: stepping round it ({_stuckTries}/{StuckMaxTries})";
         return true;
     }

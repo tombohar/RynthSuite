@@ -119,6 +119,18 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     // portalled to a different dungeon.
     private bool _dunPatrolActive;
     private uint _dunPatrolLandblock;
+    // The patrol's own route object: the patrol is the mode for as long as it is the loaded route
+    // (a macro stop or start leaves it; another route loaded in its place ends it, said in chat).
+    private NavRouteParser? _dunPatrolRoute;
+    // The dungeon the patrol last tried to follow the character into (once per dungeon).
+    private uint _dunPatrolFollowTriedLb = uint.MaxValue;
+    // The landblock seen on the last tick the patrol was running (MaxValue = not running then), and
+    // whether the character changed landblock while it ran: the patrol follows only through a
+    // portal taken while it runs, not to wherever the character went with the macro off.
+    private uint _dunPatrolPrevRunningLb = uint.MaxValue;
+    private bool _dunPatrolArrivedRunning;
+    // The nav engine's planner, for its dungeon-landblock test (null until login).
+    private NavRecoveryPlanner? _navPlanner;
     private int  _dunPatrolHazardVersion;
     // The patrol settings (Settings > Navigation > Dungeon Patrol) the running patrol was built
     // with: a change rebuilds it once the settings settle (TickDunPatrolHazardReroute).
@@ -350,6 +362,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         try { _sessionStats?.OnLogout(); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats logout"); }
         try { OnLogoutMonsterStats(); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "monster stats logout"); }
         Loot.T11ItemSupport.Reset();
+        _boostNavNoticeSaid = false;   // the Boost Nav Priority notice: once per session
         // A real logout: the next OnLoginComplete is a fresh login, not a hot reload.
         ClearInGameMarker();
         ServerPolicy.Forget();   // the next login's [REALM] line says whether the character is in a Thread
@@ -451,6 +464,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private void TeardownSession()
     {
         ObjectChangeTracker.Clear();
+        ResetItemTool();
         while (_engineCommands.TryDequeue(out _)) { }   // a fellowship button's command is for this character only
         // The server drops whatever it was doing for this character at logout.
         RynthCore.Plugin.Shared.ActionPacer.Forget("logout");
@@ -569,6 +583,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _killClock.SessionStarted();
         _dashboard.OnLoginComplete();
         _dashboard.ChatSubmitHandler = HandleRynthChatSubmit;
+        _dashboard.StartPatrolHandler = () => QueueDashAction(HandleDungeonNavPatrol);
         EnsureTranslator();
         EnsureItemInfoUi();
         EnsureSpellsUi();
@@ -596,7 +611,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         // Plans the detours: the dungeon cell graph indoors, RynthNav's navmesh outdoors.
         // Reads the raycast geometry and hazards through the fields, so it follows their
         // (re)creation; dropped with the engine at teardown.
-        _navigationEngine.SetRecoveryPlanner(new NavRecoveryPlanner(Host, () => _raycast, () => _objectCache?.GetHazardCells()));
+        _navPlanner = new NavRecoveryPlanner(Host, () => _raycast, () => _objectCache?.GetHazardCells());
+        _navigationEngine.SetRecoveryPlanner(_navPlanner);
         if (_objectCache != null) _navigationEngine.SetWorldObjectCache(_objectCache);
         _navMarkerRenderer = new NavMarkerRenderer(Host, _dashboard.Settings)
         {
@@ -1039,7 +1055,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "cancelrebuff": dash.RequestCancelForceRebuff(); break;
             case "clearbusy":    HandleClearBusyCommand(); break;
             case "hideui":       _hideUi = on; dash.SetUiHidden(on); break;  // applied each tick in OnTick
-            case "sendchat":     if (!string.IsNullOrEmpty(value)) HandleRynthChatSubmit(value); break;
+            case "sendchat":     if (!string.IsNullOrEmpty(value)) RunItemToolUntrusted(() => HandleRynthChatSubmit(value)); break;   // a remote line is never the player at the keyboard
             case "setsetting":   ApplyRemoteSetting(value); break;   // one advanced setting from the phone (clamped + persisted)
             case "hub":
             case "quests":
@@ -1135,6 +1151,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         ["DunPatrolWallDistance"] = (DungeonPatrolOptions.WallClearanceMin, DungeonPatrolOptions.WallClearanceMax),
         ["DunPatrolLookInSize"] = (DungeonPatrolOptions.LookInRoomMin, DungeonPatrolOptions.LookInRoomMax),
         ["DunPatrolSightYd"] = (DungeonPatrolOptions.SightMin, DungeonPatrolOptions.SightMax),
+        ["OutdoorHuntRange"] = (OutdoorHuntRangeMin, OutdoorHuntRangeMax), ["OutdoorHuntRadius"] = (0, OutdoorHuntRadiusMax),
         ["T2Speed"] = (0.1, 5), ["T2WalkWithinYd"] = (1, 50), ["T2DistanceTo"] = (0.1, 10), ["T2ReissueMs"] = (100, 10000),
         ["T2MaxRangeYd"] = (50, 2000), ["T2MaxLandblocks"] = (1, 20),
         ["RebuffSecondsRemaining"] = (30, 1800), ["RebuffTopOffSecondsRemaining"] = (30, 3600), ["RebuffIdleMarginMinutes"] = (0, 60),
@@ -1634,6 +1651,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             Guard(TickStep.LocalFeatures, TickLocalFeatures);
             if (diag) Host.Log("[RynthAi] OnTick: after quest tracker");
             Guard(TickStep.GiveQueue, DrainGiveQueue);
+            Guard(TickStep.ItemTool, TickItemTool);   // the Item Tool: chest looter + Quick give (RynthAiPlugin.ItemTool.cs)
             if (diag) Host.Log("[RynthAi] OnTick: after drain give queue");
             Guard(TickStep.Jumper, () => _jumper?.Tick());
             if (diag) Host.Log("[RynthAi] OnTick: after jumper tick");
@@ -1786,6 +1804,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     // looping through it — or with the Dungeon Patrol settings changed since.
                     // Cheap no-op unless a new hazard cell was registered or a setting changed.
                     TickDunPatrolHazardReroute();
+                    // Outdoor hunting's next walk (no-op unless /ra hunt is on).
+                    TickOutdoorHunt();
                 });
 
                 // ── Activity arbiter — STEP 5: AUTHORITATIVE, full stop ──
@@ -1896,9 +1916,12 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                         boostNav:      settings.BoostNavPriority,
                         boostLoot:     settings.BoostLootPriority,
                         followActive:  followActive,
-                        lootStarved:   lootStarved);
+                        lootStarved:   lootStarved,
+                        forcedLoot:    wantLoot && ForcedLootHolds());
                     _activity = _arbiter.Apply(in inputs, settings);
                     _lootStarveTurn = lootStarved && _activity == BotActivity.Looting;
+                    // Boost Nav Priority skipped a fight or a corpse: say so, once (RynthAiPlugin.BoostNav.cs).
+                    NoteBoostNavSkip(settings, wantCombat);
                     // Display only: what the Buffing slot is doing (ActivityArbiter.DisplayLabel),
                     // and the decision for [HealLatency]'s "arbiter gave the tick to" part.
                     if (_buffManager != null)
@@ -2432,6 +2455,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         if (string.IsNullOrEmpty(text)) return;
         try { NoteServerPolicyChat(text); } catch { }   // DreamWeave's Thread lines (ServerPolicy)
         try { NoteDoorServerText(text); } catch { }   // "The door is locked!" (the door logic)
+        try { ItemToolChat(text); } catch { }   // the key's answers (chest looter)
         try { _sessionStats?.OnChatWindowText(text); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats chat"); }
         try { NoteMonsterStatsChat(text, chatType); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "monster stats chat"); }
         // The Meta Manager eats the reply to its own /myquests poll (only that).
@@ -3920,8 +3944,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         if (parts.Length < 2) return;
 
         string cmd = parts[1].ToLower();
-        int eat = 0; // not used for meta dispatch, but needed for shared helpers
-        DispatchRaCommand(cmd, parts, ref eat);
+        RunItemToolUntrusted(() => { int e = 0; DispatchRaCommand(cmd, parts, ref e); });   // a meta's line is never the player at the keyboard
     }
 
     /// <summary>
@@ -4005,6 +4028,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "buffprofile":  HandleBuffProfileCommand(parts); break;
             case "groundloot":   HandleGroundLootCommand(parts); break;
             case "addnavpt":     HandleAddNavPointCommand(); break;
+            case "navheading":   HandleNavHeadingCommand(parts); break;
             case "nav":          HandleNavCommand(parts); break;
             case "meta":         HandleMetaCommand(parts); break;
             case "lua":          ForwardLuaCommand(parts); break;
@@ -4025,6 +4049,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "metamgr":       QueueMetaMgrCommand(parts); Reply.Answered(); break;   // Meta Manager: applied (and answered) on the next tick
             case "dunnav":        HandleDungeonNavCommand(parts); break;
             case "dunnav-patrol": HandleDungeonNavPatrolCommand(parts); break;
+            case "hunt": HandleHuntCommand(parts); break;
             case "hazard":        HandleHazardCommand(parts); break;
             case "lootparse":    HandleLootParseCommand(trimmed); break;
             case "lootcheckinv": HandleLootCheckInventoryCommand(trimmed); break;
@@ -4117,6 +4142,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 if (parts.Length >= 3 && parts[2].Equals("stop", StringComparison.OrdinalIgnoreCase)) CancelGiveQueue();
                 else HandleGiveCommand(parts, GiveItemMatch.Regex,   partialPlayer: false, allItems: true);
                 break;
+            case "itemtool":     HandleItemToolCommand(parts); break;
             case "ig":           HandleGiveProfileCommand(parts, partialPlayer: false); break;
             case "igp":          HandleGiveProfileCommand(parts, partialPlayer: true); break;
             // use variants

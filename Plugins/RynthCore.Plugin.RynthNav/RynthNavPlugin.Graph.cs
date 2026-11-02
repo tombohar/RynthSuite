@@ -29,7 +29,7 @@ public sealed partial class RynthNavPlugin
     private NavCoarse? _coarse;                  // the current leg's route (null = none, or none yet)
     private int _coarseRetry;                    // re-plans left before planning a route again
     private int _coarseOff;                      // re-plans in a row off the route
-    private bool _coarseAnnounced, _coarseNoRouteSaid;
+    private bool _coarseAnnounced, _coarseNoRouteSaid, _coarseGoalMovedSaid;
     private double _aimEw, _aimNs;               // where the last re-plan aimed (the blind push follows it)
 
     private void LoadGraph()
@@ -107,7 +107,7 @@ public sealed partial class RynthNavPlugin
 
     private void ResetCoarse()
     {
-        _coarse = null; _coarseRetry = 0; _coarseOff = 0; _coarseAnnounced = false; _coarseNoRouteSaid = false;
+        _coarse = null; _coarseRetry = 0; _coarseOff = 0; _coarseAnnounced = false; _coarseNoRouteSaid = false; _coarseGoalMovedSaid = false;
         _coarseTask = null; _coarseVersion++;
     }
 
@@ -167,14 +167,24 @@ public sealed partial class RynthNavPlugin
         NavCoarse.Probe? target = null;
         int gx = (int)Math.Floor(_gotoTew / 192.0), gy = (int)Math.Floor(_gotoTns / 192.0);
         uint goalLb = gx is >= 0 and <= 255 && gy is >= 0 and <= 255 ? (uint)((gx << 8) | gy) : 0;
+        bool moved = false;
         try
         {
+            // Ground a walk from here can end on: the spot itself, or the nearest such ground
+            // when the spot is a pocket nothing links into (NavCoarse.ProbeReachable).
             target = _loadedTiles.Contains(goalLb)
-                ? NavCoarse.ProbeNear(g, _navMesh!, _query!, _gotoTew, _wz, _gotoTns, 40f, _tileRegions)
-                : NavCoarse.ProbeFile(g, NavDataDir, _gotoTew, _wz, _gotoTns, 40f);
+                ? NavCoarse.ProbeReachable(g, _navMesh!, _query!, _gotoTew, _wz, _gotoTns, 40f, _tileRegions, start.Region, out moved)
+                : NavCoarse.ProbeFile(g, NavDataDir, _gotoTew, _wz, _gotoTns, 40f, start.Region, out moved);
         }
         catch (Exception ex) { Host.Log($"[RynthNav] route: target tile unreadable: {ex.Message}"); }
         if (target == null) return;   // no navmesh at the target: head straight, as without a graph
+        if (moved && !_coarseGoalMovedSaid)
+        {
+            _coarseGoalMovedSaid = true;
+            double off = Math.Sqrt((target.Pt.X - _gotoTew) * (target.Pt.X - _gotoTew) + (target.Pt.Z - _gotoTns) * (target.Pt.Z - _gotoTns));
+            Host.Log($"[RynthNav] route: the spot itself can't be walked into (fenced-in ground, a roof or a rock); aiming at walkable ground {off:F0}u from it (region {target.Region})");
+            if (off >= ArrivalUnits) Say($"goto: that exact spot can't be walked to; going to the nearest walkable ground, {off:F0} yd from it");
+        }
 
         NavCoarse.Request req = NavCoarse.Request.Measure(g, start, target);
         int version = _coarseVersion, here = start.Region, goal = target.Region;
@@ -207,6 +217,17 @@ public sealed partial class RynthNavPlugin
                 // Water or cliffs between here and there: walking (or a blind push) only leads
                 // somewhere wrong, like into a portal. Plan with portals and recalls, or stop.
                 NoLandRoute();
+                return;
+            }
+            // On open ground (the start links to its neighbours, on a real landmass) and still no
+            // route though the goal end was already moved to ground a walk can end on: the graph
+            // knows of no way there. Heading straight for it then only runs into what's between
+            // (11-01: a bridge, then round in circles for minutes). Stop and say so. Standing in a
+            // pocket yourself (indoors, a roof), the way out may be narrower than the mesh shows:
+            // head for it as before.
+            if (g != null && g.RegionPortals(here).Length > 0 && g.ComponentSize(g.Component(here)) >= 8)
+            {
+                FinishGoto("stopped: the route graph has no walking way to that spot (nothing walkable within 96 yd of it links to where you are); pick a spot nearby");
                 return;
             }
             if (!_coarseNoRouteSaid)

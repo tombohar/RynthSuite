@@ -211,6 +211,16 @@ internal sealed class NavigationEngine
     private long   _areaMismatchSince;
     private string _areaMessage = string.Empty;
     private string _areaAnnounced = string.Empty;
+    // The two places the last mismatch named ("the landscape", "in dungeon 0x5756").
+    private string _areaRouteName = string.Empty;
+    private string _areaPlayerName = string.Empty;
+    // The look along the route for a waypoint in the character's area (TryCarryOnHere) runs once
+    // per route / landblock / indoors-or-out; a look that found none is not repeated on the
+    // 3 s rechecks. Null route = not looked yet.
+    private NavRouteParser? _areaScanRoute;
+    private uint _areaScanLb = uint.MaxValue;
+    private bool _areaScanInCell;
+    private bool _areaScanNone;
     // A route that walks INTO a portal has its last point on this side and the next
     // one on the other side. For a few seconds after reaching that last point, keep
     // walking on through it (the way the route came in) so the portal can fire,
@@ -2460,6 +2470,12 @@ internal sealed class NavigationEngine
         _areaPlayerLb         = uint.MaxValue;
         _areaRetryAt          = 0;
         _areaMismatch         = false;
+        // A new route, a teleport or a macro start: a hold that comes back says so again (a route
+        // loaded again over the same hold used to change nothing the player could see, 2026-11-01).
+        _areaAnnounced        = string.Empty;
+        _areaScanRoute        = null;
+        _areaScanNone         = false;
+        _settings.NavAreaHoldOffersPatrol = false;
     }
 
     private string DescribeRecovery()
@@ -2479,6 +2495,17 @@ internal sealed class NavigationEngine
     /// join those, so nothing is attempted; one chat line per mismatch. The check is
     /// recomputed only when the waypoint, the route or the character's landblock/cell
     /// kind changes, and resumes on its own when they match again (e.g. after a portal).
+    ///
+    /// Three cases (2026-11-01):
+    ///   - At the route's own way out (the character stands at the last waypoint before the
+    ///     change, a walk-in portal): walk on through it for a few seconds, then hold.
+    ///   - Anywhere else (the character got here by a portal, a recall, a death, or loaded the
+    ///     route here): the route is looked along, in the order it is walked, for the first
+    ///     waypoint in the character's area, and nav carries on from there. A Circular route
+    ///     whose loop starts with a recall cast in this dungeon goes on to that recall.
+    ///   - No waypoint of the route is here: hold, and say once what to do (load a route for
+    ///     here; in a dungeon, or press Patrol).
+    /// Nothing is ever walked in an area its waypoint isn't in.
     /// </summary>
     private bool AreaMismatchHold(NavRouteParser route, int idx, NavPoint pt)
     {
@@ -2507,20 +2534,39 @@ internal sealed class NavigationEngine
             if (_areaMismatch)
             {
                 if (!was) _areaMismatchSince = Now;
+                _areaRouteName  = routeArea;
+                _areaPlayerName = playerArea;
                 _areaMessage = $"Nav: this route is in a different area ({routeArea}) - you are {playerArea}. Navigation stopped.";
                 if (_detour != null) EndDetour("the route is in a different area", success: false);
             }
             else if (was)
             {
                 _areaAnnounced = string.Empty;
+                _settings.NavAreaHoldOffersPatrol = false;
                 _host.Log($"Nav: the route's area matches again at waypoint [{idx}] - navigation resumes");
             }
         }
 
         if (!_areaMismatch) return false;
 
-        if (Now - _areaMismatchSince < (long)AreaGraceMs && AreaGraceWalk(route, idx))
+        if (AtAreaBoundary(route, idx))
+        {
+            // The route's own way out: walk on through for the grace, then hold (the portal didn't fire).
+            if (Now - _areaMismatchSince < (long)AreaGraceMs && AreaGraceWalk(route, idx))
+                return true;
+        }
+        else if (TryCarryOnHere(route, idx, cell, lb, inCell))
+        {
             return true;
+        }
+        else if (_areaScanNone)
+        {
+            // Nothing of this route is here: say what to do instead of only "stopped".
+            _areaMessage = $"Nav: this route is in a different area ({_areaRouteName}) - you are {_areaPlayerName}, and nothing ahead on it is here. "
+                         + (inCell ? "Navigation is waiting: load a route for this dungeon, or press Patrol to patrol it."
+                                   : "Navigation is waiting: load a route for here.");
+            _settings.NavAreaHoldOffersPatrol = inCell;
+        }
 
         // Hold: one chat line per mismatch.
         if (_areaMessage != _areaAnnounced)
@@ -2531,9 +2577,107 @@ internal sealed class NavigationEngine
         }
         StopMovement();
         _settings.NavIsStuck    = true;
-        _settings.NavStatusLine = "Nav: route is in a different area - stopped";
+        _settings.NavStatusLine = _areaScanNone
+            ? $"Nav: this route is for {_areaRouteName} - load a route for here{(inCell ? " or press Patrol" : "")}"
+            : "Nav: route is in a different area - stopped";
         return true;
     }
+
+    /// <summary>
+    /// The character stands at (within AreaGraceNearYd of) the walk point just before
+    /// <paramref name="idx"/>: the route's own way into the other area (a walk-in portal there).
+    /// </summary>
+    private bool AtAreaBoundary(NavRouteParser route, int idx)
+    {
+        int prev = PrevIndex(idx, route);
+        if (prev < 0 || !IsWalkTarget(route.Points[prev].Type)) return false;
+        if (!TryGetPos(out double ns, out double ew)) return false;
+        var p = route.Points[prev];
+        return NavYd(p.NS - ns, p.EW - ew) <= AreaGraceNearYd;
+    }
+
+    /// <summary>
+    /// The route looked along from <paramref name="idx"/> in the order it is walked (a Circular
+    /// route round to the point before it, a Linear route to its end and back, a Once route to
+    /// its end) for the first waypoint in the character's area, of any kind (a recall cast here,
+    /// a portal used here, a point). Found: nav carries on from it, said once in chat, and true.
+    /// Not found: false, remembered (<see cref="_areaScanNone"/>) until the route or the
+    /// character's area changes.
+    /// </summary>
+    private bool TryCarryOnHere(NavRouteParser route, int idx, uint cell, uint lb, bool inCell)
+    {
+        if (ReferenceEquals(route, _areaScanRoute) && lb == _areaScanLb && inCell == _areaScanInCell && _areaScanNone)
+            return false;
+        _areaScanRoute  = route;
+        _areaScanLb     = lb;
+        _areaScanInCell = inCell;
+        _areaScanNone   = false;
+
+        // Only a clear Match counts: the dats are loaded by now (the current waypoint's check said
+        // Mismatch), so Unknown means a point off the map, which is nowhere to carry on from.
+        int found = -1, foundDir = _linearDir;
+        foreach (var (k, dir) in WalkOrderAfter(route, idx))
+        {
+            var p = route.Points[k];
+            if (_planner!.CheckArea(cell, p.NS, p.EW, out _, out _) != NavAreaCheck.Match) continue;
+            found = k; foundDir = dir;
+            break;
+        }
+        if (found < 0)
+        {
+            _areaScanNone = true;
+            return false;
+        }
+
+        var to = route.Points[found];
+        string msg = $"Nav: waypoint [{idx}] is in another area ({_areaRouteName}); [{found}] {to} is here ({PlaceName(_areaPlayerName)}) - carrying on from [{found}].";
+        _host.WriteToChat(msg, 1);
+        _host.Log($"{msg} [cell 0x{cell:X8}]");
+
+        _settings.ActiveNavIndex = found;
+        if (route.RouteType == NavRouteType.Linear) _linearDir = foundDir;
+        _areaMismatch    = false;
+        _areaAnnounced   = string.Empty;
+        _settings.NavIsStuck = false;
+        _settings.NavAreaHoldOffersPatrol = false;
+        _settings.NavStatusLine = $"Nav: carrying on from [{found}], the route's next waypoint here";
+        _closestDist     = double.MaxValue;
+        _legStartNs      = double.NaN;
+        _legStartEw      = double.NaN;
+        _watchdogNs      = double.NaN;
+        _watchdogEw      = double.NaN;
+        _stuckCount      = 0;
+        StopMovement();
+        return true;
+    }
+
+    /// <summary>
+    /// The waypoints after <paramref name="idx"/> in the order nav walks them, each with the Linear
+    /// direction it is reached in. At most one lap; <paramref name="idx"/> itself is not included.
+    /// </summary>
+    private IEnumerable<(int Idx, int Dir)> WalkOrderAfter(NavRouteParser route, int idx)
+    {
+        int n = route.Points.Count;
+        switch (route.RouteType)
+        {
+            case NavRouteType.Circular:
+                for (int s = 1; s < n; s++) yield return ((idx + s) % n, 1);
+                break;
+            case NavRouteType.Once:
+                for (int k = idx + 1; k < n; k++) yield return (k, 1);
+                break;
+            case NavRouteType.Linear:
+                int d = _linearDir >= 0 ? 1 : -1;
+                for (int k = idx + d; k >= 0 && k < n; k += d) yield return (k, d);
+                // ... then back from the far end: the points behind idx, reached heading the other way.
+                for (int k = idx - d; k >= 0 && k < n; k -= d) yield return (k, -d);
+                break;
+        }
+    }
+
+    /// <summary>"in dungeon 0x5756" / "on the landscape" (CheckArea's wording) as a place: "dungeon 0x5756".</summary>
+    private static string PlaceName(string playerArea)
+        => playerArea.StartsWith("in ", StringComparison.Ordinal) || playerArea.StartsWith("on ", StringComparison.Ordinal) ? playerArea[3..] : playerArea;
 
     /// <summary>
     /// Mismatch grace: when the character is at (within AreaGraceNearYd of) the last

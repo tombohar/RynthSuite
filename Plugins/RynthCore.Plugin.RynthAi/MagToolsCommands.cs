@@ -275,6 +275,8 @@ public sealed partial class RynthAiPlugin
         ["rebuftimeremainingseconds"] = "RebuffSecondsRemaining",
         ["navclosestoprange"]         = "NavCloseStopRange",
         ["follownavmin"]              = "FollowNavMin",
+        ["outdoorhuntrange"]          = "OutdoorHuntRange",
+        ["outdoorhuntradius"]         = "OutdoorHuntRadius",
         // UtilityBelt AutoVendor options (/ub opt set AutoVendor.TestMode true)
         ["autovendor.enabled"]          = "AutoVendorEnabled",
         ["autovendor.enablebuying"]     = "AutoVendorEnableBuying",

@@ -257,6 +257,9 @@ internal sealed class DashboardBridge : IDashboardHost
     public void SetAutoSort(bool on) => Queue(() => _p.SetDashAutoSort(on));
     public void ToggleSortWindow() => Queue(() => _p.SendSortCommand(string.Empty));
     public void StartPatrol() => Queue(_p.HandleDungeonNavPatrol);
+    public void ToggleHunt() => Queue(_p.ToggleHunt);
+    public bool HuntActive => _p.HuntActive;
+    public void ToggleHuntPanel() => _p.ToggleHuntPanel();
     public void ToggleSpells() => _p.EnqueueRemoteCommand("spells", "toggle");
     public void UseClassicLook() => _p.UseClassicLook();
     public bool DrawMiniRemote(out Vector2 want) => _p.DrawDashMiniRemote(out want);

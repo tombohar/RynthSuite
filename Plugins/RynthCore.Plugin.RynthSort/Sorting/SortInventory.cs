@@ -32,6 +32,12 @@ internal sealed class SortPack
     /// nothing is reordered in this pack.
     /// </summary>
     public bool OrderKnown;
+    /// <summary>
+    /// Where it sits in the pack column, 1 = the top, counting foci too (the column shows both);
+    /// 0 when the column's order isn't known. Its pack number counts packs only, so the two differ
+    /// when a focus sits above it.
+    /// </summary>
+    public int ColumnSlot;
 
     /// <summary>
     /// Puts <see cref="Items"/> in <paramref name="order"/> (the pack's slot order) when that names
@@ -118,11 +124,26 @@ internal readonly struct SortSlot
     public bool IsPack => Capacity > 0;
 }
 
+/// <summary>Where the side packs' numbers come from (what the window tells the player).</summary>
+internal enum PackOrderSource
+{
+    /// <summary>The engine has no slot orders (before plugin API 80): numbered by object id.</summary>
+    NoEngine,
+    /// <summary>The engine hasn't seen the server's pack list for this character (an engine that
+    /// loaded after the login and had nothing saved): numbered by object id until the next login.</summary>
+    NotSeen,
+    /// <summary>The engine's pack list doesn't name every pack read: numbered by object id.</summary>
+    Mismatch,
+    /// <summary>The pack column's order, top first.</summary>
+    Known,
+}
+
 /// <summary>
 /// The character's packs: the main pack and the side packs, pack 1 first. With the engine's slot
 /// order (API v80) that is the pack column on screen, top first (<see cref="PackOrderKnown"/>);
-/// else GetContainerContents' order, by object id. Rules keep the pack's id either way, so a
-/// pack keeps its rules whatever its number.
+/// else GetContainerContents' order, by object id (which is also the order the engine's own
+/// Inventory panel falls back to). Rules keep the pack's id either way, so a pack keeps its
+/// rules whatever its number.
 /// </summary>
 internal sealed class SortInventory
 {
@@ -136,21 +157,39 @@ internal sealed class SortInventory
     public readonly List<SortSlot> Slots = new();
     /// <summary><see cref="Packs"/> are in the pack column's order, top first.</summary>
     public bool PackOrderKnown;
+    /// <summary>Why the packs are numbered the way they are.</summary>
+    public PackOrderSource OrderSource = PackOrderSource.NoEngine;
+    /// <summary>With <see cref="PackOrderSource.Mismatch"/>: how many packs read the list lacks.</summary>
+    public int MissingFromColumn;
+    /// <summary>Entries in the pack column's list (packs and foci) the last time it was read; -1 = no list.</summary>
+    public int ColumnEntries = -1;
 
     /// <summary>
     /// Puts <see cref="Packs"/> in the pack column's order: <paramref name="order"/> is the main
     /// pack's side-slot list (packs and foci, top first). Only when it names every pack read; else
-    /// the packs keep their order and <see cref="PackOrderKnown"/> is false.
+    /// the packs keep their order, <see cref="PackOrderKnown"/> is false and
+    /// <see cref="MissingFromColumn"/> says how many it lacks. Each pack's
+    /// <see cref="SortPack.ColumnSlot"/> is its place in the list (foci counted).
     /// </summary>
     public bool ApplyPackOrder(IReadOnlyList<uint> order, int count)
     {
         PackOrderKnown = false;
+        MissingFromColumn = 0;
+        ColumnEntries = count;
+        foreach (SortPack p in Packs) p.ColumnSlot = 0;
         var rank = new Dictionary<uint, int>(count);
         for (int i = 0; i < count; i++) rank.TryAdd(order[i], i);
         foreach (SortPack p in Packs)
-            if (!rank.ContainsKey(p.Id)) return false;
+            if (!rank.ContainsKey(p.Id)) MissingFromColumn++;
+        if (MissingFromColumn > 0)
+        {
+            OrderSource = PackOrderSource.Mismatch;
+            return false;
+        }
         Packs.Sort((a, b) => rank[a.Id].CompareTo(rank[b.Id]));
+        foreach (SortPack p in Packs) p.ColumnSlot = rank[p.Id] + 1;
         PackOrderKnown = true;
+        OrderSource = PackOrderSource.Known;
         return true;
     }
 

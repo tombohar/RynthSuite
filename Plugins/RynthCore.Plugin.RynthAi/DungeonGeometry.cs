@@ -199,6 +199,22 @@ internal sealed class DungeonGeometry
         return true;
     }
 
+    /// <summary>
+    /// One portal polygon on its own (a building's door to the outside has no twin in another
+    /// cell): its centre at floor level (z = its lowest vertex), its horizontal facing (either way
+    /// round), its width and its top. False for a floor or ceiling portal (a shaft).
+    /// </summary>
+    internal static bool TryOpening(Vector3[] v, out double x, out double y, out double z,
+                                    out double nx, out double ny, out double width, out double top)
+    {
+        x = y = z = nx = ny = width = top = 0;
+        if (v == null || v.Length < 3 || !TryPortalPoly(v, out var pp)) return false;
+        x = pp.X; y = pp.Y; z = pp.Z; nx = pp.Nx; ny = pp.Ny; width = pp.Width;
+        top = double.MinValue;
+        foreach (var p in v) top = Math.Max(top, p.Z);
+        return true;
+    }
+
     private static bool TryMatch(DungeonGeometry g, DungeonNavNode a, DungeonNavNode b,
                                  List<PortalPoly> aList, List<PortalPoly> bList, out DungeonDoorway door)
     {

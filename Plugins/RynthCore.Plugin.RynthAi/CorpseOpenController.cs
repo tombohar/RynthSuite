@@ -488,6 +488,8 @@ public sealed partial class RynthAiPlugin
             _pendingLootCheckContainerId = sid;
             // And a chest to loot, if it turns out eligible (RynthAiPlugin.ChestLoot.cs).
             NoteContainerOpened(sid);
+            NoteChestKeyOpened(sid);   // the Item Tool's chest looter waits for this
+            NoteManualChestOpened(sid); // Pickup with macro off (RynthAiPlugin.ChestLoot.cs)
             return;
         }
 
@@ -722,6 +724,8 @@ public sealed partial class RynthAiPlugin
         WatchLateLandings(CorpseNowMs);
         TickDeferredClose(settings);
         TakeLootThisRequest(settings);   // /ra lootthis (RynthAiPlugin.VTankHotkeys.cs)
+        TakeChestKeyRequest();           // the Item Tool's chest looter (RynthAiPlugin.ItemTool.cs)
+        TakeManualChest(settings);       // Pickup with macro off (RynthAiPlugin.ChestLoot.cs)
 
         // ── Macro off / looting disabled / nav-boost — full stop and reset ──
         // Must come before the Buffing check so that turning off the macro always
@@ -730,7 +734,7 @@ public sealed partial class RynthAiPlugin
         if ((!settings.IsMacroRunning || !settings.EnableLooting || BoostNavHoldsLoot(settings)) && !ForcedLootHolds())
         {
             _lootSkipWhy = !settings.IsMacroRunning ? "the macro is off"
-                : !settings.EnableLooting ? "looting is off" : "Boost Nav Priority gives the tick to the route";
+                : !settings.EnableLooting ? "looting is off" : "Boost Nav Priority is on (RynthAi only navigates)";
             ResetCorpseTarget();
             return;
         }
@@ -2853,6 +2857,23 @@ public sealed partial class RynthAiPlugin
             return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// Boost Nav Priority is passing by a corpse in range that would be looted with it off. For
+    /// the once-per-session notice only (RynthAiPlugin.BoostNav.cs), which calls it every
+    /// BoostNavLootCheckMs until it has spoken. The scan's loot-starvation mark is put back: it
+    /// belongs to HasLootWork's tick, not to this look.
+    /// </summary>
+    private bool BoostNavSkipsLoot(LegacyUiSettings settings)
+    {
+        if (!settings.IsMacroRunning || !settings.EnableLooting || !BoostNavHoldsLoot(settings)) return false;
+        if (IsLootingBlockedByPack(settings)) return false;
+        double maxMeters = GetCorpseApproachRangeMaxMeters(settings);
+        if (maxMeters <= 0.25) return false;
+        bool starved = _lootStarved;
+        try { return HasUnlootedCorpsesInRange(maxMeters); }
+        finally { _lootStarved = starved; }
     }
 
     /// <summary>

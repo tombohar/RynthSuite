@@ -54,6 +54,7 @@ public partial class CombatManager
     private (int Id, string Source) _lastOffPlan = (-1, "");
     private DateTime _lastOffHoldLogAt = DateTime.MinValue;
     private readonly HashSet<string> _offNoted = new();
+    private const string DefaultOffhandSource = "Default offhand";
 
     private void ResetOffhandState()
     {
@@ -193,7 +194,7 @@ public partial class CombatManager
         }
         if (pick == 0 && OffhandRules.IsRuleItem(ruleVal)) { pick = ruleVal; source = $"Monsters rule '{rule!.Name}' offhand"; }
         if (pick == 0 && ruleVal == 0 && defaultRow != null && OffhandRules.IsRuleItem(defaultRow.OffhandId))
-        { pick = defaultRow.OffhandId; source = "Default offhand"; }
+        { pick = defaultRow.OffhandId; source = DefaultOffhandSource; }
         if (pick != 0 && !_settings.ItemRules.Exists(r => r.Id == pick))
         {
             NoteUnlisted(pick, source);
@@ -214,9 +215,18 @@ public partial class CombatManager
             var wo = _worldFilter[r.Id];
             if (wo == null) continue;
             if (IsShieldItem(wo)) list.Add(new OffhandCandidate(r.Id, wo.Name, true, r.Id == offInSlot));
-            else if (IsOffhandWeaponItem(wo)) list.Add(new OffhandCandidate(r.Id, wo.Name, false, r.Id == offInSlot));
+            else if (IsOffhandWeaponItem(wo)) list.Add(new OffhandCandidate(r.Id, wo.Name, false, r.Id == offInSlot, ListedElementOf(r.Id)));
         }
         return list;
+    }
+
+    /// <summary>A weapon's element as the weapon choice reads it: the one set in the Items list, else its properties.</summary>
+    internal string ListedElementOf(int id)
+    {
+        var r = _settings.ItemRules.Find(x => x.Id == id);
+        string elem = WeaponElements.Normalize(r?.Element);
+        if (elem.Length == 0 && id != 0) elem = ElementTracker.Read(id, _worldFilter[id]?.Name).Element;
+        return elem;
     }
 
     /// <summary>The off hand to go with <paramref name="mainId"/> against <paramref name="target"/>.</summary>
@@ -225,8 +235,10 @@ public partial class CombatManager
         var (mode, pick, source) = OffhandChoiceFor(target, rule);
         int off = OffhandInSlot();
         var kind = MainKindOf(_worldFilter[mainId]);
+        // A dual-wield pair goes on together: the off-hand weapon of the main weapon's element.
+        string mainElement = kind == MainHandKind.OneHandedMelee ? ListedElementOf(mainId) : "";
         var plan = OffhandPlanner.Choose(mode, kind, mainId, ListedOffhand(off), DualWieldTrained, _settings.PreferDualWield,
-            _host.HasWieldItem, pick, source);
+            _host.HasWieldItem, pick, source, mainElement, explicitIsDefault: source == DefaultOffhandSource);
 
         // Nothing listed planned: put back what RynthAi took off itself, when the hands allow it.
         if (plan.Id == 0 && mode != OffhandMode.None && _stowedOffhandId != 0 && _stowedOffhandId != mainId)
@@ -239,6 +251,26 @@ public partial class CombatManager
                 plan = new OffhandPlan(_stowedOffhandId, "putting back what was taken off");
         }
         return plan;
+    }
+
+    /// <summary>
+    /// Dual wield: <paramref name="wantedId"/> (the weapon choice) already swings in the off hand
+    /// beside <paramref name="inHand"/>, of another element. Its partner: another listed one-handed
+    /// weapon of the wanted element the character can wield now, for the main hand (null = none,
+    /// or the hands already hold the wanted element).
+    /// </summary>
+    private WorldObject? DualWieldPartnerFor(int wantedId, int inHand)
+    {
+        string elem = ListedElementOf(wantedId);
+        if (elem.Length == 0 || elem.Equals(ListedElementOf(inHand), StringComparison.OrdinalIgnoreCase)) return null;
+        foreach (var c in ListedCandidates())
+        {
+            if (c.Id == wantedId || c.Id == inHand || c.Kind != CombatMode.Melee
+                || !c.Element.Equals(elem, StringComparison.OrdinalIgnoreCase)) continue;
+            if (_worldFilter[c.Id] is WorldObject wo && MainKindOf(wo) == MainHandKind.OneHandedMelee && IsOffhandWeaponItem(wo))
+                return wo;
+        }
+        return null;
     }
 
     // ── Before a main wield ──────────────────────────────────────────────────

@@ -277,6 +277,10 @@ internal sealed class PetManager
             if (!_petSeenSinceSummon) return;
             _assumePetActiveUntil = 0;
         }
+        // Boost Nav Priority (owner's rule, 2026-11-02): RynthAi only navigates, so there is no
+        // fight to summon for (a summoned pet attacks the monsters it was called for), and a
+        // cosmetic pet stays out.
+        if (_settings.BoostNavPriority) return;
         if (petOut)
         {
             // A cosmetic pet in the slot steps aside for the fight; wait for the dismiss to land.

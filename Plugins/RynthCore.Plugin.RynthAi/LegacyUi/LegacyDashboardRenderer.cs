@@ -348,6 +348,13 @@ internal sealed partial class LegacyDashboardRenderer
         get => _rynthChatUi.OnSubmit;
         set => _rynthChatUi.OnSubmit = value;
     }
+
+    /// <summary>The nav window's "Patrol this dungeon" button (shown while an area hold offers it).</summary>
+    public Action? StartPatrolHandler
+    {
+        get => _navigationUi.StartPatrol;
+        set => _navigationUi.StartPatrol = value;
+    }
     public void SetWorldObjectCache(WorldObjectCache cache)
     {
         _rynthRadarUi.SetWorldObjectCache(cache);
@@ -1363,6 +1370,8 @@ internal sealed partial class LegacyDashboardRenderer
                 DunPatrolWallDistance      = s.DunPatrolWallDistance,
                 DunPatrolLookInSize        = s.DunPatrolLookInSize,
                 DunPatrolSightYd           = s.DunPatrolSightYd,
+                OutdoorHuntRange           = s.OutdoorHuntRange,
+                OutdoorHuntRadius          = s.OutdoorHuntRadius,
                 T2Speed                    = s.T2Speed,
                 T2WalkWithinYd             = s.T2WalkWithinYd,
                 T2DistanceTo               = s.T2DistanceTo,
@@ -1396,6 +1405,7 @@ internal sealed partial class LegacyDashboardRenderer
                 BoostLootPriority          = s.BoostLootPriority,
                 LootOnlyRareCorpses        = s.LootOnlyRareCorpses,
                 LootJumpEnabled            = s.LootJumpEnabled,
+                LootChestsMacroOff         = s.LootChestsMacroOff,
                 LootJumpHeight             = s.LootJumpHeight,
                 LootOwnership              = s.LootOwnership,
                 LootOwnCorpse              = s.LootOwnCorpse,
@@ -1628,6 +1638,9 @@ internal sealed partial class LegacyDashboardRenderer
             if (p.DunPatrolWallDistance is float patrolWalls) s.DunPatrolWallDistance = (float)Math.Clamp(patrolWalls, DungeonPatrolOptions.WallClearanceMin, DungeonPatrolOptions.WallClearanceMax);
             if (p.DunPatrolLookInSize is float patrolLookIn)  s.DunPatrolLookInSize   = (float)Math.Clamp(patrolLookIn, DungeonPatrolOptions.LookInRoomMin, DungeonPatrolOptions.LookInRoomMax);
             if (p.DunPatrolSightYd is float patrolSight)      s.DunPatrolSightYd      = (float)Math.Clamp(patrolSight, DungeonPatrolOptions.SightMin, DungeonPatrolOptions.SightMax);
+            // Outdoor hunt: absent (an older engine) = unchanged.
+            if (p.OutdoorHuntRange is float huntRange)       s.OutdoorHuntRange      = (float)Math.Clamp(huntRange, RynthAiPlugin.OutdoorHuntRangeMin, RynthAiPlugin.OutdoorHuntRangeMax);
+            if (p.OutdoorHuntRadius is float huntRadius)     s.OutdoorHuntRadius     = (float)Math.Clamp(huntRadius, 0, RynthAiPlugin.OutdoorHuntRadiusMax);
             s.T2Speed                    = p.T2Speed;
             s.T2WalkWithinYd             = p.T2WalkWithinYd;
             s.T2DistanceTo               = p.T2DistanceTo;
@@ -1658,6 +1671,7 @@ internal sealed partial class LegacyDashboardRenderer
             s.BoostLootPriority          = p.BoostLootPriority;
             s.LootOnlyRareCorpses        = p.LootOnlyRareCorpses;
             s.LootJumpEnabled            = p.LootJumpEnabled;
+            s.LootChestsMacroOff         = p.LootChestsMacroOff;
             s.LootJumpHeight             = p.LootJumpHeight;
             s.LootOwnership              = p.LootOwnership;
             if (p.EscapeHazards is bool escape) s.EscapeHazards = escape;                 // absent = unchanged
@@ -2001,6 +2015,8 @@ internal sealed partial class LegacyDashboardRenderer
         dst.DunPatrolWallDistance    = tmp.DunPatrolWallDistance;
         dst.DunPatrolLookInSize      = tmp.DunPatrolLookInSize;
         dst.DunPatrolSightYd         = tmp.DunPatrolSightYd;
+        dst.OutdoorHuntRange         = tmp.OutdoorHuntRange;
+        dst.OutdoorHuntRadius        = tmp.OutdoorHuntRadius;
         dst.T2Speed                  = tmp.T2Speed;
         dst.T2DistanceTo             = tmp.T2DistanceTo;
         dst.T2ReissueMs              = tmp.T2ReissueMs;
@@ -2042,6 +2058,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.LootOpenRetryMs          = tmp.LootOpenRetryMs;
         dst.LootCorpseTimeoutMs      = tmp.LootCorpseTimeoutMs;
         dst.LootJumpEnabled          = tmp.LootJumpEnabled;
+        dst.LootChestsMacroOff       = tmp.LootChestsMacroOff;
         dst.LootJumpHeight           = tmp.LootJumpHeight;
         dst.SalvageOpenDelayFirstMs  = tmp.SalvageOpenDelayFirstMs;
         dst.SalvageOpenDelayFastMs   = tmp.SalvageOpenDelayFastMs;

@@ -21,7 +21,8 @@ internal enum OffhandMode
 internal enum MainHandKind { None, OneHandedMelee, TwoHanded, Launcher, Thrown, Caster }
 
 /// <summary>A listed item that can go in the off hand: a shield, or a one-handed melee weapon.</summary>
-internal sealed record OffhandCandidate(int Id, string Name, bool IsShield, bool InOffhand);
+/// <param name="Element">A weapon's normalized element ("" = unknown, and for shields).</param>
+internal sealed record OffhandCandidate(int Id, string Name, bool IsShield, bool InOffhand, string Element = "");
 
 /// <summary>The off hand to wield (0 = add nothing; what is there stays) and why.</summary>
 internal readonly record struct OffhandPlan(int Id, string Source);
@@ -160,12 +161,17 @@ internal static class OffhandRules
 ///     listed one-handed weapon instead only when <paramref name="preferDualWield"/> is on and
 ///     dual wield is possible. A thrown weapon gets a shield too (never a second weapon).
 /// "Best": the listed one already in the off hand, else list order. Only listed items count.
+/// An off-hand weapon is first of all the main weapon's partner: one of the same element
+/// (<paramref name="mainElement"/>), so a matched pair goes on together when the element changes
+/// (a dual-wield player with two pairs had only the main hand swap, 2026-11-02). With no listed
+/// partner, the one in the off hand stays. The Default row's item pick gives way to a partner too
+/// (<paramref name="explicitIsDefault"/>); a pick for the monster itself does not.
 /// </summary>
 internal static class OffhandPlanner
 {
     public static OffhandPlan Choose(OffhandMode mode, MainHandKind main, int mainId,
         IReadOnlyList<OffhandCandidate> listed, bool dualWieldTrained, bool preferDualWield, bool canWieldOffhandWeapon,
-        int explicitId = 0, string explicitSource = "")
+        int explicitId = 0, string explicitSource = "", string mainElement = "", bool explicitIsDefault = false)
     {
         if (mode == OffhandMode.None) return new OffhandPlan(0, "Offhand None");
         // A shield goes with a one-handed melee weapon, and with a thrown weapon too (ACE
@@ -179,8 +185,9 @@ internal static class OffhandPlanner
         {
             if (c.Id == 0 || c.Id == mainId) continue;
             if (c.IsShield) { if (shield == null || (c.InOffhand && !shield.InOffhand)) shield = c; }
-            else if (weapon == null || (c.InOffhand && !weapon.InOffhand)) weapon = c;
+            else if (weapon == null || WeaponRank(c, mainElement) < WeaponRank(weapon, mainElement)) weapon = c;
         }
+        bool partner = weapon != null && IsPartner(weapon, mainElement);
 
         if (explicitId != 0)
         {
@@ -189,6 +196,10 @@ internal static class OffhandPlanner
                 if (c.Id != explicitId) continue;
                 if (explicitId != mainId)
                 {
+                    // The Default row's weapon pick, another element than the main weapon's: the
+                    // main weapon's partner goes with it instead.
+                    if (!c.IsShield && dualOk && explicitIsDefault && partner && !IsPartner(c, mainElement))
+                        return new OffhandPlan(weapon!.Id, explicitSource + $"; the {mainElement} partner of the main weapon");
                     if (c.IsShield || dualOk) return new OffhandPlan(c.Id, explicitSource);
                 }
                 // The off-hand weapon picked is the main weapon this fight (chosen for the monster's
@@ -207,15 +218,23 @@ internal static class OffhandPlanner
             case OffhandMode.Shield:
                 return shield != null ? new OffhandPlan(shield.Id, "Shield") : new OffhandPlan(0, "Shield: none listed");
             case OffhandMode.Weapon:
-                if (dualOk && weapon != null) return new OffhandPlan(weapon.Id, "Offhand weapon");
+                if (dualOk && weapon != null) return new OffhandPlan(weapon.Id, partner ? $"Offhand weapon ({mainElement}, as the main weapon)" : "Offhand weapon");
                 if (shield != null) return new OffhandPlan(shield.Id, weapon == null ? "Offhand weapon: no second one-handed weapon listed; shield" : $"Offhand weapon: {why}; shield");
                 return new OffhandPlan(0, weapon == null ? "Offhand weapon: no second one-handed weapon listed" : $"Offhand weapon: {why}");
             default:
                 // Auto is the shield; dual wield only with "Prefer dual wield" on (owner,
                 // 2026-10-01), so two swords listed for element switching don't start dual wielding.
                 if (dualOk && weapon != null && preferDualWield)
-                    return new OffhandPlan(weapon.Id, "Auto (dual wield preferred)");
+                    return new OffhandPlan(weapon.Id, partner ? $"Auto (dual wield preferred; {mainElement}, as the main weapon)" : "Auto (dual wield preferred)");
                 return shield != null ? new OffhandPlan(shield.Id, "Auto") : new OffhandPlan(0, "Auto: no shield listed");
         }
     }
+
+    /// <summary>Same element as the main weapon (both known).</summary>
+    private static bool IsPartner(OffhandCandidate c, string mainElement) =>
+        mainElement.Length > 0 && c.Element.Equals(mainElement, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Lower is better: the main weapon's partner, then the one in the off hand, then list order.</summary>
+    private static int WeaponRank(OffhandCandidate c, string mainElement) =>
+        (IsPartner(c, mainElement) ? 0 : 2) + (c.InOffhand ? 0 : 1);
 }

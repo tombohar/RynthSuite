@@ -96,6 +96,8 @@ internal sealed class PackLine
     public bool OrderKnown;
     /// <summary>Items out of place in it (0 = in order; only counted when the order is known and ordering is on).</summary>
     public int OutOfPlace;
+    /// <summary>Its place in the pack column, 1 = top, foci counted (<see cref="SortPack.ColumnSlot"/>); 0 = not known.</summary>
+    public int ColumnSlot;
 
     /// <summary>"Sack (12/24) - Salvage, Gems".</summary>
     public string Label => $"{Name} ({Used}/{Capacity}) - {Summary}";
@@ -123,6 +125,8 @@ internal sealed class SortView
     public PackLine Main = new();
     /// <summary>The packs are numbered top to bottom as the pack column shows them (else by object id).</summary>
     public bool PackOrderKnown;
+    /// <summary>Why the packs are numbered as they are (<see cref="SortInventory.OrderSource"/>).</summary>
+    public PackOrderSource OrderSource = PackOrderSource.NoEngine;
     /// <summary>The pass could put items in order (the engine reads slot orders and ordering is on).</summary>
     public bool Ordering;
     /// <summary>Items a rule wants moved that can't go yet (settling, pack full, pack missing, main full).</summary>
@@ -428,6 +432,7 @@ internal sealed class SortPlanner
         Summary = p.Summary(),
         OrderKnown = p.OrderKnown,
         OutOfPlace = ordering && p.OrderKnown ? PackOrder.OutOfPlace(p.Items, kindFirst) : 0,
+        ColumnSlot = p.ColumnSlot,
     };
 
     private static void FillPacks(SortView view, SortInventory inv, bool ordering, bool kindFirst)
@@ -437,6 +442,7 @@ internal sealed class SortPlanner
         view.Main = LineOf(inv.Main, MainCapacityFallback, ordering, kindFirst);
         view.Main.Name = "Main pack";
         view.PackOrderKnown = inv.PackOrderKnown;
+        view.OrderSource = inv.OrderSource;
         view.Ordering = ordering;
         foreach (SortPack p in inv.Packs) view.Packs.Add(LineOf(p, SideCapacityFallback, ordering, kindFirst));
     }

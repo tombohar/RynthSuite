@@ -14,6 +14,9 @@ internal sealed class LegacyNavigationUi
 
     public Action? OnSettingsChanged;
 
+    /// <summary>Starts the Dungeon Patrol here (set by the plugin; run on the plugin tick).</summary>
+    public Action? StartPatrol;
+
     private readonly string[] _routeTypes = { "Once", "Circular", "Linear", "Follow" };
     private readonly string[] _addModes = { "End", "Above", "Below" };
     private int _addModeIdx = 0;
@@ -43,6 +46,15 @@ internal sealed class LegacyNavigationUi
                 ? new Vector4(0.91f, 0.70f, 0.20f, 1.00f)   // amber
                 : new Vector4(0.25f, 0.85f, 0.45f, 1.00f);  // green
             SafeImGui.TextColored(statusColor, _settings.NavStatusLine);
+        }
+
+        // Held in a dungeon by a route with nothing here (a landscape route, another dungeon's):
+        // the way to run here is the Dungeon Patrol, offered right under the status (2026-11-01).
+        if (_settings.NavAreaHoldOffersPatrol && StartPatrol != null)
+        {
+            if (ImGui.Button("Patrol this dungeon##navAreaPatrol", new Vector2(-1, 24)))
+                StartPatrol();
+            SafeImGui.SetItemTooltip("The loaded route has no waypoint in this dungeon. Builds the Dungeon Patrol here and runs it (the same as the Patrol button).");
         }
 
         ImGui.Spacing();

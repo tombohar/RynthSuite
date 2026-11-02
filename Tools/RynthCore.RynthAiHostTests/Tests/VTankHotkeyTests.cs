@@ -388,6 +388,7 @@ internal static class VTankHotkeyTests
         bot.UseGemProfile();
         bot.S.IsMacroRunning = false;
         bot.S.EnableLooting = false;
+        bot.S.LootChestsMacroOff = false;   // the chest waits for LootThisCont (Pickup with macro off would take it)
         bot.Create(Chest, Gem, Spoon);
         FakeHost.GroundContainer = Chest;
         bot.P.OnViewObjectContents(Chest);

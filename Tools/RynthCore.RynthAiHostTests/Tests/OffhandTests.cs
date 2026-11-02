@@ -23,6 +23,8 @@ internal static class OffhandTests
     private const uint Wcid = 434343;
     private const uint Sword = 0x80000401, Dagger = 0x80000402, Great = 0x80000403, Shield = 0x80000404,
                        Round = 0x80000405, Bow = 0x80000406, Arrows = 0x80000407, Wand = 0x80000408;
+    // Two matched pairs of one-handed weapons for dual wield (an element each).
+    private const uint ColdA = 0x80000411, ColdB = 0x80000412, FireA = 0x80000413, FireB = 0x80000414;
     private const uint Pack = 0x80000501;
     private const int MeleeSlot = 0x00100000, ShieldSlot = 0x00200000, MissileSlot = 0x00400000,
                       AmmoSlot = 0x00800000, HeldSlot = 0x01000000, TwoHandedSlot = 0x02000000;
@@ -37,6 +39,10 @@ internal static class OffhandTests
         r.Add("swap speed: a weapon in hand -> one use of the wand (the client swaps); the pack move only as the fallback", CasterDirectSwap);
         r.Add("swap speed: the gate lets the next step go once the server is done, else after 3 s", SwapGateSettles);
         r.Add("offhand: dual wield with the Dual Wield skill", DualWield);
+        r.Add("offhand: dual wield pairs, the element changes -> both hands swap to the pair", DualWieldPairSwap);
+        r.Add("offhand: dual wield pairs, the off hand already right stays (no loop)", DualWieldPairStays);
+        r.Add("offhand: dual wield pairs, the wanted weapon in the off hand -> its partner goes in the main hand", DualWieldPairPartnerToMain);
+        r.Add("offhand: element pairs leave shield users and single weapons as they were", PairsLeaveShieldAndSingle);
         r.Add("offhand: the weapon in hand is the main hand's when the wielded slot reads 0 (the weenie's wielder record)", InHandFromWielderInfo);
         r.Add("weapons: a weapon refused 'skill too low' is left out of the choice (the off hand stays)", SkillTooLowLeftOut);
         r.Add("offhand: two weapons wielded and no slot read says which: the one RynthAi put in the off hand is the off hand's", OffhandRemembered);
@@ -146,7 +152,7 @@ internal static class OffhandTests
         private readonly FieldInfo _lastEquip = typeof(CombatManager).GetField("_lastEquipTime", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
         public Rig(bool dualWieldSkill = false, bool shieldOn = false, bool wieldCalls = true, bool wielderInfo = false, bool weenieErrors = false,
-                   bool contents = false, bool tracker = false)
+                   bool contents = false, bool tracker = false, bool pairs = false)
         {
             FakeHost.Reset();
             FakeHost.EquippedCalls = tracker;         // v87 GetWieldedItems (answering FakeHost.Equipped)
@@ -166,6 +172,13 @@ internal static class OffhandTests
             Item(Arrows, "Arrow", 0x100, AmmoSlot);
             FakeHost.Ints[(Arrows, 50)] = 1; FakeHost.Ints[(Arrows, 12)] = 100; FakeHost.Ints[(Arrows, 11)] = 250;
             Item(Wand, "Wand", 0x8000, HeldSlot);
+            if (pairs)
+            {
+                Item(ColdA, "Cold Sword", 0x1, MeleeSlot, combatUse: 1);
+                Item(ColdB, "Cold Dagger", 0x1, MeleeSlot, combatUse: 1);
+                Item(FireA, "Fire Sword", 0x1, MeleeSlot, combatUse: 1);
+                Item(FireB, "Fire Dagger", 0x1, MeleeSlot, combatUse: 1);
+            }
             Wield(Sword, MeleeSlot);
             if (shieldOn) Wield(Shield, ShieldSlot);
             FakeHost.Wcids[Monster] = Wcid;
@@ -174,7 +187,9 @@ internal static class OffhandTests
             // ownership read (GetObjectOwnershipInfo: the item's own container field).
             if (contents) { FakeHost.Names[Pack] = "Pack"; FakeHost.ItemTypes[Pack] = 0x200; FakeHost.Containers[Pack] = Player; }
             var host = FakeHost.Create(wielderInfo ? Player : 0);
-            var cache = FakeHost.MakeCache(host, Player, new[] { Sword, Dagger, Great, Shield, Round, Bow, Arrows, Wand });
+            var ids = new List<uint> { Sword, Dagger, Great, Shield, Round, Bow, Arrows, Wand };
+            if (pairs) ids.AddRange(new[] { ColdA, ColdB, FireA, FireB });
+            var cache = FakeHost.MakeCache(host, Player, ids.ToArray());
             C = new CombatManager(host, S, cache);
             C.SetPlayerId(Player);
             C.SetDamageStores(null, Store);
@@ -196,6 +211,17 @@ internal static class OffhandTests
                 Id = unchecked((int)i), Name = FakeHost.Names[i], Element = "", ElementSource = "",
                 Action = i == Shield || i == Round ? WeaponList.ShieldAction : "Weapon",
             }).ToList();
+
+        /// <summary>The Items list with an element set on each entry.</summary>
+        public void ListWith(params (uint Id, string Element)[] items)
+        {
+            List(items.Select(i => i.Id).ToArray());
+            foreach (var (id, elem) in items) S.ItemRules.First(r => r.Id == unchecked((int)id)).Element = elem;
+        }
+
+        /// <summary>This monster's Monsters rule fights with <paramref name="element"/> (its DamageType).</summary>
+        public void Element(string element, int offhandId = 0) =>
+            S.MonsterRules = new List<MonsterRule> { new() { Name = "Default" }, new() { Name = "Test Dummy", DamageType = element, OffhandId = offhandId } };
 
         public void Rule(int offhandId) =>
             S.MonsterRules = new List<MonsterRule> { new() { Name = "Default" }, new() { Name = "Test Dummy", OffhandId = offhandId } };
@@ -460,6 +486,174 @@ internal static class OffhandTests
         rig2.Rule(OffhandRules.RuleWeapon);
         rig2.Tick();
         Check.Eq(rig2.ShieldWields(Dagger), 1, "Monsters rule 'Offhand weapon': the dagger");
+    }
+
+    // ── Dual wield pairs ──────────────────────────────────────────────────────
+
+    // 2026-11-02 report: a dual-wield character with a matched pair per element (a Cold pair, a
+    // Fire pair). When the element changed only the main hand swapped; the off hand kept whatever
+    // it held, because the off-hand pick was "the one already in the off hand, else list order"
+    // and never looked at the element.
+    private static (uint, string)[] Pairs => new[] { (ColdA, "Cold"), (ColdB, "Cold"), (FireA, "Fire"), (FireB, "Fire") };
+
+    private static Rig PairRig(uint main, uint off)
+    {
+        var rig = new Rig(dualWieldSkill: true, pairs: true);
+        Rig.Unwield(Sword);
+        Rig.Wield(main, MeleeSlot);
+        Rig.Wield(off, ShieldSlot);
+        rig.InHand = unchecked((int)main);
+        rig.S.PreferDualWield = true;
+        rig.ListWith(Pairs);
+        return rig;
+    }
+
+    private static void DualWieldPairSwap()
+    {
+        // The pure plan: the main weapon's partner (same element) first, whatever is in the off hand.
+        var coldA = new OffhandCandidate(30, "Cold Sword", false, false, "Cold");
+        var coldB = new OffhandCandidate(31, "Cold Dagger", false, false, "Cold");
+        var fireA = new OffhandCandidate(40, "Fire Sword", false, false, "Fire");
+        var fireB = new OffhandCandidate(41, "Fire Dagger", false, true, "Fire");   // in the off hand
+        var pairs = new[] { coldA, coldB, fireA, fireB };
+        OffhandPlan P(OffhandMode m, int main, string elem, bool pref = true, int pick = 0, bool isDefault = false)
+            => OffhandPlanner.Choose(m, MainHandKind.OneHandedMelee, main, pairs, true, pref, true, pick, "pick", elem, isDefault);
+        Check.Eq(P(OffhandMode.Auto, 30, "Cold").Id, 31, "Auto, dual wield preferred, Cold main: the Cold partner, not the Fire one in the off hand");
+        Check.Eq(P(OffhandMode.Weapon, 30, "Cold").Id, 31, "Offhand weapon, Cold main: the Cold partner");
+        Check.True(P(OffhandMode.Weapon, 30, "Cold").Source.Contains("Cold"), "the log says why: " + P(OffhandMode.Weapon, 30, "Cold").Source);
+        Check.Eq(P(OffhandMode.Weapon, 40, "Fire").Id, 41, "Fire main, the Fire partner already in the off hand: it stays");
+        Check.Eq(P(OffhandMode.Weapon, 30, "").Id, 41, "main element not known: the one in the off hand stays, as before");
+        Check.Eq(P(OffhandMode.Auto, 30, "Cold", pref: false).Id, 0, "Auto, dual wield not preferred, no shield: nothing, as before");
+        Check.Eq(P(OffhandMode.Weapon, 30, "Cold", pick: 41).Id, 41, "a pick for this monster wins over the partner");
+        Check.Eq(P(OffhandMode.Weapon, 30, "Cold", pick: 41, isDefault: true).Id, 31, "the Default row's pick gives way to the main weapon's partner");
+        Check.Eq(P(OffhandMode.Weapon, 30, "Cold", pick: 31, isDefault: true).Id, 31, "the Default row's pick that is the partner: kept");
+        Check.Eq(P(OffhandMode.Weapon, 31, "Cold", pick: 31, isDefault: true).Id, 30, "the Default row's pick is the main weapon: the other of its pair");
+
+        // In combat: the Fire pair in hand, the monster wants Cold.
+        var rig = PairRig(FireA, FireB);
+        rig.Element("Cold");
+        Check.False(rig.Tick(), "Cold wanted: the main hand swaps");
+        Check.Eq(FakeHost.Uses.LastOrDefault(), ColdA, "the main hand: the Cold sword");
+        rig.Landed(ColdA, FireA, MeleeSlot);
+        Check.False(rig.Tick(), "Cold sword in hand: the off hand goes next");
+        Check.True(FakeHost.Moves.Count == 1 && FakeHost.Moves[0] == (FireB, Pack, 1), "the Fire dagger into the pack first");
+        Rig.Unwield(FireB);
+        Check.False(rig.Tick(), "off hand empty: the partner goes on");
+        Check.Eq(rig.ShieldWields(ColdB), 1, "WieldItem(Cold dagger, Shield slot)");
+        Rig.Wield(ColdB, ShieldSlot);
+        Check.True(rig.Tick(), "the Cold pair in both hands: ready");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("off hand for") && l.Contains("Cold Dagger")), "the off-hand choice is logged");
+
+        // And back to Fire (another fight): both hands again.
+        rig.C.SwapTracker.MinDwellMs = 0;
+        rig.C.OffhandTracker.MinDwellMs = 0;
+        rig.Element("Fire");
+        rig.Tick();
+        Check.Eq(FakeHost.Uses.LastOrDefault(), FireA, "Fire wanted: the Fire sword");
+        rig.Landed(FireA, ColdA, MeleeSlot);
+        rig.Tick();
+        Check.True(FakeHost.Moves.Any(m => m.Id == ColdB), "the Cold dagger comes off");
+        Rig.Unwield(ColdB);
+        rig.Tick();
+        Check.Eq(rig.ShieldWields(FireB), 1, "the Fire dagger goes on");
+        Rig.Wield(FireB, ShieldSlot);
+        Check.True(rig.Tick(), "the Fire pair: ready");
+    }
+
+    private static void DualWieldPairStays()
+    {
+        var rig = PairRig(ColdA, ColdB);
+        rig.Element("Cold");
+        for (int i = 0; i < 10; i++) Check.True(rig.Tick(), $"the Cold pair for a Cold monster: ready (tick {i + 1})");
+        Check.Eq(FakeHost.Uses.Count, 0, "no main-hand wield");
+        Check.Eq(FakeHost.Wields.Count, 0, "no off-hand wield");
+        Check.Eq(FakeHost.Moves.Count, 0, "nothing moved");
+
+        // The pair in hand the other way round (the B weapon in the main hand): still the pair, left alone.
+        var rig2 = PairRig(FireB, FireA);
+        rig2.Element("Fire");
+        for (int i = 0; i < 10; i++) rig2.Tick();
+        Check.True(rig2.Tick(), "the Fire pair, either way round: ready");
+        Check.Eq(FakeHost.Uses.Count + FakeHost.Wields.Count + FakeHost.Moves.Count, 0, "no swap, no loop");
+
+        // After a swap to the pair, ticks on do nothing more (each swap pays a stance change).
+        var rig3 = PairRig(FireA, FireB);
+        rig3.Element("Cold");
+        rig3.Tick();
+        rig3.Landed(ColdA, FireA, MeleeSlot);
+        rig3.Tick();
+        Rig.Unwield(FireB);
+        rig3.Tick();
+        Rig.Wield(ColdB, ShieldSlot);
+        int uses = FakeHost.Uses.Count, wields = FakeHost.Wields.Count, moves = FakeHost.Moves.Count;
+        for (int i = 0; i < 20; i++) Check.True(rig3.Tick(), $"converged: ready (tick {i + 1})");
+        Check.Eq(FakeHost.Uses.Count, uses, "no further main-hand wields");
+        Check.Eq(FakeHost.Wields.Count, wields, "no further off-hand wields");
+        Check.Eq(FakeHost.Moves.Count, moves, "no further moves");
+    }
+
+    private static void DualWieldPairPartnerToMain()
+    {
+        // The Cold sword with the Fire dagger (half a swap, say), the Fire dagger listed first: the
+        // weapon choice wants it, and it already swings in the off hand. Its partner, the Fire sword,
+        // goes in the main hand; the off hand stays. Before, combat fought on with Cold + Fire.
+        var rig = new Rig(dualWieldSkill: true, pairs: true);
+        Rig.Unwield(Sword);
+        Rig.Wield(ColdA, MeleeSlot);
+        Rig.Wield(FireB, ShieldSlot);
+        rig.InHand = unchecked((int)ColdA);
+        rig.S.PreferDualWield = true;
+        rig.ListWith((FireB, "Fire"), (FireA, "Fire"), (ColdA, "Cold"), (ColdB, "Cold"));
+        rig.Element("Fire");
+        Check.Eq(unchecked((uint)rig.C.PlanFor(rig.Target, rig.S.MonsterRules[1]).WeaponId), FireB, "the plan: the Fire dagger (listed first)");
+        Check.False(rig.Tick(), "not ready: the main hand swaps");
+        Check.Eq(FakeHost.Uses.LastOrDefault(), FireA, "the main hand: the Fire dagger's partner, the Fire sword");
+        Check.Eq(FakeHost.Moves.Count, 0, "the Fire dagger isn't moved out of the off hand");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("its partner") && l.Contains("Fire Sword")), "logged");
+        rig.Landed(FireA, ColdA, MeleeSlot);
+        for (int i = 0; i < 5; i++) Check.True(rig.Tick(), $"the Fire pair: ready (tick {i + 1})");
+        Check.Eq(FakeHost.Wields.Count, 0, "the off hand was right: no off-hand wield");
+        Check.Eq(FakeHost.Moves.Count, 0, "nothing moved");
+    }
+
+    private static void PairsLeaveShieldAndSingle()
+    {
+        // A shield user with a Cold and a Fire sword (dual wield skill, not preferred): the shield
+        // stays through element changes; only the main hand swaps.
+        var rig = new Rig(dualWieldSkill: true, shieldOn: true, pairs: true);
+        Rig.Unwield(Sword);
+        Rig.Wield(FireA, MeleeSlot);
+        rig.InHand = unchecked((int)FireA);
+        rig.ListWith((ColdA, "Cold"), (FireA, "Fire"), (Shield, ""));
+        rig.Element("Cold");
+        rig.Tick();
+        Check.Eq(FakeHost.Uses.LastOrDefault(), ColdA, "the main hand: the Cold sword");
+        rig.Landed(ColdA, FireA, MeleeSlot);
+        for (int i = 0; i < 5; i++) Check.True(rig.Tick(), $"Cold sword and shield: ready (tick {i + 1})");
+        Check.Eq(FakeHost.Wields.Count, 0, "the shield stays: no off-hand wield");
+        Check.Eq(FakeHost.Moves.Count, 0, "nothing moved");
+
+        // Offhand Shield with dual wield preferred and a Cold pair listed: still the shield.
+        var rig2 = new Rig(dualWieldSkill: true, shieldOn: true, pairs: true);
+        Rig.Unwield(Sword);
+        Rig.Wield(ColdA, MeleeSlot);
+        rig2.InHand = unchecked((int)ColdA);
+        rig2.S.PreferDualWield = true;
+        rig2.ListWith((ColdA, "Cold"), (ColdB, "Cold"), (Shield, ""));
+        rig2.Element("Cold", OffhandRules.RuleShield);
+        for (int i = 0; i < 5; i++) Check.True(rig2.Tick(), $"Offhand Shield: sword and shield, ready (tick {i + 1})");
+        Check.Eq(FakeHost.Wields.Count + FakeHost.Moves.Count, 0, "the Cold dagger never goes on");
+
+        // One weapon listed: it stays, nothing goes in the off hand.
+        var rig3 = new Rig(dualWieldSkill: true, pairs: true);
+        Rig.Unwield(Sword);
+        Rig.Wield(ColdA, MeleeSlot);
+        rig3.InHand = unchecked((int)ColdA);
+        rig3.S.PreferDualWield = true;
+        rig3.ListWith((ColdA, "Cold"));
+        rig3.Element("Fire");
+        for (int i = 0; i < 5; i++) Check.True(rig3.Tick(), $"a single weapon: ready (tick {i + 1})");
+        Check.Eq(FakeHost.Uses.Count + FakeHost.Wields.Count + FakeHost.Moves.Count, 0, "nothing wielded or moved");
     }
 
     // 2026-10-16: Drakkon dual wielding two Hand Wraps; CurrentWieldedLocation read 0, so both

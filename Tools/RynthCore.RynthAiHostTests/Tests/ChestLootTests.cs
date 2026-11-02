@@ -39,7 +39,9 @@ internal static class ChestLootTests
         r.Add("chest loot: your own side pack opened -> nothing taken", OwnSidePackNotLooted);
         r.Add("chest loot: house storage (HouseOwner set) -> nothing taken", HouseStorageNotLooted);
         r.Add("chest loot: house storage by name (engine without the HouseOwner read) -> nothing taken", HouseStorageByNameNotLooted);
-        r.Add("chest loot: Looting off -> nothing taken, the loot check still runs", LootingOffNothing);
+        r.Add("chest loot: Looting off and Pickup with macro off off -> nothing taken, the loot check still runs", LootingOffNothing);
+        r.Add("chest loot: Pickup with macro off (on by default) loots an opened chest with the macro off or Looting off", PickupWithMacroOff);
+        r.Add("chest loot: Pickup with macro off never takes from house storage or your own side pack", PickupWithMacroOffRefuses);
         r.Add("chest loot: reopening the chest loots it again (never marked done)", ReopenLootsAgain);
         r.Add("chest loot: a salvage-only item is left when no UST is carried, as on corpses", SalvageWithoutUstLeft);
         r.Add("chest loot: opened mid-fight it waits for combat, then is looted if still open", ChestWaitsForCombat);
@@ -317,6 +319,7 @@ internal static class ChestLootTests
         var host = FakeHost.Create(Player);
         var bot = new Bot(host);
         bot.S.EnableLooting = false;
+        bot.S.LootChestsMacroOff = false;
         bot.Create(Chest, Gem, Spoon);
 
         bot.ServerOpens(Chest);
@@ -327,6 +330,54 @@ internal static class ChestLootTests
         Check.False(FakeHost.Logs.Any(l => l.Contains("Chest loot:")), "no chest-loot lines at all");
         Check.True(FakeHost.Chat.Any(c => c.Contains("Black Opal") || c.Contains("Rusty Spoon") || c.Contains("loot profile")),
             "the old loot check of a natively opened container still runs (chat: " + string.Join(" | ", FakeHost.Chat) + ")");
+    }
+
+    // Owner, 2026-11-02: "even with looting and the macro off, it should pick up items from a chest when
+    // it's open that match the loaded loot profile ... (Pickup with macro off)", on by default.
+    private static void PickupWithMacroOff()
+    {
+        Check.True(new LegacyUiSettings().LootChestsMacroOff, "on by default");
+        foreach (bool macroOff in new[] { true, false })
+        {
+            BaseWorld();
+            var host = FakeHost.Create(Player);
+            var bot = new Bot(host);
+            if (macroOff) bot.S.IsMacroRunning = false; else bot.S.EnableLooting = false;
+            string what = macroOff ? "macro off" : "Looting off";
+            bot.Create(Chest, Gem, Spoon);
+
+            bot.ServerOpens(Chest);
+            bot.TickUntil(() => bot.Moved(Gem));
+            Check.True(FakeHost.ExternalMoves.Contains((Gem, Player, 0)), $"{what}: the gem is picked up (moves: {Moves()})");
+            Check.False(bot.Moved(Spoon), $"{what}: the spoon matches nothing and stays");
+            Check.False(FakeHost.Uses.Contains(Chest), $"{what}: no open sent");
+            Check.False(FakeHost.AutoRunCalls.Any(on => on), $"{what}: no walk");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("Pickup with macro off: looting the opened chest")), $"{what}: logged");
+        }
+    }
+
+    private static void PickupWithMacroOffRefuses()
+    {
+        BaseWorld();
+        FakeHost.InstanceIds[(Chest, 32)] = 0x50000ABC; // house storage
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        bot.S.IsMacroRunning = false;
+        bot.Create(Chest, Gem, Spoon);
+        bot.ServerOpens(Chest);
+        bot.TickFor(300);
+        Check.Eq(FakeHost.ExternalMoves.Count, 0, "nothing taken out of house storage");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("Pickup with macro off: not looting") && l.Contains("house storage")), "the reason is logged");
+
+        BaseWorld();
+        FakeHost.Containers[Chest] = Player;   // a side pack the character carries
+        host = FakeHost.Create(Player);
+        bot = new Bot(host);
+        bot.S.IsMacroRunning = false;
+        bot.Create(Chest, Gem, Spoon);
+        bot.ServerOpens(Chest);
+        bot.TickFor(300);
+        Check.Eq(FakeHost.ExternalMoves.Count, 0, "nothing taken out of your own side pack");
     }
 
     private static void ReopenLootsAgain()

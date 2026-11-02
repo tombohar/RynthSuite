@@ -88,13 +88,17 @@ internal static class Program
         VTankYieldTests.Register(runner);
         OffhandTests.Register(runner);
         HandSwapTests.Register(runner);
+        OutdoorHuntTests.Register(runner);
+        HuntBuildingTests.Register(runner);
         FloodPerfTests.Register(runner);
         LootSalvageTests.Register(runner);
         LootCorpseTests.Register(runner);
         LootRetryTimingTests.Register(runner);
         LootClaimMismatchTests.Register(runner);
+        BoostNavTests.Register(runner);
         LootNothingLineTests.Register(runner);
         ChestLootTests.Register(runner);
+        ItemToolTests.Register(runner);
         OwnCorpseTests.Register(runner);
         UseRefusalTests.Register(runner);
         CorpseKillerTests.Register(runner);
@@ -170,6 +174,7 @@ internal static class Program
         SkCombatAddonTests.Register(runner);
         DoorTests.Register(runner);
         ServerPolicyTests.Register(runner);
+        PatrolModeTests.Register(runner);
         BlankLoadTests.Register(runner);
         GiveProfileTests.Register(runner);
         TinkerTests.Register(runner);

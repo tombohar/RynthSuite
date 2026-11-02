@@ -84,6 +84,9 @@ public sealed class RynthSortPlugin : RynthPluginBase
         {
             Warnings = () => _warnings,
             Character = () => _identityKnown ? _character : string.Empty,
+            Icons = IconsOn,
+            CanSelect = () => Host.HasSelectItem,
+            SelectInGame = id => Host.HasSelectItem && Host.SelectItem(id),
         };
         // No bar button of its own: opened from the engine Inventory window's Sort button, the
         // Scripts menu or /rsort.
@@ -242,6 +245,14 @@ public sealed class RynthSortPlugin : RynthPluginBase
             _sort.Data.Settings.WindowOpen = _window.Visible;
             RequestSave();
         }
+    }
+
+    // Item icons in script windows need op level 2 (engines from 2026-09-30); asked until it says yes.
+    private bool _icons;
+    private bool IconsOn()
+    {
+        if (!_icons) _icons = Host.HasUi && Host.TryGetUiInfo(out RynthCore.PluginSdk.UiInfoNative info) && info.OpLevel >= 2;
+        return _icons;
     }
 
     private void TryStartCharacter(long now)

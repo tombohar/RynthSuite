@@ -8,9 +8,10 @@ namespace RynthCore.Plugin.RynthSort.Views;
 
 /// <summary>
 /// The RynthSort window: the auto-sort box and status, the job buttons, then one collapsing
-/// section per side pack ("Pack 1: Sack (12/24) - Components", top pack first) holding that
-/// pack's warnings and its rules (A-Z), a section for rules whose pack isn't carried, and the
-/// settings. A rule is one row (on/off box, its classes and names); selecting it opens its
+/// section per side pack ("Pack 1: Sack (12/24) - Components", top pack first) holding a line
+/// that says which pack in the game it is (its icon, "Select in game", and its place in the
+/// pack column), that pack's warnings and its rules (A-Z), a section for rules whose pack isn't
+/// carried, and the settings. A rule is one row (on/off box, its classes and names); selecting it opens its
 /// editor beneath: the classes and names as chips (click one to take it out), a class picker and
 /// a name box to add, the pack it sends to, and Remove. Recorded on the pump thread, replayed by
 /// the engine.
@@ -29,6 +30,15 @@ internal sealed class SortPanel
     public Func<IReadOnlyList<string>> Warnings = () => Array.Empty<string>();
     /// <summary>The character (blank before login).</summary>
     public Func<string> Character = () => string.Empty;
+    /// <summary>The engine draws item icons in script windows (op level 2).</summary>
+    public Func<bool> Icons = () => false;
+    /// <summary>The engine can select objects (else no Select button).</summary>
+    public Func<bool> CanSelect = () => false;
+    /// <summary>Selects an object in the game (Host.SelectItem); false when it couldn't.</summary>
+    public Func<uint, bool> SelectInGame = _ => false;
+
+    private uint _selectedPack;
+    private string _selectNote = string.Empty;
 
     public SortPanel(SortController c, Action save)
     {
@@ -78,6 +88,14 @@ internal sealed class SortPanel
             w.TextColored(UiColors.Amber, "RynthAi's AutoCram also moves loot out of the main pack; turn one of them off");
         foreach (string warning in Warnings()) w.TextColored(UiColors.Amber, warning);
 
+        string numbering = NumberingNote(view);
+        if (numbering.Length > 0)
+        {
+            w.PushStyleColor(UiFormat.ColText, UiColors.Grey);
+            w.TextWrapped(numbering);
+            w.PopStyleColor();
+        }
+
         Dictionary<int, List<SortRule>> byPack = Group(rules, view);
         Dictionary<int, List<string>> conflicts = Conflicts(rules, view);
         for (int i = 1; i <= view.Packs.Count; i++)
@@ -121,10 +139,11 @@ internal sealed class SortPanel
         if (attention) w.PushStyleColor(UiFormat.ColText, UiColors.Amber);
         bool open = w.CollapsingHeader($"Pack {number}: {p.Label}", $"pack.{p.Id:X8}", defaultOpen: true);
         if (attention) w.PopStyleColor();
-        w.Tooltip(PackTooltip(view));
+        w.Tooltip(PackHeaderTooltip(view, number));
         if (!open) return;
 
         w.Indent(RowIndent);
+        DrawWhere(w, view, p, number);
         if (full) w.TextColored(UiColors.Amber, "This pack is full: items for it wait where they are");
         foreach (string line in warnings) w.TextColored(UiColors.Amber, line);
         packRules.Sort(SortRules.CompareForList);
@@ -149,6 +168,36 @@ internal sealed class SortPanel
         if (order.Length > 0) w.TextDisabled(order);
         w.Unindent(RowIndent);
     }
+
+    /// <summary>The pack's first line: its icon, Select in game, and where it is in the pack column.</summary>
+    private void DrawWhere(UiWindow w, SortView view, PackLine p, int number)
+    {
+        if (Icons())
+        {
+            w.Image(UiFormat.IconKindObject, p.Id, WhereIcon, WhereIcon);
+            w.SameLine();
+        }
+        if (CanSelect())
+        {
+            uint id = p.Id;
+            string name = p.Name;
+            w.SmallButton("Select in game", $"select.{id:X8}", () =>
+            {
+                _selectedPack = id;
+                _selectNote = SelectInGame(id) ? $"Selected: the game has your {name} selected now" : "The game didn't take the selection";
+            });
+            w.Tooltip(SelectTooltip);
+            w.SameLine();
+        }
+        w.TextDisabled(WhereText(view, p, number));
+        if (_selectedPack == p.Id && _selectNote.Length > 0) w.TextDisabled(_selectNote);
+    }
+
+    private const float WhereIcon = 20f;
+
+    internal const string SelectTooltip =
+        "Selects this pack in the game, as clicking it in your inventory would, so the game shows you which one it is "
+        + "(its name in the selection bar). Nothing moves.";
 
     private void DrawMissing(UiWindow w, SortView view, List<SortRule> rules, List<SortRule> missing)
     {
@@ -310,13 +359,66 @@ internal sealed class SortPanel
     internal static string PackTooltip(SortView view) => view.PackOrderKnown ? PackTooltipTopDown : PackTooltipListOrder;
 
     internal const string PackTooltipTopDown =
-        "Packs are numbered from the top of the pack column (foci don't count). "
-        + "A rule remembers the pack you pick, so adding, moving or emptying packs doesn't change where items go.";
+        "Pack 1 is the top pack in your inventory's pack column, pack 2 the one below it, and so on (foci don't count). "
+        + "A rule remembers the pack itself, so moving, adding or emptying packs never sends items to the wrong one.";
 
     internal const string PackTooltipListOrder =
-        "A rule remembers the pack you pick, so adding, moving or emptying packs doesn't change where items go. "
-        + "Pack numbers count your side packs (not foci) in the client's list order, oldest pack first, "
-        + "which can differ from the pack column on screen: go by the name and what's in it.";
+        "Right now the pack numbers here may not match your inventory's pack column (they go oldest pack first): "
+        + "go by the pack's name, its item count and what's in it, or open the pack here and use Select in game. "
+        + "A rule remembers the pack itself, so items still go to the right one.";
+
+    /// <summary>The header's tooltip: which pack in the game this is, in plain words.</summary>
+    internal static string PackHeaderTooltip(SortView view, int number)
+    {
+        PackLine p = view.Packs[number - 1];
+        string what = $"Your {p.Name}: {p.Used} of {p.Capacity} items ({p.Summary}).";
+        string where = view.PackOrderKnown
+            ? $"It is the {Ordinal(number)} pack from the top of your inventory's pack column{SlotAside(p, number)}."
+            : "Its place in your inventory's pack column isn't known right now, so its number may not match the column.";
+        return what + " " + where + " Open it here and use Select in game to see it picked out in the game.\n\n" + PackTooltip(view);
+    }
+
+    /// <summary>The pack's first line: "2nd pack from the top of the pack column - 14/24 items", or that it isn't known.</summary>
+    internal static string WhereText(SortView view, PackLine p, int number)
+    {
+        if (view.PackOrderKnown)
+            return $"{Ordinal(number)} pack from the top of the pack column - {p.Used}/{p.Capacity} items";
+        return $"Place in the pack column not known - {p.Used}/{p.Capacity} items";
+    }
+
+    /// <summary>
+    /// " (the game's own inventory window also shows the focus above it, so there it is the 3rd entry)"
+    /// when foci sit above it in the column: the retail window lists foci among the packs; RynthCore's
+    /// Inventory panel lists them after the packs, so there the pack number is the row.
+    /// </summary>
+    private static string SlotAside(PackLine p, int number)
+    {
+        if (p.ColumnSlot <= number) return string.Empty;
+        int foci = p.ColumnSlot - number;
+        return $" (the game's own inventory window also shows the {(foci == 1 ? "focus" : foci + " foci")} above it, so there it is the {Ordinal(p.ColumnSlot)} entry)";
+    }
+
+    /// <summary>Above the packs when their numbers aren't the pack column's: why, in plain words; else empty.</summary>
+    internal static string NumberingNote(SortView view)
+    {
+        if (view.Packs.Count == 0 || view.PackOrderKnown) return string.Empty;
+        string why = view.OrderSource switch
+        {
+            PackOrderSource.NotSeen => "RynthCore hasn't seen your pack list since this character logged in (it was reloaded after the login). Log out and back in once to fix it.",
+            PackOrderSource.Mismatch => "RynthCore's pack list is missing a pack you carry. Log out and back in once to fix it.",
+            _ => "this RynthCore can't read the pack column's order (it needs plugin API 80).",
+        };
+        return "Pack numbers here go oldest pack first, not in your pack column's order: " + why
+               + " Until then go by each pack's name and contents, or use Select in game.";
+    }
+
+    /// <summary>1st, 2nd, 3rd, 4th ... 11th, 12th, 13th ... 21st.</summary>
+    internal static string Ordinal(int n)
+    {
+        int t = n % 100;
+        string suffix = t is >= 11 and <= 13 ? "th" : (n % 10) switch { 1 => "st", 2 => "nd", 3 => "rd", _ => "th" };
+        return n.ToString(System.Globalization.CultureInfo.InvariantCulture) + suffix;
+    }
 
     /// <summary>" - in order", " - 3 to put in order", " - order not known": a pack's order as the window says it (empty when ordering is off).</summary>
     internal static string OrderNote(SortView view, PackLine p, string lead)

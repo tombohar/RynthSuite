@@ -76,10 +76,15 @@ internal sealed class InventoryReader
             if (isContainer)
             {
                 // A side pack holds items; foci (containers that hold none) aren't packs or items.
-                if (capRead && cap > 0)
+                // A container whose capacity can't be read yet but that has items in it is a pack
+                // too (foci never hold any): leaving it out would number every pack below it one
+                // too high against the pack column. Its capacity stays 0 (the planner's 24).
+                uint[]? inside = null;
+                if (!capRead) inside = Contents(host, id);
+                if (IsSidePack(wielded: false, capRead, cap, inside?.Length ?? 0))
                 {
-                    var pack = new SortPack { Id = id, Capacity = cap, Name = host.TryGetObjectName(id, out string pn) ? pn : string.Empty };
-                    foreach (uint inner in Contents(host, id))
+                    var pack = new SortPack { Id = id, Capacity = capRead ? cap : 0, Name = host.TryGetObjectName(id, out string pn) ? pn : string.Empty };
+                    foreach (uint inner in inside ?? Contents(host, id))
                     {
                         if (inner == 0) continue;
                         uint it = host.TryGetItemType(inner, out uint itt) ? itt : 0;
@@ -98,9 +103,40 @@ internal sealed class InventoryReader
             foreach (SortPack p in inv.Packs)
                 if (host.TryGetContainerOrder(p.Id, false, ref _order, out n)) p.ApplyOrder(_order, n);
             if (host.TryGetContainerOrder(player, true, ref _order, out n)) inv.ApplyPackOrder(_order, n);
+            else inv.OrderSource = PackOrderSource.NotSeen;
         }
+        NoteOrderSource(host, inv);
         return inv;
     }
+
+    private PackOrderSource? _loggedSource;
+    private int _loggedPacks = -1;
+
+    /// <summary>One log line whenever where the pack numbers come from changes (a runtime fact the window can't show the log).</summary>
+    private void NoteOrderSource(RynthCoreHost host, SortInventory inv)
+    {
+        if (_loggedSource == inv.OrderSource && _loggedPacks == inv.Packs.Count) return;
+        _loggedSource = inv.OrderSource;
+        _loggedPacks = inv.Packs.Count;
+        try { host.Log("[RynthSort] " + OrderSourceLine(inv)); } catch { }
+    }
+
+    /// <summary>The log line for <see cref="NoteOrderSource"/> (pure).</summary>
+    internal static string OrderSourceLine(SortInventory inv) => inv.OrderSource switch
+    {
+        PackOrderSource.Known => $"pack numbers follow the pack column, top first ({inv.Packs.Count} packs, {inv.ColumnEntries} entries in the column with foci)",
+        PackOrderSource.Mismatch => $"pack numbers by object id: the engine's pack column list ({inv.ColumnEntries} entries) lacks {inv.MissingFromColumn} of {inv.Packs.Count} packs",
+        PackOrderSource.NotSeen => $"pack numbers by object id: the engine has no pack column list for this character (it loaded after the login with nothing saved); {inv.Packs.Count} packs",
+        _ => $"pack numbers by object id: this engine has no slot orders (plugin API 80); {inv.Packs.Count} packs",
+    };
+
+    /// <summary>
+    /// Whether a container in the main pack is a side pack RynthSort lists (pure): never a worn or
+    /// wielded one; one whose capacity reads holds items (above 0; a focus holds none); one whose
+    /// capacity can't be read yet counts when it has items in it (foci never do).
+    /// </summary>
+    internal static bool IsSidePack(bool wielded, bool capRead, int capacity, int itemsInside) =>
+        !wielded && (capRead ? capacity > 0 : itemsInside > 0);
 
     /// <summary>The slot <paramref name="itemId"/> holds in <paramref name="container"/> (the engine's slot order), or -1.</summary>
     public int SlotOf(RynthCoreHost host, uint container, uint itemId)

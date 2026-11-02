@@ -20,6 +20,9 @@ internal sealed class AvoidFilter : IDtQueryFilter
 
     public AvoidFilter(PortalAvoid avoid) { _avoid = avoid; }
 
+    /// <summary>The circles this filter keeps out of.</summary>
+    public PortalAvoid Portals => _avoid;
+
     public bool PassFilter(long refs, DtMeshTile tile, DtPoly poly)
     {
         if (!_inner.PassFilter(refs, tile, poly)) return false;

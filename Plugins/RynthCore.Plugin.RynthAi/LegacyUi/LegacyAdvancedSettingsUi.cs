@@ -789,6 +789,8 @@ internal sealed class LegacyAdvancedSettingsUi
 
             case "Navigation":
                 ImGui.Checkbox("Boost Nav Priority", ref _settings.BoostNavPriority);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("RynthAi only navigates: no hunting, no looting, no fighting back (owner's rule, 2026-11-02). With no route it stands idle. Buffing and healing still run.");
                 ImGui.SetNextItemWidth(120);
                 ImGui.InputFloat("Nav point reach (yd)", ref _settings.FollowNavMin, 0.1f, 1.0f, "%.1f");
                 _settings.FollowNavMin = LegacyUiSettings.ClampFollowNavMin(_settings.FollowNavMin);
@@ -1100,6 +1102,9 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Checkbox("Learn Unknown Spells", ref _settings.ReadUnknownScrolls);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Loots scrolls of spells you don't know and can learn (magic school trained or\nspecialized, skill high enough), and reads them when it's safe. Scrolls already\nin your pack are read too.");
+                ImGui.Checkbox("Pickup with macro off", ref _settings.LootChestsMacroOff);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("A chest you open is looted by the loaded loot profile\neven with the macro or Looting off.");
                 ImGui.Checkbox("Jump When Looting", ref _settings.LootJumpEnabled);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Hop (the keyboard jump) just before each pickup,\nso the server skips the bend-down. The hop has a fixed height.");

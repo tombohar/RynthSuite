@@ -3,7 +3,8 @@
   <!--
     Offline tests for RynthNav's long-range route graph: region building (NavRegions), the
     baker's portal matching and costs (GraphBuild), the file format and A* (NavGraph) and the
-    route follower (NavCoarse). Tiles are baked here from small made-up floors with the same
+    route follower (NavCoarse), and the "RynthNav.Path" interface's FindPathEx and Raycast
+    (NavPathQuery). Tiles are baked here from small made-up floors with the same
     Recast settings as the baker, written to %TEMP%, and removed afterwards.
     Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
   -->
@@ -13,6 +14,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>RynthNav.GraphTests</RootNamespace>
+    <!-- The linked RynthNav.Path contract holds function pointers. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
@@ -33,6 +36,9 @@
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\NavCoords.cs" Link="Linked\NavCoords.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\TownNet.cs" Link="Linked\TownNet.cs" />
     <Compile Include="..\RynthNav.PortalGraph\PortalRoute.cs" Link="Linked\PortalRoute.cs" />
+    <!-- "RynthNav.Path" v2 (FindPathEx, Raycast) and the walker's planning steps it shares; the contract it answers. -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\NavPathQuery.cs" Link="Linked\NavPathQuery.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthNavPathApi.cs" Link="Linked\RynthNavPathApi.cs" />
   </ItemGroup>
 
   <ItemGroup>

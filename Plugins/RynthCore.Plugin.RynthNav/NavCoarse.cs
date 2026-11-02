@@ -22,6 +22,8 @@ internal sealed class NavCoarse
     private int _idx;                     // portals crossed so far
     public double GoalEw { get; }
     public double GoalNs { get; }
+    /// <summary>The goal's height on the navmesh (NaN: not known, a route planned without a navmesh).</summary>
+    public double GoalUp { get; private set; } = double.NaN;
     public float Cost { get; }
     public int Count => _portals.Count;
     public int Crossed => _idx;
@@ -57,12 +59,12 @@ internal sealed class NavCoarse
     internal sealed class Request
     {
         public int StartRegion, GoalRegion;
-        public float Sx, Sz, Gx, Gz;
+        public float Sx, Sz, Gx, Gz, Gy = float.NaN;
         public Dictionary<int, float> StartLegs = new(), GoalLegs = new();
 
         public static Request Measure(NavGraph g, Probe start, Probe goal)
         {
-            var r = new Request { StartRegion = start.Region, GoalRegion = goal.Region, Sx = start.Pt.X, Sz = start.Pt.Z, Gx = goal.Pt.X, Gz = goal.Pt.Z };
+            var r = new Request { StartRegion = start.Region, GoalRegion = goal.Region, Sx = start.Pt.X, Sz = start.Pt.Z, Gx = goal.Pt.X, Gz = goal.Pt.Z, Gy = goal.Pt.Y };
             foreach (int p in g.RegionPortals(start.Region)) r.StartLegs[p] = start.WalkTo(g.Portal(p));
             if (start.Region != goal.Region)
                 foreach (int p in g.RegionPortals(goal.Region)) r.GoalLegs[p] = goal.WalkTo(g.Portal(p));
@@ -76,7 +78,7 @@ internal sealed class NavCoarse
         List<int>? route = g.FindRoute(q.StartRegion, q.Sx, q.Sz, q.GoalRegion, q.Gx, q.Gz, out float cost, out expanded,
             startLeg: p => q.StartLegs.TryGetValue(p, out float c) ? c : float.NaN,
             goalLeg: p => q.GoalLegs.TryGetValue(p, out float c) ? c : float.NaN);
-        return route == null ? null : new NavCoarse(g, route, q.StartRegion, q.Gx, q.Gz, cost);
+        return route == null ? null : new NavCoarse(g, route, q.StartRegion, q.Gx, q.Gz, cost) { GoalUp = q.Gy };
     }
 
     /// <summary>
@@ -195,6 +197,64 @@ internal sealed class NavCoarse
         return null;
     }
 
+    /// <summary>
+    /// Can a walk from <paramref name="startRegion"/> end in <paramref name="region"/>, as far as the
+    /// graph tells? The start's own region, or one with border links (portals) on the start's
+    /// landmass. A region with no portal is a pocket nothing links into (ground fenced in by a
+    /// building's walls, a roof, the top of a rock): the route search can never reach it.
+    /// </summary>
+    public static bool Reachable(NavGraph g, int startRegion, int region)
+    {
+        if (region < 0) return false;
+        if (region == startRegion) return true;
+        if (g.RegionPortals(region).Length == 0) return false;
+        int cs = g.Component(startRegion), cr = g.Component(region);
+        // Components not built, or the start on a roof or a ledge of its own: any linked region.
+        if (cs < 0 || cr < 0 || g.ComponentSize(cs) < 8) return true;
+        return cs == cr;
+    }
+
+    private const int ProbeMaxPolys = 16384;
+
+    /// <summary>
+    /// The goal end of a route: the polygon nearest (<paramref name="ew"/>, <paramref name="ns"/>), as
+    /// <see cref="ProbeNear"/>, when a walk from <paramref name="startRegion"/> can end there; else
+    /// the nearest polygon within <paramref name="reach"/> (then 96 units) that one can
+    /// (<see cref="Reachable"/>), with <paramref name="moved"/> set; else the nearest polygon as
+    /// before (the search then finds no route).
+    ///
+    /// 11-01: a /loc on a spot fenced in by a building's walls (a pocket region of one polygon, no
+    /// portals, the open ground 0.2 m lower and under 6 m away) was the goal of every search: "route:
+    /// none ... (0 expanded)" from everywhere, and the walk fell back to heading straight for it,
+    /// into a bridge, round in circles.
+    /// </summary>
+    public static Probe? ProbeReachable(NavGraph g, DtNavMesh nav, DtNavMeshQuery q, double ew, double up, double ns, float reach,
+                                        IReadOnlyDictionary<uint, int[]> tileRegions, int startRegion, out bool moved)
+    {
+        moved = false;
+        Probe? first = ProbeNear(g, nav, q, ew, up, ns, reach, tileRegions);
+        if (first != null && Reachable(g, startRegion, first.Region)) return first;
+        var filter = new DtQueryDefaultFilter();
+        var centre = new RcVec3f((float)ew, (float)up, (float)ns);
+        var polys = new long[ProbeMaxPolys];
+        foreach (float r in new[] { reach, Math.Max(reach, 96f) })
+        {
+            q.QueryPolygons(centre, new RcVec3f(r, 512, r), filter, polys, out int pc, polys.Length);
+            long bestRef = 0; RcVec3f bestPt = default; int bestRegion = -1; double best = double.MaxValue;
+            for (int i = 0; i < pc; i++)
+            {
+                int region = RegionOf(g, nav, polys[i], tileRegions);
+                if (!Reachable(g, startRegion, region)) continue;
+                if (q.ClosestPointOnPoly(polys[i], centre, out RcVec3f cp, out _).Failed()) continue;
+                // Flat distance first; height only breaks near-ties (a bridge deck over a road).
+                double d = Math.Sqrt((cp.X - ew) * (cp.X - ew) + (cp.Z - ns) * (cp.Z - ns)) + 0.05 * Math.Abs(cp.Y - up);
+                if (d < best) { best = d; bestRef = polys[i]; bestPt = cp; bestRegion = region; }
+            }
+            if (bestRef != 0) { moved = true; return new Probe(q, bestRef, bestPt, bestRegion); }
+        }
+        return first;
+    }
+
     /// <summary>The graph region of a polygon of a loaded tile, or -1.</summary>
     public static int RegionOf(NavGraph g, DtNavMesh nav, long polyRef, IReadOnlyDictionary<uint, int[]> tileRegions)
     {
@@ -211,7 +271,16 @@ internal sealed class NavCoarse
     /// ground is within <paramref name="reach"/> units.
     /// </summary>
     public static Probe? ProbeFile(NavGraph g, string navDataDir, double ew, double up, double ns, float reach)
+        => ProbeFile(g, navDataDir, ew, up, ns, reach, -1, out _);
+
+    /// <summary>
+    /// <see cref="ProbeFile(NavGraph, string, double, double, double, float)"/>; with a
+    /// <paramref name="startRegion"/> (not -1) it picks ground a walk from there can end on
+    /// (<see cref="ProbeReachable"/>).
+    /// </summary>
+    public static Probe? ProbeFile(NavGraph g, string navDataDir, double ew, double up, double ns, float reach, int startRegion, out bool moved)
     {
+        moved = false;
         int x = (int)Math.Floor(ew / 192.0), y = (int)Math.Floor(ns / 192.0);
         if (x < 0 || x > 255 || y < 0 || y > 255) return null;
         uint lb = (uint)((x << 8) | y);
@@ -226,6 +295,9 @@ internal sealed class NavCoarse
         var prm = new DtNavMeshParams { orig = new RcVec3f(0, 0, 0), tileWidth = 192f, tileHeight = 192f, maxTiles = 2, maxPolys = 1 << 16 };
         nav.Init(ref prm, 6);
         nav.AddTile(md, 0, 0, out _);
-        return ProbeNear(g, nav, new DtNavMeshQuery(nav), ew, float.IsFinite((float)up) ? up : 0, ns, reach, regions);
+        double u = float.IsFinite((float)up) ? up : 0;
+        return startRegion < 0
+            ? ProbeNear(g, nav, new DtNavMeshQuery(nav), ew, u, ns, reach, regions)
+            : ProbeReachable(g, nav, new DtNavMeshQuery(nav), ew, u, ns, reach, regions, startRegion, out moved);
     }
 }

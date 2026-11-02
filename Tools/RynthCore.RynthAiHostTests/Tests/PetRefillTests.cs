@@ -41,6 +41,19 @@ internal static class PetRefillTests
         r.Add("pets: the server's 'full' trust expires after 30 min", TrustExpires);
         r.Add("pets: a landed summon whose pet is not in the cache yet holds a second essence back for the 10 s window", LandedSummonHoldsWindow);
         r.Add("pets: failed summon (no charge drop) does not assume a pet; waits the 45 s essence cooldown", FailedSummonRespectsCooldown);
+        r.Add("pets: Boost Nav Priority on (RynthAi only navigates): no summon with a monster near; off: it summons", BoostNavNoSummon);
+    }
+
+    // Owner's rule (2026-11-02): with Boost Nav Priority on there is no fight, so no pet is called for one.
+    private static void BoostNavNoSummon()
+    {
+        using var rig = new Rig(charges: 50);
+        rig.S.BoostNavPriority = true;
+        rig.Run(5000);
+        Check.Eq(rig.AllSummons, 0, "flag on: no summon in 5 s with the monster 3 m away");
+        rig.S.BoostNavPriority = false;
+        rig.Run(1500);
+        Check.Eq(rig.Summons, 1, "flag off: it summons");
     }
 
     // ── Rig ───────────────────────────────────────────────────────────────

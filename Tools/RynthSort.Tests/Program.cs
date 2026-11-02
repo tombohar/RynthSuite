@@ -82,6 +82,10 @@ namespace RynthSort.Tests
                 Run("store: old rules migrate to version 3", RuleMigration);
                 Run("order: inside a pack (A-Z, fewest moves, every order of up to 7)", InPackOrder);
                 Run("order: slot orders and the pack column", SlotOrders);
+                Run("pack column: which containers are packs (foci, wielded, unloaded)", PackColumnKinds);
+                Run("pack column: order with foci, wielded and unloaded packs, and why it isn't known", PackColumnOrder);
+                Run("pack column: what a pack header says (place, count, why not known)", PackColumnLabels);
+                Run("pack column: icons and Select in game in the window", PackColumnWindow);
                 Run("plan: stacks and order inside packs", PlanInPack);
                 Run("moves: answers for moves within a pack", MoveAnswersInPlace);
                 Run("replies: every /rsort word answers", Replies);

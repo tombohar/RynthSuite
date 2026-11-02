@@ -272,11 +272,11 @@ namespace RynthSort.Tests
             Eq(SortPanel.ShownPack(p.View, rule), 2, "the rule is listed under pack 2");
             SortPanel.SetPack(rule, p.View, 6);
             Check(rule.Pack == 6 && rule.PackId == 0 && rule.PackNote == "", "a number you don't have: no id");
-            Check(!p.View.PackOrderKnown && SortPanel.PackTooltip(p.View).Contains("list order") && !SortPanel.PackTooltip(p.View).Contains("top of the pack column"),
+            Check(!p.View.PackOrderKnown && SortPanel.PackTooltip(p.View).Contains("may not match") && !SortPanel.PackTooltip(p.View).Contains("top pack"),
                 "pack order unknown: the tooltip doesn't claim screen order");
             inv.PackOrderKnown = true;
             p.Plan(inv, SortRules.Defaults(), SortScope.Main, true, 0, 0);
-            Check(SortPanel.PackTooltip(p.View).Contains("top of the pack column"), "pack order known: numbered from the top");
+            Check(SortPanel.PackTooltip(p.View).Contains("Pack 1 is the top pack in your inventory's pack column"), "pack order known: numbered from the top");
 
             // Warnings sit with their pack: a rule that fell back to a number is listed (and warned
             // about) under the pack it uses; rules whose pack isn't carried are grouped by that pack.

@@ -46,6 +46,9 @@ public sealed partial class RynthAiPlugin
 
     private long _deathHoldUntil;
     private bool _deathHolding;
+    // When the character was last seen dead (TickCount64; 0 = not this session). The Dungeon Patrol
+    // doesn't follow the character into a dungeon it was sent to by a death (TickDunPatrolHazardReroute).
+    private long _lastDeathAt;
     private const long DeathSettleMs = 5_000;
 
     /// <summary>
@@ -92,6 +95,7 @@ public sealed partial class RynthAiPlugin
         if (dead)
         {
             _deathHoldUntil = long.MaxValue;
+            _lastDeathAt = now;
             _metaManager?.OnPlayerDeath();   // the meta's Death condition sees it after the hold
         }
         else if (_deathHoldUntil == long.MaxValue)
@@ -113,6 +117,7 @@ public sealed partial class RynthAiPlugin
                 RynthCore.Plugin.Shared.ActionPacer.Forget("death");   // the server dropped whatever was open
                 _buffManager?.CancelPendingRecall("death");                // no /lifestone or macro restart after the respawn
                 _buffManager?.ForgetPendingWield("death");                 // a swap the death cut short is not a failed swap
+                StopHunt("died", say: true);   // from the lifestone it would walk all the way back to where it started
             }
             else
             {

@@ -71,6 +71,11 @@ public sealed class LegacyUiSettings
     public float DunPatrolWallDistance = 1.0f;   // metres every patrol point keeps from walls where there is room
     public float DunPatrolLookInSize = 10.0f;    // rooms this big (m) the patrol only skirts get a walk to their middle
     public float DunPatrolSightYd = 20.0f;       // sweep: how far a monster notices you, so how far apart the lanes may be
+    // Outdoor hunt (/ra hunt, Settings > Navigation > Outdoor Hunt; OutdoorHunt, 2026-10-23): walk from monster to
+    // monster around obstacles on RynthNav's map, into buildings through their doors (2026-10-25).
+    // Hunt Range 192 by default since 2026-10-25: the radar's default range, so the hunt covers the radar.
+    public float OutdoorHuntRange = (float)OutdoorHunt.DefaultRangeYd;   // yd from the character: how far the next monster may be
+    public float OutdoorHuntRadius = 0f;         // yd from where the hunt started that its picks stay within (0 = anywhere)
     // On: macro start, loading a Circular or Linear route, and nav taking over again after a
     // pause that moved the character (combat, looting, buffing, doors) all head for the closest
     // waypoint on the route. Off: a pause carries on to the waypoint it was heading for, a macro
@@ -140,6 +145,12 @@ public sealed class LegacyUiSettings
     public int LootOpenRetryMs = LootBaseline.OpenRetryMs;
     public int LootCorpseTimeoutMs = LootBaseline.CorpseTimeoutMs;
     public bool LootJumpEnabled = false;
+    /// <summary>
+    /// Pickup with macro off (2026-11-02, on by default): a chest the player opens is looted by the
+    /// loaded loot profile even with the macro or Looting off (like /ra lootthis). With both on the
+    /// macro's own chest looting takes it.
+    /// </summary>
+    public bool LootChestsMacroOff = true;
     public int LootJumpHeight = 10; // kept for old profiles and metas; jump-loot uses the keyboard tap jump (fixed height)
 
     public int SalvageOpenDelayFirstMs = 400;
@@ -878,6 +889,12 @@ public sealed class LegacyUiSettings
     [JsonIgnore]
     public bool NavIsStuck = false;
 
+    /// <summary>Nav is held in a dungeon by a route none of whose waypoints is in it (a landscape
+    /// route, another dungeon's): the Dungeon Patrol is the way to run here, and the nav window
+    /// offers its button (NavigationEngine.AreaMismatchHold sets it, the hold ending clears it).</summary>
+    [JsonIgnore]
+    public bool NavAreaHoldOffersPatrol = false;
+
     // Runtime-only: the object id of the portal/NPC the nav engine is actively
     // using (resolved by FirePortalNpcUse), or 0 when not using one. Lets the
     // marker renderer draw a ring + line to the portal's REAL position, since
@@ -1159,6 +1176,9 @@ public sealed class SettingsBridgePayload
     public float? DunPatrolWallDistance { get; set; }
     public float? DunPatrolLookInSize { get; set; }
     public float? DunPatrolSightYd { get; set; }
+    // Outdoor hunt. Nullable: an engine that predates them doesn't send them.
+    public float? OutdoorHuntRange { get; set; }
+    public float? OutdoorHuntRadius { get; set; }
     // Absent from an older engine's payload: must not read as off.
     public bool YieldToVTank { get; set; } = true;
     public bool EnableRaycasting { get; set; }
@@ -1353,6 +1373,7 @@ public sealed class SettingsBridgePayload
     public bool BoostLootPriority { get; set; }
     public bool LootOnlyRareCorpses { get; set; }
     public bool LootJumpEnabled { get; set; }
+    public bool LootChestsMacroOff { get; set; } = true;   // an engine that doesn't know it leaves it on
     public int LootJumpHeight { get; set; }
     public int LootOwnership { get; set; }
     // Nullable, as CastBuffsOverItemBuffs: an engine that predates them doesn't send them,

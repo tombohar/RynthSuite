@@ -215,9 +215,10 @@ internal sealed class NavRecoveryPlanner : INavRecoveryPlanner
         unsafe
         {
             // Resolved on every call: RynthNav may be missing, or reloaded since last time.
-            IntPtr p = _host.GetPluginInterface(RynthNavPathApiV1.PluginName, RynthNavPathApiV1.InterfaceName, RynthNavPathApiV1.InterfaceVersion);
+            // Version 1 (FindPath is all this needs): a RynthNav from before v2 answers it too.
+            IntPtr p = _host.GetPluginInterface(RynthNavPathApiV1.PluginName, RynthNavPathApiV1.InterfaceName, 1);
             var t = (RynthNavPathApiV1*)p;
-            if (t == null || t->Version < 1 || t->StructSize < (uint)sizeof(RynthNavPathApiV1) || t->FindPath == null)
+            if (t == null || t->Version < 1 || t->StructSize < RynthNavPathApiV1.SizeV1 || t->FindPath == null)
             {
                 why = "RynthNav isn't loaded";
                 return null;

@@ -42,6 +42,7 @@ internal static class LootClaimMismatchTests
         r.Add("loot claim (R-20261031-203155-cea0): Boost Nav Priority with no route: no loot work, never in Looting; looted once the flag is off", BoostNavNoRouteLoots);
         r.Add("loot claim (R-20261031-203155-cea0): Boost Nav Priority with a route, then none: nav has the tick, nothing claimed either way", BoostNavWithRouteYields);
         r.Add("loot claim (R-20261031-203155-cea0): Looting with nothing claimed is logged with the reason after 3 s, then throttled", LootStallLogged);
+        r.Add("boost nav (R-20261102-041824-3f7c): a corpse it passes by is said once in chat; nothing claimed; looted once the flag is off", BoostNavCorpseNotice);
     }
 
     // ── Clock and world ───────────────────────────────────────────────────────
@@ -287,5 +288,34 @@ internal static class LootClaimMismatchTests
         bot.Tick();
         Check.Eq(bot.Claimed, unchecked((int)Corpse), "once the halt ends the corpse is claimed");
         Check.True(Logged("the Looting stall is over"), "and the end of the stall is logged");
+    });
+
+    // ── 5. Boost Nav Priority says it skipped the corpse (owner, 2026-11-02) ───
+
+    private static void BoostNavCorpseNotice() => Clocked(() =>
+    {
+        World();
+        var bot = RescuedCorpse();
+        bot.S.BoostNavPriority = true;   // NavLootPrio turned it on; no route, no monster
+        int Notices() => FakeHost.Chat.Count(c => c == RynthAiPlugin.BoostNavNotice);
+        void Note() => bot.Call("NoteBoostNavSkip", bot.S, false);
+
+        for (int i = 0; i < 200; i++)   // 5 s of ticks, the notice looked at after each decision
+        {
+            Check.True(bot.Tick() != BotActivity.Looting, "never in Looting");
+            Note();
+        }
+        Check.Eq(Notices(), 1, "the passed-by corpse is said once in chat");
+        Check.True(Logged(RynthAiPlugin.BoostNavNotice + " (skipped a corpse)"), "and in the log, with what was skipped");
+        Check.Eq(bot.Claimed, 0, "nothing claimed");
+        Check.False(FakeHost.Uses.Contains(Corpse), "nothing opened");
+
+        bot.S.BoostNavPriority = false;
+        Note();
+        bot.Tick();
+        Check.Eq(bot.Claimed, unchecked((int)Corpse), "flag off: the corpse is claimed");
+        LootToTheEnd(bot);
+        Check.True(bot.Completed, "and looted to the end");
+        Check.Eq(Notices(), 1, "nothing more said");
     });
 }
