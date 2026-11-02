@@ -30,7 +30,31 @@ internal static class WallTests
         r.Add("walls: far off the target, it turns first and casts after the settle; facing it, no turn", WallFacing);
         r.Add("walls: the cast itself waits for the turn, then goes as an area cast", WallCastThroughAttack);
         r.Add("walls: UseWall, Wall Range and Min Wall Targets load off / 0 / 3 from old files", OldSettings);
-        r.Add("rings: a ring is due only when one is known; Void has none, so a Void caster casts its bolt (#rynth-issues 2026-10-23)", RingNeedsAKnownRing);
+        r.Add("rings: a ring is due only when one is known; a Void caster with no ring learned casts its bolt (#rynth-issues 2026-10-23)", RingNeedsAKnownRing);
+        r.Add("rings: Void's rings (11-01): Clouded Soul from tier 5, Clouded Soul II / Ring of Skulls II from tier 7", VoidRings);
+    }
+
+    // Void Magic's rings have lore names only (category 641): Clouded Soul (level 5), Clouded Soul II
+    // and Ring of Skulls II (level 7). Rynth looked for "Nether Ring", so a Void caster never rang.
+    private static void VoidRings()
+    {
+        var boltRing = new MonsterRule { Name = "Gilded Shade", UseBolt = true, UseRing = true };
+        (string, string) Cast(int tier, int near, params string[] known)
+        {
+            var rig = new Rig(tier, known);
+            rig.S.RingRange = 20; rig.S.MinRingTargets = 3; rig.S.WallRange = 0;
+            rig.C.RingCountOverride = () => near;
+            return rig.Cast("Nether", boltRing);
+        }
+        Check.Eq(Cast(7, 4, "Nether Bolt VII", "Clouded Soul II", "Clouded Soul"), ("Clouded Soul II", "Ring"), "tier 7: Clouded Soul II");
+        Check.Eq(Cast(7, 4, "Nether Bolt VII", "Ring of Skulls II"), ("Ring of Skulls II", "Ring"), "tier 7: Ring of Skulls II");
+        Check.Eq(Cast(7, 4, "Nether Bolt VII", "Clouded Soul"), ("Clouded Soul", "Ring"), "tier 7 knowing only the level-5 one: Clouded Soul");
+        Check.Eq(Cast(5, 4, "Nether Bolt V", "Clouded Soul"), ("Clouded Soul", "Ring"), "tier 5: Clouded Soul");
+        Check.Eq(Cast(6, 4, "Nether Bolt VI", "Clouded Soul", "Clouded Soul II"), ("Clouded Soul", "Ring"), "tier 6 knowing the II: the level-5 one");
+        Check.Eq(Cast(4, 4, "Nether Bolt IV", "Clouded Soul"), ("Nether Bolt IV", "Bolt"), "tier 4: no ring yet, the bolt");
+        Check.Eq(Cast(7, 2, "Nether Bolt VII", "Clouded Soul II"), ("Nether Bolt VII", "Bolt"), "too few near: the bolt");
+        foreach (string n in new[] { "Clouded Soul", "Clouded Soul II", "Ring of Skulls II" })
+            Check.True(SpellTable.Named(n).Any(row => row.Category == 641), $"{n} is a Void ring (category 641) in the spell data");
     }
 
     // A Void caster on DreamWeave with Use Ring on stood in the fight once 3+ monsters were near:

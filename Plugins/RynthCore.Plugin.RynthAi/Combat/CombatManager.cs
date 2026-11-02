@@ -8116,10 +8116,10 @@ public partial class CombatManager : IDisposable
         // ring range. If so, upgrade to ring; otherwise keep the base shape (arc/streak/blast/bolt).
         bool ringDue = rule != null && rule.UseRing && _settings.RingRange > 0
             && (RingCountOverride?.Invoke() ?? CountMonstersInRange(_settings.RingRange)) >= Math.Max(1, _settings.MinRingTargets);
-        // Like a wall, a ring is due only when one is known: Void Magic has no ring at all (no
-        // "Nether Ring" in SpellData.txt), so a Void caster with Use Ring on cast nothing once a
-        // pack came into ring range and stood in the fight ("No spell found: elem=Nether",
-        // #rynth-issues 2026-10-23, DreamWeave). Without one, the rule's other shape is cast.
+        // Like a wall, a ring is due only when one is known: a caster with Use Ring on and no ring
+        // learned used to cast nothing once a pack came into ring range and stood in the fight
+        // ("No spell found: elem=Nether", #rynth-issues 2026-10-23, DreamWeave). Without one, the
+        // rule's other shape is cast. Void's rings are Clouded Soul / Ring of Skulls (2026-11-01).
         int ringId = 0;
         if (ringDue)
         {
@@ -8128,7 +8128,7 @@ public partial class CombatManager : IDisposable
             {
                 ringDue = false;
                 if (_noRingLogged.Add(element + (useVoid ? "/void" : "")))
-                    _host.Log($"[CombatCast] no {element} ring spell known{(useVoid ? " (Void Magic has none)" : "")}: casting the rule's other shape when a ring is due");
+                    _host.Log($"[CombatCast] no {element} ring spell known{(useVoid ? " (Void: Clouded Soul, Clouded Soul II, Ring of Skulls II)" : "")}: casting the rule's other shape when a ring is due");
             }
         }
 
@@ -8201,8 +8201,8 @@ public partial class CombatManager : IDisposable
 
     /// <summary>
     /// The best ring of <paramref name="element"/> the character knows (0 = none): War's lore
-    /// rings, else the generic "{ring base} {tier}" of the shape table (the Void row's
-    /// "Nether Ring" / "Corrosion Ring" exist on no known server, so a Void caster gets 0).
+    /// rings, Void's Clouded Soul / Ring of Skulls, else the generic "{ring base} {tier}" of the
+    /// shape table.
     /// </summary>
     private int FindRingSpell(string element, AcSkillType skill, bool useVoid)
     {
@@ -8214,13 +8214,8 @@ public partial class CombatManager : IDisposable
 
     private int FindBestRingSpell(string element, AcSkillType skill)
     {
-        // Void Magic doesn't have lore-named rings (Cassius'/Halo/etc. are all War
-        // Magic spells). Returning 0 here makes FindBestShapedSpell fall through to
-        // FindBestOffensiveSpellId(elementShapes[1], skill) where elementShapes comes
-        // from VoidSpellShapes — e.g. "Nether Ring" or "Corrosion Ring" — and the
-        // Void caster gets the right Void ring tier instead of an unknown War spell.
         if (skill == AcSkillType.VoidMagic)
-            return 0;
+            return FindBestVoidRingSpell();
 
         if (!RingLoreNames.TryGetValue(element, out string[]? loreNames) || loreNames.Length < 2) return 0;
 
@@ -8272,6 +8267,26 @@ public partial class CombatManager : IDisposable
             _host.WriteToChat($"[RynthAi] Ring spell not found for {element} (tried: {loreNames[1]}, {loreNames[0]})", 2);
             _host.Log($"[CombatCast] ring spell not found for {element} (tried: {loreNames[1]}, {loreNames[0]})");
         }
+        return 0;
+    }
+
+    // Void Magic's rings (SpellData category 641, ACE's NetherRing): Clouded Soul is level 5 (power
+    // 200), Clouded Soul II and Ring of Skulls II level 7 (power 300). They have lore names only, so
+    // the old "Nether Ring {tier}" lookup never found one and a Void caster never cast a ring
+    // (2026-11-01).
+    private static readonly string[] VoidRingsLevel7 = { "Clouded Soul II", "Ring of Skulls II" };
+    private const string VoidRingLevel5 = "Clouded Soul";
+
+    private int FindBestVoidRingSpell()
+    {
+        int maxTier = EffectiveMaxTier(AcSkillType.VoidMagic);
+        if (maxTier >= 7)
+            foreach (string name in VoidRingsLevel7)
+            {
+                int id = TrySpellByName(name); if (id != 0) return id;
+            }
+        if (maxTier >= 5)
+            return TrySpellByName(VoidRingLevel5);
         return 0;
     }
 
