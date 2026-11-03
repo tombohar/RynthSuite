@@ -54,6 +54,9 @@ internal static class LootRetryTimingTests
         r.Add("loot pickup timer (#rynth-issues 'Stopped looting'): an item refused 'for room' in every pack it tries takes its pack marks with it; the next item lands", RefusedInEveryPackWithdrawn);
         r.Add("loot pickup timer (#rynth-issues 'Stopped looting'): a refusal with an error code counts as a try but not against the pack", CodedRefusalNotThePack);
         r.Add("loot pickup timer (#rynth-issues 'Stopped looting'): PackRefusals withdraws an item's own marks, keeps the ones another item backs", PackRefusalWithdraw);
+        r.Add("loot pickup in a fight (R-20261102-204309-206c): a move with no answer when a fight takes the tick is held, sent again after the fight and lands; the corpse completes, not abandoned", FightAfterLostMove);
+        r.Add("loot pickup in a fight (R-20261102-204309-206c): a move that lands during the fight is confirmed then; the next item waits for the fight's end", FightWhileMoveLands);
+        r.Add("loot pickup in a fight (R-20261102-204309-206c): an item the server never answers, a fight in between: one resend after the fight (no try counted), then given up with a log line", FightNeverAnswered);
     }
 
     // ── Clock and world ───────────────────────────────────────────────────────
@@ -111,6 +114,7 @@ internal static class LootRetryTimingTests
         };
         public readonly WorldObjectCache Cache;
         public SlowAce? Sim;
+        public BotActivity Activity = BotActivity.Looting;   // what the arbiter gave the tick
 
         public Bot(RynthCoreHost host)
         {
@@ -142,7 +146,7 @@ internal static class LootRetryTimingTests
         {
             _now += TickMs;
             Sim?.Step(_now);
-            Set("_activity", BotActivity.Looting);
+            Set("_activity", Activity);
             Call("TickCorpseOpening");
         }
 
@@ -184,6 +188,11 @@ internal static class LootRetryTimingTests
         public readonly Dictionary<uint, int> Room = new();    // the server's free slots per pack (absent: plenty)
         public readonly Dictionary<uint, long> Lag = new();
         public readonly HashSet<uint> NeverAnswer = new();
+        /// <summary>Items whose first move never leaves the client: no answer ever comes to it.</summary>
+        public readonly HashSet<uint> LoseFirst = new();
+        /// <summary>The client's attacking flag: a move sent now is dropped there ("You cannot move or use an item while attacking").</summary>
+        public bool Attacking;
+        public int AttackRefused, Lost;
         public readonly HashSet<uint> QuestTimer = new(), NeedsQuest = new(), RefusedForItem = new();
         public int QuestRefusals, Unlocks;
         public long ClientPendingTimeoutMs = 10_000;
@@ -209,6 +218,8 @@ internal static class LootRetryTimingTests
             while (_seenMoves < FakeHost.ExternalMoves.Count)
             {
                 var m = FakeHost.ExternalMoves[_seenMoves++];
+                if (Attacking) { AttackRefused++; continue; }        // "You cannot move or use an item while attacking"
+                if (LoseFirst.Remove(m.Id)) { Lost++; continue; }   // never left the client
                 if (_clientPending != 0 && now - _clientPendingAt >= ClientPendingTimeoutMs) _clientPending = 0;   // the engine lets it go
                 if (_clientPending != 0) { LocalRefused++; continue; }   // "You can only move or use one item at a time"
                 _clientPending = m.Id;
@@ -698,4 +709,143 @@ internal static class LootRetryTimingTests
         Check.Eq(r.Withdraw(0, 10).Count, 0, "nothing for item 0");
         Check.True(r.IsConfirmed(4, 10), "a mark with no item stays");
     }
+
+    // ── 8. A fight comes in while a pickup is out (R-20261102-204309-206c) ─────────────────────
+    // Conquest, RynthAi 2026.11.2.1, outdoors, Boost Loot Priority on: "sometimes it gets stuck on
+    // picking up loot like it will open the corpse and highlight the item and then just sit
+    // waiting". The corpse opened and the bow's move went out; it had no answer when monsters
+    // came 4.4 s later and the arbiter gave Combat the tick. The open corpse's looter still ran
+    // under Combat: the resend waited for 1 s of stillness the missile fight never gave, and once
+    // the answer wait was over nothing stopped the corpse's clock. 19 s after the send the corpse
+    // was abandoned mid-pickup (and marked completed: the bow was never picked up), with no line
+    // about the item at all. A move sent during the fight is dropped by the client anyway (its
+    // attacking flag).
+
+    /// <summary>
+    /// A fight of <paramref name="ms"/>: Combat has the tick. With <paramref name="shots"/> each
+    /// shot animates 1.25 s (the cast gate and the client's attacking flag), then 150 ms of
+    /// stillness; the client's busy count is up from each shot's start to its end. From 3.5 s to
+    /// 6.5 s into the fight a lull (as at 15:39:25-28 in the report: no shot for 3 s, busy=1): the
+    /// character stands still, the last shot's busy count still up. Returns the moves sent during it.
+    /// </summary>
+    private static List<(uint Id, long At)> Fight(Bot bot, SlowAce sim, long ms, bool shots = true)
+    {
+        bot.Activity = BotActivity.Combat;
+        long start = _now, end = _now + ms;
+        bool swinging = false, busy = false;
+        var sends = new List<(uint, long)>();
+        int seen = FakeHost.ExternalMoves.Count;
+        while (_now < end)
+        {
+            long t = _now - start;
+            bool lull = t >= 3500 && t < 6500;
+            bool swing = shots && !lull && t % 1400 < 1250;
+            bool wantBusy = swing || (shots && lull);
+            if (swing != swinging)
+            {
+                swinging = swing;
+                sim.Attacking = swing;
+                FakeHost.CastBusy = swing ? 1 : 0;
+            }
+            if (wantBusy != busy)
+            {
+                busy = wantBusy;
+                if (busy) bot.P.OnBusyCountIncremented(); else bot.P.OnBusyCountDecremented();
+            }
+            bot.Tick();
+            while (seen < FakeHost.ExternalMoves.Count) sends.Add((FakeHost.ExternalMoves[seen++].Id, _now));
+        }
+        sim.Attacking = false;
+        FakeHost.CastBusy = 0;
+        if (busy) bot.P.OnBusyCountDecremented();
+        bot.Activity = BotActivity.Looting;
+        return sends;
+    }
+
+    private static bool Abandoned() => Logged("abandoning corpse");
+
+    private static void FightAfterLostMove() => Clocked(() =>
+    {
+        const uint Bow = 0x80263171, G2 = 0x80263172;
+        World(sidePack: false, Bow, G2);
+        var sim = new SlowAce();
+        sim.LoseFirst.Add(Bow);   // the first move gets no answer (it never reached the server)
+        var bot = Open(sim, sidePack: false, Bow, G2);
+        bot.Call("NotePickupAnswerLatency", 3360L);   // the report's answer wait: 4.86 s (its retries came 4860 ms apart)
+        bot.Set("_corpseTargetSince", _now - 3300);   // the claim's age when the move went out (peace swap, walk, open)
+
+        bot.TickUntil(() => bot.MovesOf(Bow) > 0, 2000);
+        Check.Eq(bot.MovesOf(Bow), 1, "the move is sent");
+        bot.TickUntil(() => false, 4400);   // standing at the corpse, no answer
+        Check.Eq(bot.MovesOf(Bow), 1, "not resent within the answer wait");
+
+        var during = Fight(bot, sim, 16_300);   // the report's fight: 15:39:21.583-37.928
+
+        Check.Eq(during.Count, 0, "nothing is sent during the fight (the client would drop it)");
+        Check.Eq(sim.AttackRefused, 0, "no move dropped for the attacking flag");
+        Check.False(Abandoned(), "the corpse is not abandoned during the fight");
+        Check.True(Logged("waits for the fight") && Logged("0x80263171 'Gem 113' sent"), "the held pickup is logged when the fight takes the tick");
+
+        var after = Run(bot, () => bot.Completed, 30_000);
+
+        Check.True(Logged("the fight is over"), "the end of the hold is logged");
+        Check.True(after.Count > 0 && after[0].Id == Bow, "the bow is sent again first after the fight");
+        Check.True(Logged("sending 0x80263171 again after the fight"), "the resend is logged as the fight's");
+        Check.True(sim.Landed.Any(l => l.Id == Bow && l.Pack == Player), "the bow lands");
+        Check.True(sim.Landed.Any(l => l.Id == G2 && l.Pack == Player), "the next item lands");
+        Check.False(Abandoned(), "the corpse is never abandoned");
+        Check.False(Logged("pickup failed"), "nothing given up");
+        Check.False(Logged("took none of"), "no pack judged on the lost move");
+        Check.True(bot.Completed, "the corpse completes");
+    });
+
+    private static void FightWhileMoveLands() => Clocked(() =>
+    {
+        const uint G1 = 0x80263181, G2 = 0x80263182;
+        World(sidePack: false, G1, G2);
+        var sim = new SlowAce();
+        var bot = Open(sim, sidePack: false, G1, G2);
+
+        bot.TickUntil(() => bot.MovesOf(G1) > 0, 2000);
+        Check.Eq(bot.MovesOf(G1), 1, "the move is sent");
+        bot.TickUntil(() => false, 300);   // a monster comes before the answer (the pickup takes ~1.8 s)
+
+        var during = Fight(bot, sim, 14_000, shots: false);
+
+        Check.True(sim.Landed.Any(l => l.Id == G1), "the item lands during the fight");
+        Check.True(Logged("pickup confirmed for 0x80263181"), "and is confirmed then");
+        Check.Eq(bot.MovesOf(G1), 1, "never resent");
+        Check.Eq(during.Count, 0, "the next item is not sent while combat has the tick");
+        Check.False(Abandoned(), "the corpse is not abandoned during the fight");
+
+        Run(bot, () => bot.Completed, 30_000);
+
+        Check.True(sim.Landed.Any(l => l.Id == G2), "the next item lands after the fight");
+        Check.False(Abandoned(), "never abandoned");
+        Check.True(bot.Completed, "the corpse completes");
+    });
+
+    private static void FightNeverAnswered() => Clocked(() =>
+    {
+        const uint Lost = 0x80263191, G2 = 0x80263192;
+        World(sidePack: false, Lost, G2);
+        var sim = new SlowAce();
+        sim.NeverAnswer.Add(Lost);
+        sim.ClientPendingTimeoutMs = 0;   // every move of it leaves the client (the engine's watchdog is not the subject here)
+        var bot = Open(sim, sidePack: false, Lost, G2);
+
+        bot.TickUntil(() => bot.MovesOf(Lost) > 0, 2000);
+        bot.TickUntil(() => false, 2000);
+        var during = Fight(bot, sim, 15_000);
+        Check.Eq(during.Count, 0, "nothing sent during the fight");
+
+        Run(bot, () => bot.Completed, 60_000);
+
+        Check.Eq(bot.MovesOf(Lost), 4, "the first send, one resend for the fight, then the 2 tries left");
+        Check.True(Logged("sending 0x80263191 again after the fight"), "the fight's resend is logged");
+        Check.True(Logged("pickup failed for 0x80263191"), "then it is given up, with a line");
+        Check.True(sim.Landed.Any(l => l.Id == G2), "the next item lands");
+        Check.False(Abandoned(), "the corpse is not abandoned");
+        Check.True(bot.Completed, "the corpse completes");
+    });
 }

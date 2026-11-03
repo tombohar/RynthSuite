@@ -41,19 +41,41 @@ internal static class PetRefillTests
         r.Add("pets: the server's 'full' trust expires after 30 min", TrustExpires);
         r.Add("pets: a landed summon whose pet is not in the cache yet holds a second essence back for the 10 s window", LandedSummonHoldsWindow);
         r.Add("pets: failed summon (no charge drop) does not assume a pet; waits the 45 s essence cooldown", FailedSummonRespectsCooldown);
-        r.Add("pets: Boost Nav Priority on (RynthAi only navigates): no summon with a monster near; off: it summons", BoostNavNoSummon);
+        r.Add("pets: Boost Nav Priority along a route (RynthAi only follows it): no summon with a monster near; route unloaded: it summons", BoostNavNoSummon);
+        r.Add("pets: Boost Nav Priority with no route: it summons as with the flag off (R-20261103-000159-a65e)", BoostNavNoRouteSummons);
     }
 
-    // Owner's rule (2026-11-02): with Boost Nav Priority on there is no fight, so no pet is called for one.
+    private static NavRouteParser Route()
+    {
+        var route = new NavRouteParser { RouteType = NavRouteType.Circular };
+        route.Points.Add(new NavPoint { Type = NavPointType.Point, NS = 10.5, EW = -3.25 });
+        route.Points.Add(new NavPoint { Type = NavPointType.Point, NS = 11.5, EW = -4.25 });
+        return route;
+    }
+
+    // Owner's corrected rule (2026-11-02, R-20261103-000159-a65e): while a nav route runs with Boost Nav
+    // Priority on there is no fight, so no pet is called for one.
     private static void BoostNavNoSummon()
     {
         using var rig = new Rig(charges: 50);
         rig.S.BoostNavPriority = true;
+        rig.S.EnableNavigation = true;
+        rig.S.CurrentRoute = Route();
         rig.Run(5000);
-        Check.Eq(rig.AllSummons, 0, "flag on: no summon in 5 s with the monster 3 m away");
-        rig.S.BoostNavPriority = false;
+        Check.Eq(rig.AllSummons, 0, "a route runs: no summon in 5 s with the monster 3 m away");
+        rig.S.CurrentRoute = new NavRouteParser();   // unloaded; the flag stays on
         rig.Run(1500);
-        Check.Eq(rig.Summons, 1, "flag off: it summons");
+        Check.Eq(rig.Summons, 1, "no route: it summons");
+    }
+
+    // "When no nav route is loaded it should fight": the flag alone holds no pet back.
+    private static void BoostNavNoRouteSummons()
+    {
+        using var rig = new Rig(charges: 50);
+        rig.S.BoostNavPriority = true;
+        rig.S.EnableNavigation = true;
+        rig.Run(1500);
+        Check.Eq(rig.Summons, 1, "flag on, no route: it summons");
     }
 
     // ── Rig ───────────────────────────────────────────────────────────────

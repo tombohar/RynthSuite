@@ -374,9 +374,10 @@ internal sealed unsafe class InstrumentDashboard
         ImGui.SetCursorScreenPos(min);
         // A click asks why it is doing that (or nothing): /ra why's diagnosis, in chat.
         if (ImGui.InvisibleButton("##activity", new Vector2(w, h))) _d.Command("/ra why");
-        // Boost Nav Priority (owner's rule, 2026-11-02): it reads Idle or Navigating, and says why.
+        // Boost Nav Priority (owner's corrected rule, 2026-11-02): while a nav route runs it reads
+        // Idle or Navigating, and says why. With no route the flag changes nothing, so nothing is said.
         SafeImGui.SetItemTooltip("Bot activity: " + activity
-            + (_r.BoostNav ? "\nBoost Nav Priority is on: RynthAi only navigates (no hunting, no looting)." : "")
+            + (_r.BoostNav ? "\nBoost Nav Priority is on and a nav route runs: RynthAi only follows it (no hunting, no looting)." : "")
             + "\nMeta state: " + state + "\nClick: why it's doing that, in chat (/ra why).");
         return y + h;
     }

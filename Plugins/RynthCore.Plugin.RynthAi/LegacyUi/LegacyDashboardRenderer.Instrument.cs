@@ -52,7 +52,7 @@ internal sealed partial class LegacyDashboardRenderer
             _isLocked, _bgOpacity,
             !string.IsNullOrEmpty(_vendorProfilePath?.Invoke()) ? _vendorProfilePath!.Invoke() : _settings.CurrentLootPath ?? string.Empty,
             LootMode: Loot.LootModes.Clamp(_settings.LootMode),
-            BoostNav: _settings.BoostNavPriority);
+            BoostNav: BoostNavRule.Active(_settings));   // the flag counts only while a nav route runs
     }
 
     /// <summary>The five pickers' lists (copied under the lists' lock) and the entry in use. Any thread.</summary>

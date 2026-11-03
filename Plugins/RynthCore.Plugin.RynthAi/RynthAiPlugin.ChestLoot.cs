@@ -220,14 +220,22 @@ public sealed partial class RynthAiPlugin
     /// </summary>
     private void FinishChestLoot(int chestId, string why, bool close, bool sayNothingMatched)
     {
-        if (close)
+        // Pickup with macro off > Leave the chest open: a chest the player opened stays open, and chat says so.
+        bool leaveOpen = close && chestId == _manualChestLootId && (_dashboard?.Settings?.LootChestsMacroOffLeaveOpen ?? false);
+        if (chestId == _manualChestLootId)
+            _manualChestLootId = 0;
+        if (close && !leaveOpen)
             CloseCorpseContainer(chestId, why);
 
-        if (sayNothingMatched)
+        string chestName = _objectCache?[chestId]?.Name is { Length: > 0 } cn ? cn : "the chest";
+        if (sayNothingMatched && NothingLootedLine(chestName, chest: true) is { } nothingLine)
+            ChatLine(nothingLine);
+        if (leaveOpen)
         {
-            string chestName = _objectCache?[chestId]?.Name is { Length: > 0 } cn ? cn : "the chest";
-            if (NothingLootedLine(chestName, chest: true) is { } nothingLine)
-                ChatLine(nothingLine);
+            string done = why == "completed"
+                ? _corpseItemsLooted > 0 ? $"done with {chestName}: took {_corpseItemsLooted} item(s)." : $"done with {chestName}."
+                : $"stopped on {chestName} ({why}).";
+            ChatLine($"[RynthAi] Pickup with macro off: {done} Left it open: close it when you're done.");
         }
         LootDiag($"[RynthAi] Chest loot: done with chest 0x{(uint)chestId:X8} ({why}); not marked, so opening it again loots it again.");
 
@@ -282,6 +290,8 @@ public sealed partial class RynthAiPlugin
     private const long ManualChestWaitMs = 3000;   // for the chest's owner and name to be readable
     private int _manualChestId;
     private long _manualChestSince;
+    /// <summary>The chest Pickup with macro off is looting (0 = none): FinishChestLoot leaves it open when set to.</summary>
+    private int _manualChestLootId;
 
     /// <summary>OnViewObjectContents for a non-corpse container: a chest the player may have opened.</summary>
     private void NoteManualChestOpened(int id)
@@ -311,5 +321,6 @@ public sealed partial class RynthAiPlugin
         }
         LootDiag($"[RynthAi] Pickup with macro off: looting the opened chest 0x{(uint)id:X8} by the loot profile.");
         ForceLootOpenChest(id);
+        _manualChestLootId = id;
     }
 }

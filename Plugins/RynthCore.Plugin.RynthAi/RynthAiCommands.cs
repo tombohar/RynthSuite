@@ -2071,9 +2071,10 @@ public sealed partial class RynthAiPlugin
         // Interpretation — the point of D2/D3: name the most likely reason it isn't attacking.
         string why =
             !s.IsMacroRunning        ? "macro is STOPPED (start it from the panel / command)." :
-            // Owner's rule (2026-11-02): with Boost Nav Priority on RynthAi only navigates.
-            _dashboard?.Settings?.BoostNavPriority == true
-                                     ? "Boost Nav Priority is on: RynthAi only navigates (no hunting, no looting). Turn it off to hunt and loot." :
+            // Owner's corrected rule (2026-11-02, R-20261103-000159-a65e): Boost Nav Priority only
+            // while a nav route runs; with no route it changes nothing, so it is no reason then.
+            _dashboard?.Settings is { } boostSettings && BoostNavRule.Active(boostSettings)
+                                     ? "Boost Nav Priority is on and a nav route runs: RynthAi only follows it (no hunting, no looting). Turn it off to hunt along the route." :
             !s.EnableCombat          ? "combat is disabled in settings." :
             s.BusyCount > 0          ? "AC busy>0 — waiting on a server action (cast/use/move); try /ra clearbusy if stuck." :
             forced != 0 && forced == s.ActiveTargetId && bySelection

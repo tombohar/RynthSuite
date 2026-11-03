@@ -19,7 +19,9 @@ namespace RynthCore.RynthAiHostTests.Tests;
 // "Corpse loot:" line followed (no [LootSettings] line the whole session either). Boost Nav Priority
 // was on with no route to run: the arbiter's BoostNav clause is guarded by WantNav, so Looting won,
 // while TickCorpseOpening's full stop took the flag alone and reset every claim. Owner's rule
-// (2026-10-31): Boost Nav Priority means no looting at all, so HasLootWork offers nothing either. The kill's corpse
+// (2026-10-31): Boost Nav Priority means no looting, so HasLootWork offers nothing either; corrected
+// 2026-11-02 (R-20261103-000159-a65e): only while a nav route runs. With no route, a Once route at
+// its end, or the Outdoor Hunt, corpses are looted as with the flag off. The kill's corpse
 // ('Treasure of ...', no corpse name) was first filed as a no-position inventory Container and
 // rescued to Corpse by its weenie flag 3 s later; it must be claimed and looted like any other.
 // The loot clock (CorpseOpenController.CorpseClock) is moved by hand; the server answers at once.
@@ -39,10 +41,11 @@ internal static class LootClaimMismatchTests
     public static void Register(Runner r)
     {
         r.Add("loot claim (R-20261031-203155-cea0): a corpse first filed as a no-position inventory Container, then rescued, is claimed and looted", RescuedCorpseLooted);
-        r.Add("loot claim (R-20261031-203155-cea0): Boost Nav Priority with no route: no loot work, never in Looting; looted once the flag is off", BoostNavNoRouteLoots);
-        r.Add("loot claim (R-20261031-203155-cea0): Boost Nav Priority with a route, then none: nav has the tick, nothing claimed either way", BoostNavWithRouteYields);
+        r.Add("loot claim (R-20261103-000159-a65e): Boost Nav Priority with no route: loot work, Looting, the corpse looted as with the flag off", BoostNavNoRouteLoots);
+        r.Add("loot claim (R-20261103-000159-a65e): Boost Nav Priority with a route: nav has the tick, nothing claimed; route unloaded: looted", BoostNavWithRouteYields);
+        r.Add("loot claim (R-20261103-000159-a65e): Boost Nav Priority on an Outdoor Hunt walk, and at the end of a Once route: looted", BoostNavHuntAndOnceEndLoot);
         r.Add("loot claim (R-20261031-203155-cea0): Looting with nothing claimed is logged with the reason after 3 s, then throttled", LootStallLogged);
-        r.Add("boost nav (R-20261102-041824-3f7c): a corpse it passes by is said once in chat; nothing claimed; looted once the flag is off", BoostNavCorpseNotice);
+        r.Add("boost nav (R-20261102-041824-3f7c): a corpse passed by along a route is said once in chat; none said with no route; looted once the route is gone", BoostNavCorpseNotice);
     }
 
     // ── Clock and world ───────────────────────────────────────────────────────
@@ -122,7 +125,7 @@ internal static class LootClaimMismatchTests
         public BotActivity Decide()
         {
             var inputs = new ArbiterInputs(S.IsMacroRunning, false, false, HasLootWork(), false, NavWants(),
-                boostNav: S.BoostNavPriority, boostLoot: S.BoostLootPriority);
+                boostNav: BoostNavRule.Active(S), boostLoot: S.BoostLootPriority);
             return ActivityArbiter.Decide(in inputs);
         }
 
@@ -206,35 +209,42 @@ internal static class LootClaimMismatchTests
         Check.False(bot.HasLootWork(), "no loot work left: the bot leaves Looting");
     });
 
-    // ── 2. The report: Boost Nav Priority on, nothing to navigate ─────────────
+    private static NavRouteParser Route(NavRouteType type, bool huntWalk = false)
+    {
+        var route = new NavRouteParser { RouteType = type, OutdoorHuntWalk = huntWalk };
+        route.Points.Add(new NavPoint { Type = NavPointType.Point, NS = 10.5, EW = -3.25 });
+        route.Points.Add(new NavPoint { Type = NavPointType.Point, NS = 11.5, EW = -4.25 });
+        return route;
+    }
 
-    // Owner, 2026-10-31: Boost Nav Priority means no looting at all, route or not.
+    private static void LootedToTheEnd(Bot bot, string when)
+    {
+        Check.True(bot.HasLootWork(), $"{when}: loot work");
+        Check.Eq(bot.Tick(), BotActivity.Looting, $"{when}: Looting has the tick");
+        Check.Eq(bot.Claimed, unchecked((int)Corpse), $"{when}: the corpse is claimed");
+        LootToTheEnd(bot);
+        Check.True(bot.Completed, $"{when}: looted to the end");
+        Check.True(FakeHost.ExternalMoves.Any(m => m.Id == Gem && m.Target == Player), $"{when}: the gem is in the pack");
+    }
+
+    // ── 2. The report's setting, nothing to navigate: it loots ────────────────
+
+    // Owner's corrected rule (2026-11-02, R-20261103-000159-a65e): "when no nav route is loaded it
+    // should fight", and loot: with no route the flag changes nothing.
     private static void BoostNavNoRouteLoots() => Clocked(() =>
     {
         World();
         var bot = RescuedCorpse();
         bot.S.BoostNavPriority = true;
-        bot.S.BoostLootPriority = true;   // both on, as in the report: nav wins
+        bot.S.BoostLootPriority = true;   // both on, as in the report (NavLootPrio)
         bot.S.EnableNavigation = true;    // on, but no route loaded (want[nav=False] in the report)
         Check.False(bot.NavWants(), "nav has nothing to run");
-        Check.False(bot.HasLootWork(), "Boost Nav Priority: no loot work, the corpse is passed by");
-        Check.True(bot.Decide() != BotActivity.Looting, "the arbiter never gives Looting the tick");
-
-        for (int i = 0; i < 200; i++) Check.True(bot.Tick() != BotActivity.Looting, "never in Looting (5 s)");
-        Check.Eq(bot.Claimed, 0, "nothing claimed");
-        Check.False(FakeHost.Uses.Contains(Corpse), "nothing opened");
-        Check.False(Logged("Looting has held the tick"), "no stall: Looting never had the tick");
-
-        bot.S.BoostNavPriority = false;   // the flag off: the corpse is looted as usual
-        Check.True(bot.HasLootWork(), "loot work again");
-        bot.Tick();
-        Check.Eq(bot.Claimed, unchecked((int)Corpse), "the corpse is claimed");
-        LootToTheEnd(bot);
-        Check.True(bot.Completed, "looted to the end");
-        Check.True(FakeHost.ExternalMoves.Any(m => m.Id == Gem && m.Target == Player), "the gem is in the pack");
+        Check.False(BoostNavRule.Active(bot.S), "Boost Nav Priority does not count with no route");
+        LootedToTheEnd(bot, "no route, flag on");
+        Check.False(Logged("Boost Nav Priority is on and a nav route runs"), "no Boost Nav skip reason logged");
     });
 
-    // ── 3. Boost Nav Priority with a route still yields to nav ────────────────
+    // ── 3. Boost Nav Priority with a route yields to nav; unloaded, it loots ──
 
     private static void BoostNavWithRouteYields() => Clocked(() =>
     {
@@ -242,23 +252,50 @@ internal static class LootClaimMismatchTests
         var bot = RescuedCorpse();
         bot.S.BoostNavPriority = true;
         bot.S.EnableNavigation = true;
-        var route = new NavRouteParser { RouteType = NavRouteType.Linear };
-        route.Points.Add(new NavPoint { Type = NavPointType.Point, NS = 10.5, EW = -3.25 });
-        route.Points.Add(new NavPoint { Type = NavPointType.Point, NS = 11.5, EW = -4.25 });
-        bot.S.CurrentRoute = route;
+        bot.S.CurrentRoute = Route(NavRouteType.Linear);
         Check.True(bot.NavWants(), "nav has a route to run");
         Check.False(bot.HasLootWork(), "no loot work to offer: the looter stands down for the route");
         Check.Eq(bot.Decide(), BotActivity.Navigating, "nav has the tick");
 
-        for (int i = 0; i < 200; i++) bot.Tick();   // 5 s
+        for (int i = 0; i < 200; i++) Check.Eq(bot.Tick(), BotActivity.Navigating, "Navigating along the route (5 s)");
         Check.Eq(bot.Claimed, 0, "nothing claimed");
         Check.False(FakeHost.Uses.Contains(Corpse), "nothing opened");
         Check.False(Logged("Looting has held the tick"), "not a Looting stall: Looting never had the tick");
 
-        bot.S.CurrentRoute = null;   // the route is unloaded: still no looting while the flag is on
-        Check.True(bot.Tick() != BotActivity.Looting, "no route, flag on: still no Looting");
-        Check.Eq(bot.Claimed, 0, "still nothing claimed");
+        bot.S.CurrentRoute = new NavRouteParser();   // the route is unloaded; the flag stays on
+        LootedToTheEnd(bot, "route unloaded, flag on");
     });
+
+    // ── 3b. The Outdoor Hunt, and a Once route at its end: it loots ───────────
+
+    private static void BoostNavHuntAndOnceEndLoot()
+    {
+        Clocked(() =>
+        {
+            World();
+            var bot = RescuedCorpse();
+            bot.S.BoostNavPriority = true;
+            bot.S.EnableNavigation = true;
+            bot.S.CurrentRoute = Route(NavRouteType.Once, huntWalk: true);   // the hunt walking to its next monster
+            Check.True(bot.NavWants(), "nav walks the hunt's walk");
+            Check.False(BoostNavRule.Active(bot.S), "the hunt's walk is no nav route");
+            LootedToTheEnd(bot, "Outdoor Hunt, flag on");
+        });
+        Clocked(() =>
+        {
+            World();
+            var bot = RescuedCorpse();
+            bot.S.BoostNavPriority = true;
+            bot.S.EnableNavigation = true;
+            bot.S.CurrentRoute = Route(NavRouteType.Once);
+            bot.S.ActiveNavIndex = 1;   // walking to the last point
+            Check.Eq(bot.Tick(), BotActivity.Navigating, "the Once route still walked: Navigating, no loot");
+            Check.Eq(bot.Claimed, 0, "nothing claimed on the way");
+            bot.S.ActiveNavIndex = 2;          // the nav engine's CompleteOnceRoute: past the end...
+            bot.S.EnableNavigation = false;    // ...and nav off
+            LootedToTheEnd(bot, "Once route at its end, flag on");
+        });
+    }
 
     // ── 4. A stall is never silent ────────────────────────────────────────────
 
@@ -290,19 +327,25 @@ internal static class LootClaimMismatchTests
         Check.True(Logged("the Looting stall is over"), "and the end of the stall is logged");
     });
 
-    // ── 5. Boost Nav Priority says it skipped the corpse (owner, 2026-11-02) ───
+    // ── 5. Boost Nav Priority says it skipped the corpse along a route ────────
 
     private static void BoostNavCorpseNotice() => Clocked(() =>
     {
         World();
         var bot = RescuedCorpse();
-        bot.S.BoostNavPriority = true;   // NavLootPrio turned it on; no route, no monster
+        bot.S.BoostNavPriority = true;   // NavLootPrio turned it on; no monster
+        bot.S.EnableNavigation = true;
         int Notices() => FakeHost.Chat.Count(c => c == RynthAiPlugin.BoostNavNotice);
         void Note() => bot.Call("NoteBoostNavSkip", bot.S, false);
 
-        for (int i = 0; i < 200; i++)   // 5 s of ticks, the notice looked at after each decision
+        // No route: the flag skips nothing, so nothing is said.
+        for (int i = 0; i < 200; i++) { Note(); _now += TickMs; }
+        Check.Eq(Notices(), 0, "no route: nothing said");
+
+        bot.S.CurrentRoute = Route(NavRouteType.Circular);
+        for (int i = 0; i < 200; i++)   // 5 s of ticks along the route, the notice looked at after each decision
         {
-            Check.True(bot.Tick() != BotActivity.Looting, "never in Looting");
+            Check.True(bot.Tick() != BotActivity.Looting, "never in Looting along the route");
             Note();
         }
         Check.Eq(Notices(), 1, "the passed-by corpse is said once in chat");
@@ -310,10 +353,10 @@ internal static class LootClaimMismatchTests
         Check.Eq(bot.Claimed, 0, "nothing claimed");
         Check.False(FakeHost.Uses.Contains(Corpse), "nothing opened");
 
-        bot.S.BoostNavPriority = false;
+        bot.S.CurrentRoute = new NavRouteParser();   // the route unloaded; the flag stays on
         Note();
         bot.Tick();
-        Check.Eq(bot.Claimed, unchecked((int)Corpse), "flag off: the corpse is claimed");
+        Check.Eq(bot.Claimed, unchecked((int)Corpse), "no route: the corpse is claimed");
         LootToTheEnd(bot);
         Check.True(bot.Completed, "and looted to the end");
         Check.Eq(Notices(), 1, "nothing more said");

@@ -110,6 +110,13 @@ public sealed class NavRouteParser
     public List<NavPoint> Points { get; set; } = new();
 
     /// <summary>
+    /// The Outdoor Hunt's own walk to its next monster (RynthAiPlugin.OutdoorHunt.cs), not a nav
+    /// route the player loaded. Boost Nav Priority leaves it alone (BoostNavRule): the hunt goes
+    /// from monster to monster, so it fights and loots as usual. Never set on a loaded route.
+    /// </summary>
+    public bool OutdoorHuntWalk { get; set; }
+
+    /// <summary>
     /// Non-null if the last load hit an unknown waypoint type or a malformed
     /// line. The route still holds whatever points parsed cleanly before that.
     /// </summary>

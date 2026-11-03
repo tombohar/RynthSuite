@@ -4622,12 +4622,13 @@ public partial class CombatManager : IDisposable
             DropTarget("combat disabled");
         }
 
-        // Boost Nav Priority (owner's rule, 2026-11-02): RynthAi only navigates. No hunting and no
-        // fighting back, whatever BotAction says. canRun used to block combat only while the
-        // arbiter held "Navigating", so with no route (BotAction "Default") Think ran and the bot
-        // hunted as usual with the flag on (R-20261102-041824-3f7c). The scan above still runs:
-        // it is what tells the arbiter (and the once-per-session notice) a fight is being skipped.
-        if (_settings.BoostNavPriority)
+        // Boost Nav Priority (owner's corrected rule, 2026-11-02, R-20261103-000159-a65e): while a
+        // nav route runs RynthAi only follows it. No hunting and no fighting back, whatever
+        // BotAction says. With no route (or a Once route at its end, or the Outdoor Hunt) the flag
+        // does nothing and combat runs as usual: BoostNavRule.Active is the one test. The scan
+        // above still runs: it is what tells the arbiter (and the once-per-session notice) a fight
+        // is being skipped, and what picks the fight back up the moment the route is gone.
+        if (BoostNavRule.Active(_settings))
         {
             StandDownForBoostNav();
             return;
@@ -4635,7 +4636,9 @@ public partial class CombatManager : IDisposable
         if (_boostNavStoodDown)
         {
             _boostNavStoodDown = false;
-            _host.Log("[RynthAi] Combat: Boost Nav Priority is off - hunting again.");
+            _host.Log(_settings.BoostNavPriority
+                ? "[RynthAi] Combat: Boost Nav Priority is on but no nav route runs - hunting again."
+                : "[RynthAi] Combat: Boost Nav Priority is off - hunting again.");
         }
 
         // Combat can run in Default/Combat, can interrupt navigation, and can interrupt looting
@@ -4665,8 +4668,9 @@ public partial class CombatManager : IDisposable
     internal bool BoostNavStoodDown => _boostNavStoodDown;
 
     /// <summary>
-    /// Boost Nav Priority (owner's rule, 2026-11-02), every combat tick while the flag is on:
-    /// nothing is attacked, and a fight the flag came on in the middle of is let go cleanly. The
+    /// Boost Nav Priority (owner's corrected rule, 2026-11-02), every combat tick while the flag is
+    /// on and a nav route runs (BoostNavRule.Active): nothing is attacked, and a fight the flag (or
+    /// a route loaded with it on) came in the middle of is let go cleanly. The
     /// target is dropped (which ends a kite or an environment approach), the server's melee or
     /// missile attack is cancelled (or it keeps swinging and walking us to the mob), a held turn
     /// is let go, and with Peace Mode When Idle the stance goes back to Peace as it does between
@@ -4679,13 +4683,13 @@ public partial class CombatManager : IDisposable
         if (!_boostNavStoodDown)
         {
             _boostNavStoodDown = true;
-            _host.Log("[RynthAi] Combat: Boost Nav Priority is on - no hunting and no fighting back, RynthAi only navigates.");
+            _host.Log("[RynthAi] Combat: Boost Nav Priority is on and a nav route runs - no hunting and no fighting back, RynthAi only follows the route.");
             // The flag came on mid-fight: end the server's attack even if our record of it is gone.
             if (mode == CombatMode.Melee || mode == CombatMode.Missile)
                 ReleaseServerAttack("Boost Nav Priority", log: false);
         }
         if (activeTargetId != 0 || _lockedTargetId != 0)
-            DropTarget("Boost Nav Priority is on (RynthAi only navigates)");
+            DropTarget("Boost Nav Priority is on and a nav route runs (RynthAi only follows it)");
         if (_serverAttackTargetId != 0)
             ReleaseServerAttack("Boost Nav Priority", log: false);
         ReleaseHeldTurn();
@@ -4700,7 +4704,7 @@ public partial class CombatManager : IDisposable
         // The idle swap's backoff (ThinkCore): 500 ms for the first 4 sends, then doubling to 15 s.
         double peaceDelayMs = Math.Min(15_000, 500 * Math.Pow(2, Math.Min(5, _idlePeaceAttempts / 4)));
         if ((RynthClock.Now - _lastPeaceAttempt).TotalMilliseconds > peaceDelayMs
-            && _host.ChangeCombatModeFor(CombatMode.NonCombat, "Combat", "Boost Nav Priority: RynthAi only navigates (Peace Mode When Idle)"))
+            && _host.ChangeCombatModeFor(CombatMode.NonCombat, "Combat", "Boost Nav Priority: RynthAi only follows the nav route (Peace Mode When Idle)"))
         {
             _lastPeaceAttempt = RynthClock.Now;
             _idlePeaceAttempts++;

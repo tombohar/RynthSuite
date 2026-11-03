@@ -171,6 +171,13 @@ public sealed partial class RynthAiPlugin
     private readonly List<int> _currentLootItemDestsTried = new();
     private readonly List<int> _currentLootItemFullPacks = new();   // packs this item's refusals marked full
     private long _moveAwaitTickAt;                 // CorpseNowMs of the previous answer-wait call
+    // 2026-11-02 (R-20261102-204309-206c): an open corpse while a fight has the tick (HoldOpenCorpseForFight).
+    private long _fightHoldSince;                  // CorpseNowMs the open corpse began waiting for the fight; 0 = none
+    private long _fightHoldTickAt;                 // CorpseNowMs of the previous held tick (the corpse clock is paid back)
+    private long _fightHoldEndedAt;                // CorpseNowMs the last such wait ended (NoteNextSendWaits counts from it)
+    private bool _currentLootItemFightHeld;        // the last send had no answer when a fight took the tick
+    private int _currentLootItemFightResends;      // resends for a fight in between (not counted as tries)
+    private bool _currentLootItemResendWaitLogged; // the "next send waits" line was written for the last send
     // How long the server took to answer recent pickups (confirmations and refusals after the
     // pickup ran): the answer wait is sized from the slowest of them.
     private readonly long[] _pickupAnswerLatencies = new long[8];
@@ -700,16 +707,17 @@ public sealed partial class RynthAiPlugin
     }
 
     /// <summary>
-    /// Boost Nav Priority means no looting at all: corpses are passed by and the bot navigates
-    /// (owner, 2026-10-31: "when navprio is on it shouldn't loot at all, just bypass all corpses
-    /// and navigate"), route or not. The looter stood down for the flag, but HasLootWork still
-    /// offered the corpses, so with no route the arbiter's BoostNav clause (guarded by WantNav)
-    /// gave Looting the tick and the bot sat in Looting forever with nothing claimed
-    /// (R-20261031-203155-cea0). Both now read this one test: with the flag on there is no loot
-    /// work, so Looting never takes the tick. A forced loot (/ra lootthis) still goes.
+    /// Boost Nav Priority with a nav route running means no looting at all: corpses are passed by
+    /// and the bot follows the route (owner, 2026-10-31: "when navprio is on it shouldn't loot at
+    /// all, just bypass all corpses and navigate"). The claim and HasLootWork both read this one
+    /// test, so Looting never takes the tick while the looter stands down
+    /// (R-20261031-203155-cea0). Owner's corrected rule (2026-11-02, R-20261103-000159-a65e):
+    /// only while a nav route runs (BoostNavRule.Active); with no route, a Once route at its end,
+    /// or the Outdoor Hunt, corpses are looted as with the flag off. A forced loot (/ra lootthis)
+    /// always goes.
     /// </summary>
     private static bool BoostNavHoldsLoot(LegacyUiSettings settings)
-        => settings.BoostNavPriority;
+        => BoostNavRule.Active(settings);
 
     private void TickCorpseOpeningCore()
     {
@@ -734,7 +742,7 @@ public sealed partial class RynthAiPlugin
         if ((!settings.IsMacroRunning || !settings.EnableLooting || BoostNavHoldsLoot(settings)) && !ForcedLootHolds())
         {
             _lootSkipWhy = !settings.IsMacroRunning ? "the macro is off"
-                : !settings.EnableLooting ? "looting is off" : "Boost Nav Priority is on (RynthAi only navigates)";
+                : !settings.EnableLooting ? "looting is off" : "Boost Nav Priority is on and a nav route runs (RynthAi only follows it)";
             ResetCorpseTarget();
             return;
         }
@@ -777,7 +785,9 @@ public sealed partial class RynthAiPlugin
 
         // ── Combat takes priority over claiming NEW corpses ───────────────
         // But if we already have an opened container, finish looting it
-        // (no movement, no conflict with combat).
+        // (no movement, no conflict with combat) - while the arbiter gives Looting
+        // the tick; one that gives Combat the tick makes the open corpse wait
+        // for the fight (HoldOpenCorpseForFight).
         // Exception: loot starvation (see LootStarveMs) - the arbiter gave this tick to
         // Looting because a corpse waited too long and no monster is close.
         if (settings.EnableCombat
@@ -1070,7 +1080,7 @@ public sealed partial class RynthAiPlugin
         if (!settings.IsMacroRunning || !settings.EnableLooting)
             return false;
 
-        if (settings.BoostNavPriority)
+        if (BoostNavHoldsLoot(settings))
             return false;
 
         // Combat is #1 priority — block new corpse claims while combat is
@@ -1486,6 +1496,10 @@ public sealed partial class RynthAiPlugin
         long now = CorpseNowMs;
         if (_openedContainerAt == 0)
             _openedContainerAt = now;
+
+        // A fight has the tick: the corpse waits for it, its clock stopped (R-20261102-204309-206c).
+        if (HoldOpenCorpseForFight(settings, corpseId, now))
+            return;
 
         if (HasCorpseTimedOut(settings, now))
         {
@@ -1980,6 +1994,12 @@ public sealed partial class RynthAiPlugin
     /// <summary>Resends after a "You're too busy" that don't count as one of the item's 3 tries.</summary>
     internal const int PickupFreeRetries = 3;
 
+    /// <summary>Resends after a fight came in before the send's answer that don't count as one of the item's 3 tries.</summary>
+    internal const int PickupFightResends = 2;
+
+    /// <summary>A send with no answer this long past the answer wait, whose next send is still held, is logged (once per send).</summary>
+    internal const long PickupResendWaitLogMs = 3000;
+
     private const uint WeenieErrorYoureTooBusy = 0x001D;
     private const uint EventInventoryServerSaveFailed = 0x00A0;
 
@@ -2177,6 +2197,7 @@ public sealed partial class RynthAiPlugin
     private void NoteLootMoveSent()
     {
         _currentLootItemAwaitingAnswer = true;
+        _currentLootItemResendWaitLogged = false;
         _currentLootItemRefusedAt = 0;
         _currentLootItemRefusalError = 0;
         _currentLootItemRefusalObject = 0;
@@ -2407,7 +2428,95 @@ public sealed partial class RynthAiPlugin
             _corpseTargetSince += gap;
     }
 
-    private void TickPendingCorpsePickup(LegacyUiSettings settings)
+    // ── A fight while a corpse is open (2026-11-02, R-20261102-204309-206c) ──
+    // Conquest, RynthAi 2026.11.2.1, outdoors, Boost Loot Priority on: "it will open the corpse and
+    // highlight the item and then just sit waiting". The bow's move went out and had no answer when
+    // monsters came 4.4 s later; the arbiter gave Combat the tick (combat is engaged, Boost Loot or
+    // not). The open corpse's looter ran on under Combat as if it looted: the answer wait ran out in
+    // a lull between shots, the send was counted as an unanswered try, and the resend was held by
+    // the shot's busy count, then by the 1 s of stillness the missile fight never gave - silently.
+    // With no answer awaited any more nothing stopped the corpse's clock (PauseCorpseClockWhileMoveAwaits
+    // runs only while one is), so 19 s after the send the corpse was abandoned mid-pickup with the
+    // 30-minute completed mark, and the bow stayed on it. A resend during the fight would not have
+    // done better: the client drops an item move while the character attacks ("You cannot move or
+    // use an item while attacking", ClientActionGates) and ACE answers one that gets through with
+    // "You're too busy". Now, while Combat has the tick, the open corpse waits: its clock stopped,
+    // no new pickup, and a move already out is only watched for (it may still land, or be refused).
+    // After the fight one with no answer goes again without costing one of its 3 tries
+    // (PickupFightResends), and every step says so in the log.
+
+    /// <summary>
+    /// TickOpenCorpseLooting: true while a fight has the tick, the open corpse waiting for it (your
+    /// own death corpse excepted: its recovery runs as before). Logs when the wait begins and ends.
+    /// </summary>
+    private bool HoldOpenCorpseForFight(LegacyUiSettings settings, int corpseId, long now)
+    {
+        bool fight = _activity == BotActivity.Combat && !IsOwnDeathCorpseId(settings, corpseId);
+        bool pending = _currentLootItemMovePending && _currentLootItemId != 0;
+        if (!fight)
+        {
+            if (_fightHoldSince != 0)
+            {
+                _fightHoldEndedAt = now;
+                LootDiag($"[RynthAi] {LootTag}: the fight is over after {(now - _fightHoldSince) / 1000.0:0.0}s; looting 0x{(uint)corpseId:X8} goes on" +
+                         (pending ? $" (the move of 0x{(uint)_currentLootItemId:X8} '{_currentLootItemName}' sent {now - _currentLootItemMoveRequestedAt} ms ago " +
+                                    (_currentLootItemRefusedAt != 0 ? "was refused)." : "has no answer yet).") : "."));
+            }
+            _fightHoldSince = 0;
+            _fightHoldTickAt = 0;
+            return false;
+        }
+        if (_fightHoldSince == 0)
+        {
+            _fightHoldSince = now;
+            LootDiag(pending
+                ? $"[RynthAi] {LootTag}: 0x{(uint)corpseId:X8} waits for the fight: the move of 0x{(uint)_currentLootItemId:X8} '{_currentLootItemName}' sent {now - _currentLootItemMoveRequestedAt} ms ago " +
+                  (_currentLootItemRefusedAt != 0 ? "was refused" : "has no answer yet") +
+                  "; it is watched for but not sent again while combat has the tick (the client drops item moves during an attack); the corpse's timeout clock is stopped."
+                : $"[RynthAi] {LootTag}: 0x{(uint)corpseId:X8} waits for the fight: no pickup while combat has the tick; the corpse's timeout clock is stopped.");
+        }
+        PauseCorpseClockForFight(now);
+        if (pending && _openedContainerInventoryObservedAt != 0)
+            TickPendingCorpsePickup(settings, heldByFight: true);
+        return true;
+    }
+
+    /// <summary>
+    /// The corpse's timeout clock does not run while a fight holds it, as for the cast-answer hold
+    /// (PauseCorpseClockWhileHeld, and for the same reason: the open-container branch resets the
+    /// frozen age FreezeCorpseTimeout keeps). A pickup confirmed during the hold restarts the clock.
+    /// </summary>
+    private void PauseCorpseClockForFight(long now)
+    {
+        long last = _fightHoldTickAt;
+        _fightHoldTickAt = now;
+        if (last == 0 || _targetCorpseId == 0 || _corpseTargetSince == 0)
+            return;
+        long gap = now - last;
+        if (gap > 0 && gap <= PickupHoldMaxGapMs)
+            _corpseTargetSince += gap;
+    }
+
+    /// <summary>
+    /// The current item's next send is held (<paramref name="why"/>) although its last send has had
+    /// no answer (or a refusal) for PickupResendWaitLogMs past the answer wait (and past the end of a
+    /// fight's wait): said once per send, so no pickup waits without a line (R-20261102-204309-206c:
+    /// 19 s with none).
+    /// </summary>
+    private void NoteNextSendWaits(long now, long answerWaitMs, string why)
+    {
+        if (_currentLootItemResendWaitLogged)
+            return;
+        long since = now - _currentLootItemMoveRequestedAt;
+        long due = Math.Max(_currentLootItemMoveRequestedAt + answerWaitMs, _fightHoldEndedAt);
+        if (now - due < PickupResendWaitLogMs)
+            return;
+        _currentLootItemResendWaitLogged = true;
+        string last = _currentLootItemRefusedAt != 0 ? "was refused" : "has had no answer";
+        LootDiag($"[RynthAi] {LootTag}: the last send of 0x{(uint)_currentLootItemId:X8} '{_currentLootItemName}' ({since} ms ago) {last}; the next send waits: {why}.");
+    }
+
+    private void TickPendingCorpsePickup(LegacyUiSettings settings, bool heldByFight = false)
     {
         if (_objectCache == null || _openedContainerId == 0 || _currentLootItemId == 0)
         {
@@ -2481,6 +2590,20 @@ public sealed partial class RynthAiPlugin
             return;
         }
 
+        // A fight has the tick (HoldOpenCorpseForFight, R-20261102-204309-206c): the answer is
+        // watched for (above) and nothing else. No resend: the client drops an item move while the
+        // character attacks and ACE answers one that gets through "You're too busy". A send with
+        // no answer yet goes again after the fight without costing one of the 3 tries.
+        if (heldByFight)
+        {
+            if (!refused) _currentLootItemFightHeld = true;
+            _currentLootItemStillSince = 0;
+            _moveAwaitTickAt = 0;   // the fight's hold pays the corpse clock back, not the answer wait
+            return;
+        }
+
+        long answerWaitMs = PickupAnswerWaitMs();
+
         // Item still on corpse — wait before retrying the UseObject. The window counts from
         // when the character is still: while a pickup animation plays the engine holds the
         // move, and a retry timed from the send gave up on items whose move had not gone
@@ -2490,16 +2613,18 @@ public sealed partial class RynthAiPlugin
         {
             _currentLootItemStillSince = 0;
             if (_currentLootItemAwaitingAnswer) PauseCorpseClockWhileMoveAwaits(now);
+            NoteNextSendWaits(now, answerWaitMs, "the character keeps animating");
             return;
         }
         if (_currentLootItemStillSince == 0)
             _currentLootItemStillSince = now;
         bool freeRetry = busyRefusal && _currentLootItemFreeRetries < PickupFreeRetries;
+        // The last send had no answer when a fight took the tick: it goes again, free (bounded).
+        bool fightResend = !freeRetry && !refused && _currentLootItemFightHeld && _currentLootItemFightResends < PickupFightResends;
 
         // No answer yet: no resend before PickupAnswerWaitMs (2026-10-29, R-20261029-122319-321f).
         // The Loot Retry Timeout alone (0.5-1 s) is shorter than a slow server's answer (1.5-2.7 s
         // on Conquest), and a resend while the move is out is dropped by the client or refused.
-        long answerWaitMs = PickupAnswerWaitMs();
         long sinceSend = now - _currentLootItemMoveRequestedAt;
         if (_currentLootItemAwaitingAnswer && !refused && sinceSend < answerWaitMs)
         {
@@ -2509,7 +2634,10 @@ public sealed partial class RynthAiPlugin
         long verifyWindowMs = Math.Max(150, settings.LootRetryTimeoutMs);
         long windowStart = Math.Max(_currentLootItemMoveRequestedAt, _currentLootItemStillSince);
         if (!freeRetry && now - windowStart < verifyWindowMs)
+        {
+            NoteNextSendWaits(now, answerWaitMs, $"the character has not stood still for {verifyWindowMs} ms");
             return;
+        }
 
         // The last send failed: what it came to, once per send (a free resend's "too busy" is
         // not one of the tries). Refused after the pickup ran counts against the pack; no answer
@@ -2519,7 +2647,13 @@ public sealed partial class RynthAiPlugin
         {
             _currentLootItemAwaitingAnswer = false;
             long answerMs = refused ? _currentLootItemRefusedAt - _currentLootItemMoveRequestedAt : sinceSend;
-            if (!refused)
+            if (fightResend)
+            {
+                // The fight, not the pack: no timeout counted against it (JudgeLootDest).
+                _currentLootItemTimedOut = true;
+                lastTry = $"no answer in {answerMs} ms, a fight in between";
+            }
+            else if (!refused)
             {
                 _currentLootItemDestTimeouts++;
                 _currentLootItemTimedOut = true;
@@ -2540,7 +2674,7 @@ public sealed partial class RynthAiPlugin
                 lastTry = $"too busy, {answerMs} ms after the send";
         }
 
-        if (!freeRetry && _currentLootItemMoveAttempts >= 3)
+        if (!freeRetry && !fightResend && _currentLootItemMoveAttempts >= 3)
         {
             // None of the tries landed. When the server refused them after running the pickup,
             // the pack they went to is full (its contents unknown to the client): leave it out
@@ -2589,7 +2723,12 @@ public sealed partial class RynthAiPlugin
         }
 
         if (_busyCount > 0)
-            return; // Client is busy — don't queue retry
+        {
+            // Client is busy — don't queue retry. (R-20261102-204309-206c: a shot's busy count
+            // held the resend here, with no line, until the corpse timed out.)
+            NoteNextSendWaits(now, answerWaitMs, $"the client's busy count is {_busyCount}");
+            return;
+        }
         if (PickupHeldByServerAction())
             return; // a retry now would be refused as too busy and use up an attempt
 
@@ -2604,8 +2743,11 @@ public sealed partial class RynthAiPlugin
         bool retried = retry == LootPickupResult.Moved || retry == LootPickupResult.Used;
         if (freeRetry)
             _currentLootItemFreeRetries++;
+        else if (fightResend)
+            _currentLootItemFightResends++;
         else
             _currentLootItemMoveAttempts++;
+        _currentLootItemFightHeld = false;
         _currentLootItemErrSeqAtSend = errSeqAtSend;
         _currentLootItemMoveRequestedAt = now;
         if (retried) NoteLootMoveSent();
@@ -2614,6 +2756,10 @@ public sealed partial class RynthAiPlugin
         _lastLootActionAt = now;
         LootDiag(freeRetry
             ? $"[RynthAi] {LootTag}: the server refused 0x{(uint)_currentLootItemId:X8} as too busy ({refusedAfter} ms after the send, before its pickup ran; error 0x{refusal:X}); sending it again now the character is still."
+            : fightResend
+            ? $"[RynthAi] {LootTag}: sending 0x{(uint)_currentLootItemId:X8} again after the fight" +
+              (lastTry.Length > 0 ? $" (last: {lastTry})" : "") +
+              $"; not one of its 3 tries ({_currentLootItemMoveAttempts} used)."
             : $"[RynthAi] {LootTag}: retrying use for 0x{(uint)_currentLootItemId:X8} attempt {_currentLootItemMoveAttempts}" +
               (lastTry.Length > 0 ? $" (last: {lastTry})." : "."));
 
@@ -2790,8 +2936,8 @@ public sealed partial class RynthAiPlugin
         if (!settings.IsMacroRunning || (!settings.EnableLooting && !ForcedLootHolds()))
             return false;
 
-        // The claim's own full stop (TickCorpseOpening): with Boost Nav Priority on the looter
-        // stands down, so there is no loot work to offer (R-20261031-203155-cea0).
+        // The claim's own full stop (TickCorpseOpening): with Boost Nav Priority on and a nav route
+        // running the looter stands down, so there is no loot work to offer (R-20261031-203155-cea0).
         if (BoostNavHoldsLoot(settings) && !ForcedLootHolds())
             return false;
 
@@ -2860,7 +3006,8 @@ public sealed partial class RynthAiPlugin
     }
 
     /// <summary>
-    /// Boost Nav Priority is passing by a corpse in range that would be looted with it off. For
+    /// Boost Nav Priority, with a nav route running, is passing by a corpse in range that would be
+    /// looted with it off. For
     /// the once-per-session notice only (RynthAiPlugin.BoostNav.cs), which calls it every
     /// BoostNavLootCheckMs until it has spoken. The scan's loot-starvation mark is put back: it
     /// belongs to HasLootWork's tick, not to this look.
@@ -3725,6 +3872,9 @@ public sealed partial class RynthAiPlugin
         _currentLootItemPipelined = false;
         _currentLootItemErrSeqAtSend = 0;
         _currentLootItemFreeRetries = 0;
+        _currentLootItemFightHeld = false;
+        _currentLootItemFightResends = 0;
+        _currentLootItemResendWaitLogged = false;
         _currentLootItemActionLabel = string.Empty;
         _currentLootItemName = string.Empty;
         _currentLootItemIsSalvage = false;
@@ -4103,6 +4253,8 @@ public sealed partial class RynthAiPlugin
         _lastLootActionAt = 0;
         _corpseIdsRequested = false;
         _corpseApproachTurnsActive = false;
+        _fightHoldSince = 0;
+        _fightHoldTickAt = 0;
         ResetCurrentLootItem();
         _processedCorpseItems.Clear();
         _corpseItemAttempts.Clear();

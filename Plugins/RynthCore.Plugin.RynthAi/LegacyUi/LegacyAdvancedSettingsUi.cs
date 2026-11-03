@@ -790,7 +790,7 @@ internal sealed class LegacyAdvancedSettingsUi
             case "Navigation":
                 ImGui.Checkbox("Boost Nav Priority", ref _settings.BoostNavPriority);
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("RynthAi only navigates: no hunting, no looting, no fighting back (owner's rule, 2026-11-02). With no route it stands idle. Buffing and healing still run.");
+                    ImGui.SetTooltip("While a nav route runs (a loaded route or a follow), RynthAi only follows it: no hunting, no looting, no fighting back. With no route, at the end of a Once route, or during Outdoor Hunt it hunts and loots as usual. Buffing and healing always run.");
                 ImGui.SetNextItemWidth(120);
                 ImGui.InputFloat("Nav point reach (yd)", ref _settings.FollowNavMin, 0.1f, 1.0f, "%.1f");
                 _settings.FollowNavMin = LegacyUiSettings.ClampFollowNavMin(_settings.FollowNavMin);
@@ -1105,6 +1105,16 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Checkbox("Pickup with macro off", ref _settings.LootChestsMacroOff);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("A chest you open is looted by the loaded loot profile\neven with the macro or Looting off.");
+                if (_settings.LootChestsMacroOff)
+                {
+                    ImGui.Indent();
+                    ImGui.Checkbox("Leave the chest open", ref _settings.LootChestsMacroOffLeaveOpen);
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip("When the pickup is done the chest stays open and chat says what was taken,\n" +
+                                         "so you can check it and take anything your profile missed. Untick it and\n" +
+                                         "RynthAi closes the chest when it's done (some chests lock again on close).");
+                    ImGui.Unindent();
+                }
                 ImGui.Checkbox("Jump When Looting", ref _settings.LootJumpEnabled);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Hop (the keyboard jump) just before each pickup,\nso the server skips the bend-down. The hop has a fixed height.");

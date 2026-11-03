@@ -51,7 +51,11 @@ internal readonly struct ArbiterInputs
 
     /// <summary>Actively engaged (a live attack target), not merely "something is engageable".</summary>
     public readonly bool CombatEngaged;
-    /// <summary>BoostNavPriority: RynthAi only navigates (no combat, no looting), route or not.</summary>
+    /// <summary>
+    /// Boost Nav Priority is on AND a nav route runs (BoostNavRule.Active): RynthAi only follows the
+    /// route (no combat, no looting). False with no route, at the end of a Once route, and during the
+    /// Outdoor Hunt, so the flag changes nothing there (R-20261103-000159-a65e).
+    /// </summary>
     public readonly bool BoostNav;
     /// <summary>BoostLootPriority — looting preempts combat.</summary>
     public readonly bool BoostLoot;
@@ -115,15 +119,17 @@ internal sealed class ActivityArbiter
         if (s.WantBuffing) return BotActivity.Buffing;
 
         // ── User priority overrides ────────────────────────────────────────
-        // BoostNavPriority (owner's rule, 2026-11-02): RynthAi ONLY navigates. No
-        // hunting, no looting, and no fighting back even with a monster on it: with
-        // a route (or a follow) it navigates, with nothing to navigate it stands
-        // idle. Buffing (above) still outranks it. This used to be guarded by
-        // WantNav, so with no route the flag did nothing and the bot hunted as
-        // usual; the player never noticed it was on and only saw that it would not
-        // loot (R-20261102-041824-3f7c). Two things still get a slot: a container
-        // the player flagged with /ra lootthis (looted with Boost Nav on, as with
-        // the macro off), and the salvage queue (an inventory chore, no fight).
+        // BoostNavPriority (owner's corrected rule, 2026-11-02, R-20261103-000159-a65e):
+        // "Boost nav priority should only run the nav route, not from mob to mob. So
+        // when no nav route is loaded it should fight." s.BoostNav is true only while
+        // a nav route (or a follow) runs (BoostNavRule.Active); then RynthAi only
+        // follows it: no hunting, no looting, no fighting back even with a monster on
+        // it. With no route, a Once route at its end, or the Outdoor Hunt, s.BoostNav
+        // is false and the default order below runs, as with the flag off. Buffing
+        // (above) still outranks it. Two things still get a slot: a container the
+        // player flagged with /ra lootthis (looted with Boost Nav on, as with the
+        // macro off), and the salvage queue (an inventory chore, no fight). Idle is
+        // left for the moment nav itself waits (travelling back to your corpse).
         if (s.BoostNav)
         {
             if (s.WantNav) return BotActivity.Navigating;

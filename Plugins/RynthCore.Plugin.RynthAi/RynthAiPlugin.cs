@@ -922,7 +922,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     /// as nav work in its own right: without this, turning Follow on with no route loaded would
     /// leave the arbiter's wantNav false and NavigationEngine.Tick would never do the following.
     /// </summary>
-    private static bool IsFollowActive(LegacyUiSettings settings)
+    internal static bool IsFollowActive(LegacyUiSettings settings)
         => (settings.FollowMode && settings.FollowTargetId != 0)
            || (settings.CurrentRoute != null && settings.CurrentRoute.RouteType == NavRouteType.Follow
                && settings.CurrentRoute.FollowTargetName.Length > 0);
@@ -930,8 +930,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     /// <summary>
     /// The arbiter's WantNav input: the macro runs, navigation is on, and there is a route (or a
     /// follow) to run. Travelling back to your corpse (RynthNav walks): RynthAi's own route waits.
-    /// Also read by BoostNavHoldsLoot, so the looter stands down for Boost Nav Priority exactly
-    /// when the arbiter's BoostNav clause can give nav the tick.
+    /// The Outdoor Hunt's walks count here (nav walks them); Boost Nav Priority's own test of "a
+    /// nav route runs" is BoostNavRule.NavRouteRuns, which leaves them out.
     /// </summary>
     private bool NavWantsTick(LegacyUiSettings settings)
         => settings.IsMacroRunning && settings.EnableNavigation
@@ -1913,7 +1913,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     var inputs = new ArbiterInputs(
                         settings.IsMacroRunning, wantBuff, wantCombat, wantLoot, wantSalvage, wantNav,
                         combatEngaged: engaged,
-                        boostNav:      settings.BoostNavPriority,
+                        boostNav:      BoostNavRule.Active(settings),   // only while a nav route runs (R-20261103-000159-a65e)
                         boostLoot:     settings.BoostLootPriority,
                         followActive:  followActive,
                         lootStarved:   lootStarved,

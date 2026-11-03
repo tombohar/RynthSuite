@@ -1406,6 +1406,7 @@ internal sealed partial class LegacyDashboardRenderer
                 LootOnlyRareCorpses        = s.LootOnlyRareCorpses,
                 LootJumpEnabled            = s.LootJumpEnabled,
                 LootChestsMacroOff         = s.LootChestsMacroOff,
+                LootChestsMacroOffLeaveOpen = s.LootChestsMacroOffLeaveOpen,
                 LootJumpHeight             = s.LootJumpHeight,
                 LootOwnership              = s.LootOwnership,
                 LootOwnCorpse              = s.LootOwnCorpse,
@@ -1672,6 +1673,7 @@ internal sealed partial class LegacyDashboardRenderer
             s.LootOnlyRareCorpses        = p.LootOnlyRareCorpses;
             s.LootJumpEnabled            = p.LootJumpEnabled;
             s.LootChestsMacroOff         = p.LootChestsMacroOff;
+            s.LootChestsMacroOffLeaveOpen = p.LootChestsMacroOffLeaveOpen;
             s.LootJumpHeight             = p.LootJumpHeight;
             s.LootOwnership              = p.LootOwnership;
             if (p.EscapeHazards is bool escape) s.EscapeHazards = escape;                 // absent = unchanged
@@ -2059,6 +2061,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.LootCorpseTimeoutMs      = tmp.LootCorpseTimeoutMs;
         dst.LootJumpEnabled          = tmp.LootJumpEnabled;
         dst.LootChestsMacroOff       = tmp.LootChestsMacroOff;
+        dst.LootChestsMacroOffLeaveOpen = tmp.LootChestsMacroOffLeaveOpen;
         dst.LootJumpHeight           = tmp.LootJumpHeight;
         dst.SalvageOpenDelayFirstMs  = tmp.SalvageOpenDelayFirstMs;
         dst.SalvageOpenDelayFastMs   = tmp.SalvageOpenDelayFastMs;

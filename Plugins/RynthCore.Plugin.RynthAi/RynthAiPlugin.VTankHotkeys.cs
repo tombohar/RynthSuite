@@ -243,8 +243,11 @@ public sealed partial class RynthAiPlugin
         (s.BoostNavPriority, s.BoostLootPriority) = NextPriority(s.BoostNavPriority, s.BoostLootPriority, nav, loot, arg);
         dash!.SaveSettings();
         string On(bool b) => b ? "on" : "off";
-        // Owner's rule (2026-11-02): with Boost Nav on RynthAi only navigates; say so when it comes on.
-        string navOnly = nav && s.BoostNavPriority ? " RynthAi only navigates (no hunting, no looting)." : "";
+        // Owner's corrected rule (2026-11-02, R-20261103-000159-a65e): Boost Nav counts only while a
+        // nav route runs; say so when it comes on.
+        string navOnly = nav && s.BoostNavPriority
+            ? " While a nav route runs RynthAi only follows it (no hunting, no looting); with no route it hunts and loots as usual."
+            : "";
         ReplyOk(nav && loot ? $"[RynthAi] Boost Nav Priority {On(s.BoostNavPriority)}, Boost Loot Priority {On(s.BoostLootPriority)}.{navOnly}"
                  : nav ? $"[RynthAi] Boost Nav Priority {On(s.BoostNavPriority)}.{navOnly}"
                  : $"[RynthAi] Boost Loot Priority {On(s.BoostLootPriority)}.");
@@ -366,7 +369,7 @@ public sealed partial class RynthAiPlugin
         }
         string note = !settings.IsMacroRunning ? " (the macro is off: this container only)"
             : !settings.EnableLooting ? " (Looting is off: this container only)"
-            : BoostNavHoldsLoot(settings) ? " (Boost Nav Priority is on: this container only)" : "";
+            : BoostNavHoldsLoot(settings) ? " (Boost Nav Priority is on and a nav route runs: this container only)" : "";
         LootDiag($"[RynthAi] LootThisCont: 0x{(uint)id:X8} '{name}' flagged{(already ? " (already open as the loot container)" : "")}.");
         ChatLine($"[RynthAi] LootThisCont: looting {name}{note}.");
     }

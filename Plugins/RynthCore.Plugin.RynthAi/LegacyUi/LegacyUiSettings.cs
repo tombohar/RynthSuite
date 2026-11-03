@@ -151,6 +151,12 @@ public sealed class LegacyUiSettings
     /// macro's own chest looting takes it.
     /// </summary>
     public bool LootChestsMacroOff = true;
+    /// <summary>
+    /// Pickup with macro off > Leave the chest open (2026-11-02, off by default: the chest is closed when done, as before): when the pickup is done the
+    /// chest stays open and chat says so, instead of RynthAi closing it (a chest that locks itself on close
+    /// can't be opened again without its key or quest item).
+    /// </summary>
+    public bool LootChestsMacroOffLeaveOpen = false;
     public int LootJumpHeight = 10; // kept for old profiles and metas; jump-loot uses the keyboard tap jump (fixed height)
 
     public int SalvageOpenDelayFirstMs = 400;
@@ -1374,6 +1380,7 @@ public sealed class SettingsBridgePayload
     public bool LootOnlyRareCorpses { get; set; }
     public bool LootJumpEnabled { get; set; }
     public bool LootChestsMacroOff { get; set; } = true;   // an engine that doesn't know it leaves it on
+    public bool LootChestsMacroOffLeaveOpen { get; set; }   // off: an engine that doesn't know it closes, as before
     public int LootJumpHeight { get; set; }
     public int LootOwnership { get; set; }
     // Nullable, as CastBuffsOverItemBuffs: an engine that predates them doesn't send them,

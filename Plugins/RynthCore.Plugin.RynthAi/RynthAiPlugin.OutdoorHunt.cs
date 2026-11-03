@@ -216,7 +216,7 @@ public sealed partial class RynthAiPlugin
         _dunPatrolActive = false;   // the hunt's route replaces the patrol's
         CopyHuntSettings(s);
         _hunt.Start(RynthClock.Now, me);
-        _huntRoute = new NavRouteParser { RouteType = NavRouteType.Once };
+        _huntRoute = new NavRouteParser { RouteType = NavRouteType.Once, OutdoorHuntWalk = true };
         s.CurrentNavPath = string.Empty;
         s.CurrentRoute = _huntRoute;
         s.ActiveNavIndex = 0;
@@ -303,7 +303,8 @@ public sealed partial class RynthAiPlugin
 
     private void InstallHuntRoute(LegacyUiSettings s, IReadOnlyList<OutdoorHunt.Vec> corners)
     {
-        var route = new NavRouteParser { RouteType = NavRouteType.Once };
+        // Marked as the hunt's walk: Boost Nav Priority does not count it as a nav route (BoostNavRule).
+        var route = new NavRouteParser { RouteType = NavRouteType.Once, OutdoorHuntWalk = true };
         foreach (var c in corners)
         {
             route.Points.Add(new NavPoint
