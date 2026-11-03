@@ -37,6 +37,7 @@ internal static class OneTouchHealTests
         r.Add("one-touch: a request that stays blocked gives up after OneTouchWaitMs and says why", HealGivesUp);
         r.Add("one-touch: stamina takes a stamina kit, a listed potion out of Magic stance, else Revitalize", StaminaChoice);
         r.Add("vitals: a stamina kit is typed StaminaKit and never taken by the potion step (it was drunk with no target)", StaminaKitNeverDrunk);
+        r.Add("vitals: a healing item that is no kit (a Health Tincture listed as HealthKit) is drunk with no target, never used on yourself", NonKitHealItemDrunk);
         r.Add("buff wand: a caster that needs untrained War Magic is never picked to buff; the next listed one is", BuffWandSkipsUnwieldable);
         r.Add("one-touch: mana casts Stamina to Mana; with stamina at the floor it refills stamina first", ManaChoice);
         r.Add("one-touch: /ra heal, /ra stam and /ra mana request a pass (and say so before login)", Commands);
@@ -291,6 +292,37 @@ internal static class OneTouchHealTests
         Check.False(BuffManager.IsKitName("Stamina Tincture"), "a potion is not a kit");
     }
 
+    // R-20261103-022318-418c (Conquest, 2026-11-02): a custom Health Tincture (not Food, no kit) sat on the
+    // Items list typed HealthKit for the "Health" in its name. The kit step used it on the player every
+    // 8 s, the server refused each one ("can't use Health Tincture on ..."), and the bot stood at 73%
+    // health until the player healed by hand.
+    private static void NonKitHealItemDrunk()
+    {
+        // Listed first, typed HealthKit, a real kit listed after it: the kit goes on the player.
+        var r = Make(CombatMode.Melee, hp: 60, kit: true, healPotion: true, tweak: s =>
+        {
+            s.ConsumableRules[0].Type = "HealthKit";
+            s.ConsumableRules.Add(new ConsumableRule { Id = unchecked((int)Kit), Name = "Peerless Healing Kit", Type = "HealthKit" });
+        });
+        r.B.RequestOneTouch(OneTouchVital.Health);
+        Pump(r.B, OneTouchVital.Health);
+        Check.False(FakeHost.UsesOn.Any(u => u.Source == HealPotion), "the tincture is never used on the player");
+        Check.True(FakeHost.UsesOn.Any(u => u.Source == Kit && u.Target == Player), "the listed kit is the kit");
+
+        // No kit: the potion step drinks it, no target.
+        r = Make(CombatMode.Melee, hp: 60, healPotion: true, tweak: s => s.ConsumableRules[0].Type = "HealthKit");
+        r.B.RequestOneTouch(OneTouchVital.Health);
+        Pump(r.B, OneTouchVital.Health);
+        Check.Eq(FakeHost.UsesOn.Count, 0, "nothing used on the player");
+        Check.True(FakeHost.Uses.Contains(HealPotion), "the tincture is drunk: " + AllChat);
+        Check.Eq(FakeHost.Casts.Count, 0, "melee: no Heal Self while it can heal");
+
+        // Adding one to Items types it HealthPotion now; a kit stays HealthKit.
+        var detect = typeof(LegacyWeaponsUi).GetMethod("DetectConsumableType", BindingFlags.Static | BindingFlags.NonPublic)!;
+        Check.Eq((string)detect.Invoke(null, new object[] { new WorldObject(0x60002003, "Health Tincture", AcObjectClass.Misc) })!, "HealthPotion", "a tincture is drunk");
+        Check.Eq((string)detect.Invoke(null, new object[] { new WorldObject(0x60002004, "Peerless Healing Kit", AcObjectClass.HealingKit) })!, "HealthKit", "a kit is a kit");
+        Check.Eq((string)detect.Invoke(null, new object[] { new WorldObject(0x60002005, "Treated Healing Kit", AcObjectClass.Unknown) })!, "HealthKit", "a kit by name, class not read yet");
+    }
     // 2026-10-18 01:00-01:24: with the buff wand gone, buffing tried an Electric Baton that needs War
     // Magic (untrained) every 8 s for 24 minutes; Heal Self couldn't go and Drakkon died.
     private static void BuffWandSkipsUnwieldable()

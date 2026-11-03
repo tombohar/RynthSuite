@@ -238,7 +238,7 @@ public partial class BuffManager
                     foreach (var r in _settings.ConsumableRules)
                         if (r.Type.Equals("HealthKit", StringComparison.OrdinalIgnoreCase)
                             && !(r.Name ?? "").Contains("Stamina Kit", StringComparison.OrdinalIgnoreCase)
-                            && ConsumableLookup.Resolve(_worldObjectCache, r) != null) { capable = true; break; }
+                            && ConsumableLookup.Resolve(_worldObjectCache, r) is WorldObject wo && IsUseOnSelfKit(wo)) { capable = true; break; }
                 }
                 if (!capable && _settings.UsePotions && HasListedPotion("HealthPotion")) capable = true;
             }

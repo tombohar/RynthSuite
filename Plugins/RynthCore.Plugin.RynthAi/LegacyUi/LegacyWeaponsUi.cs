@@ -228,11 +228,12 @@ internal sealed class LegacyWeaponsUi
         string? potion = PotionType(wo);
         if (potion != null) return potion;
 
-        // Health items
+        // Health items: a kit is used on yourself, anything else (Conquest's Health Tincture is
+        // no Food) is used with no target, like a potion.
         if (name.Contains("Heal", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("Health", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("Elixir of Healing", StringComparison.OrdinalIgnoreCase))
-            return "HealthKit";
+            return BuffManager.IsUseOnSelfKit(wo) ? "HealthKit" : "HealthPotion";
 
         // Mana items. A mana kit (it restores your own mana, like a stamina kit) is no stone: typed
         // ManaStone it switched off the ordinary stones and Drakkon's gear ran dry (10-23).

@@ -2493,9 +2493,9 @@ public partial class BuffManager : IDisposable
     {
         if (_worldObjectCache == null) return false;
         foreach (var rule in _settings.ConsumableRules)
-            if (Array.FindIndex(types, t => t.Equals(rule.Type, StringComparison.OrdinalIgnoreCase)) >= 0
-                && !IsKitName(rule.Name)
-                && ConsumableLookup.Resolve(_worldObjectCache, rule) != null)
+            if (!IsKitName(rule.Name)
+                && ConsumableLookup.Resolve(_worldObjectCache, rule) is WorldObject wo
+                && Array.FindIndex(types, t => t.Equals(DrinkType(rule, wo), StringComparison.OrdinalIgnoreCase)) >= 0)
                 return true;
         return false;
     }
@@ -2509,6 +2509,20 @@ public partial class BuffManager : IDisposable
     internal static bool IsKitName(string? name) =>
         !string.IsNullOrEmpty(name) && name.TrimEnd().EndsWith(" Kit", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// A healing kit, used on yourself: the kit class, or a name ending in "Kit". Any other item
+    /// listed as a healing item is used with no target, like a potion. Conquest's Health Tincture
+    /// (no kit, not Food) was typed HealthKit for the "Health" in its name, used on the player
+    /// and refused by the server ("can't use Health Tincture on ...") every 8 s, the bot never
+    /// healing until the player did it by hand (report R-20261103-022318-418c, 2026-11-02).
+    /// </summary>
+    internal static bool IsUseOnSelfKit(WorldObject wo) =>
+        wo.ObjectClass == AcObjectClass.HealingKit || IsKitName(wo.Name);
+
+    /// <summary>The potion type <paramref name="rule"/> is drunk as: a HealthKit rule on an item that is no kit is a health potion.</summary>
+    internal static string DrinkType(ConsumableRule rule, WorldObject wo) =>
+        rule.Type.Equals("HealthKit", StringComparison.OrdinalIgnoreCase) && !IsUseOnSelfKit(wo) ? "HealthPotion" : rule.Type;
+
     /// <summary><paramref name="listedOnly"/>: only the Consumables list, not any potion in the pack.</summary>
     private bool AttemptPotion(bool listedOnly, params string[] types)
     {
@@ -2516,10 +2530,10 @@ public partial class BuffManager : IDisposable
         if ((RynthClock.Now - _lastPotionAt).TotalMilliseconds < 2500) return VitalNo("one drunk under 2.5 s ago");
         foreach (var rule in _settings.ConsumableRules)
         {
-            if (Array.FindIndex(types, t => t.Equals(rule.Type, StringComparison.OrdinalIgnoreCase)) < 0) continue;
             if (IsKitName(rule.Name)) continue;   // the kit path uses it, on yourself
             if (ConsumableLookup.Resolve(_worldObjectCache, rule) is not WorldObject potion) continue;
             if (IsKitName(potion.Name)) continue;
+            if (Array.FindIndex(types, t => t.Equals(DrinkType(rule, potion), StringComparison.OrdinalIgnoreCase)) < 0) continue;
             if (HeldCastBlocksItemUse(out string heldWhy)) return VitalNo(heldWhy);
             _host.Log($"[RynthAi] Vitals: drinking {rule.Name} ({rule.Type})" + (potion.Id != rule.Id ? " from a new stack." : "."));
             _host.UseFor(unchecked((uint)potion.Id), "Buff", $"vitals: drink {rule.Name} ({rule.Type}) from the Items list");
@@ -2670,7 +2684,8 @@ public partial class BuffManager : IDisposable
         foreach (var r in _settings.ConsumableRules)
             if (r.Type.Equals("HealthKit", StringComparison.OrdinalIgnoreCase)
                 && !(r.Name ?? "").Contains("Stamina Kit", StringComparison.OrdinalIgnoreCase)   // a stamina kit heals no health
-                && ConsumableLookup.Resolve(_worldObjectCache, r) is WorldObject wo) { kit = wo; break; }
+                && ConsumableLookup.Resolve(_worldObjectCache, r) is WorldObject wo
+                && IsUseOnSelfKit(wo)) { kit = wo; break; }   // no kit: the potion step drinks it
         if (kit == null) { kit = BestPackHealingKit(); fromPack = true; }
         if (kit == null) return VitalNo("no healing kit");
         if (KitRetryWait(out string kitWait)) return VitalNo(kitWait);
