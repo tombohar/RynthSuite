@@ -180,9 +180,12 @@ public sealed class LegacyUiSettings
     public int MakeRationsBelow = 5;   // 0 = don't cook field rations
     public bool UseKitsInMagicMode = true;
     public bool PeaceModeForKits = false;
-    // Use a healing/stamina kit only when its success chance (ACE's own skill check) is at
+    // Use a healing kit only when its success chance (ACE's own skill check) is at
     // least this %, else cast the spell instead, as VTank does. 0 = always use kits.
     public int KitMinSuccessPct = 70;
+    // The same for stamina kits (2026-11-03, its own setting): below it Revitalize Self (or a
+    // stamina potion) goes instead. 0 = always use stamina kits.
+    public int StaminaKitMinSuccessPct = 70;
     // Emergency heal: at or under this health %, a healing kit (out of Magic mode, ahead of Heal
     // At's chain) and, while a cast is pending, a kit or potion. 0 = off.
     public int EmergencyHealAt = 30;
@@ -1212,6 +1215,7 @@ public sealed class SettingsBridgePayload
     public bool UseKitsInMagicMode { get; set; }
     public bool PeaceModeForKits { get; set; }
     public int KitMinSuccessPct { get; set; } = 70;
+    public int StaminaKitMinSuccessPct { get; set; } = 70;   // an engine that doesn't know it keeps 70
     public int EmergencyHealAt { get; set; } = 30;
     public int StaminaToHealthAt { get; set; } = 30;
     public int StaminaToHealthMinStamina { get; set; } = 20;

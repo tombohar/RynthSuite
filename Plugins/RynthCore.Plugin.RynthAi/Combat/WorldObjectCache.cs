@@ -1475,6 +1475,7 @@ public class WorldObjectCache
                 UpsertDirectInventoryItem(cachedItem);
         }
 
+        if (_directInventory.Count > 0) DropVanishedInventory();
         return _directInventory.ToList();
         }
     }
@@ -2252,6 +2253,42 @@ public class WorldObjectCache
         wo.Cache = this;
         UpsertDirectInventoryItem(wo);
         return true;
+    }
+
+    /// <summary>Inventory entries dropped by <see cref="DropVanishedInventory"/> (for the log and the tests).</summary>
+    internal int VanishedDropped { get; private set; }
+
+    /// <summary>
+    /// After a live walk: an inventory entry the walk didn't find and the client can't even name any
+    /// more is gone (its removal was missed), so it leaves the inventory set. Wielded gear (never in
+    /// the walk) and anything the client still knows stay: a partial walk can't empty the pack.
+    /// A used-up Treated Healing Kit stayed in the set and was "used" 70 times after a respawn, the
+    /// server answering at once with no heal (2026-11-03); every reader of GetInventory (kits,
+    /// potions, tinctures, mana stones, component counts, meta item counts, /mt use) saw it. Under _gate.
+    /// </summary>
+    private void DropVanishedInventory()
+    {
+        List<int>? gone = null;
+        foreach (int id in _inventory)
+        {
+            if (_directInventoryIds.Contains(id)) continue;
+            uint uid = unchecked((uint)id);
+            if (_host.TryGetObjectName(uid, out string name) && !string.IsNullOrWhiteSpace(name)) continue;
+            (gone ??= new List<int>()).Add(id);
+        }
+        if (gone == null) return;
+        foreach (int id in gone)
+        {
+            string name = _byId.TryGetValue(id, out var wo) ? wo.Name : string.Empty;
+            _inventory.Remove(id);
+            _byId.Remove(id);
+            _classifyRetry.Remove(unchecked((uint)id));
+            _slowRetry.Remove(unchecked((uint)id));
+            _reclassifySkipState.Remove(unchecked((uint)id));
+            VanishedDropped++;
+            _host.Log($"[RynthAi] Inventory: 0x{unchecked((uint)id):X8} '{name}' is gone from the client (used up, given or dropped; its removal was missed): dropped from the cache.");
+        }
+        _inventoryDirty = true;
     }
 
     private void UpsertDirectInventoryItem(WorldObject item)

@@ -1260,6 +1260,7 @@ internal sealed partial class LegacyDashboardRenderer
                 UseKitsInMagicMode         = s.UseKitsInMagicMode,
                 PeaceModeForKits           = s.PeaceModeForKits,
                 KitMinSuccessPct           = s.KitMinSuccessPct,
+                StaminaKitMinSuccessPct    = s.StaminaKitMinSuccessPct,
                 EmergencyHealAt            = s.EmergencyHealAt,
                 StaminaToHealthAt          = s.StaminaToHealthAt,
                 StaminaToHealthMinStamina  = s.StaminaToHealthMinStamina,
@@ -1524,6 +1525,7 @@ internal sealed partial class LegacyDashboardRenderer
             s.UseKitsInMagicMode         = p.UseKitsInMagicMode;
             s.PeaceModeForKits           = p.PeaceModeForKits;
             s.KitMinSuccessPct           = Math.Clamp(p.KitMinSuccessPct, 0, 100);
+            s.StaminaKitMinSuccessPct    = Math.Clamp(p.StaminaKitMinSuccessPct, 0, 100);
             s.EmergencyHealAt            = Math.Clamp(p.EmergencyHealAt, 0, 100);
             s.StaminaToHealthAt          = Math.Clamp(p.StaminaToHealthAt, 0, 100);
             s.StaminaToHealthMinStamina  = Math.Clamp(p.StaminaToHealthMinStamina, 0, 100);
@@ -2081,6 +2083,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.UseKitsInMagicMode       = tmp.UseKitsInMagicMode;
         dst.PeaceModeForKits         = tmp.PeaceModeForKits;
         dst.KitMinSuccessPct         = tmp.KitMinSuccessPct;
+        dst.StaminaKitMinSuccessPct  = tmp.StaminaKitMinSuccessPct;
         dst.EmergencyHealAt          = tmp.EmergencyHealAt;
         dst.StaminaToHealthAt        = tmp.StaminaToHealthAt;
         dst.StaminaToHealthMinStamina= tmp.StaminaToHealthMinStamina;

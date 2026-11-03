@@ -99,6 +99,7 @@ internal static class Program
         LootNothingLineTests.Register(runner);
         ChestLootTests.Register(runner);
         ItemToolTests.Register(runner);
+        VanishedItemTests.Register(runner);
         OwnCorpseTests.Register(runner);
         UseRefusalTests.Register(runner);
         CorpseKillerTests.Register(runner);

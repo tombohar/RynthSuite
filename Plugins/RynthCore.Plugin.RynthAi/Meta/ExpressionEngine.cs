@@ -3626,6 +3626,7 @@ internal sealed partial class ExpressionEngine
             ["UseKitsInMagicMode"] = (() => B(s.UseKitsInMagicMode), v => s.UseKitsInMagicMode = ToDouble(v) != 0),
             ["PeaceModeForKits"] = (() => B(s.PeaceModeForKits), v => s.PeaceModeForKits = ToDouble(v) != 0),
             ["KitMinSuccessPct"] = (() => s.KitMinSuccessPct.ToString(CultureInfo.InvariantCulture), v => s.KitMinSuccessPct = Math.Clamp((int)ToDouble(v), 0, 100)),
+            ["StaminaKitMinSuccessPct"] = (() => s.StaminaKitMinSuccessPct.ToString(CultureInfo.InvariantCulture), v => s.StaminaKitMinSuccessPct = Math.Clamp((int)ToDouble(v), 0, 100)),
             ["EmergencyHealAt"] = (() => s.EmergencyHealAt.ToString(CultureInfo.InvariantCulture), v => s.EmergencyHealAt = Math.Clamp((int)ToDouble(v), 0, 100)),
             ["StaminaToHealthAt"] = (() => s.StaminaToHealthAt.ToString(CultureInfo.InvariantCulture), v => s.StaminaToHealthAt = Math.Clamp((int)ToDouble(v), 0, 100)),
             ["StaminaToHealthMinStamina"] = (() => s.StaminaToHealthMinStamina.ToString(CultureInfo.InvariantCulture), v => s.StaminaToHealthMinStamina = Math.Clamp((int)ToDouble(v), 0, 100)),

@@ -2691,7 +2691,7 @@ public partial class BuffManager : IDisposable
         if (KitRetryWait(out string kitWait)) return VitalNo(kitWait);
         // Too likely to fail on what's missing (KitMinSuccessPct): let the spell have it.
         uint missing = _vitals.MaxHealth > _vitals.CurrentHealth ? _vitals.MaxHealth - _vitals.CurrentHealth : 0;
-        if (!ignoreMinSuccess && !KitChanceOk(kit.Id, kit.Name ?? "", missing, _settings.PeaceModeForKits)) return VitalNo($"{kit.Name} under Kit Min Success %");
+        if (!ignoreMinSuccess && !KitChanceOk(kit.Id, kit.Name ?? "", missing, _settings.PeaceModeForKits, _settings.KitMinSuccessPct)) return VitalNo($"{kit.Name} under Kit Min Success %");
         if (_settings.PeaceModeForKits && mode != CombatMode.NonCombat && _host.HasChangeCombatMode)
         {
             // Only a request that went out starts the wait: a refusal (the engine turns stance changes away
@@ -2728,7 +2728,8 @@ public partial class BuffManager : IDisposable
         if (kit == null) return false;
         if (KitRetryWait(out _)) return false;
         uint missing = _vitals.MaxStamina > _vitals.CurrentStamina ? _vitals.MaxStamina - _vitals.CurrentStamina : 0;
-        if (!KitChanceOk(kit.Id, kit.Name ?? "", missing, _settings.PeaceModeForKits)) return false;
+        // Its own line (Stamina Kit Min Success %): below it Revitalize Self or a potion goes.
+        if (!KitChanceOk(kit.Id, kit.Name ?? "", missing, _settings.PeaceModeForKits, _settings.StaminaKitMinSuccessPct)) return false;
         if (_settings.PeaceModeForKits && mode != CombatMode.NonCombat && _host.HasChangeCombatMode)
         {
             if (_host.ChangeCombatModeFor(CombatMode.NonCombat, "Buff", "peace mode for the stamina kit"))
@@ -2850,13 +2851,13 @@ public partial class BuffManager : IDisposable
     internal const int WeaponOutKitMinPct = 30;
 
     /// <summary>
-    /// True when a kit may be used: KitMinSuccessPct is 0, or the kit's chance of working on
+    /// True when a kit may be used: <paramref name="minPct"/> (Kit Min Success % for healing kits,
+    /// Stamina Kit Min Success % for stamina kits) is 0, or the kit's chance of working on
     /// <paramref name="missing"/> points is at least that. Below it the caller falls through
     /// to the spell, as VTank does.
     /// </summary>
-    private bool KitChanceOk(int kitId, string kitName, uint missing, bool willBePeace)
+    private bool KitChanceOk(int kitId, string kitName, uint missing, bool willBePeace, int minPct)
     {
-        int minPct = _settings.KitMinSuccessPct;
         // A weapon out: the spell is a wand swap, the Magic stance and the cast first (4 s and more
         // from melee), so a kit gets a lower bar. Drakkon, 2026-10-14 13:50: a 51% kit was skipped
         // for Heal Self from melee and he died before the cast went out.
