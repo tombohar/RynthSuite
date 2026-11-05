@@ -96,6 +96,7 @@ internal static class OwnCorpseTests
         {
             typeof(RynthPluginBase).GetMethod("Attach", Any)!.Invoke(P, new object[] { FakeHost.LastApi });
             var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+            typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
             typeof(LegacyDashboardRenderer).GetField("_settings", Any)!.SetValue(dash, S);
             Set("_dashboard", dash);
             Cache = new WorldObjectCache(host);
@@ -304,6 +305,7 @@ internal static class OwnCorpseTests
         Check.True(payload != null && payload.LootOwnCorpse == null && payload.TravelToOwnCorpse == null, "an older engine's payload has no value");
         var s = new LegacyUiSettings { LootOwnCorpse = false, TravelToOwnCorpse = true };
         var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
         typeof(LegacyDashboardRenderer).GetField("_settings", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(dash, s);
         typeof(LegacyDashboardRenderer).GetField("_advancedSettingsUi", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(dash, new LegacyAdvancedSettingsUi(s));

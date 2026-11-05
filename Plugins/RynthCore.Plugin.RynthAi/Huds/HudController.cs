@@ -211,6 +211,14 @@ internal sealed class HudController
         _combat.OnLogout();
     }
 
+    /// <summary>
+    /// What the character carries, from a walk of the client's own pack contents (the loot step's
+    /// Keep # count reads the same). The cache's inventory set, kept up from object events, drifts over
+    /// a long session: after 10+ hours of macro the HUD showed 1 healing kit of 4 and 4 mana stones of
+    /// 6 (report R-20261103-125252-251c, 2026-11-03).
+    /// </summary>
+    private static IEnumerable<WorldObject> Carried(WorldObjectCache cache) => cache.GetDirectInventory();
+
     /// <summary>Aggregates the pack by item name and refreshes pinned entries' icon / WCID.</summary>
     private void RebuildPack()
     {
@@ -219,7 +227,7 @@ internal sealed class HudController
 
         var byName = new Dictionary<string, HudPackRow>(StringComparer.OrdinalIgnoreCase);
         var seen = new HashSet<int>();
-        foreach (var wo in cache.GetInventory())
+        foreach (var wo in Carried(cache))
         {
             if (wo == null || string.IsNullOrWhiteSpace(wo.Name)) continue;
             seen.Add(wo.Id);
@@ -270,7 +278,7 @@ internal sealed class HudController
         if (entry.IsEmpty) return;
         var cache = _cache();
         if (cache == null || !_host.HasUseObject) return;
-        var inv = cache.GetInventory().Where(w => w != null).ToList();
+        var inv = Carried(cache).Where(w => w != null).ToList();
         var wo = inv.FirstOrDefault(w => w.Name.Equals(entry.Name, StringComparison.OrdinalIgnoreCase))
                  ?? (entry.Wcid != 0 ? inv.FirstOrDefault(w => Wcid(w) == entry.Wcid) : null);
         if (wo == null) { Chat($"[RynthAi] No {entry.Name} in your pack."); return; }
@@ -280,7 +288,7 @@ internal sealed class HudController
 
     /// <summary>Carried item by object id, or null.</summary>
     private WorldObject? PackItem(int id)
-        => id == 0 ? null : _cache()?.GetInventory().FirstOrDefault(w => w != null && w.Id == id);
+        => id == 0 || _cache() is not WorldObjectCache cache ? null : Carried(cache).FirstOrDefault(w => w != null && w.Id == id);
 
     /// <summary>
     /// Remembers the last pack item selected in the game (native inventory, or the RynthCore

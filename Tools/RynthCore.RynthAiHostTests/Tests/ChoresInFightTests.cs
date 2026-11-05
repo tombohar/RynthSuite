@@ -23,6 +23,7 @@ internal static class ChoresInFightTests
     {
         r.Add("chores: a fight is a monster in Monster Range or on top of us; never with the macro or combat off", FightSignal);
         r.Add("chores: AutoCram waits while a monster is on us, and crams once the fight is over", CramWaitsForFight);
+        r.Add("chores: AutoCram stands down while RynthSort's auto-sort is on (they fought); off again, it crams; /ub autocram by hand still runs", CramOffWithAutoSort);
     }
 
     private static CombatManager.ScannedTarget At(double yards) =>
@@ -84,6 +85,47 @@ internal static class ChoresInFightTests
             bot.Call("TickCramStack", bot.S);
             Check.True(FakeHost.Moves.Any(m => m.Id == Gem && m.Pack == SidePack),
                 "the fight is over: the gem goes into the side pack (moves: " + string.Join(",", FakeHost.Moves.Select(m => $"{m.Id:X8}->{m.Pack:X8}")) + ")");
+        }
+        finally { TickIsolationTests.Done(); }
+    }
+
+    // Owner, 2026-11-03: "Auto sort and auto cram are fighting each other. When auto sort is on, auto
+    // cram should be disabled". RynthAi reads RynthSort's auto-sort (LegacyUiSettings.AutoSortOn).
+    private static void CramOffWithAutoSort()
+    {
+        try
+        {
+            var bot = new TickIsolationTests.Bot(combat: true, heal: false, arrange: () =>
+            {
+                FakeHost.Names[Gem] = "Black Opal";
+                FakeHost.ItemTypes[Gem] = ItemTypeGem;
+                FakeHost.Containers[Gem] = Player;
+                FakeHost.Names[SidePack] = "Backpack";
+                FakeHost.ItemTypes[SidePack] = ItemTypeContainer;
+                FakeHost.Ints[(SidePack, ItemsCapacityKey)] = 24;
+                FakeHost.Containers[SidePack] = Player;
+            });
+            _ = bot.Cache[unchecked((int)Gem)];
+            _ = bot.Cache[unchecked((int)SidePack)];
+            bot.S.EnableAutocram = true;
+            bot.S.AutoSortOn = true;
+            var inv = new InventoryManager(bot.Host, bot.S, bot.Cache);
+            bot.Set("_inventoryManager", inv);
+            for (int i = 0; i < 5; i++) bot.Call("TickCramStack", bot.S);
+            Check.Eq(FakeHost.Moves.Count, 0, "auto-sort on: Auto Cram moves nothing (the setting itself stays on)");
+            Check.True(bot.S.EnableAutocram, "the player's Auto Cram choice is kept");
+
+            inv.RunManual(cram: true, stack: false);
+            bot.Call("TickCramStack", bot.S);
+            Check.True(FakeHost.Moves.Any(m => m.Id == Gem && m.Pack == SidePack), "a cram asked for by hand still runs");
+
+            FakeHost.Moves.Clear();
+            FakeHost.Containers[Gem] = Player;   // back in the main pack
+            bot.S.AutoSortOn = false;
+            var inv2 = new InventoryManager(bot.Host, bot.S, bot.Cache);
+            bot.Set("_inventoryManager", inv2);
+            bot.Call("TickCramStack", bot.S);
+            Check.True(FakeHost.Moves.Any(m => m.Id == Gem && m.Pack == SidePack), "auto-sort off: Auto Cram crams again");
         }
         finally { TickIsolationTests.Done(); }
     }

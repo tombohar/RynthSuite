@@ -87,6 +87,7 @@ internal static class MetaSampleCompatTests
             FakeHost.Create(playerId: 0x50000F31);
             typeof(RynthPluginBase).GetMethod("Attach", Any)!.Invoke(P, new object[] { FakeHost.LastApi });
             var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+            typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
             typeof(LegacyDashboardRenderer).GetField("_settings", Any)!.SetValue(dash, new LegacyUiSettings());
             Set("_dashboard", dash);
             Set("_initialized", true);

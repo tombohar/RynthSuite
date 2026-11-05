@@ -333,10 +333,15 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Separator();
                 ImGui.Spacing();
 
-                ImGui.Checkbox("Auto Cram", ref _settings.EnableAutocram);
-                if (ImGui.IsItemHovered())
+                ImGui.BeginDisabled(_settings.AutoSortOn);
+                bool cramShown = _settings.EnableAutocram && !_settings.AutoSortOn;
+                if (ImGui.Checkbox("Auto Cram", ref cramShown)) _settings.EnableAutocram = cramShown;
+                ImGui.EndDisabled();
+                if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                 {
-                    ImGui.SetTooltip("Automatically moves items from your main pack into side packs.\nNote: recently used weapons stay in the main pack.");
+                    ImGui.SetTooltip(_settings.AutoSortOn
+                        ? "Off while RynthSort's auto-sort is on: RynthSort keeps your packs sorted, and the two fight."
+                        : "Automatically moves items from your main pack into side packs.\nNote: recently used weapons stay in the main pack.");
                 }
 
                 ImGui.Spacing();
@@ -1142,7 +1147,12 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Spacing();
                 ImGui.Text("Inventory Management");
                 ImGui.Checkbox("Enable Autostack", ref _settings.EnableAutostack);
-                ImGui.Checkbox("Enable Autocram", ref _settings.EnableAutocram);
+                ImGui.BeginDisabled(_settings.AutoSortOn);
+                bool cramShown2 = _settings.EnableAutocram && !_settings.AutoSortOn;
+                if (ImGui.Checkbox("Enable Autocram", ref cramShown2)) _settings.EnableAutocram = cramShown2;
+                ImGui.EndDisabled();
+                if (_settings.AutoSortOn && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ImGui.SetTooltip("Off while RynthSort's auto-sort is on: RynthSort keeps your packs sorted, and the two fight.");
                 ImGui.Checkbox("Combine Salvage Bags", ref _settings.EnableCombineSalvage);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("After the salvage queue empties, move same-name bags together so the server merges them.");

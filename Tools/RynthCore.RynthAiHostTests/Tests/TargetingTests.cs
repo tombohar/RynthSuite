@@ -228,6 +228,7 @@ internal static class TargetingTests
         // Engine Settings face: the payload carries them; an engine without the fields leaves them alone.
         s = new LegacyUiSettings { TargetSelection = 2, TargetLock = false };
         var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
         typeof(LegacyDashboardRenderer).GetField("_settings", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(dash, s);
         typeof(LegacyDashboardRenderer).GetField("_advancedSettingsUi", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(dash, new LegacyAdvancedSettingsUi(s));   // BuildSettingsJson reads its crafting state

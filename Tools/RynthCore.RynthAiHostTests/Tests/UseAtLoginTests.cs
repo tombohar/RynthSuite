@@ -90,6 +90,7 @@ internal static class UseAtLoginTests
         {
             typeof(RynthPluginBase).GetMethod("Attach", Any)!.Invoke(P, new object[] { FakeHost.LastApi });
             var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+            typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
             typeof(LegacyDashboardRenderer).GetField("_settings", Any)!.SetValue(dash, S);
             // The full OnTick reaches the dashboard's queues and lists: give every empty
             // collection/lock field a fresh instance (the constructor builds ImGui panels and

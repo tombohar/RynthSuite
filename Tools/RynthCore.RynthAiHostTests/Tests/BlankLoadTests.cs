@@ -55,6 +55,7 @@ internal static class BlankLoadTests
             Directory.CreateDirectory(Metas);
 
             Dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+            typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(Dash, true);   // a stand-in with its profile in memory
             var navFiles = new List<string>();
             Set("_settings", S);
             Set("_host", FakeHost.Create());

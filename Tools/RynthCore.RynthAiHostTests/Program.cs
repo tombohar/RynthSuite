@@ -170,6 +170,7 @@ internal static class Program
         VTankHotkeyTests.Register(runner);
         FightSelectedTests.Register(runner);
         OneTouchHealTests.Register(runner);
+        ItemHudCountTests.Register(runner);
         SaveFailureTests.Register(runner);
         EnvironmentImpactTests.Register(runner);
         SkCombatAddonTests.Register(runner);

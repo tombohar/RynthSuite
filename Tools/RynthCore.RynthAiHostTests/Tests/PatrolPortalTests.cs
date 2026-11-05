@@ -430,6 +430,7 @@ internal static class PatrolPortalTests
         typeof(RynthPluginBase).GetMethod("Attach", Any)!.Invoke(plugin, new object[] { FakeHost.LastApi });
         var settings = new LegacyUiSettings();
         var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
         typeof(LegacyDashboardRenderer).GetField("_settings", Any)!.SetValue(dash, settings);
         void Set(string f, object? v) => typeof(RynthAiPlugin).GetField(f, Any)!.SetValue(plugin, v);
         object? Call(string m, params object?[] a) => typeof(RynthAiPlugin).GetMethod(m, Any)!.Invoke(plugin, a);

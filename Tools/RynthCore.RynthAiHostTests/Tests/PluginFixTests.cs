@@ -72,6 +72,7 @@ internal static class PluginFixTests
             Host = FakeHost.Create(playerId: Player);
             typeof(RynthPluginBase).GetMethod("Attach", Any)!.Invoke(P, new object[] { FakeHost.LastApi });
             Dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+            typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(Dash, true);   // a stand-in with its profile in memory
             typeof(LegacyDashboardRenderer).GetField("_settings", Any)!.SetValue(Dash, new LegacyUiSettings());
             typeof(LegacyDashboardRenderer).GetField("_host", Any)!.SetValue(Dash, Host);
             Cache = new WorldObjectCache(Host);

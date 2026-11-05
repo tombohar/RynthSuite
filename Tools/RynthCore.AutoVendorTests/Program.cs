@@ -410,6 +410,20 @@ internal static class Program
         Eq(justSplit2.Kind, PlanKind.Sell, "same with a full stack first");
         Eq(justSplit2.Sells.Single().Id, 3u, "the 38");
 
+        // 2026-11-05 (DreamWeave, Pyreal Peas at 50,000 each, two pyreal stacks a pea): the last full stack,
+        // 80 free slots: split 39 off ((80 - 2) * 25000 / 50000). The new stack takes a slot (79 free): it
+        // must still be sold whole (its slot frees for the pyreals), never merged back onto the 61.
+        SellItem PyPea(uint id, int stack) => new() { Id = id, Name = "Pyreal Pea", Value = 50_000 * stack, StackSize = stack,
+                                                      Class = AcObjectClass.Misc, ItemType = 0x40000000, RuleName = "S: Peas", MaxStack = 100, Wcid = 9003 };
+        var lastStack = AutoVendorPlanner.PlanNext(v, none, new List<SellItem> { PyPea(1, 100) }, Pack(0, free: 80));
+        Eq(lastStack.Kind, PlanKind.Split, "the last full stack: split");
+        Eq(lastStack.SplitAmount, 39, "39 peas fit");
+        var afterSplit = AutoVendorPlanner.PlanNext(v, none, new List<SellItem> { PyPea(1, 61), PyPea(2, 39) }, Pack(0, free: 79));
+        Eq(afterSplit.Kind, PlanKind.Sell, "after the split: the 39 is sold, not merged back (the loop that left a stack)");
+        Eq(afterSplit.Sells.Single().Id, 2u, "the split-off 39");
+        var oneTooBig = AutoVendorPlanner.PlanNext(v, none, new List<SellItem> { PyPea(1, 61), PyPea(2, 41) }, Pack(0, free: 79));
+        Eq(oneTooBig.Kind, PlanKind.Merge, "a partial more than a slot's worth too big still merges first");
+
         var onePartialFits = AutoVendorPlanner.PlanNext(v, none, new List<SellItem> { Pea(1, 100), Pea(2, 79) }, Pack(0, free: 88));
         Eq(onePartialFits.Kind, PlanKind.Sell, "one partial that fits: sold whole, no split");
         Eq(onePartialFits.Sells.Single().Id, 2u, "the partial");

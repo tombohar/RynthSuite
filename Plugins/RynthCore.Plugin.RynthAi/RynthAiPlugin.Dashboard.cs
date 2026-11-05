@@ -105,10 +105,12 @@ public sealed partial class RynthAiPlugin
             _dashboard?.RefreshDashboardVitals();
             _dashFight = ReadFightTarget(_dashFight);
         }
-        if (shown && now >= _nextDashSortMs)
+        if (now >= _nextDashSortMs)
         {
-            _nextDashSortMs = now + 500;
+            // Twice a second for the dashboard's key; every 2 s otherwise, for Auto Cram (AutoSortOn).
+            _nextDashSortMs = now + (shown ? 500 : 2000);
             _dashSort = ReadAutoSort();
+            if (_dashboard?.Settings is { } sortSettings) sortSettings.AutoSortOn = _dashSort == 1;
         }
         if (now >= _nextDashClassicMs)
         {

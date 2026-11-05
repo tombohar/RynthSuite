@@ -285,6 +285,7 @@ internal static class RebuffWhenIdleTests
         // The engine's Settings face: sent; a save without it (an engine that doesn't know it) leaves it alone.
         var s = new LegacyUiSettings { RebuffIdleMarginMinutes = 5 };
         var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
         typeof(LegacyDashboardRenderer).GetField("_settings", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(dash, s);
         typeof(LegacyDashboardRenderer).GetField("_advancedSettingsUi", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(dash, new LegacyAdvancedSettingsUi(s));

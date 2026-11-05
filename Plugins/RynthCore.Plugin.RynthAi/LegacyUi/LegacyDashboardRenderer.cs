@@ -91,6 +91,15 @@ internal sealed partial class LegacyDashboardRenderer
     // ── Per-character settings persistence ───────────────────────────────────
     private string _charFolder = string.Empty;
     private string _settingsFilePath = string.Empty;
+    // The character's profile is in memory (LoadSettings finished; cleared at logout). Until then the
+    // settings here are the built-in defaults, and they must never reach the engine or be taken back
+    // from it: after an engine hot reload the engine read them, and the next click in its dashboard
+    // sent the whole default copy back, which was applied and saved over the profile (2026-11-05, and
+    // the same way raycasting kept turning off).
+    private volatile bool _profileLoaded;
+
+    /// <summary>The character's profile is loaded: settings may be read and changed from outside.</summary>
+    public bool ProfileLoaded => _profileLoaded;
     private string _lastSavedJson = string.Empty;
 
     private Vector2 _expandedSize = new(430, 452);
@@ -505,6 +514,7 @@ internal sealed partial class LegacyDashboardRenderer
             try { CaptureTransientUiState(); _lastSavedJson = JsonSerializer.Serialize(_settings, RynthAiJsonContext.Default.LegacyUiSettings); }
             catch { _lastSavedJson = string.Empty; }
         }
+        _profileLoaded = true;
     }
 
     /// <summary>
@@ -515,6 +525,7 @@ internal sealed partial class LegacyDashboardRenderer
     /// </summary>
     public void ResetCharacterSession()
     {
+        _profileLoaded    = false;
         _charFolder       = string.Empty;
         _settingsFilePath = string.Empty;
         _lastSavedJson    = string.Empty;
@@ -613,6 +624,7 @@ internal sealed partial class LegacyDashboardRenderer
             // DXVK change, the launcher's stuck-client kill) left a cut-off file that then loaded
             // as defaults.
             string tmp = path + "." + Environment.ProcessId + ".tmp";
+            KeepDailyCopy(path);
             try
             {
                 File.WriteAllText(tmp, json);
@@ -627,6 +639,31 @@ internal sealed partial class LegacyDashboardRenderer
 
     /// <summary>The last good profile kept by each save (profile path + this).</summary>
     internal const string BackupSuffix = ".bak";
+
+    /// <summary>Daily copies kept of each profile (profile path + ".yyyy-MM-dd.bak").</summary>
+    internal const int DailyCopiesKept = 7;
+
+    /// <summary>
+    /// The first save of a day keeps the profile as it was (Default.json.2026-11-05.bak), the last
+    /// <see cref="DailyCopiesKept"/> days kept: .bak alone is the save before, so a reset that was saved
+    /// twice left nothing to go back to (2026-11-05). Best effort: a copy that fails never stops the save.
+    /// </summary>
+    internal static void KeepDailyCopy(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return;
+            string today = path + "." + RynthClock.Now.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) + BackupSuffix;
+            if (File.Exists(today)) return;
+            File.Copy(path, today);
+            string dir = Path.GetDirectoryName(path)!, name = Path.GetFileName(path);
+            var old = Directory.GetFiles(dir, name + ".????-??-??" + BackupSuffix);
+            Array.Sort(old, StringComparer.Ordinal);
+            for (int i = 0; i < old.Length - DailyCopiesKept; i++)
+                try { File.Delete(old[i]); } catch { }
+        }
+        catch { }
+    }
 
     /// <summary>Reads and parses a settings profile; false (with the reason) when it's missing or doesn't parse.</summary>
     private static bool TryReadProfile(string path, out LegacyUiSettings? settings, out string json, out string error)
@@ -1234,6 +1271,7 @@ internal sealed partial class LegacyDashboardRenderer
                 TargetFPSFocused           = s.TargetFPSFocused,
                 TargetFPSBackground        = s.TargetFPSBackground,
                 EnableAutocram             = s.EnableAutocram,
+                AutoSortOn                 = s.AutoSortOn,
                 PeaceModeWhenIdle          = s.PeaceModeWhenIdle,
                 RearmAfterVitals           = s.RearmAfterVitals,
                 StartMacroOnLogin          = s.StartMacroOnLogin,
@@ -1465,6 +1503,13 @@ internal sealed partial class LegacyDashboardRenderer
     public void ApplySettingsJson(string json)
     {
         if (string.IsNullOrWhiteSpace(json)) return;
+        if (!_profileLoaded)
+        {
+            // Nothing from outside lands on the defaults held before the profile loads (they'd be saved
+            // over it once it does): the engine's copy then can only be the defaults it read.
+            try { _host.Log("[RynthAi] Settings: a settings change from the engine came before this character's profile loaded; ignored."); } catch { }
+            return;
+        }
         try
         {
             // Lay the sent fields over the current settings, so a field the sender leaves

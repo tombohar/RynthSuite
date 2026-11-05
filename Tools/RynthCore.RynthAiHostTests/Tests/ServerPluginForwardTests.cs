@@ -33,6 +33,7 @@ internal static class ServerPluginForwardTests
         var p = new RynthAiPlugin();
         typeof(RynthPluginBase).GetMethod("Attach", Any)!.Invoke(p, new object[] { FakeHost.LastApi });
         var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
         typeof(LegacyDashboardRenderer).GetField("_settings", Any)!.SetValue(dash, new LegacyUiSettings());
         typeof(RynthAiPlugin).GetField("_dashboard", Any)!.SetValue(p, dash);
         var client = new ServerHubClient(host);

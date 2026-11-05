@@ -459,9 +459,14 @@ internal static class AutoVendorPlanner
                 if (chosen.Count < 1)
                 {
                     int newStack = unit > 0 ? (int)Math.Floor((p.FreeMainSlots - 2) * (double)Math.Max(1, p.PyrealStackSize) / unit) : 0;
+                    // A partial sold whole frees its own slot for the pyreals, so it may be one slot's worth
+                    // bigger than a split: the stack a split just made took a slot, and judged against the
+                    // split's own margin it no longer fitted, was merged back, and the split came again
+                    // until the 8-try stop left the last stack of peas unsold (2026-11-05).
+                    int sellWholeUpTo = unit > 0 ? (int)Math.Floor((p.FreeMainSlots - 1) * (double)Math.Max(1, p.PyrealStackSize) / unit) : 0;
                     newStack = Math.Min(newStack, stack - 1);
                     if (newStack > 0)
-                        return SplitClean(v, sells, item, newStack, "the pyreals for the whole stack won't fit");
+                        return SplitClean(v, sells, item, newStack, "the pyreals for the whole stack won't fit", sellWholeUpTo);
                     return VendorPlan.Fatal($"AutoVendor Fatal - No inventory room to sell {item.Name}");
                 }
                 break;
@@ -535,7 +540,10 @@ internal static class AutoVendorPlanner
     /// fits, else split from it (nothing else partial for the new stack to join); with none, split as
     /// asked. An unknown max stack size keeps the old plain split.
     /// </summary>
-    internal static VendorPlan SplitClean(VendorView v, IReadOnlyList<SellItem> sells, SellItem item, int amount, string why)
+    /// <param name="sellWholeUpTo">The biggest partial that can be sold whole (its own slot counted free; at
+    /// least <paramref name="amount"/>), else <paramref name="amount"/>.</param>
+    internal static VendorPlan SplitClean(VendorView v, IReadOnlyList<SellItem> sells, SellItem item, int amount, string why,
+                                          int sellWholeUpTo = -1)
     {
         if (item.MaxStack <= 1)
             return VendorPlan.Split(item, amount, why);
@@ -547,7 +555,8 @@ internal static class AutoVendorPlanner
 
         // A partial that fits is sold whole first: the stack a split just made, or any leftover. (Merging
         // it back instead looped split-merge-split three times a second, 2026-10-19.)
-        SellItem? fits = partials.FirstOrDefault(s => s.StackSize <= amount);
+        int wholeUpTo = Math.Max(amount, sellWholeUpTo);
+        SellItem? fits = partials.FirstOrDefault(s => s.StackSize <= wholeUpTo);
         if (fits != null)
             return new VendorPlan { Kind = PlanKind.Sell, Sells = new List<SellItem> { fits }, Total = VendorPays(v, fits.IsNote, fits.Value) };
 

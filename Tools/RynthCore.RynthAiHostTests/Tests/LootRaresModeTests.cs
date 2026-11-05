@@ -142,6 +142,7 @@ internal static class LootRaresModeTests
             S.LootMode = mode;
             typeof(RynthPluginBase).GetMethod("Attach", Any)!.Invoke(P, new object[] { FakeHost.LastApi });
             Dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+            typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(Dash, true);   // a stand-in with its profile in memory
             typeof(LegacyDashboardRenderer).GetField("_settings", Any)!.SetValue(Dash, S);
             Set("_dashboard", Dash);
             Cache = new WorldObjectCache(host);
@@ -350,6 +351,7 @@ internal static class LootRaresModeTests
         // The engine's Settings face: sent; a save without it leaves it alone.
         var s = new LegacyUiSettings { LootMode = LootModes.Rares };
         var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
         typeof(LegacyDashboardRenderer).GetField("_settings", Any)!.SetValue(dash, s);
         typeof(LegacyDashboardRenderer).GetField("_advancedSettingsUi", Any)!.SetValue(dash, new LegacyAdvancedSettingsUi(s));
         var sent = JsonSerializer.Deserialize(dash.BuildSettingsJson(), RynthAiJsonContext.Default.SettingsBridgePayload);

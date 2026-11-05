@@ -73,6 +73,7 @@ internal static class TickIsolationTests
 
             typeof(RynthPluginBase).GetMethod("Attach", Any)!.Invoke(P, new object[] { FakeHost.LastApi });
             var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+            typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
             typeof(LegacyDashboardRenderer).GetField("_settings", Any)!.SetValue(dash, S);
             // As UseAtLoginTests: every empty collection/lock field of the dashboard gets an instance.
             foreach (var f in typeof(LegacyDashboardRenderer).GetFields(Any))

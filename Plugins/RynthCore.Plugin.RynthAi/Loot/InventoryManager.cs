@@ -134,7 +134,9 @@ public sealed class InventoryManager
 
     private bool ProcessAutoCram(List<WorldObject> inv, int playerId)
     {
-        if (!_settings.EnableAutocram && !ManualCram) return false;
+        // RynthSort's auto-sort on: it owns the packs, and Auto Cram moving items back out of the main pack
+        // fought it (owner, 2026-11-03). A cram asked for by hand (/ra cram) still runs.
+        if ((!_settings.EnableAutocram || _settings.AutoSortOn) && !ManualCram) return false;
 
         int crammable = 0;
         foreach (var item in inv)

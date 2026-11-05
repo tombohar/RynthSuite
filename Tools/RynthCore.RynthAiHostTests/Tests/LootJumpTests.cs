@@ -90,6 +90,7 @@ internal static class LootJumpTests
         };
         typeof(RynthPluginBase).GetMethod("Attach", Any)!.Invoke(bot, new object[] { FakeHost.LastApi });
         var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
         typeof(LegacyDashboardRenderer).GetField("_settings", Any)!.SetValue(dash, s);
         void Set(string f, object? v) => typeof(RynthAiPlugin).GetField(f, Any)!.SetValue(bot, v);
         Set("_dashboard", dash);

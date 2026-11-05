@@ -61,7 +61,7 @@ internal sealed class WaterOverlay
 
     public void Submit(TickContext ctx)
     {
-        if (!_settings.ShowImpassableWater || ctx.Terrain == null || !ctx.OnLandscape)
+        if (!_settings.ShowImpassableWater || ctx.Terrain == null || !ctx.OnLandscape || ctx.Indoors)
             return;
         if (!_host.HasNav3DTriangle) // requires API v60+
             return;

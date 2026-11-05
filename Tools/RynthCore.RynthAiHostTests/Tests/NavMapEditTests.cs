@@ -152,6 +152,7 @@ internal static class NavMapEditTests
 
         // RynthPluginGetNavJson reports the map edit version with the route.
         var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
         typeof(LegacyDashboardRenderer).GetField("_settings", Any)!.SetValue(dash, Settings(P(1, 2), P(3, 4)));
         typeof(LegacyDashboardRenderer).GetField("_navFiles", Any)!.SetValue(dash, new System.Collections.Generic.List<string>());
         // Field initializers don't run on an uninitialized object; the route editor's status line.
@@ -174,6 +175,7 @@ internal static class NavMapEditTests
         var nav = (LegacyNavigationUi)RuntimeHelpers.GetUninitializedObject(typeof(LegacyNavigationUi));
         typeof(LegacyNavigationUi).GetField("_settings", Any)!.SetValue(nav, s);
         var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
         typeof(LegacyDashboardRenderer).GetField("_settings", Any)!.SetValue(dash, s);
         typeof(LegacyDashboardRenderer).GetField("_navigationUi", Any)!.SetValue(dash, nav);
 

@@ -683,7 +683,11 @@ public static unsafe class PluginExports
     {
         try
         {
-            string json = Runtime.Plugin?.DashboardRenderer?.BuildSettingsJson() ?? "{}";
+            // Nothing until the character's profile is loaded (not "{}": the engine read that as a full
+            // settings copy of its own defaults, and its next save wrote them over the profile, 2026-11-05).
+            var renderer = Runtime.Plugin?.DashboardRenderer;
+            if (renderer == null || !renderer.ProfileLoaded) return IntPtr.Zero;
+            string json = renderer.BuildSettingsJson();
             IntPtr newPtr = Marshal.StringToHGlobalAnsi(json);
             IntPtr oldPtr = Interlocked.Exchange(ref _settingsPtr, newPtr);
             if (oldPtr != IntPtr.Zero)

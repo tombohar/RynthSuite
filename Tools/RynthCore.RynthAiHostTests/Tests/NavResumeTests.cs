@@ -335,6 +335,7 @@ internal static class NavResumeTests
         FakeHost.Reset(); At(0, 0);
         var s = new LegacyUiSettings { IsMacroRunning = true };
         var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
         void Set(string f, object v) => typeof(LegacyDashboardRenderer).GetField(f, Any)!.SetValue(dash, v);
         Set("_settings", s);
         Set("_host", FakeHost.Create());

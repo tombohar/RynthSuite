@@ -26,6 +26,8 @@ internal static class ProfileLoadTests
     public static void Register(Runner r)
     {
         r.Add("profile: every saved setting survives loading (CopySettings lists each serialized field)", EverySavedFieldIsCopied);
+        r.Add("profile: nothing from the engine lands before the profile loads, or after logout (2026-11-05 settings reset)", NoEngineChangeWithoutProfile);
+        r.Add("profile: the first save of a day keeps a dated copy, the last 7 days kept", DailyCopiesKept);
         r.Add("profile: Describe Items and the Item Info options survive a save and a reload", ItemInfoSurvivesReload);
         r.Add("profile: a profile with null item info / nav overlay loads defaults, not null", NullNestedOptionsLoadDefaults);
         r.Add("profile: a save is atomic (temp file swapped in, no temp left) and keeps the previous profile as .bak", SaveKeepsBackup);
@@ -339,5 +341,52 @@ internal static class ProfileLoadTests
         Check.True(SettingsOf(dash).EnableGroundLoot, "the backup's settings are loaded");
         Check.Eq(File.ReadAllText(Path.Combine(dir, "Third.json")), goodJson, "and put back as the profile");
         Check.Eq(Directory.GetFiles(dir, "Third.json.unreadable-*").Length, 1, "the empty file is kept too");
+    }
+
+    // 2026-11-05: after an engine hot reload the engine read RynthAi's built-in defaults (the profile wasn't
+    // loaded yet) and the next click in its dashboard sent the whole default copy back, saved over the profile.
+    private static void NoEngineChangeWithoutProfile()
+    {
+        string dir = NewCharDir("guard", out var dash);
+        var saved = new LegacyUiSettings { StartMacroOnLogin = true, TopOffHP = 77, EnableLooting = true };
+        File.WriteAllText(Path.Combine(dir, "Default.json"), Json(saved));
+        Check.False(dash.ProfileLoaded, "before LoadSettings: no profile in memory");
+
+        dash.ApplySettingsJson("{\"StartMacroOnLogin\":false,\"TopOffHP\":50,\"EnableLooting\":false}");
+        Check.True(File.Exists(Path.Combine(dir, "Default.json")) && File.ReadAllText(Path.Combine(dir, "Default.json")).Contains("\"TopOffHP\": 77"),
+            "an engine change before the profile loads doesn't touch the file");
+
+        dash.LoadSettings("Tester");
+        LegacyUiSettings live = SettingsOf(dash);
+        Check.True(dash.ProfileLoaded, "after LoadSettings: loaded");
+        Check.True(live.StartMacroOnLogin && live.TopOffHP == 77 && live.EnableLooting, "the profile's own values, not the early engine change");
+
+        dash.ApplySettingsJson("{\"TopOffHP\":80}");
+        Check.Eq(live.TopOffHP, 80, "loaded: an engine edit lands");
+        Check.True(live.StartMacroOnLogin && live.EnableLooting, "and only the field it sent");
+
+        dash.ResetCharacterSession();
+        Check.False(dash.ProfileLoaded, "logout: no profile in memory");
+        dash.ApplySettingsJson("{\"TopOffHP\":10}");
+        Check.Eq(live.TopOffHP, 80, "an engine change after logout is ignored");
+    }
+
+    private static void DailyCopiesKept()
+    {
+        string dir = NewCharDir("daily", out var dash);
+        string path = Path.Combine(dir, "Default.json");
+        for (int d = 1; d <= 9; d++)
+            File.WriteAllText(path + ".2026-10-0" + d + LegacyDashboardRenderer.BackupSuffix, "{}");
+        File.WriteAllText(path, Json(new LegacyUiSettings { TopOffHP = 66 }));
+        dash.LoadSettings("Tester");
+        SettingsOf(dash).TopOffHP = 67;
+        dash.SaveSettings();
+        string today = path + "." + DateTime.Now.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) + LegacyDashboardRenderer.BackupSuffix;
+        Check.True(File.Exists(today) && File.ReadAllText(today).Contains("\"TopOffHP\": 66"), "today's copy holds the profile from before the save");
+        Check.Eq(Directory.GetFiles(dir, "Default.json.????-??-??.bak").Length, LegacyDashboardRenderer.DailyCopiesKept, "seven days kept");
+        Check.False(File.Exists(path + ".2026-10-01" + LegacyDashboardRenderer.BackupSuffix), "the oldest went");
+        SettingsOf(dash).TopOffHP = 68;
+        dash.SaveSettings();
+        Check.True(File.ReadAllText(today).Contains("\"TopOffHP\": 66"), "a second save the same day leaves today's copy alone");
     }
 }

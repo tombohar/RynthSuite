@@ -45,6 +45,7 @@ internal static class NavOverlayTests
         s.NavOverlay.TrackBreadcrumbs = false;
         s.NavOverlay.ShowRouteMarkers = true;
         var dash = (LegacyDashboardRenderer)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
         var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
         typeof(LegacyDashboardRenderer).GetField("_settings", flags)!.SetValue(dash, s);
         typeof(LegacyDashboardRenderer).GetField("_advancedSettingsUi", flags)!.SetValue(dash, new LegacyAdvancedSettingsUi(s));

@@ -634,6 +634,7 @@ internal static class BuffTests
         Check.True(payload != null && payload.CastBuffsOverItemBuffs == null, "an older engine's payload has no value");
         var s = new LegacyUiSettings { CastBuffsOverItemBuffs = false };
         var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
         typeof(LegacyDashboardRenderer).GetField("_settings", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(dash, s);
         typeof(LegacyDashboardRenderer).GetField("_advancedSettingsUi", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(dash, new LegacyAdvancedSettingsUi(s));   // BuildSettingsJson reads its crafting state
@@ -757,6 +758,7 @@ internal static class BuffTests
         var s = new LegacyUiSettings();
         s.SetBuffEnabled("Frost Bane", false);
         var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
         typeof(LegacyDashboardRenderer).GetField("_settings", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(dash, s);
         typeof(LegacyDashboardRenderer).GetField("_advancedSettingsUi", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(dash, new LegacyAdvancedSettingsUi(s));
@@ -2140,6 +2142,7 @@ internal static class BuffTests
         Check.True(payload != null && payload.SkipUnusableBuffs == null, "an older engine's payload has no value");
         var s = new LegacyUiSettings { SkipUnusableBuffs = false };
         var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(dash, true);   // a stand-in with its profile in memory
         typeof(LegacyDashboardRenderer).GetField("_settings", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(dash, s);
         typeof(LegacyDashboardRenderer).GetField("_advancedSettingsUi", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(dash, new LegacyAdvancedSettingsUi(s));

@@ -23,6 +23,12 @@ internal sealed class TickContext
     /// </summary>
     public bool OnLandscape;
 
+    /// <summary>
+    /// True inside a building or dungeon cell (EnvCell). The terrain under a building runs
+    /// through its floors, so the slope and water overlays stay off there.
+    /// </summary>
+    public bool Indoors => (CellId & 0xFFFF) >= 0x100;
+
     /// <summary>The terrain around the player, or null while terrain data isn't loaded.</summary>
     public LandblockWindow? Terrain;
 

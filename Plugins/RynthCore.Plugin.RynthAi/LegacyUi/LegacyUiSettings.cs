@@ -19,6 +19,11 @@ public sealed class LegacyUiSettings
 {
     // ── Runtime-only state — never persisted ────────────────────────────────
     [JsonIgnore] public bool IsMacroRunning;
+    /// <summary>
+    /// RynthSort's auto-sort is on (read from RynthSort every couple of seconds): Auto Cram stands down and
+    /// its checkboxes are greyed out, as the two fought over the packs (owner, 2026-11-03). Never saved.
+    /// </summary>
+    [JsonIgnore] public bool AutoSortOn;
     /// <summary>Meta state — set only by meta actions (SetState, CallState, ReturnFromCall, UI, meta load).</summary>
     [JsonIgnore] public string CurrentState = "Default";
     /// <summary>Bot action state — what the bot is doing right now (Default, Combat, Looting, Navigating, Buffing).
@@ -1172,6 +1177,8 @@ public sealed class SettingsBridgePayload
     public int TargetFPSFocused { get; set; }
     public int TargetFPSBackground { get; set; }
     public bool EnableAutocram { get; set; }
+    /// <summary>RynthSort's auto-sort is on: the engine greys out Auto Cram (sent, never read back).</summary>
+    public bool AutoSortOn { get; set; }
     public bool PeaceModeWhenIdle { get; set; }
     // Optional: an engine without the row doesn't send it, and that must not turn it off.
     public bool? RearmAfterVitals { get; set; }
@@ -1190,7 +1197,7 @@ public sealed class SettingsBridgePayload
     public float? OutdoorHuntRadius { get; set; }
     // Absent from an older engine's payload: must not read as off.
     public bool YieldToVTank { get; set; } = true;
-    public bool EnableRaycasting { get; set; }
+    public bool EnableRaycasting { get; set; } = true;   // on unless the player turns it off (2026-11-05)
     public bool UseArcs { get; set; }
     public float BowArcVelocity { get; set; }
     public float CrossbowArcVelocity { get; set; }
