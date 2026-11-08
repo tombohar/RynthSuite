@@ -26,7 +26,7 @@ internal sealed class LootEditorBridge
     private readonly LootEditSession _session = new();
     private readonly Func<string> _inUsePath;
     private readonly Action<string> _onSaved;
-    private readonly string[] _vendorFolders;
+    private readonly Func<IReadOnlyList<string>> _vendorFolders;
 
     // Follow RynthAi's loot profile while the editor shows it and has no edits.
     private bool _followInUse = true;
@@ -42,7 +42,8 @@ internal sealed class LootEditorBridge
     /// <summary>RynthAi's item lookups for "Add to loot profile". Set once by the plugin.</summary>
     public LootItemHooks Items { get; set; } = new();
 
-    public LootEditorBridge(Func<string> inUsePath, Action<string> onSaved, params string[] vendorFolders)
+    /// <param name="vendorFolders">AutoVendor's folders in its order (character, server, main).</param>
+    public LootEditorBridge(Func<string> inUsePath, Action<string> onSaved, Func<IReadOnlyList<string>> vendorFolders)
     {
         _inUsePath = inUsePath;
         _onSaved = onSaved;
@@ -339,14 +340,9 @@ internal sealed class LootEditorBridge
                 names.Sort(StringComparer.OrdinalIgnoreCase);
                 foreach (string f in names) files.Add(new LootEditFile { Path = f, Display = Path.GetFileName(f) });
             }
-            foreach (string folder in _vendorFolders)
-            {
-                if (!Directory.Exists(folder)) continue;
-                var names = new List<string>(Directory.GetFiles(folder, "*.utl", new EnumerationOptions { RecurseSubdirectories = true, MaxRecursionDepth = 2 }));
-                names.Sort(StringComparer.OrdinalIgnoreCase);
-                foreach (string f in names)
-                    files.Add(new LootEditFile { Path = f, Display = "AutoVendor: " + Path.GetRelativePath(folder, f) });
-            }
+            // In AutoVendor's order, each marked by its folder (character, server, main).
+            foreach ((string path, string display) in Vendor.AutoVendorManager.ListProfiles(_vendorFolders()))
+                files.Add(new LootEditFile { Path = path, Display = display });
         }
         catch { }
         if (_session.IsOpen && !files.Exists(f => LootEditSession.SamePath(f.Path, _session.Path)))

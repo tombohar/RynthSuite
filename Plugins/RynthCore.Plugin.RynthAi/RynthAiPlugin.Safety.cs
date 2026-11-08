@@ -81,7 +81,9 @@ public sealed partial class RynthAiPlugin
         if (portaling && !_wasPortalingForPacer)
         {
             RynthCore.Plugin.Shared.ActionPacer.Forget("portal space");
+            RynthCore.Plugin.Shared.ActionPacer.ForgetLootJump();   // out of the air: the teleport moved the character
             _buffManager?.ForgetPendingWield("portal space");
+            _petManager?.OnPortal();   // a pet never follows through a portal
         }
         _wasPortalingForPacer = portaling;
     }
@@ -115,8 +117,10 @@ public sealed partial class RynthAiPlugin
                 _combatManager?.ReleaseHeldTurn();
                 _navigationEngine?.Stop();
                 RynthCore.Plugin.Shared.ActionPacer.Forget("death");   // the server dropped whatever was open
+                RynthCore.Plugin.Shared.ActionPacer.ForgetLootJump();     // no landing to wait for after a death
                 _buffManager?.CancelPendingRecall("death");                // no /lifestone or macro restart after the respawn
                 _buffManager?.ForgetPendingWield("death");                 // a swap the death cut short is not a failed swap
+                _petManager?.OnPlayerDeath();                              // the pet out is left behind with the corpse
                 StopHunt("died", say: true);   // from the lifestone it would walk all the way back to where it started
             }
             else

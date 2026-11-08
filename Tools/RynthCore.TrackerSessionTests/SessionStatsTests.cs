@@ -17,6 +17,7 @@ internal static partial class Program
         TestLumChatLines();
         TestIltBankLum();
         TestIltDepositExpires();
+        TestServerProfileBankLum();
         TestChatFallbackUntilBank();
         TestAelrynthAndRetailLum();
         TestLumLast5Min();
@@ -94,6 +95,29 @@ internal static partial class Program
         Eq(s.LumTotal, 400L, "an expired deposit line no longer eats income");
     }
 
+    // A server that banks earned luminance where the client can't read it: its server plugin reads the
+    // bank once a minute and the tracker passes that reading in as the bank (2026-11-02). The same value
+    // comes in on every poll in between; the character's luminance is never sent.
+    private static void TestServerProfileBankLum()
+    {
+        var s = new SessionStats();
+        s.Reset(S0);
+        DateTime t = S0;
+        void Polls(long bank, int seconds)
+        {
+            for (int i = 0; i < seconds * 2; i++) { t = t.AddSeconds(0.5); s.Sample(new SessionSample(1, null, bank, null, null, null), t); }
+        }
+        Polls(2_000_000, 60);
+        Eq(s.LumTotal, 0L, "profile bank: the first reading is the baseline");
+        Check(s.BankTracked, "profile bank: the bank is tracked");
+        for (int minute = 1; minute <= 59; minute++) Polls(2_000_000 + minute * 10_000L, 60);
+        Eq(s.LumTotal, 590_000L, "profile bank: each minute's rise counts once");
+        Check(Math.Abs(s.View(t).LumPerHour - 590_000) < 1, $"profile bank: about 590,000 an hour ({s.View(t).LumPerHour:0})");
+        Polls(100_000, 60);
+        Eq(s.LumTotal, 590_000L, "profile bank: spending is a drop, not negative");
+        Polls(150_000, 60);
+        Eq(s.LumTotal, 640_000L, "profile bank: and the next rise counts");
+    }
     // "You've banked" counts only until a bank property is read; then the bank covers it.
     private static void TestChatFallbackUntilBank()
     {

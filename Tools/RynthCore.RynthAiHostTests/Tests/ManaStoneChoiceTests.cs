@@ -40,10 +40,43 @@ internal static class ManaStoneChoiceTests
         r.Add("mana tapping: a stone that failed two drains stays parked though it reads empty", FailedStoneStaysParked);
         r.Add("mana tapping: in a fight the drain waits (holding no loot, taking no second item); after it, the drain goes", DrainWaitsForFight);
         r.Add("mana stones: in a fight, worn gear that runs low is still refilled (armor without mana drops its spells)", RefillInFight);
+        r.Add("eternal charge: tapping is ignored while it is in the pack, and applies again when it leaves", EternalIgnoresTapping);
+        r.Add("eternal charge: a use with no answer is tried again in 20 s, not 5 minutes", EternalRetriesSoon);
     }
 
     private const uint ChargeA = 0x80400031, ChargeB = 0x80400032, ChargeC = 0x80400033;
     private const string ManaCharge = "Great Mana Charge";
+    private const string EternalCharge = "Eternal Mana Charge";
+
+    private static void EternalIgnoresTapping()
+    {
+        using var rig = new Rig(tapping: true, new (uint, int?)[] { (StoneA, null), (ChargeA, null) }, ringToDrain: true, maceMana: 5000, contents: true,
+            before: _ => FakeHost.Names[ChargeA] = EternalCharge);
+        rig.Run(3000);
+        Check.True(rig.M.HasEternalChargeCached(), "the charge is seen");
+        Check.Eq(rig.OnRing.Count, 0, "no drain, with an empty stone and an item waiting");
+        Check.Eq(rig.M.FreeEmptyStoneSlots(), 0, "nothing looted to tap");
+        Check.False(rig.M.HoldsLootForDrain(), "the looter isn't held");
+        Check.True(rig.S.EnableManaTapping, "the setting itself is left alone");
+
+        rig.Destroy(ChargeA);
+        // The pack walk keeps its answer for a real second, and this test's clock runs faster than that.
+        System.Threading.Thread.Sleep(1100);
+        rig.Run(3000);
+        Check.False(rig.M.HasEternalChargeCached(), "the charge is gone");
+        Check.Eq(rig.OnRing.Count, 1, "tapping applies again: the item is drained");
+    }
+
+    private static void EternalRetriesSoon()
+    {
+        using var rig = new Rig(tapping: false, new (uint, int?)[] { (ChargeA, null) }, stoneName: EternalCharge, maceMana: 0);
+        rig.Run(1000);
+        Check.Eq(rig.OnPlayer.Count, 1, "the charge goes on the gear");
+        rig.Run(9000);     // no answer: the action times out at 8 s
+        Check.Eq(rig.OnPlayer.Count, 1, "parked after the timeout");
+        rig.Run(21_000);
+        Check.Eq(rig.OnPlayer.Count, 2, "tried again within 20 s of the timeout");
+    }
     private const string NeedMore = "The Mana Stone gives 1,000 points of mana to the following items: Khanda-handled Mace.\nYou need 2,000 more mana to fully charge your items.";
 
     // 2026-10-11 report: armor ran dry overnight with Mana Charges in the pack. The prime suspect

@@ -45,7 +45,8 @@ public sealed partial class RynthAiPlugin
                 kind = ActionPacer.ClassifyUse(host, use.ObjectId, use.DoorOrCorpse);
             }
             string who = "RynthAi/" + use.Subsystem + (use.Kind == UseKind.Asked ? " (asked)" : "");
-            ActionPacer.Begin(host, kind, use.ObjectId, use.What, who, use.UseDoneSeqBefore);
+            bool onSelf = use.TargetId != 0 && use.TargetId == player;   // a kit on yourself (the pacer's heal grace)
+            ActionPacer.Begin(host, kind, use.ObjectId, use.What, who, use.UseDoneSeqBefore, onSelf: onSelf);
         }
         catch { }
     }

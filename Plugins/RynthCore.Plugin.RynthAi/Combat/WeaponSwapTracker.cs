@@ -61,9 +61,50 @@ internal sealed class WeaponSwapTracker
     private int _lastFrom, _lastTo;
     private DateTime _lastLandedAt = DateTime.MinValue;
     private int _askKey, _pendingKey, _lastKey;   // the fight (target id) each swap was for; 0 = unknown
+    // Weapons seen in a wielded slot (the engine's equipment list) during their current run of
+    // wields. A new run (the first send after the count was cleared) forgets the sighting, so a
+    // weapon that later stops reaching the hand is given up on again.
+    private readonly HashSet<int> _seenWielded = new();
+    private DateTime _lastSentAt = DateTime.MinValue;
+
+    /// <summary>How long after the last send counted tries keep the equipment list sampled.</summary>
+    public double AttemptWatchMs { get; set; } = 120_000;
 
     /// <summary>The weapon a swap is in flight for (0 = none).</summary>
     public int PendingId => _pendingId;
+
+    /// <summary>
+    /// True while a wield is in flight, or tries are counted and the last send was under
+    /// <see cref="AttemptWatchMs"/> before <paramref name="now"/>: the equipment list is worth
+    /// sampling. A stale count left behind does not keep the sampler reading every tick.
+    /// </summary>
+    public bool HasAttemptsAt(DateTime now) =>
+        _pendingId != 0 || (_tries.Count > 0 && (now - _lastSentAt).TotalMilliseconds < AttemptWatchMs);
+
+    /// <summary>True when <paramref name="id"/> was seen wielded while its wields were under way (see <see cref="SeenWielded"/>).</summary>
+    public bool WasSeenWielded(int id) => _seenWielded.Contains(id);
+
+    /// <summary>
+    /// <paramref name="id"/> is in a main-hand slot per the engine's equipment list, sampled every
+    /// tick while a wield is under way. When it has a wield in flight or tries counted, the wield
+    /// worked: its try count starts over and it is remembered as seen, so it is never taken for a
+    /// weapon that "never reached your hand". The swap in flight is left alone (combat lands it
+    /// when it sees the weapon in hand itself), so a stale hand read can never send a second
+    /// UseObject that would take the weapon off again. A weapon that reached the hand and was
+    /// swapped out for the buff wand before combat looked again had each of those wields counted
+    /// as a failed try, until it was left out of the weapon choice for 30 min.
+    /// </summary>
+    public void SeenWielded(int id)
+    {
+        if (id == 0 || (_pendingId != id && !_tries.ContainsKey(id))) return;
+        _seenWielded.Add(id);
+        _tries.Remove(id);
+        _busyRefunds.Remove(id);
+    }
+    /// <summary>A wield was sent less than <see cref="ResolveMs"/> ago and hasn't been answered.</summary>
+    public bool InFlight(DateTime now) => _pendingId != 0 && (now - _pendingAt).TotalMilliseconds < ResolveMs;
+    /// <summary><paramref name="id"/> is resting after its failed tries.</summary>
+    public bool Resting(int id, DateTime now) => _restUntil.TryGetValue(id, out DateTime rest) && now < rest;
     /// <summary>Wields sent for <paramref name="id"/> since it was last in hand.</summary>
     public int TriesFor(int id) => _tries.TryGetValue(id, out int t) ? t : 0;
     /// <summary>Why the last Hold happened, for the log ("" = none).</summary>
@@ -140,6 +181,9 @@ internal sealed class WeaponSwapTracker
         _pendingId = id;
         _pendingFrom = fromId;
         _pendingAt = now;
+        _lastSentAt = now;
+        // A fresh run of wields: an earlier sighting says nothing about this one.
+        if (!_tries.ContainsKey(id)) _seenWielded.Remove(id);
         _tries[id] = (_tries.TryGetValue(id, out int t) ? t : 0) + 1;
     }
 
@@ -179,6 +223,7 @@ internal sealed class WeaponSwapTracker
         _tries.Clear();
         _busyRefunds.Clear();
         _restUntil.Clear();
+        _seenWielded.Clear();
         _busyUntil = DateTime.MinValue;
     }
 
@@ -196,9 +241,11 @@ internal sealed class WeaponSwapTracker
         _busyRefunds.Clear();
         _busyUntil = DateTime.MinValue;
         _restUntil.Clear();
+        _seenWielded.Clear();
         _landed.Clear();
         _lastFrom = _lastTo = 0;
         _lastLandedAt = DateTime.MinValue;
+        _lastSentAt = DateTime.MinValue;
         _askKey = _pendingKey = _lastKey = 0;
         HoldReason = "";
         Notice = null;

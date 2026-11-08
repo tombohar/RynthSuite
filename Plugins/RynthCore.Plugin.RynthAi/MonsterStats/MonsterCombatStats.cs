@@ -10,6 +10,10 @@
 //                  = landed + resisted + no effect; damage taken.
 //    Rates         it evades (its evades / your swings), it resists (its
 //                  resists / your spells), you evade, you resist.
+//    Experience    (2026-11-08) the XP of the kills whose rise was seen
+//                  (KillXpMatcher) and how many: XP per kill.
+//    Death         (2026-11-08) the time from each kill to its corpse (the
+//                  death animation; CorpseTimer), summed, and how many.
 //
 //  Fed by CombatEvents (typed melee/missile events), CombatLines (spell lines)
 //  and the kill notice; shown under each monster in the Damage panel (the row's
@@ -40,8 +44,15 @@ internal sealed record MonsterStatsRow(
     string Name,
     int Hits, int Evaded, int SpellsLanded, int Resisted, int NoEffect, int Kills, long DamageDealt,
     int HitsTaken, int YouEvaded, int SpellsTaken, int YouResisted, int NoEffectOnYou, long DamageTaken,
-    long FirstUtcTicks, long LastUtcTicks)
+    long FirstUtcTicks, long LastUtcTicks,
+    long Xp = 0, int XpKills = 0,
+    long CorpseMs = 0, int CorpseKills = 0)
 {
+    /// <summary>The experience per kill, over the kills whose XP was seen (KillXpMatcher), or null.</summary>
+    public double? XpPerKill => XpKills > 0 ? (double)Xp / XpKills : null;
+    /// <summary>The time from the kill to its corpse (the death animation), on average in ms, or null (CorpseTimer).</summary>
+    public double? CorpseAvgMs => CorpseKills > 0 ? (double)CorpseMs / CorpseKills : null;
+
     /// <summary>Your melee and missile attacks at it: hits and the ones it evaded.</summary>
     public int Swings => Hits + Evaded;
     /// <summary>Your spells that reached it.</summary>
@@ -73,9 +84,14 @@ internal sealed class MonsterCombatStats
         public int HitsTaken, YouEvaded, SpellsTaken, YouResisted, NoEffectOnYou;
         public long DamageTaken;
         public long FirstUtcTicks, LastUtcTicks;
+        public long Xp;          // experience from the kills whose rise was seen (2026-11-08)
+        public int XpKills;      // those kills
+        public long CorpseMs;    // kill notice to corpse, summed (the death animation, 2026-11-08)
+        public int CorpseKills;  // the kills whose corpse was timed
 
         public MonsterStatsRow ToRow() => new(Name, Hits, Evaded, SpellsLanded, Resisted, NoEffect, Kills, DamageDealt,
-            HitsTaken, YouEvaded, SpellsTaken, YouResisted, NoEffectOnYou, DamageTaken, FirstUtcTicks, LastUtcTicks);
+            HitsTaken, YouEvaded, SpellsTaken, YouResisted, NoEffectOnYou, DamageTaken, FirstUtcTicks, LastUtcTicks, Xp, XpKills,
+            CorpseMs, CorpseKills);
     }
 
     private readonly Dictionary<string, Entry> _byName = new(StringComparer.OrdinalIgnoreCase);
@@ -173,6 +189,32 @@ internal sealed class MonsterCombatStats
         return e.Name;
     }
 
+    /// <summary>
+    /// A kill of <paramref name="name"/> gave <paramref name="xp"/> (KillXpMatcher paired the rise with
+    /// its kill notice): added to its XP and its kills with XP counted. Kills whose rise wasn't seen
+    /// stay out of both, so XP/kill is never diluted by them.
+    /// </summary>
+    public void OnKillXp(string? name, long xp, DateTime nowUtc)
+    {
+        if (xp <= 0) return;
+        Entry? e = Touch(name, nowUtc);
+        if (e == null) return;
+        e.Xp += xp;
+        e.XpKills++;
+        Version++;
+    }
+
+    /// <summary>A kill of <paramref name="name"/> left its corpse <paramref name="ms"/> after the kill notice (CorpseTimer).</summary>
+    public void OnCorpseTime(string? name, long ms, DateTime nowUtc)
+    {
+        if (ms < 0) return;
+        Entry? e = Touch(name, nowUtc);
+        if (e == null) return;
+        e.CorpseMs += ms;
+        e.CorpseKills++;
+        Version++;
+    }
+
     private string? LongestNameIn(string notice)
     {
         string? best = null;
@@ -252,6 +294,8 @@ internal sealed class MonsterCombatStats
                 SpellsTaken = Math.Max(0, r.SpellsTaken), YouResisted = Math.Max(0, r.YouResisted), NoEffectOnYou = Math.Max(0, r.NoEffectOnYou),
                 DamageTaken = Math.Max(0, r.DamageTaken),
                 FirstUtcTicks = r.FirstUtcTicks, LastUtcTicks = r.LastUtcTicks,
+                Xp = Math.Max(0, r.Xp), XpKills = Math.Max(0, r.XpKills),
+                CorpseMs = Math.Max(0, r.CorpseMs), CorpseKills = Math.Max(0, r.CorpseKills),
             };
             if (_byName.Count >= MaxMonsters) break;
         }

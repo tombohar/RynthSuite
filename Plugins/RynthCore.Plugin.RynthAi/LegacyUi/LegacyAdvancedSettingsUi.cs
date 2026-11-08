@@ -47,6 +47,11 @@ internal sealed class LegacyAdvancedSettingsUi
         "Off: nav carries on to the waypoint it was heading for, and a loaded route starts at its first point.";
     private static readonly string[] TargetSelectionNames = { "Lowest health", "Closest", "Farthest", "Least turning" };
     private static readonly string[] LootOwnershipModes = { "My Kills Only", "Fellowship Kills", "All Corpses" };
+    private const string OpenFellowOnCreateTip =
+        "A fellowship RynthAi creates (/mt fellow create, or a meta's /fellowship create) is opened\n" +
+        "as soon as you lead it, so every member can recruit, not just the leader. AC makes a new\n" +
+        "fellowship closed.\n" +
+        "Only right after RynthAi creates it: one you made or closed by hand is left alone.";
 
     public LegacyAdvancedSettingsUi(LegacyUiSettings settings)
     {
@@ -358,6 +363,9 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Checkbox("Patrol On Login", ref _settings.PatrolOnLogin);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Automatically starts dungeon patrol when RynthAi loads.");
+                ImGui.Checkbox("Resume Meta After Reload", ref _settings.ResumeMetaOnReload);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("After a hot reload the meta carries on in the same state, with its variables,\nfired rules and route. A real login still starts in Default.");
                 ImGui.Checkbox("Escape Acid and Lava", ref _settings.EscapeHazards);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("When acid or lava hurts you, stop everything (combat, buffs, healing, looting)\nand walk back out the way you came. The spot is remembered so the patrol avoids it.\nTurn off for a character that walks through acid on purpose.");
@@ -702,6 +710,17 @@ internal sealed class LegacyAdvancedSettingsUi
 
                 ImGui.Spacing();
                 ImGui.Checkbox("Cast Dispel Self", ref _settings.CastDispelSelf);
+                ImGui.Checkbox("Auto Fellowship Management", ref _settings.AutoFellowMgmt);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("VTank's Auto Fellow Mgmt., saved with the profile. Metas read it (AutoFellowMgmt).");
+                if (_settings.AutoFellowMgmt)
+                {
+                    ImGui.Indent();
+                    ImGui.Checkbox("Open fellowship on create", ref _settings.OpenFellowOnCreate);
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip(OpenFellowOnCreateTip);
+                    ImGui.Unindent();
+                }
 
                 ImGui.Spacing();
                 ImGui.Text("Ring Spell Override");
@@ -778,7 +797,7 @@ internal sealed class LegacyAdvancedSettingsUi
                     ImGui.SetTooltip("Which monster to attack, among those of the highest priority inside Monster Range.\nLeast turning: the one needing the smallest turn to face. Unknown health counts as full.");
                 ImGui.Checkbox("Target Lock", ref _settings.TargetLock);
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("On: keeps the target it picked until it dies, leaves Monster Range, or a higher-priority monster shows up.\nOff: switches whenever another monster is clearly better by the Targeting rule.");
+                    ImGui.SetTooltip("On: keeps the target it picked until it dies or leaves Monster Range, even when a higher-priority monster shows up.\nOff: a higher-priority monster in range takes over at once, and it switches whenever another monster is clearly better by the Targeting rule.");
                 ImGui.Checkbox("Fight the monster I select", ref _settings.FightSelectedTarget);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip(LegacyUiSettings.FightSelectedTargetTip);
@@ -1122,7 +1141,10 @@ internal sealed class LegacyAdvancedSettingsUi
                 }
                 ImGui.Checkbox("Jump When Looting", ref _settings.LootJumpEnabled);
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Hop (the keyboard jump) just before each pickup,\nso the server skips the bend-down. The hop has a fixed height.");
+                    ImGui.SetTooltip("Hop (the keyboard jump) just before each pickup, so the server skips the\n" +
+                                     "bend-down (ACE servers). The hop has a fixed height. Attacks and heals wait\n" +
+                                     "for the landing (the server refuses them in the air), so there is no hop\n" +
+                                     "with monsters near or health under Heal At.");
 
                 ImGui.Spacing();
                 ImGui.Text("Corpse Ownership");
@@ -1153,6 +1175,12 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.EndDisabled();
                 if (_settings.AutoSortOn && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                     ImGui.SetTooltip("Off while RynthSort's auto-sort is on: RynthSort keeps your packs sorted, and the two fight.");
+                ImGui.Checkbox("Unbox Aetheria When Idle", ref _settings.UnboxAetheriaWhenIdle);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("With the macro on and nothing to fight or loot, uses an Aetheria Mana Stone on each\n" +
+                                     "Coalesced Aetheria in your pack, one at a time, to reveal its sigil. The server puts\n" +
+                                     "you in peace mode for the clap; combat takes its stance again for the next fight.\n" +
+                                     "The stone isn't used up. Also /ra aetheria unbox | status.");
                 ImGui.Checkbox("Combine Salvage Bags", ref _settings.EnableCombineSalvage);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("After the salvage queue empties, move same-name bags together so the server merges them.");

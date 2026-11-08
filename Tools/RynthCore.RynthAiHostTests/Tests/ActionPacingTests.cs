@@ -43,8 +43,31 @@ internal static class ActionPacingTests
     private static readonly (uint Cell, float X, float Y, float Z) Me0 = (0xA9B40019u, 100f, 100f, 0f);
     private const BindingFlags Any = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static;
 
+    // The macro switched off while the player runs by hand: RynthAi leaves the character running
+    // (the owner, 2026-11-07). It stops only movement of its own: autorun or a motion it turned on,
+    // or the server's walk to a target or a corpse for it (Combat, Looting).
+    private static void MacroStopLeavesPlayersRun()
+    {
+        Check.False(RynthAiPlugin.MacroStopHalts(false, "Default"), "idle, nothing of ours moving: no stop");
+        Check.False(RynthAiPlugin.MacroStopHalts(false, "Buffing"), "buffing, nothing of ours moving: no stop");
+        Check.False(RynthAiPlugin.MacroStopHalts(false, null), "no action yet: no stop");
+        Check.True(RynthAiPlugin.MacroStopHalts(true, "Navigating"), "nav's autorun: stopped");
+        Check.True(RynthAiPlugin.MacroStopHalts(false, "Combat"), "fighting (the server may be walking us to the target): stopped");
+        Check.True(RynthAiPlugin.MacroStopHalts(false, "Looting"), "looting (the walk to the corpse): stopped");
+
+        FakeHost.Reset();
+        MoveAudit.Reset();
+        var host = FakeHost.Create();
+        Check.False(MoveAudit.OwnMovementActive, "nothing sent: nothing of ours moving");
+        host.SetAutoRunBy("Nav", true);
+        Check.True(MoveAudit.OwnMovementActive, "our autorun: ours is moving");
+        host.SetAutoRunBy("Nav", false);
+        Check.False(MoveAudit.OwnMovementActive, "stopped again: not ours");
+    }
+
     public static void Register(Runner r)
     {
+        r.Add("macro off: the player's own running is left alone; RynthAi's movement is stopped", MacroStopLeavesPlayersRun);
         r.Add("pacing: a use is the server action until its UseDone; a refusal answers it too; a wield answers by wielding", UseAnswers);
         r.Add("pacing: the player's turn (RynthAi.Yield) holds every start, mode change and move, ends by itself, and lets what is out finish", PlayersTurn);
         r.Add("pacing: the stall onset replayed - the idle peace swap waits for the corpse use's answer, then goes; no swap to the mode you're in", OnsetModeChangeHeld);

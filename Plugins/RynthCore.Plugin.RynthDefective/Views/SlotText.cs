@@ -56,7 +56,8 @@ internal static class SlotText
         return sb.Length == 0 ? "?" : sb.ToString();
     }
 
-    public static string Tooltip(int number, ItemRef? item, SlotStatus s, UseMode mode, string? key)
+    /// <param name="keys">The slot can have a key (an extra Shortcuts bar's can't: clicks only).</param>
+    public static string Tooltip(int number, ItemRef? item, SlotStatus s, UseMode mode, string? key, bool keys = true)
     {
         if (item == null) return $"Slot {number}: empty. Click to set it up.";
         var sb = new StringBuilder();
@@ -69,12 +70,12 @@ internal static class SlotText
         {
             ItemKind kind = ItemKinds.Classify(s.Item);
             UseAction action = UseModes.ActionFor(mode, kind);
-            sb.Append("\nClick or press the key: ").Append(UseModes.Describe(action).Replace("used", "use it").Replace("wielded", "wield it"));
+            sb.Append(keys ? "\nClick or press the key: " : "\nClick: ").Append(UseModes.Describe(action).Replace("used", "use it").Replace("wielded", "wield it"));
             if (s.Item.MaxUses > 0) sb.Append("\n").Append(s.Uses).Append(" uses left");
             if (s.Count > 1 || s.Item.MaxStack > 1) sb.Append(s.Item.MaxUses > 0 ? ", " : "\n").Append(s.Count).Append(" carried");
             if (s.Item.Wielded) sb.Append("\nIn your hands now.");
         }
-        sb.Append(key != null ? "\nKey: " + key : "\nNo key yet (Edit slots).");
+        if (keys) sb.Append(key != null ? "\nKey: " + key : "\nNo key yet (Edit slots).");
         return sb.ToString();
     }
 }

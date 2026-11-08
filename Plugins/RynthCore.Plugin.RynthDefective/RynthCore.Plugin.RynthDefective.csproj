@@ -31,7 +31,7 @@
          pictures) are checked first; so are the UseDone count (v63), wield/refusal info (v70) and
          the chat parser the key binding goes through. Below v71 it still uses items (/rdef use). -->
     <RynthPluginMinEngineApi>66</RynthPluginMinEngineApi>
-    <RynthPluginDescription>Draws the Shortcuts bar (the game's 18 slots and its own), the Game Panels buttons and the Selection window (with a quantity box: split, give or buy that many): one-touch kits, potions, weapons and spells by slot or key, and a fast weapon picker. Settings: the bar's gear or /rdef settings.</RynthPluginDescription>
+    <RynthPluginDescription>Draws the Shortcuts bar (the game's 18 slots and its own), the Game Panels buttons and the Selection window (with a quantity box: split, give or buy that many), and a Day/Night timer: one-touch kits, potions, weapons and spells by slot or key, and a fast weapon picker. Settings: the bar's gear or /rdef settings.</RynthPluginDescription>
   </PropertyGroup>
 
   <ItemGroup>
@@ -44,6 +44,8 @@
     <Compile Include="..\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
     <!-- How a chat command answers (2026-10-28): the shared reply queue and colours. -->
     <Compile Include="..\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+    <!-- Dereth's clock (2026-11-04): day or night and the real time to the change, for the Day/Night timer. -->
+    <Compile Include="..\Shared\DerethClock.cs" Link="Shared\DerethClock.cs" />
     <!-- The active server (plugin API v86 GetServerStateJson) and its owner's "RynthServer.Profile"
          values (2026-10-31): whether its bank pays vendors, and how much, for the quantity box's buys. -->
     <Compile Include="..\Shared\EngineServerState.cs" Link="Shared\EngineServerState.cs" />

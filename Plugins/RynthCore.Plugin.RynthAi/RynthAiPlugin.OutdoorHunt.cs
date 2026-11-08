@@ -55,6 +55,9 @@ public sealed partial class RynthAiPlugin
             case "radius":
                 SetHuntSetting(arg, parts.Length > 3 ? parts[3] : "");
                 break;
+            case "pick":
+                SetHuntPick(parts.Length > 3 ? string.Join(" ", parts, 3, parts.Length - 3) : "");
+                break;
             case "panel":
             case "settings":
                 ToggleHuntPanel();
@@ -63,9 +66,48 @@ public sealed partial class RynthAiPlugin
                 if (_hunt.Active) StopHunt("stopped", say: true); else StartHunt();
                 break;
             default:
-                ChatLine("[RynthAi] /ra hunt [start|stop|status|panel] | /ra hunt range <yd> | /ra hunt radius <yd, 0 = anywhere>");
+                ChatLine("[RynthAi] /ra hunt [start|stop|status|panel] | /ra hunt range <yd> | /ra hunt radius <yd, 0 = anywhere> | " + HuntPickUsage);
                 break;
         }
+    }
+
+    internal const string HuntPickUsage = "/ra hunt pick [nearest|pack|xp]";
+
+    /// <summary>The setting's words (OutdoorHuntPick 0 / 1 / 2): the short name, and what it does.</summary>
+    internal static (string Name, string Does) HuntPickWords(int pick) => Math.Clamp(pick, 0, 2) switch
+    {
+        1 => ("Biggest pack", "goes for the biggest pack of monsters (a near pack wins unless a farther one is clearly bigger)"),
+        2 => ("Most XP", "goes for the pack worth the most experience (the XP per kill it has learned; by size until it knows)"),
+        _ => ("Nearest", "goes for the nearest monster (the shortest walk)"),
+    };
+
+    /// <summary>"/ra hunt pick [nearest|pack|xp]": no word says the choice now and the usage; a word sets it and says so.</summary>
+    private void SetHuntPick(string value)
+    {
+        var s = _dashboard?.Settings;
+        if (s == null) { ReplyFail("[RynthAi] Settings not ready."); return; }
+        string v = value.Trim().ToLowerInvariant();
+        if (v.Length == 0)
+        {
+            var (name, does) = HuntPickWords(s.OutdoorHuntPick);
+            ReplyOk($"[RynthAi] Outdoor hunt pick: {name}, it {does}. {HuntPickUsage} to change it.");
+            return;
+        }
+        int? pick = v switch
+        {
+            "nearest" or "near" or "closest" or "0" => 0,
+            "pack" or "biggest" or "biggest pack" or "dense" or "densest" or "most dense" or "1" => 1,
+            "xp" or "exp" or "experience" or "most xp" or "highest experience" or "2" => 2,
+            _ => null,
+        };
+        if (pick is not int p)
+        {
+            ReplyFail($"[RynthAi] Outdoor hunt pick: '{value.Trim()}' isn't one of nearest, pack or xp (it is {HuntPickWords(s.OutdoorHuntPick).Name} now). Usage: {HuntPickUsage}");
+            return;
+        }
+        s.OutdoorHuntPick = p;
+        var (n, d) = HuntPickWords(p);
+        ReplyOk($"[RynthAi] Outdoor hunt pick set: {n}, it {d}." + (_hunt.Active ? " In use from the next monster." : ""));
     }
 
     private void SetHuntSetting(string what, string value)
@@ -87,7 +129,8 @@ public sealed partial class RynthAiPlugin
     /// <summary>The two distances, each with what it does (Tom set Hunt Radius 2000 and saw no farther hunting: that one is the roaming limit).</summary>
     private static string HuntSettingsText(LegacyUiSettings s) =>
         $"looks for monsters out to {s.OutdoorHuntRange:0} yd (Hunt Range), "
-        + (s.OutdoorHuntRadius > 0 ? $"and only within {s.OutdoorHuntRadius:0} yd of where it started (Hunt Radius)." : "anywhere it goes (Hunt Radius 0).");
+        + (s.OutdoorHuntRadius > 0 ? $"and only within {s.OutdoorHuntRadius:0} yd of where it started (Hunt Radius)." : "anywhere it goes (Hunt Radius 0).")
+        + $" Pick: {HuntPickWords(s.OutdoorHuntPick).Name}.";
 
     // ── The Outdoor Hunt window (Tom 10-23: "we need a small panel to change the settings") ──
     // Right-click the dashboard's Hunt button, or /ra hunt panel. Render thread: the sliders write the
@@ -161,6 +204,21 @@ public sealed partial class RynthAiPlugin
                     radius < 1f ? "anywhere" : "%.0f yd", "Anywhere", 0f, k))
                 s.OutdoorHuntRadius = radius < 1f ? 0f : radius;
             Wrapped("How far from where it started it may roam. Anywhere: no limit.", Ui.Text);
+            ImGui.Spacing();
+
+            // Go for (2026-11-08): Nearest, Biggest pack or Most XP (OutdoorHuntPick).
+            using (Ui.PushFont(RynthUiFont.UiBold14)) ImGui.TextUnformatted("Go for");
+            int pick = Math.Clamp(s.OutdoorHuntPick, 0, 2);
+            float third = (ImGui.GetContentRegionAvail().X - 2 * ImGui.GetStyle().ItemSpacing.X) / 3f;
+            for (int i = 0; i < 3; i++)
+            {
+                if (i > 0) ImGui.SameLine();
+                bool chosen = pick == i;
+                if (chosen) ImGui.PushStyleColor(ImGuiCol.Button, Ui.Accent);
+                if (ImGui.Button(HuntPickWords(i).Name + "##huntpick" + i, new Vector2(Math.Max(40 * k, third), 0))) s.OutdoorHuntPick = i;
+                if (chosen) ImGui.PopStyleColor();
+            }
+            Wrapped("It " + HuntPickWords(pick).Does + ".", Ui.Text);
             ImGui.Spacing();
             Wrapped("Ctrl+click a slider to type a number.", Ui.Mute);
         }
@@ -327,6 +385,8 @@ public sealed partial class RynthAiPlugin
     {
         _hunt.RangeYd = Math.Clamp(s.OutdoorHuntRange, OutdoorHuntRangeMin, OutdoorHuntRangeMax);
         _hunt.RadiusYd = Math.Clamp(s.OutdoorHuntRadius, 0, OutdoorHuntRadiusMax);
+        _hunt.Pick = (OutdoorHunt.PickMode)Math.Clamp(s.OutdoorHuntPick, 0, 2);
+        _hunt.XpLookup ??= XpPerKill;   // the learned XP per kill (MonsterXpTable), for Most XP
     }
 
     // Range up to 2000 (Tom 10-23): past what the client knows of (the landblocks round you) it means "every monster in sight".

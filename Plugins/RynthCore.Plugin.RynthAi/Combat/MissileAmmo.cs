@@ -4,16 +4,20 @@ using System.Collections.Generic;
 namespace RynthCore.Plugin.RynthAi;
 
 /// <summary>One stack of arrows, quarrels or darts the character carries.</summary>
-/// <param name="AmmoType">AC AmmoType (int 50): 1 arrow, 2 quarrel, 4 dart; 0 = not known.</param>
+/// <param name="AmmoType">AC AmmoType (int 50): 1 arrow, 2 quarrel, 4 dart; 0 = none (an ammunition-slot
+/// item with no AmmoType and no ammo name: a server's own ammo, see <see cref="MissileAmmo.CanShoot"/>).</param>
 /// <param name="Element">Normalized element ("" = none known).</param>
 /// <param name="Prismatic">Takes the launcher's element (DamageType Base, or named Prismatic).</param>
 /// <param name="Quality">AmmoRecipes rank: Deadly beats Greater beats plain; 1 for ammo no recipe makes.</param>
 /// <param name="ListIndex">Position in the Items list; -1 = not listed.</param>
 /// <param name="Wielded">In the ammunition slot now.</param>
+/// <param name="Infinite">Never runs out (UnlimitedUse, or a single item that doesn't stack): see <see cref="MissileAmmo.LooksInfinite"/>.</param>
 internal sealed record AmmoCandidate(int Id, string Name, int AmmoType, string Element, bool Prismatic,
-    int Quality, int ListIndex, bool Wielded)
+    int Quality, int ListIndex, bool Wielded, bool Infinite = false)
 {
     public bool Listed => ListIndex >= 0;
+    /// <summary>No AmmoType: fits any launcher in hand, but must come off before a launcher is wielded.</summary>
+    public bool Untyped => AmmoType == 0;
 }
 
 /// <summary>
@@ -23,6 +27,9 @@ internal sealed record AmmoCandidate(int Id, string Name, int AmmoType, string E
 ///     and crystal / chorizite variants. The server refuses to wield a launcher while ammo of
 ///     another type is in the ammunition slot (0x00800000), and refuses ammo that doesn't match
 ///     the launcher in hand. So a bow-to-crossbow swap must take the arrows off first.
+///   * The ammo check is skipped when either side has no AmmoType, the launcher check is not: ammo
+///     with none goes on with any launcher in hand, but must come off before a launcher is wielded
+///     (2026-11-07, servers' custom infinite ammo).
 ///   * Thrown weapons (stackable, in the missile-weapon slot) are their own ammo: no AmmoType rule.
 ///   * A launcher's missile damage takes the AMMO's element. Prismatic ammo (DamageType Base)
 ///     takes the launcher's element instead (Pierce when the launcher has none).
@@ -77,8 +84,37 @@ internal static class MissileAmmo
         _                       => "arrows",
     };
 
-    /// <summary>The server's rule: the types must be equal (a crystal arrow is not an arrow).</summary>
+    /// <summary>
+    /// The server's rule for wielding a launcher: the ammo already on must be of the launcher's type
+    /// (a crystal arrow is not an arrow). Ammo with no AmmoType does not fit: ACE compares the
+    /// launcher's type with the ammo's (none), so it must come off first.
+    /// </summary>
     public static bool Fits(int launcherType, int ammoType) => launcherType != 0 && ammoType == launcherType;
+
+    /// <summary>
+    /// The launcher in hand can shoot it: ammo of its type, or ammo with no AmmoType at all (ACE checks
+    /// ammo going into the ammunition slot against the launcher only when both have a type). Custom
+    /// infinite ammo is sometimes made that way.
+    /// </summary>
+    public static bool CanShoot(int launcherType, int ammoType) => launcherType != 0 && (ammoType == launcherType || ammoType == 0);
+
+    /// <summary>PropertyBool UnlimitedUse: ammo the server never uses up (ACE Player_Missile.UpdateAmmoAfterLaunch).</summary>
+    public const uint PropUnlimitedUse = 63;
+
+    /// <summary>
+    /// Ammo that never runs out: UnlimitedUse (known once the item is appraised), or a single item that
+    /// doesn't stack (every ammo the game drops or crafts stacks), or named so. Servers make their
+    /// infinite ammo these ways; a single custom arrow that is used up costs one shot, then the next pick.
+    /// </summary>
+    public static bool LooksInfinite(bool unlimitedUse, int stackSize, int maxStackSize, string? name)
+    {
+        if (unlimitedUse) return true;
+        if (maxStackSize <= 1 && stackSize <= 1) return true;
+        string n = name ?? "";
+        return n.IndexOf("Infinite", StringComparison.OrdinalIgnoreCase) >= 0
+            || n.IndexOf("Unlimited", StringComparison.OrdinalIgnoreCase) >= 0
+            || n.IndexOf("Endless", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
 
     /// <summary>Prismatic: DamageType has the Base bit, or the name says so.</summary>
     public static bool IsPrismatic(int? damageType, string? name) =>
@@ -97,23 +133,29 @@ internal static class MissileAmmo
 
     /// <summary>
     /// The stack to wield in <paramref name="launcherType"/>'s launcher, null when the pack has
-    /// none that fits. Order:
+    /// none it can shoot (<see cref="CanShoot"/>). Order:
     ///   1. listed ammo (the Items list) before anything else;
-    ///   2. the element: <paramref name="elementRank"/> (lower = better) of the element the
+    ///   2. infinite ammo (it never runs out, owner 2026-11-07) before ammo that is used up;
+    ///   3. ammo of the launcher's own type before ammo with no AmmoType, and of those, not
+    ///      <paramref name="demoteId"/> (the stack just taken off the other launcher: it is that one's);
+    ///   4. the element: <paramref name="elementRank"/> (lower = better) of the element the
     ///      launcher would do with it; ammo of no known element counts as Pierce;
-    ///   3. quality (Deadly > Greater > plain), then the stack already wielded, then list / pack order.
+    ///   5. quality (Deadly > Greater > plain), then the stack already wielded, then list / pack order.
     /// </summary>
     public static AmmoCandidate? Choose(int launcherType, string launcherElement, IReadOnlyList<AmmoCandidate> pack,
-        Func<string, int> elementRank)
+        Func<string, int> elementRank, int demoteId = 0)
     {
         AmmoCandidate? best = null;
-        (int, int, int, int, int) bestKey = default;
+        (int, int, int, int, int, int, int, int) bestKey = default;
         for (int i = 0; i < pack.Count; i++)
         {
             var a = pack[i];
-            if (!Fits(launcherType, a.AmmoType)) continue;
+            if (!CanShoot(launcherType, a.AmmoType)) continue;
             string e = EffectiveElement(a, launcherElement);
             var key = (a.Listed ? 0 : 1,
+                       a.Infinite ? 0 : 1,
+                       a.Untyped ? 1 : 0,
+                       demoteId != 0 && a.Id == demoteId ? 1 : 0,
                        elementRank(e.Length > 0 ? e : "Pierce"),
                        -a.Quality,
                        a.Wielded ? 0 : 1,

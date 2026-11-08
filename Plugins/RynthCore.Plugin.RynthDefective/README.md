@@ -35,6 +35,17 @@ all three go.
   game's toolbar and its keys are not changed. Turning it off shows the game's 18 first again, RynthDefective's
   slot 1 at 19.
 
+* **More bars** (up to 4: *Shortcuts 2* to *Shortcuts 5*): *Add a shortcut bar* in the bar's right-click menu
+  (or Defective Settings, or `/rdef bars add`) opens another bar in a window of its own, to put anywhere: drag
+  its title to move it, its edge to fit more slots in a row. Each has its own slots (10 to start, 1-24 with the
+  edit button's - / + or the settings' slider), filled as the bar's own slots are: drag an item from the pack
+  onto a slot, or right-click it for *Put the selected item here* or *Put a spell here...*. A click uses the
+  item one-touch, as on the bar. Their slots have no keys (keys go on the bar's own slots). The engine remembers
+  each bar's place, size and whether it shows; the slots are kept per character with the others. They have no
+  RynthCore bar button: the Shortcuts bar's right-click menu shows or hides each, and removes one (*Remove a
+  bar*, or *Remove this bar* in that bar's own menu; a bar that holds something asks once more, and its slots
+  are forgotten). Why 4: the engine hosts at most 8 windows for a plugin, and RynthDefective draws 4 others.
+
 On an older engine the bar below is a script window, with its settings under its *Settings* button.
 
 ## What it does
@@ -108,6 +119,16 @@ number (the game gets no keys while the box has the keyboard) or pick 1, 10, 100
   `/rdef buy` (below). It doesn't need the Inventory panel or RynthInventory.
 * Retail AC kept this number in its toolbar; RynthCore's *Hide retail toolbar* hides it with the toolbar.
 
+## The Day/Night timer
+
+A one-row window (its RynthCore bar button is the sun; `/rdef daynight [show|hide]`; Settings > UI > Toolbar >
+*Day/Night timer*): a sun by day, a moon at night, and the **real** time until the next change, "Night in 23m",
+"Day in 4m 10s" (seconds from 10 minutes down), with the Dereth hour's name when there is room. A Dereth day is
+16 hours of 476.25 s, 2 h 7 min of real time: day (Dawnsong to Warmtide-and-Half) and night (Evensong to
+Foredawn-and-Half) are 63.5 real minutes each; the clock and calendar are RynthAi's meta expressions'
+(`getisday`, `getminutesuntilnight`). It shows "—" until you're in the world: the game clock isn't read before.
+`/rdef daynight` also says the time in chat. Drag it anywhere; Ctrl+wheel resizes it; right-click hides it.
+
 ## Busy, combat and RynthAi
 
 * One item action at a time: a request waits while the client is busy, a gesture animates, RynthAi waits on
@@ -118,8 +139,18 @@ number (the game gets no keys while the box has the keyboard) or pick 1, 10, 100
   up with nothing in flight after a death, a login or an interrupted action (and RynthAi's "waiting on the
   server" with it). A count that hasn't moved for 4 s with nothing of RynthDefective's in flight, a gesture
   that has "animated" for 4 s, or RynthAi's bit on for 5.5 s holds nothing (logged once); only a count above
-  that leftover holds again. RynthDefective never resets the count itself (the engine owns it). If the server
-  really is busy it answers "You're too busy" and the use is tried once more a second later.
+  that leftover holds again. RynthDefective doesn't reset the count itself (the engine owns it) unless you turn
+  on the option below. If the server really is busy it answers "You're too busy" and the use is tried once more
+  a second later.
+* **Shortcuts clear a stuck busy state** (Defective Settings, `/rdef shortcuts clearbusy on|off`; per character,
+  off by default): a press held only by the client's busy count, with nothing of RynthDefective's in flight or
+  unanswered, no animation, RynthAi with no action of its own out, and no "You're too busy" from the server in
+  the last 5 s, resets the count as RynthAi's `/ra clearbusy` does (the engine's busy-count reset; not its
+  *stop moving*), then the item is used: once per press, logged. Off by default because a reset also wipes
+  actions the server hasn't answered that RynthDefective can't see (a click in the game's own windows, its own
+  toolbar keys, another plugin's), and their late answers then take the count below zero (the engine repairs
+  that after 2 s); RynthAi stopped resetting the count for that reason. With it off a leftover holds a press
+  for at most 4 s.
 * A key pressed in portal space (a death's too) is not kept for later: it says so.
 * After a wield from a fighting stance the stance follows the weapon (wand: magic, melee weapon: melee,
   launcher with ammunition in hand: missile) once the character is still. At peace you stay at peace. A bow
@@ -142,11 +173,15 @@ number (the game gets no keys while the box has the keyboard) or pick 1, 10, 100
 /rdef weapons [search]        show the weapon picker
 /rdef fav                     make the selected weapon a favourite (or take it out)
 /rdef slots <n>               how many slots the script-window bar shows (1-24)
+/rdef bars                    the extra Shortcuts bars; /rdef bars add | remove <2-5> | slots <2-5> <1-24> |
+                              show <2-5> (show or hide it)
+/rdef shortcuts clearbusy [on|off]  a press held only by a stuck busy count clears it first (off by default)
 /rdef qty [n | max | half]    the quantity box's number (alone: what it is and what it's of)
 /rdef split [n] [into <pack>] split n (or the box's number) off the selected stack; pack: main, a side
                               pack's name, or open (the chest you have open)
 /rdef give [n]                give n of the selected stack to the last player or NPC you selected
 /rdef buy [n] [item name]     buy n of the selected vendor item (or the one named) from the open vendor
+/rdef daynight [show | hide] show / hide the Day/Night timer (alone: toggle); says the time now
 /rdef list | status | help
 ```
 
@@ -156,8 +191,10 @@ slot N is bar slot 18+N, or bar slot N when the bar is independent of the game's
 ## Settings
 
 Shortcuts bar: the windows shown, the quantity box under the selection (on by default), independent of the
-game's toolbar, slot picture size, allow weapon swaps under RynthAi, picker row icon size. Script-window bar: slots (1-24), slots per row, button size, picker row
-icon size, item icons on/off, counts and keys on/off, allow weapon swaps under RynthAi. Kept per character
+game's toolbar, slot picture size, shortcuts clear a stuck busy state (off by default), the extra bars (shown,
+slots, remove, add), allow weapon swaps under RynthAi, picker row icon size. Script-window bar: slots (1-24), slots per row, button size, picker row
+icon size, item icons on/off, counts and keys on/off, allow weapon swaps under RynthAi, shortcuts clear a stuck
+busy state. Kept per character
 with the slots, favourites and recent weapons in
 `<RynthSuite>\RynthDefective\characters\<server>_<character>.json`.
 

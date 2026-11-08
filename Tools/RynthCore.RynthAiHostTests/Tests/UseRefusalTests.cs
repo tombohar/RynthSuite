@@ -43,6 +43,7 @@ internal static class UseRefusalTests
         r.Add("use check: the next open settles an answered one that opened nothing; an open resets", WatchSettlesOnNextOpen);
         r.Add("use check (looting): Drakkon's stall - stop once, retry, say it once in chat, stop opening corpses, probe, recover", LootingStall);
         r.Add("use check (looting): normal opens never trip it", LootingNormalOpens);
+        r.Add("use check (looting): opens with monsters about never trip it (a fight cancels them)", OpensInAFightDontCount);
         r.Add("flight recorder: the use check asks the engine for a dump (clean stop, stuck); normal opens never do", FlightDumpRequests);
         r.Add("corpse open: a corpse claimed while Combat owns the tick is opened only on the Looting tick", OpenWaitsForLootingTick);
         r.Add("move hold: while a corpse use is in flight RynthAi's moves and turns wait, stops go through, UseDone or 1.5 s releases", MoveHoldWhileUseInFlight);
@@ -256,6 +257,34 @@ internal static class UseRefusalTests
 
     private static int ChatCount(string text) => FakeHost.Chat.Count(c => c.Contains(text));
 
+    // 2026-11-06, a wave fight: combat's swings cancelled the walk to the corpse, each open came back
+    // answered with nothing opened, and four of them paused looting 5 minutes with "a relog fixes it".
+    private static void OpensInAFightDontCount()
+    {
+        World();
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        var combat = new CombatManager(host, bot.S, bot.Cache);
+        combat.SetPlayerId(Player);
+        combat.SetScannedTargetsForTests(new[] { new CombatManager.ScannedTarget { Id = 0x7000, Distance = 3, Angle = 0, Bearing = double.NaN, Name = "Mob" } });
+        bot.Set("_combatManager", combat);
+        WithClock((now, advance) =>
+        {
+            long answerAt = 0;
+            for (int i = 0; i < 600; i++)
+            {
+                int uses = FakeHost.Uses.Count;
+                bot.Tick(BotActivity.Looting);
+                if (FakeHost.Uses.Count > uses) answerAt = now() + 60;
+                advance(100);
+                if (answerAt != 0 && now() >= answerAt) { FakeHost.UseDone(0); answerAt = 0; }
+            }
+            Check.True(FakeHost.Uses.Count > 0, "opens went out");
+            Check.Eq(ChatCount(StuckLine), 0, "no 'a relog fixes it'");
+            Check.False(FakeHost.Logs.Any(l => l.Contains("Use check:")), "the use check never acts on them");
+        });
+    }
+
     private static void LootingStall()
     {
         World();
@@ -289,7 +318,7 @@ internal static class UseRefusalTests
             int usesAtStuck = FakeHost.Uses.Count;
             Check.False((bool)bot.Call("HasLootWork", bot.S, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())!,
                 "no loot work during the back-off: nav and combat run on");
-            for (int i = 0; i < 2400; i++) Step();          // 4 minutes
+            for (int i = 0; i < 200; i++) Step();           // 20 s of the 30 s back-off
             Check.Eq(FakeHost.Uses.Count, usesAtStuck, "no corpse is opened during the back-off");
             Check.Eq(ChatCount(StuckLine), 1, "and nothing more is said");
 
@@ -639,7 +668,7 @@ internal static class UseRefusalTests
 
             var w = bot.Get<UseRefusalWatch>("_useRefusals");
             int usesAtStuck = FakeHost.Uses.Count;
-            for (int i = 0; i < 2400; i++) { bot.Tick(BotActivity.Looting); advance(100); }   // 4 minutes
+            for (int i = 0; i < 200; i++) { bot.Tick(BotActivity.Looting); advance(100); }   // 20 s of the 30 s back-off
             Check.Eq(FakeHost.TapJumps, 1, "no jump during the back-off");
             Check.Eq(FakeHost.Uses.Count, usesAtStuck, "no opens during the back-off");
 

@@ -9,6 +9,17 @@
 //  Threading: every call except RequestReset and View runs on the pump
 //  thread. RequestReset only sets a flag (any thread); View is an immutable
 //  record swapped in after each poll (any thread).
+//
+//  The bank's luminance where the client has no bank property (2026-11-02):
+//  a server that keeps earned luminance in its bank out of the client's sight
+//  has its server plugin read the bank and publish it in its profile
+//  ("RynthServer.Profile" values, RynthServerProfile.ValueBankLuminance;
+//  RynthDreamWeave's every-minute /b). Read every few seconds from the active
+//  server's owner (ServerStateClient) and only while ACECustom's 9005 isn't
+//  readable, it goes in as that bank's reading: the same baseline (the
+//  session file's "bank"), so rises are earned luminance and drops aren't.
+//  Needs, linked into the plugin: ServerStateClient.cs, EngineServerState.cs,
+//  RynthServerProfileApi.cs.
 // ============================================================================
 using System;
 using System.Collections.Generic;
@@ -40,6 +51,9 @@ internal sealed class SessionStatsTracker
     private readonly string _saveDirectory;
     private readonly SessionStats _stats = new();
     private readonly List<(uint Id, DateTime Seen)> _pendingCorpses = new();
+    private readonly ServerStateClient _server = new();
+    private long? _profileBankLum;  // the active server profile's bank luminance (null = none)
+    private long _nextProfileMs;
 
     private uint _playerId;
     private bool _loggedIn;         // between OnLoginComplete and OnLogout
@@ -66,6 +80,12 @@ internal sealed class SessionStatsTracker
     /// <summary>True while a session is running (pump thread).</summary>
     public bool Active => _active;
 
+    /// <summary>
+    /// How often the active server profile's bank luminance is re-read (a server plugin reads its bank
+    /// once a minute at most). Tests set it lower.
+    /// </summary>
+    internal long ProfileIntervalMs { get; init; } = 5000;
+
     /// <summary>Starts a fresh session on the next tick (any thread).</summary>
     public void RequestReset() => _pendingReset = true;
 
@@ -91,6 +111,9 @@ internal sealed class SessionStatsTracker
         _loggedIn = false;
         _active = false;
         _pendingCorpses.Clear();
+        _server.Clear();
+        _profileBankLum = null;
+        _nextProfileMs = 0;
         _view = SessionStatsView.Empty;
         _host.Log($"{_tag} Session ended.");
     }
@@ -186,7 +209,7 @@ internal sealed class SessionStatsTracker
         long nowMs = Environment.TickCount64;
         if (nowMs < _nextPollMs) return;
         _nextPollMs = nowMs + PollIntervalMs;
-        Poll(now);
+        Poll(now, nowMs);
         _view = _stats.View(now);
 
         // Saved right after a poll, so totals and baselines in the file always match.
@@ -197,13 +220,13 @@ internal sealed class SessionStatsTracker
         }
     }
 
-    private void Poll(DateTime now)
+    private void Poll(DateTime now, long nowMs)
     {
         if (_playerId == 0 || !_host.HasGetObjectQuadProperty) return;
         _stats.Sample(new SessionSample(
             Read(Int64TotalExperience),
             Read(Int64AvailableLuminance),
-            Read(Int64BankedLuminance),
+            Read(Int64BankedLuminance) ?? ProfileBankLum(nowMs),
             Read(Int64LuminanceBanked),
             Read(Int64LuminanceDrawn),
             Read(Int64RadianceEarned)), now);
@@ -211,6 +234,24 @@ internal sealed class SessionStatsTracker
 
     private long? Read(uint stype)
         => _host.TryGetObjectQuadProperty(_playerId, stype, out long value) ? value : null;
+
+    /// <summary>
+    /// The active server profile's bank luminance (RynthServerProfile.ValueBankLuminance), re-read every
+    /// few seconds and held in between; null while the profile has none (or the engine is older than v86).
+    /// </summary>
+    private long? ProfileBankLum(long nowMs)
+    {
+        if (nowMs < _nextProfileMs) return _profileBankLum;
+        _nextProfileMs = nowMs + ProfileIntervalMs;
+        try
+        {
+            _server.Poll(_host, nowMs, force: true);   // throttled here, not by the client's own 2 s
+            double v = ServerProfileView.Value(_server.ProfileJson, RynthServerProfile.ValueBankLuminance, double.NaN);
+            _profileBankLum = v >= 0 && v < long.MaxValue ? (long)v : null;
+        }
+        catch { _profileBankLum = null; }
+        return _profileBankLum;
+    }
 
     /// <summary>
     /// The player's health from the engine's vitals (the same reading RynthAi's death hold uses),

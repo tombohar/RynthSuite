@@ -10,7 +10,7 @@ using RynthNav.Baker;
 using RynthNav.Routing;
 using RynthCore.Plugin.Shared;
 
-internal static class Program
+internal static partial class Program
 {
     private static int _fails, _asserts;
     private static void Check(bool cond, string msg)
@@ -57,6 +57,7 @@ internal static class Program
             Run(nameof(RealMeshView), RealMeshView);
             Run(nameof(DungeonFileAndLayer), DungeonFileAndLayer);
             Run(nameof(RealDungeons), RealDungeons);
+            RunRouteMaker();   // RouteMakerTests.cs
         }
         finally { try { Directory.Delete(_root, true); } catch { } }
         Console.WriteLine();

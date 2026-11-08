@@ -40,6 +40,8 @@
     <!-- RynthSort reads what the bot is doing through RynthAi.Activity (read only). -->
     <Compile Include="..\Shared\RynthAiActivityApi.cs" Link="Shared\RynthAiActivityApi.cs" />
     <Compile Include="..\Shared\RynthAiYieldApi.cs" Link="Shared\RynthAiYieldApi.cs" />
+    <!-- Dungeon routes made on demand for another plugin (an AI layer): /ra dunroute's work, JSON in and out. -->
+    <Compile Include="..\Shared\RynthAiRoutesApi.cs" Link="Shared\RynthAiRoutesApi.cs" />
     <!-- RynthLua's scripts choose attack and heal spells through RynthAi.Combat. -->
     <Compile Include="..\Shared\RynthAiCombatApi.cs" Link="Shared\RynthAiCombatApi.cs" />
     <!-- RynthNav's navmesh path queries (stuck-recovery detours outdoors). -->

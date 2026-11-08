@@ -52,6 +52,10 @@ internal static class LootCorpseTests
         r.Add("boost loot: our kill holds the next target until its corpse is looted (one kill, one loot)", BoostLootOneKillOneLoot);
         r.Add("boost loot: the wait ends after BoostLootKillWaitMs, for a close monster, and with Boost Loot off", BoostLootHoldLimits);
         r.Add("boost loot: looting the kill's corpse ends the wait; an older corpse does not", BoostLootWaitEndsOnKillCorpse);
+        r.Add("death wait (11-08): Looting on, our kill holds the next target for the learned death + 1 s; Looting gets the tick", DeathWaitUsesLearnedTime);
+        r.Add("death wait (11-08): not learned yet: 2.5 s + 1 s; the corpse's coming is timed and learned", DeathWaitDefaultAndLearns);
+        r.Add("death wait (11-08): looting the kill's corpse ends it at once; a corpse the rules don't take ends it soon after it came", DeathWaitEndsOnLoot);
+        r.Add("death wait (11-08): no corpse in the time: it carries on; a close attacker is fought; Looting off changes nothing", DeathWaitLimits);
         r.Add("monster ignore: a close Priority 0 monster neither holds combat nor starves the corpse", IgnoredMonsterDoesNotHoldLoot);
         r.Add("loot gate (R-20261025 727b): a predicted kill still alive holds the corpse; after its window combat has it again", PredictedKillHoldsCorpse);
         r.Add("loot gate (R-20261025 727b): the kill notice, health 0 or a hit after the swap settle a predicted kill at once", PredictedKillSettled);
@@ -605,6 +609,180 @@ internal static class LootCorpseTests
         bot.Call("EndBoostLootKillWait", Fresh);
         Check.Eq(bot.Get<long>("_boostLootKillAt"), 0L, "the kill's corpse (first seen after it) ends the wait");
         Check.False((bool)bot.Call("BoostLootHoldsNewTarget")!, "so combat goes on at once");
+    }
+
+    // ── The death wait (2026-11-08, Tom: the bot ran off from its kill, then turned round and ran back
+    //    when the corpse came after the death animation) ──
+
+    private const string Elemental = "Ancient Water Elemental";
+
+    /// <summary>BoostWorld with Boost Loot off and combat's hold wired to both holds, on a clock the test moves.</summary>
+    private static Bot DeathWorld(float monsterMeters, out CombatManager combat, Func<long> clock)
+    {
+        RynthAiPlugin.CorpseClock = clock;
+        var bot = BoostWorld(monsterMeters, withCorpse: false, out combat, boost: false);
+        combat.HoldNewTarget = () => (bool)bot.Call("LootHoldsNewTarget")!;
+        combat.HoldNewTargetWhy = () => (string)bot.Call("LootHoldWhy")!;
+        return bot;
+    }
+
+    private static void RestoreCorpseClock() => RynthAiPlugin.CorpseClock = static () => Environment.TickCount64;
+
+    private static BotActivity Arbiter(Bot bot, CombatManager combat)
+    {
+        bool wantLoot = bot.HasLootWork();
+        var inputs = new ArbiterInputs(true, false, combat.HasEngageableTarget, wantLoot, false, true,
+                                       combatEngaged: combat.IsUnderCloseAttack, deathWait: wantLoot && bot.Get<bool>("_deathWaitHeld"));
+        return ActivityArbiter.Decide(in inputs);
+    }
+
+    private static void DeathWaitUsesLearnedTime()
+    {
+        long now = 1_000_000;
+        try
+        {
+            var bot = DeathWorld(15f, out var combat, () => now);
+            bot.P.XpTableForTests.RecordDeath(Elemental, 1500);
+            bot.Call("StartDeathWait", Elemental);
+            Check.Eq(bot.Get<long>("_deathWaitMs"), 2500L, "the learned 1.5 s and 1 s more");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("waiting up to 2.5 s for the corpse of 'Ancient Water Elemental'") && l.Contains("learned over 1 kill")),
+                       "said once, plainly: " + FakeHost.Logs.LastOrDefault());
+            combat.HandleCombatTrigger();
+            Check.Eq(combat.activeTargetId, 0, "the next monster (15 m) is not locked while the corpse comes");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("[CombatTarget] next target waits: the kill's corpse comes first")), "combat says why");
+            Check.Eq(Arbiter(bot, combat), BotActivity.Looting, "Looting has the tick (no nav, no hunt walk)");
+            now += 2400;
+            Check.Eq(Arbiter(bot, combat), BotActivity.Looting, "still at 2.4 s");
+            now += 200;
+            Check.Eq(Arbiter(bot, combat), BotActivity.Combat, "at 2.6 s, no corpse: it carries on");
+            combat.HandleCombatTrigger();
+            Check.Eq(combat.activeTargetId, unchecked((int)Monster), "and the next monster is locked");
+        }
+        finally { RestoreCorpseClock(); }
+    }
+
+    private static void DeathWaitDefaultAndLearns()
+    {
+        long now = 2_000_000;
+        try
+        {
+            var bot = DeathWorld(15f, out var combat, () => now);
+            bot.Set("_loginComplete", true);
+            string? killed = (string?)bot.Call("NoteMonsterStatsKill", $"You killed {Elemental}!");
+            Check.Eq(killed, Elemental, "the kill notice names it");
+            bot.Call("StartDeathWait", killed!);
+            Check.Eq(bot.Get<long>("_deathWaitMs"), RynthAiPlugin.DeathWaitDefaultMs + RynthAiPlugin.DeathWaitExtraMs, "not learned: 2.5 s + 1 s");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("isn't learned yet")), "and says so");
+            now += 2100;
+            bot.Cache.OnCreateObject(Corpse);
+            bot.Cache.Tick();
+            bot.Call("NoteCorpseCreated", Corpse);
+            Check.Eq(bot.Get<int>("_deathCorpseId"), unchecked((int)Corpse), "the kill's corpse is known");
+            Check.Near(bot.P.XpTableForTests.DeathMs(Elemental) ?? 0, 2100, 1e-9, "its death learned: 2.1 s");
+            Check.Eq(bot.P.MonsterStatsForTests.Get(Elemental)!.CorpseKills, 1, "and on the session's row");
+            Check.Eq(Arbiter(bot, combat), BotActivity.Looting, "the corpse is here and lootable: Looting");
+            bot.Set("_targetCorpseId", unchecked((int)Corpse));   // the looter claims it
+            now += 5000;   // past the 3.5 s: the corpse is being looted, so it still holds
+            Check.Eq(Arbiter(bot, combat), BotActivity.Looting, "while its corpse is claimed the wait goes on");
+        }
+        finally { RestoreCorpseClock(); }
+    }
+
+    private static void DeathWaitEndsOnLoot()
+    {
+        long now = 3_000_000;
+        try
+        {
+            var bot = DeathWorld(15f, out var combat, () => now);
+            bot.Call("StartDeathWait", Elemental);
+            now += 1500;
+            bot.Cache.OnCreateObject(Corpse);
+            bot.Cache.Tick();
+            bot.Call("NoteCorpseCreated", Corpse);
+            bot.HasLootWork();
+            bot.Call("MarkCorpseCompleted", unchecked((int)Corpse));
+            Check.Eq(bot.Get<long>("_deathWaitAt"), 0L, "looted: the wait is over at once");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("done waiting for the corpse of 'Ancient Water Elemental' after 1.5 s: its corpse is looted")),
+                       "said once: " + FakeHost.Logs.LastOrDefault());
+            combat.HandleCombatTrigger();
+            Check.Eq(combat.activeTargetId, unchecked((int)Monster), "and combat goes on");
+
+            // A corpse the rules don't take (another player's kill, My Kills Only): no longer than its coming and the look.
+            var other = DeathWorld(15f, out var combat2, () => now);
+            FakeHost.Strings[(Corpse, LongDescKey)] = "Killed by Someone Else.";
+            other.Call("StartDeathWait", Elemental);
+            now += 1500;
+            other.Cache.OnCreateObject(Corpse);
+            other.Cache.Tick();
+            other.Call("NoteCorpseCreated", Corpse);
+            Check.Eq(Arbiter(other, combat2), BotActivity.Looting, "just came: the loot rules get their look");
+            now += RynthAiPlugin.DeathWaitDecideMs + 1;
+            Check.Eq(Arbiter(other, combat2), BotActivity.Combat, "not ours: it carries on");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("the loot rules don't take it")), "and says why");
+
+            // Ours and lootable, but the looter leaves it for the fight (monsters in range): no stand-off.
+            // 2026-11-08: the wait held combat's next target while looting waited for combat; the
+            // character stood 7.8 s, then the whole loot held it (16 s for a 1.2 s death).
+            var standoff = DeathWorld(15f, out var combat3, () => now);
+            FakeHost.Strings.Remove((Corpse, LongDescKey));
+            standoff.Call("StartDeathWait", Elemental);
+            now += 1200;
+            standoff.Cache.OnCreateObject(Corpse);
+            standoff.Cache.Tick();
+            standoff.Call("NoteCorpseCreated", Corpse);
+            Check.Eq(Arbiter(standoff, combat3), BotActivity.Looting, "just came: the looter gets its moment to claim it");
+            Check.True(standoff.Get<List<int>>("_lootableInRange").Contains(unchecked((int)Corpse)), "it is lootable in range");
+            Check.Eq(standoff.Get<int>("_targetCorpseId"), 0, "but not claimed");
+            now += RynthAiPlugin.DeathWaitDecideMs + 1;
+            Check.Eq(Arbiter(standoff, combat3), BotActivity.Combat, "unclaimed a second after it came: the fight goes on");
+            combat3.HandleCombatTrigger();
+            Check.Eq(combat3.activeTargetId, unchecked((int)Monster), "and the next monster is locked");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("the looter leaves it for the fight")), "says why: " + FakeHost.Logs.LastOrDefault());
+        }
+        finally { RestoreCorpseClock(); }
+    }
+
+    private static void DeathWaitLimits()
+    {
+        long now = 4_000_000;
+        try
+        {
+            // No corpse ever: the wait ends at its time, once.
+            var bot = DeathWorld(15f, out var combat, () => now);
+            bot.Call("StartDeathWait", Elemental);
+            Check.True((bool)bot.Call("LootHoldsNewTarget")!, "holding");
+            now += RynthAiPlugin.DeathWaitDefaultMs + RynthAiPlugin.DeathWaitExtraMs;
+            Check.False((bool)bot.Call("LootHoldsNewTarget")!, "past the time: no hold");
+            Check.Eq(FakeHost.Logs.Count(l => l.Contains("no corpse came in 3.5 s")), 1, "said once");
+            combat.HandleCombatTrigger();
+            Check.Eq(combat.activeTargetId, unchecked((int)Monster), "the next monster is locked");
+            bot.HasLootWork();
+            Check.Eq(FakeHost.Logs.Count(l => l.Contains("done waiting")), 1, "and not again");
+
+            // A monster 2 m away is fought whatever the wait.
+            var close = DeathWorld(2f, out var combat2, () => now);
+            close.Call("StartDeathWait", Elemental);
+            combat2.HandleCombatTrigger();
+            Check.Eq(combat2.activeTargetId, unchecked((int)Monster), "a monster at 2 m: locked");
+            Check.Eq(Arbiter(close, combat2), BotActivity.Combat, "and fought");
+
+            // Looting off: nothing changes.
+            var off = DeathWorld(15f, out var combat3, () => now);
+            off.S.EnableLooting = false;
+            off.Call("StartDeathWait", Elemental);
+            Check.Eq(off.Get<long>("_deathWaitAt"), 0L, "no wait");
+            Check.False(off.HasLootWork(), "no loot work");
+            combat3.HandleCombatTrigger();
+            Check.Eq(combat3.activeTargetId, unchecked((int)Monster), "the next monster is locked at once");
+            Check.Eq(Arbiter(off, combat3), BotActivity.Combat, "combat as before");
+
+            // Rare-only looting: as Boost Loot, nothing to wait for.
+            var rare = DeathWorld(15f, out _, () => now);
+            rare.S.LootOnlyRareCorpses = true;
+            rare.Call("StartDeathWait", Elemental);
+            Check.Eq(rare.Get<long>("_deathWaitAt"), 0L, "Loot Only Rare Corpses: no wait");
+        }
+        finally { RestoreCorpseClock(); }
     }
 
     private static void HeldByCombatLoggedOnce()

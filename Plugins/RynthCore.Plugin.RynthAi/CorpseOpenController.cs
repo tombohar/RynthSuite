@@ -156,6 +156,8 @@ public sealed partial class RynthAiPlugin
     private bool _currentLootItemSawAnim;
     private bool _currentLootItemStackable;   // a stack at send: it may merge into a pack stack and vanish
     private bool _currentLootItemPipelined;   // sent while the last pickup's Return played (ACE queues it)
+    private bool _currentLootItemJumped;      // jump-loot: sent in the air, its own jump or the last one's (not a resend)
+    private bool _currentLootItemSentInAirWindow; // sent on the strength of the last no-bend-down pickup (JumpPickupInAir)
     private int _currentLootItemErrSeqAtSend; // TryGetLastWeenieError seq at the send (0 = unknown)
     private int _currentLootItemFreeRetries;  // resends after a too-busy answer (not counted as attempts)
     // 2026-10-29 (R-20261029-122319-321f): what the server said to the last send, and what the
@@ -194,6 +196,33 @@ public sealed partial class RynthAiPlugin
     private bool _settlingSawAnim;
     private bool _settlingAllowsPipeline;
     private int _pipelinedAfterItemId;        // the answered pickup a move was already queued behind
+    // A jump-loot pickup answered with no bend-down (JumpPickupHadNoMotion): until this CorpseNowMs
+    // the client's motion queue is the jump's own (take-off, fall, landing), not a server pickup.
+    private long _jumpPickupAirUntil;
+    // The no-bend-down call is off until this CorpseNowMs (DistrustJumpNoMotion): the server turned a
+    // move or open away as too busy that went out on it, so it had played a bend-down after all.
+    private long _jumpNoMotionOffUntil;
+    // The UseDone count before a corpse open sent inside the no-bend-down window (-1: none watched).
+    private int _openInAirWindowSeq = -1;
+    /// <summary>How long the no-bend-down call stays off after the server proved it wrong.</summary>
+    internal const long JumpNoMotionDistrustMs = 5 * 60_000;
+
+    // Flight budget. A pickup sent in the air with no fresh jump is a no-bend-down pickup only if the
+    // server still sees the character jumping when it processes the move. Prediction: jumpAge (ms
+    // since the loot jump) + the recent send-to-off-corpse time of no-bend-down pickups must stay
+    // within this budget, else the send waits for the landing and takes a fresh jump (a landing and
+    // a jump cost about 0.5 s; a late in-air send got the whole bend-down and Return, about 2 s).
+    // Measured in client logs from one ACE server: of 56 in-air sends answered with no bend-down,
+    // the largest jumpAge + off-corpse ms was 809.
+    internal const long LootJumpFlightBudgetMs = 809;
+
+    /// <summary>The send-to-off-corpse time assumed until a no-bend-down pickup has been measured (log median 203 ms).</summary>
+    internal const long DefaultNoMotionOffCorpseMs = 200;
+
+    // The send-to-off-corpse ms of the last 4 pickups answered with no bend-down (ConfirmCurrentLootItem).
+    private readonly long[] _noMotionOffCorpse = new long[4];
+    private int _noMotionOffCorpseCount, _noMotionOffCorpseNext;
+    private bool _flightHoldLogged;            // the hold for the current send has been logged
     // [LootEval] lines: one per item per open (a matched item was re-printed before every pickup).
     private readonly Dictionary<int, string> _lootEvalLogged = new();
     private int _manaStoneCapLoggedFor;        // container the "ManaStone count for cap check" line was logged for
@@ -823,6 +852,10 @@ public sealed partial class RynthAiPlugin
 
         // A chest the player or a meta opened: looted where it stands (RynthAiPlugin.ChestLoot.cs).
         if (_targetCorpseId == 0 && _chestCandidateId != 0 && TryTakeOpenChest(settings, CorpseNowMs))
+            return;
+
+        // A named object (Loot by name) when no corpse is claimed and nothing is open.
+        if (_targetCorpseId == 0 && _lootNameTargetId != 0 && TryLootByName(settings, CorpseNowMs))
             return;
 
         double maxMeters = GetCorpseApproachRangeMaxMeters(settings);
@@ -1832,9 +1865,11 @@ public sealed partial class RynthAiPlugin
             // The character still animates. Right after a pickup's answer that is its "Return"
             // (standing up): ACE queues a move that arrives then and runs it the moment the
             // Return ends (Player.HandleActionPutItemInContainer_Verify, NextPickup), so the next
-            // move goes out now - one, never two. Any other animation: wait until it ends.
+            // move goes out now - one, never two. Any other animation: wait until it ends. Not the
+            // jump's own motion after a jump-loot pickup the server answered with no bend-down: ACE
+            // has nothing to play then (no Return, not busy) and takes a pickup in the air.
             bool pipelined = false;
-            if (PickupAnimating(now))
+            if (PickupAnimating(now) && !JumpPickupInAir(now))
             {
                 if (!CanPipelinePickup(now))
                     return;
@@ -1844,6 +1879,25 @@ public sealed partial class RynthAiPlugin
             // The server still owes an answer to a cast or use: it refuses a pickup now.
             if (PickupHeldByServerAction())
                 return;
+
+            // Jump-loot (see the jump below): the settings and the flight are read first, so a send
+            // held for the landing does nothing else this tick (no chat line, no selection).
+            bool jumpLoot = !pipelined && ShouldJumpLoot(settings);
+            long jumpAge = jumpLoot ? ActionPacer.LootJumpAgeMs() : -1;
+            bool stillInAir = jumpLoot && ActionPacer.LootJumpAirborne(Host, out _);
+            if (stillInAir && FlightBudgetSpent(jumpAge, out long expectedAnswerMs))
+            {
+                // A pickup sent now would reach the server after the flight is over and get the
+                // whole bend-down and Return: hold until LootJumpAirborne says landed (JumpLandMaxMs
+                // at most); the path below then jumps and sends.
+                if (!_flightHoldLogged)
+                {
+                    _flightHoldLogged = true;
+                    LootDiag($"[RynthAi] {LootTag}: jump-loot: holding 0x{(uint)firstMatchId:X8} '{matchItemName}' for the landing - {jumpAge} ms into the flight and an answer takes about {expectedAnswerMs} ms, over the {LootJumpFlightBudgetMs} ms flight budget.");
+                }
+                return;
+            }
+            _flightHoldLogged = false;
 
             ChatLine($"[RynthAi] Loot rule: {matchItemName} -> [{matchActionLabel}] {matchRuleLabel}");
             _currentLootItemId = firstMatchId;
@@ -1861,9 +1915,16 @@ public sealed partial class RynthAiPlugin
             // corpses hold one match, so a multi-item gate meant jump-loot almost never ran), with
             // stamina > 5 to cover the cost. Not for a pipelined move: it is already queued behind
             // the last pickup's Return, and a jump there would only disturb that queue. The tap jump
-            // has a fixed height, so LootJumpHeight no longer has an effect.
-            if (!pipelined && ShouldJumpLoot(settings))
-                Host.TapJump();
+            // has a fixed height, so LootJumpHeight no longer has an effect. No second jump while
+            // still in the air (on ACE an air jump only costs stamina); a jump taken is noted, so
+            // combat and buffs wait for the landing (ACE refuses them in the air). A send late in
+            // the flight was held above (FlightBudgetSpent).
+            bool jumped = false;
+            if (jumpLoot && !stillInAir)
+            {
+                try { jumped = Host.TapJump(); } catch { jumped = false; }
+                if (jumped) ActionPacer.NoteLootJump(Host);
+            }
 
             // Always a move into a pack, never a use: a use on a wearable corpse item is
             // get-and-wield, which put salvage jewellery on the character (2026-10-02).
@@ -1914,6 +1975,8 @@ public sealed partial class RynthAiPlugin
             // slot still held, or "You're too busy") must not cost the item one of its 3 tries.
             _currentLootItemMoveAttempts     = pipelined ? 0 : 1;
             _currentLootItemPipelined        = pipelined;
+            _currentLootItemJumped           = jumped || stillInAir;
+            _currentLootItemSentInAirWindow  = JumpPickupInAir(now);
             _currentLootItemStackable        = stackable;
             _currentLootItemErrSeqAtSend     = errSeqAtSend;
             NoteLootMoveSent();
@@ -1985,6 +2048,8 @@ public sealed partial class RynthAiPlugin
     /// <summary>
     /// An answer sooner than this after the send isn't believed: ACE plays the whole pickup
     /// motion (about 0.75 s standing, longer in a combat stance) before it moves the item.
+    /// Not for a jump-loot send's item seen in a pack (TickPendingCorpsePickup): with no motion
+    /// it comes in about the round trip.
     /// </summary>
     internal const long PickupAnswerMinMs = 500;
 
@@ -2227,6 +2292,35 @@ public sealed partial class RynthAiPlugin
         _currentLootItemRefusalBusy = !IsQuestPickupRefusal(err) && (err == WeenieErrorYoureTooBusy || after < PickupAnswerMinMs);
         if (!_currentLootItemRefusalBusy && !_currentLootItemTimedOut)
             NotePickupAnswerLatency(after);
+        if (_currentLootItemSentInAirWindow && RefusedAsTooBusy(err))
+            DistrustJumpNoMotion(now, $"0x{(uint)_currentLootItemId:X8}, sent on it, was refused as too busy {after} ms after the send");
+    }
+
+    /// <summary>
+    /// The refusal of the current send was ACE's "too busy", not another one (a full pack, a quest
+    /// item) that only came fast. ACE sends YoureTooBusy (0x1D) and then InventoryServerSaveFailed
+    /// with no code (Player_Inventory HandleActionPutItemInContainer_Verify); the engine keeps only
+    /// the last refusal but counts each, so the 0x1D is either the last code or the first of two
+    /// refusals since the send. A full pack sends one save-failed.
+    /// </summary>
+    private bool RefusedAsTooBusy(uint err) =>
+        err == WeenieErrorYoureTooBusy
+        || (err == 0 && LastWeenieErrorSeq() - _currentLootItemErrSeqAtSend >= 2);
+
+    /// <summary>
+    /// The server turned away as too busy a move or open that went out on a no-bend-down call: the
+    /// last pickup had a bend-down and a Return after all (on a fast server it can be 0.25-0.4 s,
+    /// inside PickupAnswerMinMs). The window ends and JumpPickupHadNoMotion says no for
+    /// JumpNoMotionDistrustMs, so every pickup waits its Return as without jump-loot.
+    /// </summary>
+    private void DistrustJumpNoMotion(long now, string why)
+    {
+        _jumpPickupAirUntil = 0;
+        _openInAirWindowSeq = -1;
+        bool was = now < _jumpNoMotionOffUntil;
+        _jumpNoMotionOffUntil = now + JumpNoMotionDistrustMs;
+        if (!was)
+            LootDiag($"[RynthAi] {LootTag}: jump-loot: {why}; the server played a bend-down after all - every pickup waits its Return for {JumpNoMotionDistrustMs / 60_000} min.");
     }
 
     /// <summary>
@@ -2375,12 +2469,27 @@ public sealed partial class RynthAiPlugin
     internal const long PickupHoldMaxGapMs = 500;
 
     /// <summary>Jump-loot for this pickup: the setting, the keyboard jump and the move call, stamina for
-    /// the jump.</summary>
+    /// the jump, and no fight or heal it could delay (<see cref="JumpLootWouldDelayFight"/>).</summary>
     private bool ShouldJumpLoot(LegacyUiSettings settings) =>
         settings.LootJumpEnabled
         && Host.HasTapJump
         && Host.HasMoveItemExternal
-        && _vitals.CurrentStamina > 5;
+        && _vitals.CurrentStamina > 5
+        && !JumpLootWouldDelayFight(settings);
+
+    /// <summary>
+    /// The jump's flight holds attacks, buffs and heals (ACE refuses them in the air: ActionPacer
+    /// LootJumpAirborne), so a pickup goes without one while monsters are near (looting can run in a
+    /// fight with Boost Loot Priority or a loot turn) or health is under Heal At: the bend-down costs
+    /// about a second, a heal held in the air could cost the character.
+    /// </summary>
+    private bool JumpLootWouldDelayFight(LegacyUiSettings settings)
+    {
+        if (_combatManager?.HasNearbyMonsters == true)
+            return true;
+        uint max = _vitals.MaxHealth;
+        return max > 0 && settings.HealAt > 0 && _vitals.CurrentHealth * 100 < (uint)settings.HealAt * max;
+    }
 
     /// <summary>
     /// True while the server owes an answer to a cast or use (ActionPacer): ACE refuses a pickup
@@ -2553,7 +2662,11 @@ public sealed partial class RynthAiPlugin
                 && (currentItem == null || ObjectGoneFromClient(_currentLootItemId) || (currentContainer == 0 && _currentLootItemStackable)
                     || MergedIntoInventoryStack(out mergedInto));
             bool landed = inPack || mergedAway;
-            bool believable = now - _currentLootItemMoveRequestedAt >= PickupAnswerMinMs;
+            // The floor is ACE's motion time; a jump send skips it only for the item seen in a pack,
+            // the server's answer about that object, which also frees the client's one request slot
+            // (a merged-away object can leave the slot held, so a merge keeps the floor).
+            bool jumpAnswer = _currentLootItemJumped && inPack;
+            bool believable = jumpAnswer || now - _currentLootItemMoveRequestedAt >= PickupAnswerMinMs;
             long since = now - _currentLootItemLeftAt;
             bool answered = landed && believable;
             if (!answered && since < PickupArriveMaxMs)
@@ -2750,6 +2863,8 @@ public sealed partial class RynthAiPlugin
         _currentLootItemFightHeld = false;
         _currentLootItemErrSeqAtSend = errSeqAtSend;
         _currentLootItemMoveRequestedAt = now;
+        _currentLootItemJumped = false;   // a resend goes without a jump (the floor applies)
+        _currentLootItemSentInAirWindow = false;
         if (retried) NoteLootMoveSent();
         _currentLootItemStillSince = 0;
         _currentLootItemSawAnim = false;
@@ -2874,8 +2989,12 @@ public sealed partial class RynthAiPlugin
         if (answered) _currentLootItemDestsTried.Clear();   // landed: nothing to watch for (ResetCurrentLootItem)
         _processedCorpseItems.Add(_currentLootItemId);
         _corpseItemsLooted++;
+        bool noMotion = answered && JumpPickupHadNoMotion();
+        long jumpSentAt = _currentLootItemMoveRequestedAt;
         LootDiag($"[RynthAi] {LootTag}: pickup confirmed for 0x{(uint)_currentLootItemId:X8}; {reason}" +
-                 $" ({now - _currentLootItemMoveRequestedAt} ms after the send{(_currentLootItemPipelined ? ", queued" : "")}).");
+                 $" ({now - _currentLootItemMoveRequestedAt} ms after the send{(_currentLootItemPipelined ? ", queued" : "")}" +
+                 $"{(noMotion ? $", jump-loot: off the corpse {_currentLootItemLeftAt - _currentLootItemMoveRequestedAt} ms after the send, no bend-down or Return to wait for" : "")}).");
+        if (noMotion) NoteNoMotionOffCorpse(_currentLootItemLeftAt - _currentLootItemMoveRequestedAt);   // sizes the flight-budget prediction
         // Each item taken is progress, so the corpse/chest timeout counts from the last pickup:
         // a chest gets its 2 minutes per pickup, and a corpse with many keeps is no longer
         // closed part way through by the 12 s timeout (SK, 2026-10-11). Not while a hold
@@ -2886,7 +3005,7 @@ public sealed partial class RynthAiPlugin
         if (_openedContainerId != 0 && _openedContainerId == _ownRecoveryCorpseId)
             NoteOwnCorpseItemRecovered(now);
         if (_currentLootItemChat is { } described)
-            Host.WriteToChat(described.Line, described.ChatType);
+            WriteItemInfoLine(described.Line, described.ChatType);
         else if (!string.IsNullOrWhiteSpace(_currentLootItemName))
             ChatLine($"[RynthAi] Looted [{_currentLootItemActionLabel}] {_currentLootItemName}");
 
@@ -2900,13 +3019,85 @@ public sealed partial class RynthAiPlugin
         ResetCurrentLootItem();
         _lastLootActionAt = now;
 
-        // Its Return now plays: the close waits for it, and one move may be queued behind it.
+        _pickupAnimSince = 0; // the next pickup's animation gets its own PickupAnimMaxMs
+        if (noMotion)
+        {
+            // Jump-loot, answered with no bend-down: ACE played no pickup motion, so EnqueuePickupDone
+            // has no Return to play and the server is no longer busy. Nothing to settle: the corpse
+            // can close and the next pickup or open can go now, in the air. What the server refuses
+            // in the air (a cast, an attack) waits on its own gates (ActionPacer.LootJumpAirborne).
+            // Still one move at a time: the next goes only after this one's answer.
+            _settlingLootItemId = 0;
+            _settlingContainerId = 0;
+            _settlingAllowsPipeline = false;
+            // The flight ends JumpLandMaxMs after the JUMP, not after this send: a send that rode an
+            // earlier jump (the in-air path) is later than its jump. Looked up as an age so the
+            // pacer's clock and the loot clock need not agree; -1 (no jump noted: it has landed, or
+            // the pacer was reset) falls back to the send time.
+            long flightAge = ActionPacer.LootJumpAgeMs();
+            _jumpPickupAirUntil = flightAge >= 0
+                ? now + (ActionPacer.JumpLandMaxMs - flightAge)
+                : jumpSentAt + ActionPacer.JumpLandMaxMs;
+            return;
+        }
+
+        // Its Return now plays: the close waits for it, and one move may be queued behind it. A
+        // busy motion queue is that Return now, not an earlier jump's flight.
+        _jumpPickupAirUntil = 0;
         _settlingLootItemId = itemId;
         _settlingContainerId = _openedContainerId;
         _settlingSince = now;
         _settlingSawAnim = false;
         _settlingAllowsPipeline = answered;
-        _pickupAnimSince = 0; // the next pickup's animation gets its own PickupAnimMaxMs
+    }
+
+    /// <summary>
+    /// The current pickup was a jump-loot pickup the server ran with no bend-down: its jump went
+    /// out with this very send or it was sent in the air from the last one (not a resend), and the
+    /// item was off the corpse sooner than PickupAnswerMinMs after it - quicker than ACE's pickup
+    /// motion, so ACE skipped it (in the air, Player_Inventory.GetPickupMotion returns Invalid under
+    /// allow_jump_loot). A jump pickup answered later (the character had landed, or allow_jump_loot
+    /// is off) had a bend-down and gets its Return waited out as before. Off for
+    /// JumpNoMotionDistrustMs after the server proved the call wrong (DistrustJumpNoMotion).
+    /// </summary>
+    private bool JumpPickupHadNoMotion() =>
+        _currentLootItemJumped
+        && CorpseNowMs >= _jumpNoMotionOffUntil
+        && _currentLootItemLeftAt != 0
+        && _currentLootItemLeftAt - _currentLootItemMoveRequestedAt < PickupAnswerMinMs;
+
+    /// <summary>
+    /// Inside the flight of the last jump pickup that had no bend-down (at most
+    /// ActionPacer.JumpLandMaxMs from its jump): a busy motion queue now is the jump's take-off,
+    /// fall or landing, not a server pickup motion.
+    /// </summary>
+    private bool JumpPickupInAir(long now) => _jumpPickupAirUntil != 0 && now < _jumpPickupAirUntil;
+
+    /// <summary>
+    /// A pickup sent in the air now is predicted to reach the server after the loot jump's flight:
+    /// jumpAge + the expected answer time is over <see cref="LootJumpFlightBudgetMs"/>.
+    /// </summary>
+    private bool FlightBudgetSpent(long jumpAge, out long expectedAnswerMs)
+    {
+        expectedAnswerMs = ExpectedNoMotionAnswerMs();
+        return jumpAge >= 0 && jumpAge + expectedAnswerMs > LootJumpFlightBudgetMs;
+    }
+
+    /// <summary>The recent send-to-off-corpse time of pickups answered with no bend-down (mean of the last 4), or the default.</summary>
+    internal long ExpectedNoMotionAnswerMs()
+    {
+        if (_noMotionOffCorpseCount == 0) return DefaultNoMotionOffCorpseMs;
+        long sum = 0;
+        for (int i = 0; i < _noMotionOffCorpseCount; i++) sum += _noMotionOffCorpse[i];
+        return sum / _noMotionOffCorpseCount;
+    }
+
+    private void NoteNoMotionOffCorpse(long ms)
+    {
+        if (ms <= 0) return;
+        _noMotionOffCorpse[_noMotionOffCorpseNext] = ms;
+        _noMotionOffCorpseNext = (_noMotionOffCorpseNext + 1) % _noMotionOffCorpse.Length;
+        if (_noMotionOffCorpseCount < _noMotionOffCorpse.Length) _noMotionOffCorpseCount++;
     }
 
     /// <summary>
@@ -2933,6 +3124,7 @@ public sealed partial class RynthAiPlugin
     {
         _lootStarved = false;
         _lootWorkWhy = string.Empty;
+        _deathWaitHeld = false;
         if (!settings.IsMacroRunning || (!settings.EnableLooting && !ForcedLootHolds()))
             return false;
 
@@ -2954,6 +3146,7 @@ public sealed partial class RynthAiPlugin
                 && _corpseWaitingSince.TryGetValue(current, out long since)
                 && CorpseNowMs - since >= LootStarveMs;
             _lootWorkWhy = _openedContainerId != 0 ? "a container is open" : _targetCorpseId != 0 ? "a corpse is claimed" : "corpse autorun";
+            _deathWaitHeld = DeathWaitHolds(settings);   // the kill's corpse being looted: the wait goes on (RynthAiPlugin.DeathWait.cs)
             return true;
         }
 
@@ -2966,6 +3159,13 @@ public sealed partial class RynthAiPlugin
         if (HasChestLootWork(settings))
         {
             _lootWorkWhy = "an open chest";
+            return true;
+        }
+
+        // A named object in range (Loot by name, RynthAiPlugin.LootByName.cs): used so the client walks there.
+        if (HasLootNameWork(settings, CorpseNowMs))
+        {
+            _lootWorkWhy = "a named item";
             return true;
         }
 
@@ -2985,7 +3185,22 @@ public sealed partial class RynthAiPlugin
             double range = GetCorpseApproachRangeMaxMeters(settings);
             if (range > 0.25) HasUnlootedCorpsesInRange(range);   // keeps _lootableInRange current
             _lootWorkWhy = "Boost Loot: the kill's corpse is forming";
+            _deathWaitHeld = DeathWaitHolds(settings);
             return true;
+        }
+
+        // The death wait (2026-11-08, RynthAiPlugin.DeathWait.cs): our kill's corpse is on its way, or
+        // here and being looted. Looting holds the tick, so nothing walks off meanwhile.
+        if (_deathWaitAt != 0)
+        {
+            double range = GetCorpseApproachRangeMaxMeters(settings);
+            if (range > 0.25) HasUnlootedCorpsesInRange(range);   // keeps _lootableInRange current
+            _deathWaitHeld = DeathWaitHolds(settings);
+            if (_deathWaitHeld)
+            {
+                _lootWorkWhy = _deathCorpseId == 0 ? "the kill's corpse is on its way (death animation)" : "the kill's corpse is being looted";
+                return true;
+            }
         }
 
         double maxMeters = GetCorpseApproachRangeMaxMeters(settings);
@@ -3378,6 +3593,14 @@ public sealed partial class RynthAiPlugin
         actionLabel = string.Empty;
         ruleLabel   = string.Empty;
         builtIn     = string.Empty;
+
+        // An Eternal Mana Charge in the pack: tapping is ignored, so stones are not needed.
+        if (_manaStoneManager?.HasEternalChargeCached() == true && !ManaStoneManager.IsEternalCharge(item))
+        {
+            builtIn = "a mana stone, but an Eternal Mana Charge is in the pack: mana tapping is ignored";
+            if (!preview) _corpseCappedIds.Add(item.Id);
+            return false;
+        }
 
         // Count stones already in the pack against the KeepCount cap, using
         // the SAME IsManaStone predicate as the loot gate above — if these
@@ -3779,6 +4002,7 @@ public sealed partial class RynthAiPlugin
 
         _completedCorpses[corpseId] = CorpseNowMs;
         EndBoostLootKillWait(corpseId);
+        EndDeathWaitFor(corpseId);
         _corpseCooldownUntil.Remove(corpseId);
         _processedCorpseItems.Clear();
         _corpseItemAttempts.Clear();
@@ -3870,6 +4094,9 @@ public sealed partial class RynthAiPlugin
         _currentLootItemSawAnim = false;
         _currentLootItemStackable = false;
         _currentLootItemPipelined = false;
+        _currentLootItemJumped = false;
+        _currentLootItemSentInAirWindow = false;
+        _flightHoldLogged = false;   // a hold is logged once per send; a corpse completed or abandoned starts fresh
         _currentLootItemErrSeqAtSend = 0;
         _currentLootItemFreeRetries = 0;
         _currentLootItemFightHeld = false;
@@ -3994,8 +4221,14 @@ public sealed partial class RynthAiPlugin
         int seqBefore = watch ? Host.GetUseDoneSeq() : 0;
         RynthCore.Plugin.RynthAi.ItemInfo.SelfSelect.SelectAsBot(Host, unchecked((uint)corpseId));
         bool sent = Host.UseFor(unchecked((uint)corpseId), "Loot", "open the claimed corpse");
-        if (watch && sent)
+        // Not with monsters about: a swing, a hit or a stance change cancels the server's walk to the
+        // corpse, and the use is answered with nothing opened. That says nothing about the server, and
+        // four of them in a wave fight paused looting for 5 minutes and told the player to relog
+        // (2026-11-06). The check is for a calm character whose opens still don't work.
+        if (watch && sent && _combatManager?.HasNearbyMonsters != true)
             _useRefusals.OnOpenSent(corpseId, now, seqBefore);
+        // An open on a no-bend-down call: its answer says whether the server was free (DistrustJumpNoMotion).
+        _openInAirWindowSeq = watch && sent && JumpPickupInAir(now) ? seqBefore : -1;
         LootDiag($"[RynthAi] Corpse loot: attempting open for 0x{(uint)corpseId:X8}.");
         // The finished corpse held open (MarkCorpseCompleted): this use closes it on the server.
         if (sent && _closeDeferredFor != 0 && _closeDeferredFor != corpseId)
@@ -4018,6 +4251,12 @@ public sealed partial class RynthAiPlugin
             return;
         int seq = Host.GetUseDoneSeq();
         bool haveErr = Host.TryGetLastUseDone(out int lastSeq, out uint err) && lastSeq == seq;
+        if (_openInAirWindowSeq >= 0 && seq != _openInAirWindowSeq)
+        {
+            if (haveErr && err == WeenieErrorYoureTooBusy)
+                DistrustJumpNoMotion(now, "the next corpse's open, sent on it, was refused as too busy");
+            _openInAirWindowSeq = -1;
+        }
         ApplyUseRefusalVerdict(_useRefusals.OnTick(now, seq, err, haveErr), now);
     }
 
@@ -4067,18 +4306,18 @@ public sealed partial class RynthAiPlugin
             case UseRefusalWatch.Verdict.Stuck:
             {
                 FlightRecorderSignal.Dump(Host, "use check: server refuses every use");
-                Log($"[RynthAi] Use check: the server answers every use but nothing opens ({_useRefusals.Refusals} refusals on {RefusedList()}), the clean stop{(_useCheckJumpAt != 0 ? ", the jump" : "")} and retry didn't help - looting paused {_useRefusals.BackoffMs / 60_000} min, then one corpse is tried again{(Host.HasTapJump ? " after a jump" : "")}.");
+                Log($"[RynthAi] Use check: the server answers every use but nothing opens ({_useRefusals.Refusals} refusals on {RefusedList()}), the clean stop{(_useCheckJumpAt != 0 ? ", the jump" : "")} and retry didn't help - looting paused {_useRefusals.BackoffMs / 1000} s, then one corpse is tried again{(Host.HasTapJump ? " after a jump" : "")}.");
                 _useCheckJumpAt = 0;
                 if (!_useStuckAnnounced)
                 {
                     _useStuckAnnounced = true;
-                    ChatLine($"[RynthAi] The server isn't letting this character use objects; a relog fixes it. Looting is paused and tried again every few minutes.");
+                    ChatLine($"[RynthAi] The server isn't letting this character use objects; a relog fixes it. Looting is paused and tried again every minute or two.");
                 }
                 ResetCorpseTarget();
                 break;
             }
             case UseRefusalWatch.Verdict.StillStuck:
-                Log($"[RynthAi] Use check: still refused{(_useCheckJumpAt != 0 ? " after the jump" : "")} - next try in {_useRefusals.BackoffMs / 60_000} min.");
+                Log($"[RynthAi] Use check: still refused{(_useCheckJumpAt != 0 ? " after the jump" : "")} - next try in {_useRefusals.BackoffMs / 1000} s.");
                 _useCheckJumpAt = 0;
                 ResetCorpseTarget();
                 break;
@@ -4245,6 +4484,11 @@ public sealed partial class RynthAiPlugin
     private void ResetCorpseTarget()
     {
         StopCorpseMovement();
+        // The no-bend-down window belongs to the loot that set it (the macro off, a claim dropped).
+        // ActionPacer's air hold is the character's own flight: it ends on the landing, or at death,
+        // portal space and logout (RynthAiPlugin), not with a corpse.
+        _jumpPickupAirUntil = 0;
+        _openInAirWindowSeq = -1;
         _targetCorpseId = 0;
         _corpseTargetSince = 0;
         _openedContainerAt = 0;

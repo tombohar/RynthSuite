@@ -11,7 +11,9 @@
 //     <row count>
 //     per cell: <tag line s|i|b|d|...> then <value line>
 // Tables we read: MyMonsters (monster rules), weapons/wands/shields/combatitems (weapon
-// rules), pets (pet essences), items/itemlist/buffeditems/AssistItems (consumables).
+// rules), pets (pet essences), items/itemlist/buffeditems/AssistItems (consumables). Of the
+// options after the tables, the two ring ones (MinimumRingTargets, RingDistance: VtRingSettings)
+// become Min Ring Targets and Ring Range when the profile has them (2026-11-06).
 // Object ids are resolved against the current inventory (id first, then name). The
 // import is previewed first and only applied after a confirm; existing rules with the
 // same name / id are replaced, everything else is kept.
@@ -23,6 +25,7 @@ using System.Linq;
 using ImGuiNET;
 using RynthCore.Loot;
 using RynthCore.Plugin.RynthAi.LegacyUi;
+using RynthCore.Plugin.RynthAi.ProfileImport;
 using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthAi.MiniRemote;
@@ -62,12 +65,16 @@ internal sealed class VTankUsdImporter
         public List<ItemRule> Weapons = new();
         public List<ConsumableRule> Consumables = new();
         public List<string> Notes = new();
+        public VtRingSettings Ring = new();
     }
 
     private readonly MiniRemoteContext _ctx;
     private volatile ImportPlan? _plan;
     private volatile string _status = string.Empty;
     private string _pathInput = string.Empty;
+
+    /// <summary>The last preview / import line (tests read it).</summary>
+    internal string Status => _status;
 
     public VTankUsdImporter(MiniRemoteContext ctx)
     {
@@ -211,7 +218,7 @@ internal sealed class VTankUsdImporter
         try { lines = File.ReadAllLines(path); }
         catch (Exception ex) { _status = "Read failed: " + ex.Message; _plan = null; return; }
 
-        var plan = new ImportPlan { Path = path };
+        var plan = new ImportPlan { Path = path, Ring = VtRingSettings.Read(lines) };
         foreach (var t in Parse(lines))
         {
             if (t.Name.Equals("MyMonsters", StringComparison.OrdinalIgnoreCase)) PlanMonsters(t, plan);
@@ -221,7 +228,11 @@ internal sealed class VTankUsdImporter
         }
         _ctx.State.LastUsdPath = path;
         _plan = plan;
-        _status = $"Preview: {plan.Monsters.Count} monsters, {plan.Weapons.Count} weapons, {plan.Consumables.Count} consumables.";
+        foreach (string c in plan.Ring.Clamped) plan.Notes.Add($"{c} (the settings' range)");
+        var cur = _ctx.Settings;
+        string ring = cur != null ? plan.Ring.DescribeAgainst(cur) : plan.Ring.Describe();
+        _status = $"Preview: {plan.Monsters.Count} monsters, {plan.Weapons.Count} weapons, {plan.Consumables.Count} consumables" +
+                  (ring.Length > 0 ? $"; ring settings: {ring}." : "; no ring settings in the profile (Min Ring Targets and Ring Range are left alone).");
     }
 
     private void PlanMonsters(UsdTable t, ImportPlan plan)
@@ -294,6 +305,19 @@ internal sealed class VTankUsdImporter
         }
     }
 
+    /// <summary>
+    /// An imported weapon or shield replaces the saved entries with its id. A shield the player
+    /// marked "No buff" stays marked: VTank's .usd has no such setting, so a re-import must not
+    /// quietly turn buffing back on for it (ItemRule.KeepBuffed).
+    /// </summary>
+    internal static void ReplaceItemRule(List<ItemRule> rules, ItemRule imported)
+    {
+        if (rules.Exists(r => r.Id == imported.Id && WeaponList.IsShieldRule(r) && r.ExcludedFromBuffing()))
+            imported.KeepBuffed = false;
+        rules.RemoveAll(r => r.Id == imported.Id);
+        rules.Add(imported);
+    }
+
     /// <summary>Writes the previewed rules into the live settings and saves them.</summary>
     public void Apply()
     {
@@ -307,17 +331,18 @@ internal sealed class VTankUsdImporter
             s.MonsterRules.Add(m);
         }
         foreach (var w in plan.Weapons)
-        {
-            s.ItemRules.RemoveAll(r => r.Id == w.Id);
-            s.ItemRules.Add(w);
-        }
+            ReplaceItemRule(s.ItemRules, w);
         foreach (var c in plan.Consumables)
         {
             s.ConsumableRules.RemoveAll(r => r.Id == c.Id);
             s.ConsumableRules.Add(c);
         }
+        // The player's own import: the profile's ring options replace these two settings.
+        plan.Ring.ApplyTo(s);
         _ctx.SaveCombatSettings?.Invoke();
-        _status = $"Imported {plan.Monsters.Count} monsters, {plan.Weapons.Count} weapons, {plan.Consumables.Count} consumables.";
+        string ring = plan.Ring.Describe();
+        _status = $"Imported {plan.Monsters.Count} monsters, {plan.Weapons.Count} weapons, {plan.Consumables.Count} consumables" +
+                  (ring.Length > 0 ? $"; set {ring}." : "; ring settings left alone (none in the profile).");
         _ctx.Chat("[Mini Remote] " + _status);
         _plan = null;
     }
@@ -337,6 +362,8 @@ internal sealed class VTankUsdImporter
         if (plan != null)
         {
             ImGui.TextUnformatted($"{plan.Monsters.Count} monster rules, {plan.Weapons.Count} weapons, {plan.Consumables.Count} consumables");
+            string ringLine = plan.Ring.Describe();
+            SafeImGui.Text(ringLine.Length > 0 ? "Ring settings: " + ringLine : "Ring settings: none in the profile (left alone)");
             if (ImGui.TreeNode("Preview details"))
             {
                 foreach (var m in plan.Monsters.Take(50)) SafeImGui.BulletText($"Monster {m.Name} [{m.DamageType}] pri {m.Priority}");
@@ -347,7 +374,8 @@ internal sealed class VTankUsdImporter
             }
             if (ImGui.Button("Apply import..."))
                 _ctx.Confirm("Import VTank settings",
-                    $"Write these rules into the current RynthAi profile?\nRules with the same monster name / item id are replaced.",
+                    $"Write these rules into the current RynthAi profile?\nRules with the same monster name / item id are replaced." +
+                    (plan.Ring.Any ? $"\nAlso sets {plan.Ring.Describe()}." : ""),
                     Apply, "Import");
         }
         if (_status.Length > 0) SafeImGui.TextWrapped(_status);

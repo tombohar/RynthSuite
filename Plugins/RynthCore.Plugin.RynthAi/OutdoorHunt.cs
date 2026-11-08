@@ -16,7 +16,8 @@ namespace RynthCore.Plugin.RynthAi;
 /// in a straight line. A monster with no walkable way to it (on a cliff, in water, inside a closed
 /// building) is left out for <see cref="SkipSec"/>. Monsters are looked for out to <see cref="RangeYd"/>
 /// (Hunt Range); <see cref="RadiusYd"/> (Hunt Radius) keeps the picks within that far of where it started
-/// (0 = anywhere). With nothing in range it waits where it is.
+/// (0 = anywhere). With nothing in range it waits where it is. That is <see cref="PickMode.Nearest"/>;
+/// since 2026-11-08 the setting can go for the biggest pack or the most experience instead (PickPack).
 ///
 /// Buildings (2026-10-25, Tom: "the entire radar range, also going inside houses"): RynthNav's map ends
 /// at a building's walls, so a walk into one is RynthNav's way to the outside of one of its doors, then
@@ -127,6 +128,35 @@ internal sealed class OutdoorHunt
     /// every half second to a monster on its far side: the walk's end, 1.3 yd away, counted as reached.
     /// </summary>
     public double NoFightSec { get; set; } = 2;
+
+    /// <summary>
+    /// What the next monster is chosen by (2026-11-08, Tom: "it should be a setting to go for nearest
+    /// spawn or most dense or highest experience", and "right now it does circles when only 1 mob has
+    /// respawned"): the setting OutdoorHuntPick, 0 / 1 / 2.
+    /// </summary>
+    internal enum PickMode
+    {
+        /// <summary>The shortest walk among the nearest few (the hunt as it was before the setting).</summary>
+        Nearest = 0,
+        /// <summary>The biggest pack: the monsters within <see cref="PackYd"/> of each other, counted.</summary>
+        Pack = 1,
+        /// <summary>The pack worth the most experience (the learned XP per kill, <see cref="XpLookup"/>).</summary>
+        Xp = 2,
+    }
+
+    public PickMode Pick { get; set; } = PickMode.Nearest;
+    /// <summary>Monsters this close to a monster are in its pack.</summary>
+    public double PackYd { get; set; } = 20;
+    /// <summary>
+    /// A pack's worth is divided by (1 + its walk / this): a pack this far away counts half, twice as far
+    /// a third, so a near pack wins unless a farther one is clearly bigger (a 5-pack 80 yd off beats a
+    /// lone monster 10 yd off; a 3-pack 180 yd off doesn't).
+    /// </summary>
+    public double PackFarYd { get; set; } = 60;
+    /// <summary>Most monsters looked at for packs (nearest first): the pack count is every pair.</summary>
+    public const int MaxPackCandidates = 300;
+    /// <summary>The learned XP per kill of a monster by name (null: not known), for <see cref="PickMode.Xp"/>.</summary>
+    public Func<string, double?>? XpLookup { get; set; }
 
     public bool Active { get; private set; }
     public Vec Anchor { get; private set; }
@@ -254,6 +284,7 @@ internal sealed class OutdoorHunt
         if ((now - _lastPick).TotalSeconds < PickEverySec)
             return new Decision(Act.Idle);
         _lastPick = now;
+        if (Pick != PickMode.Nearest) return PickPack(now, me, meCell, candidates);
         _viable.Clear();
         int asked = 0;
         foreach (var c in candidates)
@@ -280,23 +311,154 @@ internal sealed class OutdoorHunt
                 var v = _viable[i];
                 if (v.C.Priority > best.C.Priority || (v.C.Priority == best.C.Priority && v.W.P.Length < best.W.P.Length)) best = v;
             }
-            TargetId = best.C.Id;
-            _plannedTo = best.C.Pos;
-            _lastPlan = now;
-            Note = NextNote(best.C, best.W);
-            if (best.W.P.Length > ArrivedYd)
-            {
-                _arrivedSince = DateTime.MinValue;
-                return new Decision(Act.Walk, best.W.P.Corners, best.C.Id, Note);
-            }
-            _arrivedSince = now;   // it's right here and combat hasn't taken it: NoFightSec, then left out
-            return new Decision(Act.Idle, TargetId: best.C.Id, Why: Note);
+            return Go(now, best.C, best.W);
         }
+        return Waiting();
+    }
 
-        // Nothing to hunt: wait where it is (no walk back to the start: Tom 10-23, "it shouldn't bother").
+    /// <summary>The chosen monster becomes the target: walked to, or stood by when the walk's end is already here.</summary>
+    private Decision Go(DateTime now, Candidate c, HuntWalk w, string pack = "")
+    {
+        TargetId = c.Id;
+        _plannedTo = c.Pos;
+        _lastPlan = now;
+        Note = NextNote(c, w, pack);
+        if (w.P.Length > ArrivedYd)
+        {
+            _arrivedSince = DateTime.MinValue;
+            return new Decision(Act.Walk, w.P.Corners, c.Id, Note);
+        }
+        _arrivedSince = now;   // it's right here and combat hasn't taken it: NoFightSec, then left out
+        return new Decision(Act.Idle, TargetId: c.Id, Why: Note);
+    }
+
+    /// <summary>Nothing to hunt: wait where it is (no walk back to the start: Tom 10-23, "it shouldn't bother").</summary>
+    private Decision Waiting()
+    {
         string wait = $"nothing within Hunt Range ({RangeYd:0} yd){(RadiusYd > 0 ? $" inside Hunt Radius ({RadiusYd:0} yd)" : "")}: waiting here";
         if (_note != wait) Note = wait;
         return new Decision(Act.Idle);
+    }
+
+    // ── Biggest pack / Most XP (2026-11-08) ────────────────────────────────────────────────────────
+    // Every monster that could be chosen has a pack: itself and the others within PackYd of it. Its
+    // worth is the pack's count (Biggest pack) or the sum of the pack's XP per kill (Most XP: a name
+    // with no XP learned counts as the average of the known ones here, or 1 when none is known, so
+    // it falls back to Biggest pack). Score = worth / (1 + walk / PackFarYd). A higher Priority in the
+    // pack still comes first. The packs are ranked by the straight line first, paths are asked only
+    // for the top PickCandidates, and those are scored again by the real walk; the target is the
+    // pack's member with the shortest walk.
+
+    private readonly List<Candidate> _eligible = new();
+
+    private Decision PickPack(DateTime now, Vec me, uint meCell, IReadOnlyList<Candidate> candidates)
+    {
+        _eligible.Clear();
+        foreach (var c in candidates)
+        {
+            if (c.Distance > RangeYd) break;   // nearest first
+            if (!InArea(c.Pos) || IsSkipped(c.Id, now) || !Plannable(c)) continue;
+            _eligible.Add(c);
+            if (_eligible.Count >= MaxPackCandidates) break;
+        }
+        int n = _eligible.Count;
+        if (n == 0) return Waiting();
+
+        // Each monster's worth: 1, or its XP per kill.
+        var worth = new double[n];
+        bool xpKnown = false;
+        if (Pick == PickMode.Xp && XpLookup != null)
+        {
+            double sum = 0;
+            int known = 0;
+            for (int i = 0; i < n; i++)
+            {
+                double? x = XpLookup(_eligible[i].Name);
+                if (x is double v && double.IsFinite(v) && v > 0) { worth[i] = v; sum += v; known++; }
+                else worth[i] = -1;
+            }
+            xpKnown = known > 0;
+            double unknown = known > 0 ? sum / known : 1;
+            for (int i = 0; i < n; i++) if (worth[i] < 0) worth[i] = unknown;
+        }
+        else
+            for (int i = 0; i < n; i++) worth[i] = 1;
+
+        // Each monster's pack: its worth, its size, its highest Priority.
+        var packWorth = new double[n];
+        var packCount = new int[n];
+        var packPri = new int[n];
+        for (int i = 0; i < n; i++)
+        {
+            int pri = int.MinValue;
+            for (int j = 0; j < n; j++)
+            {
+                if (i != j && _eligible[i].Pos.DistanceTo(_eligible[j].Pos) > PackYd) continue;
+                packWorth[i] += worth[j];
+                packCount[i]++;
+                if (_eligible[j].Priority > pri) pri = _eligible[j].Priority;
+            }
+            packPri[i] = pri;
+        }
+
+        // Ranked by the straight line; paths for the top few only.
+        var order = new List<int>(n);
+        for (int i = 0; i < n; i++) order.Add(i);
+        var straight = new double[n];
+        for (int i = 0; i < n; i++) straight[i] = packWorth[i] / (1 + _eligible[i].Distance / PackFarYd);
+        order.Sort((a, b) =>
+        {
+            if (packPri[a] != packPri[b]) return packPri[b].CompareTo(packPri[a]);
+            int s = straight[b].CompareTo(straight[a]);
+            return s != 0 ? s : _eligible[a].Distance.CompareTo(_eligible[b].Distance);
+        });
+
+        var walks = new Dictionary<int, HuntWalk>();   // eligible index -> its walk (the ones that reach it)
+        int asked = 0;
+        foreach (int i in order)
+        {
+            if (asked >= PickCandidates) break;
+            asked++;
+            var c = _eligible[i];
+            var w = PlanWalk(me, meCell, c.Pos, c.Cell);
+            if (w.P.Status == PathStatus.Unavailable) return new Decision(Act.Idle, Why: "no pathfinder");
+            if (Reaches(w.P)) walks[i] = w;
+            else
+            {
+                Skip(c.Id, now);
+                Note = $"'{c.Name}' left out for {SkipSec:0} s: {Describe(w.P, w.Why)}";
+            }
+        }
+        if (walks.Count == 0) return Waiting();
+
+        // Scored again by the real walk.
+        int best = -1;
+        double bestScore = 0;
+        foreach (var (i, w) in walks)
+        {
+            double score = packWorth[i] / (1 + w.P.Length / PackFarYd);
+            if (best < 0 || packPri[i] > packPri[best]
+                || (packPri[i] == packPri[best] && (score > bestScore || (score == bestScore && w.P.Length < walks[best].P.Length))))
+            {
+                best = i;
+                bestScore = score;
+            }
+        }
+
+        // The target: the pack's member with the highest Priority, then the shortest walk (best itself if no other was planned).
+        int target = best;
+        foreach (var (i, w) in walks)
+        {
+            if (i != best && _eligible[i].Pos.DistanceTo(_eligible[best].Pos) > PackYd) continue;
+            var t = _eligible[target];
+            var c = _eligible[i];
+            if (c.Priority > t.Priority || (c.Priority == t.Priority && w.P.Length < walks[target].P.Length)) target = i;
+        }
+
+        int count = packCount[best];
+        string pack = count == 1 ? ", on its own" : $", pack of {count}";
+        if (Pick == PickMode.Xp) pack += xpKnown ? $" ({packWorth[best]:N0} XP)" : " (no XP learned yet: by size)";
+        return Go(now, _eligible[target], walks[target], pack);
     }
 
     // ── Indoors ──────────────────────────────────────────────────────────────────────────────────
@@ -425,19 +587,21 @@ internal sealed class OutdoorHunt
         return b != 0 && (b == _meBuilding || _buildings!.Doors(b).Count > 0);
     }
 
-    private string NextNote(Candidate c, HuntWalk w)
+    /// <summary>The log line for the choice; <paramref name="pack"/> (Biggest pack, Most XP): ", pack of 5 (4,200,000 XP)" after the name.</summary>
+    private string NextNote(Candidate c, HuntWalk w, string pack = "")
     {
         var b = _buildings;
         string len = $"a {w.P.Length:0} yd walk";
         string away = $"({c.Distance:0} yd away)";
+        string next = $"next: '{c.Name}'{pack}";
         static string At(Door d) => $"{d.At.X:0},{d.At.Y:0}";
-        if (b == null || (w.From == 0 && w.To == 0)) return $"next: '{c.Name}', {len} {away}";
+        if (b == null || (w.From == 0 && w.To == 0)) return $"{next}, {len} {away}";
         if (w.Out is Door o && w.In is Door i)
-            return $"next: '{c.Name}', inside {b.Name(w.To)} (cell {c.Cell:X8}), {len} out of {b.Name(w.From)} through the door at {At(o)}, "
+            return $"{next}, inside {b.Name(w.To)} (cell {c.Cell:X8}), {len} out of {b.Name(w.From)} through the door at {At(o)}, "
                  + $"then in through the door at {At(i)} {away}";
-        if (w.In is Door din) return $"next: '{c.Name}', inside {b.Name(w.To)} (cell {c.Cell:X8}), {len} through the door at {At(din)} {away}";
-        if (w.Out is Door dout) return $"next: '{c.Name}', {len} out of {b.Name(w.From)} through the door at {At(dout)} {away}";
-        return $"next: '{c.Name}', inside {b.Name(w.To)} (cell {c.Cell:X8}), {len} through its rooms {away}";
+        if (w.In is Door din) return $"{next}, inside {b.Name(w.To)} (cell {c.Cell:X8}), {len} through the door at {At(din)} {away}";
+        if (w.Out is Door dout) return $"{next}, {len} out of {b.Name(w.From)} through the door at {At(dout)} {away}";
+        return $"{next}, inside {b.Name(w.To)} (cell {c.Cell:X8}), {len} through its rooms {away}";
     }
 
     // ── Walks into, out of and between buildings ───────────────────────────────────────────────────

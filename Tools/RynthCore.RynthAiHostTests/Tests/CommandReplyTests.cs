@@ -119,6 +119,11 @@ internal static class CommandReplyTests
         new(null, "/ra dunnav 1 2", K.Act),
         new(null, "/ra dunnav", K.Act),
         new(null, "/ra dunnav-patrol", K.Act),
+        new(null, "/ra dunroute banana", K.Act),
+        new(null, "/ra dunroute Hive exit to exit", K.Act),   // outdoors here: "requires you to be inside a dungeon"
+        new(null, "/ra dunroute info", K.Act),
+        new(null, "/ra dunpatrol-save", K.Act),
+        new(null, "/ra dunpatrol-save Hive patrol", K.Act),   // outdoors here
         new(null, "/ra nav restart", K.Act),
         new(null, "/ra nav banana", K.Act),
         new(null, "/ra meta banana", K.Act),
@@ -158,9 +163,13 @@ internal static class CommandReplyTests
         new(null, "/ra fellowship leader", K.Act),
         new("/ra mstats reset", "/ra mstats", K.Act),           // no monster selected with stats: why, and the usage
         new(null, "/ra mstats show", K.Act),                    // this rig's engine has no plugin windows: says so
+        new("/ra aetheria off", "/ra aetheria banana", K.Act),
+        new(null, "/ra aetheria unbox", K.Act),                 // nothing coalesced in this rig's pack: says so
         new(null, "/ra nosuchverb", K.Act),
         // ── /ra: output asked for ──
         new("/ra help", null, K.Query),
+        new("/ra aetheria", null, K.Query),
+        new("/ra aetheria status", null, K.Query),
         new("/ra", null, K.Query),
         new("/ra version", null, K.Query),
         new("/ra server", null, K.Query),
@@ -207,6 +216,8 @@ internal static class CommandReplyTests
         new("/ra debug", null, K.Query),
         new("/ra loot", null, K.Query),
         new("/ra hazard", null, K.Query),
+        new("/ra dunroute where", null, K.Query),
+        new("/ra dunroute", null, K.Query),
         new("/ra hazard list", null, K.Query),
         new("/ra hazard texture list", null, K.Query),
         new("/ra groundloot", null, K.Query),
@@ -479,6 +490,7 @@ internal static class CommandReplyTests
             Set("_combatManager", combat);
             Set("_fellowshipTracker", new FellowshipTracker());
             Set("_jumper", new Jumper(host, S, text => P.Reply.Fail(text)));
+            Set("_aetheriaUnboxer", new RynthCore.Plugin.RynthAi.Loot.AetheriaUnboxer(host, S, cache) { PlayerId = () => Player });
             Set("_initialized", true);
             Set("_loginComplete", true);
 

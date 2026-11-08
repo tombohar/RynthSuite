@@ -23,6 +23,8 @@ namespace RynthCore.Plugin.RynthAi;
 ///     default) turns it off.
 ///   * When: on the armor's rules (Rebuff With, Also Refresh Under in a batch, Force Rebuff), on the
 ///     shield's own timers, recorded from the "You cast X on &lt;shield&gt;" line.
+///   * A shield marked "No buff" in the Items list (ItemRule.KeepBuffed off) is treated as an
+///     unlisted one: nothing is aimed at it, and it never makes buffing due.
 ///   * Never at a shield being moved (its pack move or wield not settled, a swap under way).
 ///   * A cast at the shield that gets no answer twice in a row, or that the server says can't be
 ///     cast on it, stops shield buffing for ShieldParkTime; the armor is never held up by it.
@@ -49,6 +51,13 @@ public partial class BuffManager
     internal const int ShieldNoShowsToPark = 2;
     internal static readonly TimeSpan ShieldParkTime = TimeSpan.FromMinutes(30);
 
+    // Shields the server said take no spells ("Brogard's Defiance cannot be cast on Covenant Shield.",
+    // ACE IsInvalidTarget): never buffed again, kept in bufftimers.txt (2026-11-08, Tom: "if an item
+    // is deemed unbuffable it should just skip it altogether"; it was only parked for 30 min, so a
+    // Covenant Shield was tried again every half hour). /ra buffs unbuffable [clear] lists or forgets them.
+    private readonly Dictionary<int, string> _unbuffableShields = new();
+    internal IReadOnlyDictionary<int, string> UnbuffableShields => _unbuffableShields;
+
     // The off-hand item buffing's wand swap put into a pack (combat puts it back on), and when.
     // Seen in the off hand again after StowedSightingGraceMs, it is forgotten: the next time it is
     // in a pack, something else put it there.
@@ -57,13 +66,15 @@ public partial class BuffManager
     private const double StowedSightingGraceMs = 10000;
 
     // ShieldToBuff walks the inventory: its answer is kept ShieldReadMs (the arbiter asks every tick),
-    // and worked out again at once when the Items list or the cache changes. Tests set ShieldReadMs 0.
+    // and worked out again at once when the Items list or the cache changes, or an entry's "No buff"
+    // is flipped in place (ExcludedSignature). Tests set ShieldReadMs 0.
     internal long ShieldReadMs = 1000;
     private int _shieldChoice;
     private string _shieldChoiceWhy = "";
     private long _shieldChoiceAt = long.MinValue / 2;
     private List<ItemRule>? _shieldChoiceRules;
     private int _shieldChoiceRuleCount;
+    private long _shieldChoiceExcluded;
     private WorldObjectCache? _shieldChoiceCache;
     private string _shieldChoiceLogged = "";
 
@@ -89,25 +100,39 @@ public partial class BuffManager
         OffhandStowed?.Invoke(id);
     }
 
-    /// <summary>The Items list's shields the cache knows, in list order.</summary>
-    private List<int> ListedShields()
+    /// <summary>
+    /// The Items list's shields the cache knows, in list order. A shield marked "No buff"
+    /// (ItemRule.KeepBuffed off) is left out, so it is treated as an unlisted shield is: never a
+    /// target. An id with any of its rules marked is left out, whatever the rules' order.
+    /// <paramref name="excludedIds"/> are the listed shields left out for that.
+    /// </summary>
+    private List<int> ListedShields(out List<int> excludedIds)
     {
+        excludedIds = new List<int>();
         var found = new List<int>();
         var cache = _worldObjectCache;
         if (cache == null) return found;
         List<ItemRule> rules;
         try { rules = new List<ItemRule>(_settings.ItemRules); }
         catch { return found; }   // the list edited mid-copy: next read
+        var excludedRule = new HashSet<int>();
+        foreach (var r in rules)
+            if (r.Id != 0 && r.ExcludedFromBuffing()) excludedRule.Add(r.Id);
         foreach (var r in rules)
         {
-            if (r.Id == 0 || found.Contains(r.Id)) continue;
+            if (r.Id == 0 || found.Contains(r.Id) || excludedIds.Contains(r.Id)) continue;
             var wo = cache[r.Id];
             if (wo == null) continue;
             if (CombatManager.IsShieldItem(wo) || (WeaponList.IsShieldRule(r) && wo.ObjectClass == AcObjectClass.Armor))
+            {
+                if (excludedRule.Contains(r.Id)) { excludedIds.Add(r.Id); continue; }
                 found.Add(r.Id);
+            }
         }
         return found;
     }
+
+    private List<int> ListedShields() => ListedShields(out _);
 
     private bool InInventory(int id)
     {
@@ -125,7 +150,8 @@ public partial class BuffManager
     {
         long now = KitClockMs();
         var rules = _settings.ItemRules;
-        if (!fresh && ReferenceEquals(rules, _shieldChoiceRules) && rules.Count == _shieldChoiceRuleCount
+        long excludedSig = ExcludedSignature(rules);
+        if (!fresh && ReferenceEquals(rules, _shieldChoiceRules) && rules.Count == _shieldChoiceRuleCount && excludedSig == _shieldChoiceExcluded
             && ReferenceEquals(_worldObjectCache, _shieldChoiceCache) && now >= _shieldChoiceAt && now - _shieldChoiceAt < ShieldReadMs)
         {
             where = _shieldChoiceWhy;
@@ -137,6 +163,7 @@ public partial class BuffManager
         _shieldChoiceAt = now;
         _shieldChoiceRules = rules;
         _shieldChoiceRuleCount = rules.Count;
+        _shieldChoiceExcluded = excludedSig;
         _shieldChoiceCache = _worldObjectCache;
         // One log line when the answer changes, only for a character with a shield listed.
         string line = anyListed ? $"{id:X8}|{where}" : "";
@@ -151,13 +178,42 @@ public partial class BuffManager
         return id;
     }
 
+    /// <summary>
+    /// Which entries are marked "No buff", as one number (count and ids): ShieldToBuff's kept answer
+    /// is read again when it changes, so a flag flipped on an entry in place takes effect on the next
+    /// tick, not after ShieldReadMs. A list walk only (no inventory); -1 if it is edited mid-walk.
+    /// The Items face and a profile load replace the list, which the reference check already
+    /// catches; this covers an edit in place (the VTank importer removes then adds, so the count
+    /// can stay the same).
+    /// </summary>
+    private static long ExcludedSignature(List<ItemRule> rules)
+    {
+        try
+        {
+            long count = 0, ids = 0;
+            foreach (var r in rules)
+                if (r.ExcludedFromBuffing()) { count++; ids = unchecked(ids * 31 + (uint)r.Id); }
+            return unchecked((count << 48) ^ ids);
+        }
+        catch { return -1; }
+    }
+
     private int FindShieldToBuff(out string where, out bool anyListed)
     {
         anyListed = false;
         if (!_settings.BuffShield) { where = "Buff the shield is off"; return 0; }
-        var listed = ListedShields();
-        anyListed = listed.Count > 0;
-        if (!anyListed) { where = "no shield listed"; return 0; }
+        var listed = ListedShields(out List<int> excludedIds);
+        anyListed = listed.Count > 0 || excludedIds.Count > 0;
+        // A shield that takes no spells counts as one marked No buff: in the off hand it is the one in
+        // use and nothing is buffed.
+        bool unbuffable = false;
+        foreach (int id in listed.FindAll(_unbuffableShields.ContainsKey)) { listed.Remove(id); excludedIds.Add(id); unbuffable = true; }
+        if (listed.Count == 0)
+        {
+            where = unbuffable ? "the listed shield takes no spells (the server said so)"
+                  : excludedIds.Count > 0 ? "the listed shield is marked No buff" : "no shield listed";
+            return 0;
+        }
         foreach (int id in listed)
         {
             if (!IsWieldedLive(id)) continue;
@@ -166,6 +222,16 @@ public partial class BuffManager
                 _stowedShieldId = 0;   // back in the off hand
             where = "in the off hand";
             return id;
+        }
+        // A marked shield in the off hand is the one in use: no shield is buffed, not one put away
+        // for the wand some time before (a stale stow).
+        foreach (int id in excludedIds)
+        {
+            if (!IsWieldedLive(id)) continue;
+            _stowedShieldId = 0;
+            where = _unbuffableShields.ContainsKey(id) ? "the shield in the off hand takes no spells (the server said so)"
+                                                        : "the shield in the off hand is marked No buff";
+            return 0;
         }
         if (_stowedShieldId != 0 && listed.Contains(_stowedShieldId) && InInventory(_stowedShieldId))
         {
@@ -487,7 +553,45 @@ public partial class BuffManager
         _host.WriteToChat($"[RynthAi] Not buffing the shield '{ItemName(shield)}' for {ShieldParkTime.TotalMinutes:0} min ({why}).", 2);
     }
 
-    /// <summary>Force Rebuff: the shield starts over too.</summary>
+    /// <summary>The server said <paramref name="shield"/> takes no spells: never buffed again (saved).</summary>
+    private void MarkShieldUnbuffable(int shield, string serverLine)
+    {
+        if (shield == 0) return;
+        string name = ItemName(shield);
+        _unbuffableShields[shield] = name;
+        _shieldChoiceAt = long.MinValue / 2;   // chosen again at once
+        foreach (long key in new List<long>(_shieldSpellTimers.Keys))
+            if (unchecked((int)(uint)(key >> 32)) == shield) _shieldSpellTimers.Remove(key);
+        SaveBuffTimers();
+        _host.Log($"[Buff] shield 0x{(uint)shield:X8} '{name}': '{serverLine}' - it takes no spells: never buffed again (/ra buffs unbuffable clear to try again).");
+        _host.WriteToChat($"[RynthAi] '{name}' takes no spells (the server said so): it is never buffed again. /ra buffs unbuffable clear to try it again.", 2);
+    }
+
+    /// <summary>/ra buffs unbuffable [clear]: the shields that take no spells, or forget them. Chat lines to show.</summary>
+    internal List<string> UnbuffableCommand(bool clear)
+    {
+        var lines = new List<string>();
+        if (clear)
+        {
+            int n = _unbuffableShields.Count;
+            _unbuffableShields.Clear();
+            _shieldChoiceAt = long.MinValue / 2;
+            SaveBuffTimers();
+            lines.Add(n == 0 ? "[RynthAi] No item was marked as taking no spells." : $"[RynthAi] Forgot {n} item(s) marked as taking no spells: they are buffed (and tried) again.");
+            return lines;
+        }
+        if (_unbuffableShields.Count == 0)
+        {
+            lines.Add("[RynthAi] No item is marked as taking no spells. Usage: /ra buffs unbuffable [clear]");
+            return lines;
+        }
+        lines.Add($"[RynthAi] Never buffed, the server said they take no spells ({_unbuffableShields.Count}):");
+        foreach (var kv in _unbuffableShields) lines.Add($"[RynthAi]   0x{(uint)kv.Key:X8} '{kv.Value}'");
+        lines.Add("[RynthAi] /ra buffs unbuffable clear tries them again.");
+        return lines;
+    }
+
+    /// <summary>Force Rebuff: the shield starts over too (the shields that take no spells stay skipped).</summary>
     private void ResetShieldBuffs()
     {
         _shieldSpellTimers.Clear();
@@ -509,11 +613,20 @@ public partial class BuffManager
             int family = unchecked((int)(kvp.Key & 0xFFFFFFFF));
             lines.Add($"shield|{id}|{family}|{info.CastAt.Ticks}|{info.ExpiresAt.Ticks}|{info.SpellLevel}|{info.SpellName}");
         }
+        // "unbuffable|id|name": a shield that takes no spells (kept until /ra buffs unbuffable clear).
+        foreach (var kv in _unbuffableShields)
+            lines.Add($"unbuffable|{unchecked((uint)kv.Key)}|{kv.Value}");
     }
 
     /// <summary>One "shield|..." line of bufftimers.txt; false when the line is something else.</summary>
     private bool LoadShieldTimer(string[] p)
     {
+        if (p[0] == "unbuffable")
+        {
+            if (p.Length >= 2 && uint.TryParse(p[1], out uint ub) && ub != 0)
+                _unbuffableShields[unchecked((int)ub)] = p.Length >= 3 ? string.Join("|", p, 2, p.Length - 2) : "";
+            return true;
+        }
         if (p[0] != "shield") return false;
         if (p.Length < 7) return true;
         if (!uint.TryParse(p[1], out uint id) || !int.TryParse(p[2], out int family)

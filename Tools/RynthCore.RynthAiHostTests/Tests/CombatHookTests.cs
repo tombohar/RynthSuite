@@ -53,6 +53,8 @@ internal static class CombatHookTests
         r.Add("combat hook: a script answer at an ignored monster is rejected, even one hitting us (RynthAi casts its own)", HookRejectsIgnoredTarget);
         r.Add("combat hook: a script heal (a drain) at a fight target whose rule turned to Priority 0 is rejected", HookHealRejectsIgnoredTarget);
         r.Add("blacklist: casts answered 'too busy' (UseDone 0x1D) are not no-damage casts (answered 0: the target is dropped)", RefusedCastsNotJudged);
+        r.Add("loot jump: Think sends no cast while in the air after a loot jump; it casts on the landing, or at the cap", LootJumpHoldsAttack);
+        r.Add("loot jump: a swing refused in the air (WeenieError 0x4EB) is not a no-damage attack (without it: a miss)", MeleeInAirNotJudged);
         r.Add("combat hook: ctx.pending is the cast in flight; ctx.last the last resolved one, err its first UseDone (final; -1 when missed or after 7 s)", LastErrIsTheCastsAnswer);
         r.Add("combat hook: an attack and a heal in flight take their UseDones in send order (attack 0x401, heal 0)", AnswersInSendOrder);
         r.Add("combat hook: a script heal refused for mana keeps its 2 s rest (no recovery fast retry)", ScriptHealNoFastRetry);
@@ -1049,9 +1051,9 @@ internal static class CombatHookTests
     private static void RefusedCastsNotJudged() => Guard(() =>
     {
         int drain = Id("Drain Health Other V");
-        foreach (uint answer in new uint[] { 0, ActionPacer.TooBusyErr })
+        foreach (uint answer in new uint[] { 0, ActionPacer.TooBusyErr, CombatManager.InTheAirErr })
         {
-            string what = answer == 0 ? "answered 0" : "answered 0x1D";
+            string what = answer == 0 ? "answered 0" : $"answered 0x{answer:X}";
             var rig = new AttackRig(setup: () => { FakeHost.ServerGates = true; FakeHost.LastUseDoneCalls = true; });
             rig.S.BlacklistAttempts = 2;
             rig.S.EnableRaycasting = false;
@@ -1071,10 +1073,68 @@ internal static class CombatHookTests
                 Check.Eq(rig.C.activeTargetId, 0, "answered 0: two no-damage casts blacklist and drop the target");
             else
             {
-                Check.Eq(rig.C.activeTargetId, Target, "answered 0x1D: refusals are not casts, the target is kept");
-                Check.Eq(rig.C.RefusedCastsNotJudged, 2, "both kept out of the count");
-                Check.True(FakeHost.Logs.Any(l => l.Contains("refused 'too busy' (UseDone 0x1D): not counted")), "logged");
+                Check.Eq(rig.C.activeTargetId, Target, $"{what}: refusals are not casts, the target is kept");
+                Check.Eq(rig.C.RefusedCastsNotJudged, 2, $"{what}: both kept out of the count");
+                Check.Eq(Field<int>(rig.C, "_consecutiveCastMisses"), 0, $"{what}: no miss counted");
+                Check.True(FakeHost.Logs.Any(l => l.Contains(answer == ActionPacer.TooBusyErr
+                    ? "refused 'too busy' (UseDone 0x1D): not counted" : "refused in the air (UseDone 0x4EB): not counted")), $"{what}: logged");
             }
+        }
+    });
+
+    // A jump-loot pickup's jump (ActionPacer.NoteLootJump) holds the attack until the landing.
+    // ACE refuses a cast, swing or shot in the air (Player_Magic/Melee/Missile: IsJumping).
+    private static void LootJumpHoldsAttack() => Guard(() =>
+    {
+        bool pacer = ActionPacer.Enabled;
+        var clock = ActionPacer.NowMs;
+        long t = 1_000_000;
+        ActionPacer.Enabled = false;   // only the air hold under test (it does not depend on the pacer switch)
+        ActionPacer.NowMs = () => t;
+        try
+        {
+            foreach (bool cap in new[] { false, true })
+            {
+                string what = cap ? "landing never seen" : "landing seen";
+                var rig = new AttackRig(think: true);
+                ActionPacer.ForgetLootJump();
+                ActionPacer.NoteLootJump(rig.Host);                 // the pickup's jump, from the ground
+                var ground = FakeHost.PlayerPose;
+                FakeHost.PlayerPose = (ground.Cell, ground.X, ground.Y, ground.Z + 1.0f);
+                rig.C.Think();
+                Check.Eq(FakeHost.Casts.Count, 0, $"{what}: no cast in the air");
+                Check.Eq(rig.C.LastCombatSkipReason, "loot-jump-air", $"{what}: held for the landing");
+                Check.Eq(rig.C.GetStateSnapshot().LastAttackCmd, DateTime.MinValue, $"{what}: no attack stamped");
+                Check.Eq(rig.C.activeTargetId, Target, $"{what}: the target stays");
+                t += ActionPacer.JumpLandMinMs + 100;
+                rig.C.Think();
+                Check.Eq(FakeHost.Casts.Count, 0, $"{what}: still up: no cast");
+                if (!cap)
+                    FakeHost.PlayerPose = ground;                   // landed
+                else
+                    t += ActionPacer.JumpLandMaxMs;                 // up for good: the cap
+                rig.C.Think();
+                Check.Eq(rig.LastCast, "Flame Bolt VI", $"{what}: the cast goes at once");
+                Check.Eq(Field<int>(rig.C, "_consecutiveCastMisses"), 0, $"{what}: nothing counted for the held ticks");
+            }
+        }
+        finally { ActionPacer.Enabled = pacer; ActionPacer.NowMs = clock; ActionPacer.ForgetLootJump(); ActionPacer.Forget("test"); }
+    });
+
+    private static void MeleeInAirNotJudged() => Guard(() =>
+    {
+        foreach (bool inAir in new[] { false, true })
+        {
+            var rig = new AttackRig(setup: () => { FakeHost.WeaponCalls = true; FakeHost.CombatModeValue = CombatMode.Melee; FakeHost.WeenieErrorCalls = true; });
+            rig.S.BlacklistAttempts = 5;
+            rig.S.EnableRaycasting = false;                          // (the raycast warm-up drops every judgement)
+            rig.C.RecordOffensiveCast(Target);                       // a swing goes out
+            if (inAir) FakeHost.WeenieError(CombatManager.InTheAirErr); // ACE: "You can't do that while in the air"
+            SetField(rig.C, "_pendingJudgeCastAt", DateTime.Now.AddSeconds(-30));
+            CallPrivate(rig.C, "JudgePendingCast");
+            Check.Eq(Field<int>(rig.C, "_consecutiveCastMisses"), inAir ? 0 : 1,
+                inAir ? "refused in the air: not a miss" : "control, no refusal: a no-damage swing is a miss");
+            if (inAir) Check.True(FakeHost.Logs.Any(l => l.Contains("refused in the air (0x4EB)")), "logged");
         }
     });
 

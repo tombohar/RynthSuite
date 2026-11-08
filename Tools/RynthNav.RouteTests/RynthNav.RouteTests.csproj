@@ -39,6 +39,14 @@
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\PathMarkers.cs" Link="Linked\PathMarkers.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\NavRouteExport.cs" Link="Linked\NavRouteExport.cs" />
     <Compile Include="..\..\Plugins\Shared\Nav3DText.cs" Link="Linked\Nav3DText.cs" />
+    <!-- The route maker's parts that need no navmesh (RouteMakerTests): requests, jobs, loop order and
+         the nav file, routeinfo, a plan's figures, the building outlines. -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\RouteRequest.cs" Link="Linked\RouteRequest.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\RouteJobs.cs" Link="Linked\RouteJobs.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\RouteShape.cs" Link="Linked\RouteShape.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\RouteInfo.cs" Link="Linked\RouteInfo.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\TripSummary.cs" Link="Linked\TripSummary.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\BuildingOutlines.cs" Link="Linked\BuildingOutlines.cs" />
     <!-- RynthAi's own nav reader/writer: the saved route is read back the way RynthAi reads it. -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\LegacyUi\NavRouteParser.cs" Link="Linked\NavRouteParser.cs" />
   </ItemGroup>

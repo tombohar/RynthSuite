@@ -1711,9 +1711,9 @@ answer with the value ub-IT gives when there is nothing to report.
 Supported setting names:
     Booleans: EnableCombat, EnableBuffing, EnableNavigation, EnableLooting,
               EnableMeta, EnableRaycasting, EnableAutostack, EnableAutocram,
-              EnableCombineSalvage, PeaceModeWhenIdle, RebuffWhenIdle,
+              EnableCombineSalvage, PeaceModeWhenIdle, RebuffWhenIdle, UnboxAetheriaWhenIdle,
               SummonPets, MineOnly, UseDispelItems, CastDispelSelf,
-              AutoFellowMgmt, UseRecklessness, UseNativeAttack
+              AutoFellowMgmt, OpenFellowOnCreate, UseRecklessness, UseNativeAttack
     Integers: MonsterRange, RingRange, ApproachRange, MinRingTargets,
               HealAt, RestamAt, GetManaAt, TopOffHP, TopOffStam, TopOffMana,
               HealOthersAt, MeleeAttackPower, MissileAttackPower,

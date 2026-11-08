@@ -61,6 +61,7 @@ internal static partial class Program
         RunTravelPlan();
         RunTripExport();
         RunAutoRunGate();
+        RunRouteMaker();
         RunSteering();
 
         Console.WriteLine();

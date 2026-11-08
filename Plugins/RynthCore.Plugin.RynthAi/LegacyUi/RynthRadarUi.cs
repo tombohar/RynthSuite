@@ -75,6 +75,26 @@ internal sealed class RynthRadarUi
     internal void SetMapData(DungeonMapUi mapData) => _mapData = mapData;
     public void SetWorldObjectCache(WorldObjectCache cache) => _objectCache = cache;
 
+    /// <summary>
+    /// The share (0..1) of the dungeon's flat floor the radar has painted as visited this visit, for
+    /// /ra dunroute where; null when the radar hasn't drawn this landblock (its snapshot drives the
+    /// painting, so a closed radar knows nothing). Pump thread, as the snapshot.
+    /// </summary>
+    internal double? ExploredShare(uint landblock)
+    {
+        var map = _mapData;
+        if (map?._floorCells is null || map._cachedLandblock != landblock || _visitedLandblock != landblock) return null;
+        int total = 0, seen = 0;
+        foreach (var (_, cells) in map._floorCells)
+            foreach (var ((gx, gy), ctype) in cells)
+            {
+                if (ctype != DungeonMapUi.CellType.Flat) continue;
+                total++;
+                if (_visitedCells.Contains((gx, gy))) seen++;
+            }
+        return total == 0 ? null : (double)seen / total;
+    }
+
     // ── Visited strip cache ─────────────────────────────────────────────
 
     private void RebuildRadarVisitedStrips()

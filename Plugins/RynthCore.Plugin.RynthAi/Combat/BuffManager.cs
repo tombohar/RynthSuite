@@ -349,8 +349,51 @@ public partial class BuffManager : IDisposable
     /// <summary>Tests: whether a monster is within Monster Range (else CombatManager decides).</summary>
     internal Func<bool>? InCombatOverride { get; set; }
 
-    private bool InCombatNow() => InCombatOverride?.Invoke()
-        ?? _combatManager?.HasCloseThreat(System.Math.Max(1, _settings.MonsterRange)) == true;
+    private bool InCombatNow()
+    {
+        bool beingHit = HealthFellRecently();   // first: it keeps its record on every pass
+        return InCombatOverride?.Invoke()
+            ?? (_combatManager?.HasCloseThreat(System.Math.Max(1, _settings.MonsterRange)) == true || beingHit);
+    }
+
+    // Health falling means a fight, whatever the scan says. A mob behind a wall isn't in the scan,
+    // so a character it was hitting read as idle: every hit put him under Top Off HP, the heal took
+    // the tick, and nothing else ran until it stopped (2026-11-06: 45 s of kits with the mob hitting
+    // him once a second). With the fight lines he heals at Heal At and otherwise gets on with it.
+    private const double HealthFellCountsMs = 5000;
+    private int _healthFellLastPct = -1;
+    private DateTime _healthFellAt = DateTime.MinValue;
+
+    private bool HealthFellRecently()
+    {
+        int pct = _vitals.HealthPct;
+        DateTime now = RynthClock.Now;
+        if (_healthFellLastPct >= 0 && pct < _healthFellLastPct) _healthFellAt = now;
+        _healthFellLastPct = pct;
+        return _healthFellAt != DateTime.MinValue && (now - _healthFellAt).TotalMilliseconds < HealthFellCountsMs;
+    }
+
+    // ── Buffs wait while hurt in a fight (2026-11-07) ──
+    // Drakkon cast four weapon auras (2.4 s each) one after another with a golem's Force Bolts hitting him
+    // and his health under Heal At; the emergency heal then waited for the last aura's cast and he died.
+    // Under Heal At in a fight no new buff cast starts (one already sent finishes) and the arbiter doesn't
+    // give Buffing the tick for buffs: the heals (vital recharge keeps its slot) and combat go first. The
+    // buffs carry on once health is back over Heal At or the fight is over.
+    private bool _buffHurtWaitOn;
+
+    /// <summary>True while health is under Heal At in a fight: no new buff cast. Logs the start and end of each wait.</summary>
+    public bool BuffsWaitForHealth()
+    {
+        bool wait = _settings.HealAt > 0 && _vitals.HealthPct > 0 && _vitals.HealthPct < _settings.HealAt && InCombatNow();
+        if (wait != _buffHurtWaitOn)
+        {
+            _host.Log(wait
+                ? $"[Buff] buffs wait: health {_vitals.HealthPct}% is under Heal At {_settings.HealAt}% in a fight; heals and combat go first."
+                : $"[Buff] buffs go on: health {_vitals.HealthPct}%, {(InCombatNow() ? "back over Heal At" : "the fight is over")}.");
+            _buffHurtWaitOn = wait;
+        }
+        return wait;
+    }
 
     // ── Rebuff When Idle (RebuffWhenIdle + RebuffIdleMarginMinutes; VTank's "idlebufftopoff") ──
     // The checkbox was saved and shown since the first version but nothing read it (a player asked,
@@ -839,11 +882,14 @@ public partial class BuffManager : IDisposable
         get => _busyCount;
         set
         {
+            if (value > 0 && _busyCount <= 0) _busyRoseAt = Now;   // the heal grace counts from the rise (BusyHoldsHeal)
             _busyCount = value;
             _busyGate.NoteCount(value, UseDoneSeqNow());
         }
     }
     private int _busyCount;
+    // When the busy count last rose from 0 (the heal grace in BusyHoldsHeal).
+    private DateTime _busyRoseAt = DateTime.MinValue;
 
     // A heal and a leftover busy count (2026-10-05, a mage's heals "sometimes several seconds
     // late"): a war or void cast raises the plugin's busy count, and AC lowers its own count
@@ -863,15 +909,28 @@ public partial class BuffManager : IDisposable
     /// True while the busy count should hold a heal: it is positive and not a leftover. A leftover
     /// (a UseDone arrived after the count last rose and no cast gesture is animating: the server
     /// finished every action behind it) is cleared here, as combat does, and lets the heal go.
+    /// So is a count up ActionPacer.HealGraceMs since it rose (the heal grace, below).
     /// </summary>
     internal bool BusyHoldsHeal()
     {
         if (BusyCount <= 0) return false;
         bool gesture = _host.HasGetCastBusyState && !_host.CanCastNow;
-        if (!_busyGate.IsStale(BusyCount, _host.HasUseDoneSeq, UseDoneSeqNow(), gesture)) return true;
+        string why;
+        if (_busyGate.IsStale(BusyCount, _host.HasUseDoneSeq, UseDoneSeqNow(), gesture))
+            why = "the server finished the action (UseDone)";
+        else
+        {
+            // The heal grace: the count can't say what it waits for (a lost UseDone leaves it up until
+            // the 5 s force-clear), so it holds a heal ActionPacer.HealGraceMs at most, timed from its
+            // rise so it does not add to the pacer's own hold. The pacer and the cast gate still hold
+            // a heal for an action the server hasn't answered and for a gesture that is animating.
+            double upMs = (Now - _busyRoseAt).TotalMilliseconds;
+            if (upMs < ActionPacer.HealGraceMs) return true;
+            why = $"the count has been up {upMs:0} ms (heal grace)";
+        }
         int was = BusyCount;
         StaleBusyClears++;
-        _onStaleBusy?.Invoke($"vitals: health is under a heal line and the server finished the action (UseDone) — was {was}");
+        _onStaleBusy?.Invoke($"vitals: health is under a heal line and {why} - was {was}");
         if (BusyCount > 0) BusyCount = 0;   // no callback, or the shared mirror was already 0
         _busyGate.Reset();
         return false;
@@ -1151,7 +1210,8 @@ public partial class BuffManager : IDisposable
     /// and they need the same mid-cast protection a buff gets. Side-effect free:
     /// CheckVitals repopulates these flags every cycle it reaches.
     /// </summary>
-    public bool WantsVitalRecharge => _isHealingSelf || _isRechargingMana || _isRechargingStamina || WantsHealNow() || WantsManaNow();
+    public bool WantsVitalRecharge => (!HealHoldReleased && (_isHealingSelf || WantsHealNow()))   // the heal hold (BuffManager.HealHold.cs)
+                                      || _isRechargingMana || _isRechargingStamina || WantsManaNow();
 
     // Health below a heal line wins the arbiter's tick by itself. The flags above are only set on
     // a tick where CheckVitals actually ran and acted, and it doesn't run while the client is busy
@@ -1336,6 +1396,7 @@ public partial class BuffManager : IDisposable
     public void OnHeartbeat()
     {
         bool track = _settings.IsMacroRunning && _vitals.MaxHealth > 0;
+        NoteKitProgress();   // every heartbeat: the vitals step is not reached while the kit's heal motion plays
         _healHold = "";
         _healHoldDetail = "";
         _healWaitKind = "";
@@ -1383,7 +1444,15 @@ public partial class BuffManager : IDisposable
         TickRechargeRequest();   // /ra recharge: one vitals pass, macro on or off (BuffManager.Recharge.cs)
         TickOneTouchRequest();   // /ra heal, /ra stam, /ra mana: one-touch recharge, macro on or off (BuffManager.OneTouch.cs)
 
-        if (!_settings.IsMacroRunning) { DropWandSwap("the macro stopped"); return; }
+        if (!_settings.IsMacroRunning)
+        {
+            DropWandSwap("the macro stopped");
+            ResetHealHold("the macro stopped");
+            ClearKitRefusedStreaks();            // the vital wand gate's refusal streaks end
+            EndWandGateEpisodes("the macro stopped");
+            return;
+        }
+        TickWandGateLog();   // the vital wand gate: says when a refusal episode is over (BuffManager.VitalWandGate.cs)
 
         // A wand swap's next step goes as soon as the server has answered the last (before the cast gates).
         NoteModeChange();
@@ -1396,7 +1465,9 @@ public partial class BuffManager : IDisposable
 
         // Heals failing at Emergency Heal At: break the cast, then recall (BuffManager.HpFailsafe.cs).
         TickHpFailsafe();
-        if (!_settings.IsMacroRunning) return;
+        if (!_settings.IsMacroRunning) { ResetHealHold("the HP failsafe stopped the macro for a recall"); return; }
+        // No heal landing under a heal line: combat gets the tick for a while (BuffManager.HealHold.cs).
+        TickHealHold();
 
         // A Magic stance we asked for: watch the client's mode every tick (see ObserveStance).
         ObserveStance();
@@ -1825,8 +1896,7 @@ public partial class BuffManager : IDisposable
             if (_vitals.StaminaPct <= 15)
             {
                 _vitalWhy = "";
-                if (AttemptStaminaKitUse() || AttemptVitalCast("Revitalize Self")
-                    || AttemptPotion("StaminaPotion", "Stamina"))
+                if (AttemptStaminaRestore())
                 {
                     _isRechargingStamina = true;
                     return;
@@ -1914,6 +1984,8 @@ public partial class BuffManager : IDisposable
 
         if (_settings.EnableBuffing)
         {
+            if (BuffsWaitForHealth())
+                return;   // hurt in a fight: no new buff cast (a run in progress resumes after)
             if (CheckAndCastSelfBuffs())
                 return;
 
@@ -2029,6 +2101,15 @@ public partial class BuffManager : IDisposable
     }
 
     internal bool CheckVitals()   // internal for the host tests (VitalsTests)
+    {
+        // Combat has the tick (BuffManager.HealHold.cs): no stance change or wield for a vital this pass.
+        _vitalsNoStanceChange = HealHoldReleased && CurrentCombatMode != CombatMode.Magic;
+        _vitalsNoPeaceSwitch = HealHoldReleased;   // no peace switch for a kit either, Magic stance included
+        try { return CheckVitalsCore(); }
+        finally { _vitalsNoStanceChange = false; _vitalsNoPeaceSwitch = false; }
+    }
+
+    private bool CheckVitalsCore()
     {
         int curHealthPct = _vitals.HealthPct;
         int curManaPct   = _vitals.ManaPct;
@@ -2156,8 +2237,15 @@ public partial class BuffManager : IDisposable
         // for the wand and back (slow, and the 10-06 stalls began at those switches), so a stamina
         // potion listed in Consumables goes before it. A potion drunk under 2.5 s ago: no Revitalize
         // on top of it. In Magic stance (a caster) Revitalize stays first.
+        // No wand swap for the between-fights top-off (the owner, 2026-11-07): with melee or missile
+        // weapons in hand, Revitalize means weapons -> peace -> wand -> Magic -> cast -> back, about
+        // 5.5 s, and a melee character (Top Off Stam 60, no kit or potion) did it every 2 minutes, often between
+        // two corpses or with the next monster walking up. Kits and potions still top off; stamina
+        // regenerates otherwise. Under Re-stam At, or in a Re-stam To run, the cast goes as before.
+        bool castNeedsSwap = !inCombat && !_restamRun && curStamPct >= _settings.RestamAt
+                             && CurrentCombatMode != CombatMode.Magic && !FightsWithMagic();
         int sentBefore = _vitalActionsSent;
-        if (curStamPct < stamThreshold && AttemptStaminaChain())
+        if (curStamPct < stamThreshold && AttemptStaminaChain(allowCast: !castNeedsSwap))
         {
             _isRechargingStamina = true;
             // Only a cast, kit or potion actually sent counts toward the run's cap. The chain also
@@ -2167,9 +2255,17 @@ public partial class BuffManager : IDisposable
             if (_restamRun && _vitalActionsSent != sentBefore) _restamRunCasts++;
             return true;
         }
+        if (curStamPct < stamThreshold && castNeedsSwap && (RynthClock.Now - _staminaNoSwapLoggedAt).TotalSeconds >= 60)
+        {
+            _staminaNoSwapLoggedAt = RynthClock.Now;
+            _host.Log($"[RynthAi] Vitals: stamina {curStamPct}% < Top Off Stamina {stamThreshold}%, no stamina kit or potion: " +
+                      $"no wand swap for it out of a fight (it regenerates); under Re-stam At {_settings.RestamAt}% Revitalize is cast.");
+        }
 
         return false;
     }
+
+    private DateTime _staminaNoSwapLoggedAt = DateTime.MinValue;
 
     /// <summary>
     /// The heal chain of the vitals step (CheckVitals, and the one-touch heal): a kit, Heal Self and a
@@ -2220,7 +2316,7 @@ public partial class BuffManager : IDisposable
         // Stamina too low for Stamina to Mana (StaminaToManaFloorPct: Re-stam At, at least 15): a
         // stamina kit, Revitalize or a potion first.
         if (curStamPct <= StaminaToManaFloorPct() && TopStaminaToManaId() != 0
-            && (AttemptStaminaKitUse() || AttemptVitalCast("Revitalize Self") || AttemptPotion("StaminaPotion", "Stamina")))
+            && AttemptStaminaRestore())
         {
             refilledStamina = true;
             return true;
@@ -2230,19 +2326,16 @@ public partial class BuffManager : IDisposable
 
     /// <summary>
     /// The stamina step: a kit, a listed potion first out of Magic stance, Revitalize, then any potion
-    /// (the reasons are in the comment above CheckVitals' stamina line).
+    /// (the reasons are in the comment above CheckVitals' stamina line). <paramref name="allowCast"/>
+    /// false: kits and potions only (no wand swap for the idle top-off).
     /// </summary>
-    private bool AttemptStaminaChain()
+    private bool AttemptStaminaChain(bool allowCast = true)
     {
         bool potionFirst = CurrentCombatMode != CombatMode.Magic;
         bool potionJustDrunk = potionFirst && _settings.UsePotions
             && (RynthClock.Now - _lastPotionAt).TotalMilliseconds < 2500
             && HasListedPotion("StaminaPotion", "Stamina");
-        return !potionJustDrunk
-            && (AttemptStaminaKitUse()
-                || (potionFirst && AttemptPotion(true, "StaminaPotion", "Stamina"))
-                || AttemptVitalCast("Revitalize Self")
-                || AttemptPotion("StaminaPotion", "Stamina"));
+        return !potionJustDrunk && AttemptStaminaRestore(listedPotionFirst: potionFirst, allowCast: allowCast);
     }
 
     // Re-stam To (2026-10-06): a recharge started under Re-stam At carries on until stamina
@@ -2438,8 +2531,16 @@ public partial class BuffManager : IDisposable
         // A recovery vital retried after a mana refusal: its retry gap and the per-second ceiling.
         if (IsRecoveryVital(what) && RecoveryRetryHolds(family) is { Length: > 0 } recoveryWhy)
             return VitalNo(recoveryWhy);
+        // No wand swap for a vital spell while a kit or potion heals (BuffManager.VitalWandGate.cs).
+        if (VitalSpellWouldSwap(label, what, out string swapWhy))
+            return VitalNo(swapWhy);
         if (CurrentCombatMode != CombatMode.Magic && RynthClock.Now < _vitalSwapBlockedUntil)
             return VitalNo("wand swap blocked, retrying shortly");
+        if (_vitalsNoStanceChange)
+        {
+            NoteHealHoldRefusal(peace: false, what);
+            return VitalNo("combat has the tick (no heal landed): no wand swap for a spell");
+        }
         bool urgentHeal = label == LabelHealing && (_oneTouchHealthScope || HealIsUrgent(_vitals.HealthPct, _vitals.StaminaPct));
         if (!EnsureMagicMode(urgentHeal: urgentHeal))
         {
@@ -2684,15 +2785,18 @@ public partial class BuffManager : IDisposable
         foreach (var r in _settings.ConsumableRules)
             if (r.Type.Equals("HealthKit", StringComparison.OrdinalIgnoreCase)
                 && !(r.Name ?? "").Contains("Stamina Kit", StringComparison.OrdinalIgnoreCase)   // a stamina kit heals no health
-                && ConsumableLookup.Resolve(_worldObjectCache, r) is WorldObject wo
+                && ConsumableLookup.Resolve(_worldObjectCache, r, KitUsedUp) is WorldObject wo
                 && IsUseOnSelfKit(wo)) { kit = wo; break; }   // no kit: the potion step drinks it
         if (kit == null) { kit = BestPackHealingKit(); fromPack = true; }
         if (kit == null) return VitalNo("no healing kit");
         if (KitRetryWait(out string kitWait)) return VitalNo(kitWait);
         // Too likely to fail on what's missing (KitMinSuccessPct): let the spell have it.
         uint missing = _vitals.MaxHealth > _vitals.CurrentHealth ? _vitals.MaxHealth - _vitals.CurrentHealth : 0;
-        if (!ignoreMinSuccess && !KitChanceOk(kit.Id, kit.Name ?? "", missing, _settings.PeaceModeForKits, _settings.KitMinSuccessPct)) return VitalNo($"{kit.Name} under Kit Min Success %");
-        if (_settings.PeaceModeForKits && mode != CombatMode.NonCombat && _host.HasChangeCombatMode)
+        // Combat has the tick (BuffManager.HealHold.cs): no peace switch goes out, so the chance is the stance it is in.
+        if (!ignoreMinSuccess && !KitChanceOk(kit.Id, kit.Name ?? "", missing, _settings.PeaceModeForKits && !_vitalsNoPeaceSwitch, _settings.KitMinSuccessPct)) return VitalNo($"{kit.Name} under Kit Min Success %");
+        if (_settings.PeaceModeForKits && mode != CombatMode.NonCombat && _host.HasChangeCombatMode && _vitalsNoPeaceSwitch)
+            NoteHealHoldRefusal(peace: true, "the healing kit");
+        if (_settings.PeaceModeForKits && mode != CombatMode.NonCombat && _host.HasChangeCombatMode && !_vitalsNoPeaceSwitch)
         {
             // Only a request that went out starts the wait: a refusal (the engine turns stance changes away
             // around a teleport) leaves no pacing state, so the next tick asks again.
@@ -2711,6 +2815,7 @@ public partial class BuffManager : IDisposable
         _host.UseOnFor(unchecked((uint)kit.Id), playerId, "Buff", "vitals: healing kit on yourself");
         _lastCastAttempt = RynthClock.Now;
         MarkKitUsed();
+        NoteKitInFlight(kit);
         NoteHealSent(kit.Name ?? "healing kit");
         return true;
     }
@@ -2719,8 +2824,13 @@ public partial class BuffManager : IDisposable
     /// Uses the best stamina kit in the pack on the player, with the same rules as healing
     /// kits: not in Magic mode unless UseKitsInMagicMode, peace mode first if PeaceModeForKits.
     /// </summary>
-    private bool AttemptStaminaKitUse()
+    private bool AttemptStaminaKitUse() => AttemptStaminaKit(false, out _);
+
+    /// <summary><paramref name="underMinSuccess"/>: a kit was there and skipped only for Stamina Kit Min Success %;
+    /// <paramref name="ignoreMinSuccess"/> uses it anyway (AttemptStaminaRestore's last resort).</summary>
+    private bool AttemptStaminaKit(bool ignoreMinSuccess, out bool underMinSuccess)
     {
+        underMinSuccess = false;
         if (_worldObjectCache == null || !_host.HasUseObjectOn) return false;
         int mode = CurrentCombatMode;
         if (mode == CombatMode.Magic && !_settings.UseKitsInMagicMode) return false;
@@ -2729,8 +2839,15 @@ public partial class BuffManager : IDisposable
         if (KitRetryWait(out _)) return false;
         uint missing = _vitals.MaxStamina > _vitals.CurrentStamina ? _vitals.MaxStamina - _vitals.CurrentStamina : 0;
         // Its own line (Stamina Kit Min Success %): below it Revitalize Self or a potion goes.
-        if (!KitChanceOk(kit.Id, kit.Name ?? "", missing, _settings.PeaceModeForKits, _settings.StaminaKitMinSuccessPct)) return false;
-        if (_settings.PeaceModeForKits && mode != CombatMode.NonCombat && _host.HasChangeCombatMode)
+        // Combat has the tick (BuffManager.HealHold.cs): no peace switch goes out, so the chance is the stance it is in.
+        if (!ignoreMinSuccess && !KitChanceOk(kit.Id, kit.Name ?? "", missing, _settings.PeaceModeForKits && !_vitalsNoPeaceSwitch, _settings.StaminaKitMinSuccessPct))
+        {
+            underMinSuccess = true;
+            return false;
+        }
+        if (_settings.PeaceModeForKits && mode != CombatMode.NonCombat && _host.HasChangeCombatMode && _vitalsNoPeaceSwitch)
+            NoteHealHoldRefusal(peace: true, "the stamina kit");
+        if (_settings.PeaceModeForKits && mode != CombatMode.NonCombat && _host.HasChangeCombatMode && !_vitalsNoPeaceSwitch)
         {
             if (_host.ChangeCombatModeFor(CombatMode.NonCombat, "Buff", "peace mode for the stamina kit"))
                 _lastCastAttempt = RynthClock.Now;
@@ -2744,6 +2861,7 @@ public partial class BuffManager : IDisposable
         _vitalActionsSent++;
         _lastCastAttempt = RynthClock.Now;
         MarkKitUsed(stamina: true);
+        NoteKitInFlight(kit);
         return true;
     }
 
@@ -2753,10 +2871,43 @@ public partial class BuffManager : IDisposable
     // and used a second kit, every time (2026-10-03). After a kit, vitals wait for the
     // kit's own result line (heal, fail, movement disrupted, already at full), plus
     // KitLandGraceMs for the vitals to catch up, or KitResultTimeoutMs with no line at all.
+    //
+    // The heal grace (2026-11-07): a kit with no result line held every vital for 8 s, the old
+    // KitResultTimeoutMs, with the label reading Healing and nothing healing. ACE answers a kit it
+    // won't play (an item the player no longer has, a target it can't heal) with a bare UseDone and
+    // no chat, and sends a kit's result line before its UseDone. So (KitWaitVerdict):
+    //   - a UseDone(0) for the kit with no line ends the wait KitLandGraceMs later (none is coming),
+    //     unless the heal motion is still playing (that UseDone was another action's);
+    //   - a kit the server shows no sign of having taken (no heal motion since the send, no UseDone,
+    //     no line) is let go after ActionPacer.HealGraceMs, and the next tick may send it again;
+    //   - a started kit is waited for KitResultTimeoutMs at most (a healthy kit answers in 2.5 s).
     private DateTime _kitUsedAt = DateTime.MinValue;
     private DateTime _kitLandedAt = DateTime.MinValue;
-    private const double KitResultTimeoutMs = 8000;
+    private DateTime _kitAnsweredAt = DateTime.MinValue;   // the kit's own UseDone(0), no line yet
+    private bool _kitSawAnimating;                          // the motion queue read busy since the send
+    // 3.5 s: the longest healthy kit answer is 2.5 s (ActionPacer's time limits). Stamina kits share it.
+    internal const double KitResultTimeoutMs = 3500;
     private const double KitLandGraceMs = 700;
+    /// <summary>Kits let go with no result line (heal grace or the time limit) (tests, status).</summary>
+    internal int KitRetries { get; private set; }
+
+    internal enum KitWaitEnd { Waiting, Landed, Answered, NotTaken, TimedOut }
+
+    /// <summary>
+    /// The kit wait, from what has been seen since the send (pure; a ms value below 0 = not seen): the
+    /// result line plus KitLandGraceMs; the kit's UseDone(0) with no line plus KitLandGraceMs, with no
+    /// motion playing; nothing at all from the server (<paramref name="serverTookIt"/> false) and no
+    /// motion playing after ActionPacer.HealGraceMs; or KitResultTimeoutMs whatever happened.
+    /// </summary>
+    internal static KitWaitEnd KitWaitVerdict(double msSinceUse, double msSinceLanded, double msSinceAnswered,
+        bool serverTookIt, bool animatingNow)
+    {
+        if (msSinceLanded >= 0) return msSinceLanded >= KitLandGraceMs ? KitWaitEnd.Landed : KitWaitEnd.Waiting;
+        if (msSinceAnswered >= KitLandGraceMs && !animatingNow) return KitWaitEnd.Answered;
+        if (!serverTookIt && !animatingNow && msSinceUse >= ActionPacer.HealGraceMs) return KitWaitEnd.NotTaken;
+        if (msSinceUse >= KitResultTimeoutMs) return KitWaitEnd.TimedOut;
+        return KitWaitEnd.Waiting;
+    }
 
     // A refused kit (2026-10-05): ACE answers a kit used while the character is busy (a swing, a
     // cast still resolving), in the air, or on something it can't heal with a UseDone error and
@@ -2777,8 +2928,34 @@ public partial class BuffManager : IDisposable
     {
         _kitUsedAt = RynthClock.Now;
         _kitLandedAt = DateTime.MinValue;
+        _kitAnsweredAt = DateTime.MinValue;
+        _kitSawAnimating = false;
         _kitIsStamina = stamina;
         _kitSeqAtUse = UseDoneSeqNow();
+    }
+
+    private bool MotionQueueBusy => _host.HasGetCastBusyState && !_host.CanCastNow;
+
+    /// <summary>
+    /// The server has shown it took the kit in flight (its heal motion, or its UseDone(0)). An engine
+    /// with neither GetCastBusyState nor the UseDone sequence can show neither, so there the kit counts
+    /// as taken and only KitResultTimeoutMs ends the wait (no resend at the heal grace).
+    /// </summary>
+    private bool KitServerTookIt() =>
+        (!_host.HasGetCastBusyState && !_host.HasUseDoneSeq) || _kitSawAnimating || _kitAnsweredAt != DateTime.MinValue;
+
+    /// <summary>
+    /// Records what the server has done with the kit in flight: the heal motion playing (the client's
+    /// motion queue busy) or the kit's UseDone(0), the first UseDone after the send (as the pacer pairs
+    /// a cast). Every heartbeat, and from KitPending.
+    /// </summary>
+    private void NoteKitProgress()
+    {
+        if (_kitUsedAt == DateTime.MinValue || _kitLandedAt != DateTime.MinValue) return;
+        if (!_kitSawAnimating && MotionQueueBusy) _kitSawAnimating = true;
+        if (_kitAnsweredAt == DateTime.MinValue && _host.HasUseDoneSeq && _host.TryGetLastUseDone(out int seq, out uint err)
+            && seq == _kitSeqAtUse + 1 && err == 0)
+            _kitAnsweredAt = RynthClock.Now;
     }
 
     internal bool KitPending()
@@ -2791,12 +2968,30 @@ public partial class BuffManager : IDisposable
             KitRefused($"UseDone error 0x{err:X}");
             return false;
         }
+        NoteKitProgress();
         DateTime now = RynthClock.Now;
-        bool done = _kitLandedAt != DateTime.MinValue
-            ? (now - _kitLandedAt).TotalMilliseconds >= KitLandGraceMs
-            : (now - _kitUsedAt).TotalMilliseconds >= KitResultTimeoutMs;
-        if (done) { _kitUsedAt = DateTime.MinValue; _kitLandedAt = DateTime.MinValue; }
-        return !done;
+        double sinceUse = (now - _kitUsedAt).TotalMilliseconds;
+        var end = KitWaitVerdict(sinceUse,
+            _kitLandedAt != DateTime.MinValue ? (now - _kitLandedAt).TotalMilliseconds : -1,
+            _kitAnsweredAt != DateTime.MinValue ? (now - _kitAnsweredAt).TotalMilliseconds : -1,
+            KitServerTookIt(), MotionQueueBusy);
+        if (end == KitWaitEnd.Waiting) return true;
+        if (end != KitWaitEnd.Landed)
+        {
+            KitRetries++;
+            string what = end switch
+            {
+                KitWaitEnd.Answered => "was answered (UseDone) with no result line",
+                KitWaitEnd.NotTaken => "shows no sign the server took it (no motion, no UseDone, no result line)",
+                _ => "has no result line yet",
+            };
+            _host.Log($"[RynthAi] Vitals: the {(_kitIsStamina ? "stamina" : "healing")} kit {what} {sinceUse:0} ms after use: " +
+                      "vitals carry on (heal grace), the next tick may send it again.");
+        }
+        _kitUsedAt = DateTime.MinValue;
+        _kitLandedAt = DateTime.MinValue;
+        _kitAnsweredAt = DateTime.MinValue;
+        return false;
     }
 
     /// <summary>The kit in flight was refused: no result line will come, so stop waiting for one.</summary>
@@ -2807,6 +3002,7 @@ public partial class BuffManager : IDisposable
         _kitUsedAt = DateTime.MinValue;
         _kitRefusedAt = RynthClock.Now;
         KitRefusals++;
+        NoteKitRefusedStreak(_kitInFlightId);   // the vital wand gate stops counting a kit refused again and again
         _host.Log($"[RynthAi] Vitals: the {(_kitIsStamina ? "stamina" : "healing")} kit was refused {ms:0} ms after use ({why}): " +
                   $"no result will come, vitals carry on (next kit in {KitRetryAfterRefusalMs:0} ms).");
     }
@@ -2898,6 +3094,7 @@ public partial class BuffManager : IDisposable
         {
             string name = wo.Name ?? "";
             if (!name.EndsWith("Stamina Kit", StringComparison.OrdinalIgnoreCase)) continue;
+            if (KitUsedUp(wo.Id)) continue;   // its line said used up; the walk may not show it yet
             int rank = name.Contains("Greater", StringComparison.OrdinalIgnoreCase) ? 0
                      : name.Contains("Lesser", StringComparison.OrdinalIgnoreCase) ? 2 : 1;
             if (rank < bestRank) { best = wo; bestRank = rank; }
@@ -2917,6 +3114,7 @@ public partial class BuffManager : IDisposable
         {
             string name = wo.Name ?? "";
             if (!name.EndsWith("Healing Kit", StringComparison.OrdinalIgnoreCase)) continue;
+            if (KitUsedUp(wo.Id)) continue;   // its line said used up; the walk may not show it yet
             int rank = Array.FindIndex(KitRanks, k => name.Contains(k, StringComparison.OrdinalIgnoreCase));
             if (rank < 0) rank = name.Contains("Crude", StringComparison.OrdinalIgnoreCase) ? KitRanks.Length + 1 : KitRanks.Length;
             if (rank < bestRank) { best = wo; bestRank = rank; }
@@ -4522,7 +4720,11 @@ public partial class BuffManager : IDisposable
 
         // A kit on yourself finished (see KitPending). After the speech filter: "heal yourself" in a tell is not one.
         if (_kitUsedAt != DateTime.MinValue && _kitLandedAt == DateTime.MinValue && IsKitResultLine(lower))
+        {
             _kitLandedAt = RynthClock.Now;
+            NoteKitResultLine(text, lower);   // "... is used up." naming it: kit picks skip it (BuffManager.KitUsedUp.cs)
+            ClearKitRefusedStreaks();         // a kit landed: the refusal streaks end (BuffManager.VitalWandGate.cs)
+        }
 
         // Real failure phrases. Note: bare "component" was removed — it false-matches
         // the "consumed the following components" line, which fires for both success
@@ -4740,7 +4942,7 @@ public partial class BuffManager : IDisposable
         {
             _cast.Result(null, "refused by the server", atStart: true);
             _host.Log($"[BuffChat] CLEARED pending={_pendingSpellId} on the shield 0x{(uint)_pendingShieldId:X8} - '{text}'");
-            ParkShield(_pendingShieldId, "the server says these spells can't be cast on it");
+            MarkShieldUnbuffable(_pendingShieldId, text);   // never again, not just 30 min (BuffManager.Shield.cs)
             _pendingSpellId = 0;
             _pendingShieldId = 0;
             _onCastResolved?.Invoke("can't be cast on the shield");
@@ -5390,23 +5592,7 @@ public partial class BuffManager : IDisposable
             return false;
         }
 
-        // Primary check: CurrentWieldedLocation (stype=10) — works even before the
-        // phys-obj offset probe fires, mirrors CombatManager.EquipWeaponAndSetStance.
-        bool alreadyWielded = false;
-        var wandObj = _worldObjectCache?[wandId];
-        if (wandObj != null)
-            alreadyWielded = wandObj.Values(LongValueKey.CurrentWieldedLocation, 0) > 0;
-
-        // Secondary check via API if primary didn't confirm
-        if (EquippedState.IsWielded(_host, wandId) is bool trackedWand) alreadyWielded = trackedWand;   // the server's word
-        else if (!alreadyWielded && _host.HasGetObjectWielderInfo)
-        {
-            uint playerId = _host.GetPlayerId();
-            if (playerId != 0 &&
-                _host.TryGetObjectWielderInfo((uint)wandId, out uint wielder, out _) &&
-                wielder == playerId && _worldObjectCache?.InPackWalk(wandId) != true)   // a stale record (the wand in a pack)
-                alreadyWielded = true;
-        }
+        bool alreadyWielded = IsBuffWandWielded(wandId);   // shared with the vital wand gate (BuffManager.VitalWandGate.cs)
 
         if (!_settings.FastWeaponSwap)
         {

@@ -58,7 +58,7 @@ internal static partial class DungeonPathfinder
     //     same scale as Z.
     //   - atan2(|dZ|, dHoriz) > DropAngleDeg → drop.
     // Near-zero horizontal distance (rooms stacked vertically) is always a drop.
-    private static bool IsDropEdge(DungeonNavNode a, DungeonNavNode b)
+    internal static bool IsDropEdge(DungeonNavNode a, DungeonNavNode b)
     {
         double dZ = Math.Abs(b.Z - a.Z);
         if (dZ < 0.5) return false; // trivially flat
@@ -84,6 +84,11 @@ internal static partial class DungeonPathfinder
         _cachedLandblockKey = landblockKey;
         return _cachedGraph;
     }
+
+    /// <summary>Another landblock's graph without touching the cache (the current dungeon's stays):
+    /// /ra dunroute info on a route made elsewhere.</summary>
+    internal static Dictionary<uint, DungeonNavNode> GraphOf(uint landblockKey, DatDatabase cellDat)
+        => _cachedLandblockKey == landblockKey && _cachedGraph != null ? _cachedGraph : BuildGraph(landblockKey, cellDat);
 
     public static void InvalidateCache()
     {

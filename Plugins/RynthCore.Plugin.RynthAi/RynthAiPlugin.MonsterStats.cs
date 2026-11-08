@@ -14,6 +14,11 @@
 // server messages: 0x01B1..0x01B4, asked for in Initialize); spells from the server's spell lines
 // in chat (CombatLines, one table); kills from the kill notice. Not a player's chat types, never a
 // player's or a pet's name, and an enchantment line only for a creature (items cast the same line).
+// Experience per kill (2026-11-08): the kill notice and the rise of TotalExperience paired by
+// KillXpMatcher; the session's rows carry it ("xp", "xk"), and MonsterXpTable learns it per
+// character across logins for the Outdoor Hunt's Most XP choice.
+// Damage taken by shield and facing (same day): the row's "mstats" also carries monster_damage.txt's
+// TS cells (learned across logins, CombatManager.ShieldFacing.cs), sent even with nothing since login.
 //
 // Lifetime: from login to logout (per character), kept across a hot reload (MonsterStatsStore),
 // started over only by /ra mstats reset, the window's Reset or the Damage panel's Reset stats; not
@@ -76,6 +81,18 @@ public sealed partial class RynthAiPlugin
     // Creature names around, by class (refreshed at most every 2 s): who a line's name is.
     private readonly Dictionary<string, AcObjectClass> _creatureClassByName = new(StringComparer.OrdinalIgnoreCase);
     private long _creatureNamesAtMs = long.MinValue / 2;
+    // Experience per kill (2026-11-08, Tom: "the monster tab should record how much experience you get
+    // for killing x mob"): each credited kill notice and each rise of TotalExperience go to the
+    // matcher; a pair adds to the session's row and to the learned table the Outdoor Hunt reads.
+    private readonly KillXpMatcher _killXp = new();
+    private readonly MonsterXpTable _xpTable = new();
+    private const uint TotalExperienceQuad = 1;   // PropertyInt64.TotalExperience
+
+    /// <summary>The learned XP per kill of a kind of monster, kept across logins (MonsterXpTable), or null.</summary>
+    internal double? XpPerKill(string name) => _xpTable.XpPerKill(name);
+
+    /// <summary>The learned table (tests).</summary>
+    internal MonsterXpTable XpTableForTests => _xpTable;
 
     /// <summary>Where the save goes (tests point it at a temp folder).</summary>
     internal string MonsterStatsDirectory { get; set; } = MonsterStatsStore.DefaultDirectory();
@@ -107,16 +124,52 @@ public sealed partial class RynthAiPlugin
     }
 
     /// <summary>The kill notice: a kill, and the killing blow by the combat mode it was struck in.</summary>
-    private void NoteMonsterStatsKill(string? notice)
+    /// <returns>The monster credited (null: none, or not in the world).</returns>
+    private string? NoteMonsterStatsKill(string? notice)
     {
-        if (!_loginComplete) return;
+        if (!_loginComplete) return null;
         KillBlow blow = _currentCombatMode switch
         {
             CombatMode.Melee or CombatMode.Missile => KillBlow.Physical,
             CombatMode.Magic => KillBlow.Spell,
             _ => KillBlow.None,
         };
-        _monsterStats.OnKill(notice, blow, DateTime.UtcNow, CreatureNameIn);
+        DateTime now = DateTime.UtcNow;
+        string? credited = _monsterStats.OnKill(notice, blow, now, CreatureNameIn);
+        if (credited != null)
+        {
+            ApplyKillXp(_killXp.OnKill(credited, now), now);
+            _corpseTimer.OnKill(credited, CorpseNowMs);   // its corpse comes after the death animation (RynthAiPlugin.DeathWait.cs)
+        }
+        return credited;
+    }
+
+    /// <summary>The player's TotalExperience, read every tick, for the kills' XP.</summary>
+    private void WatchKillXp(DateTime now)
+    {
+        if (!_loginComplete || _playerId == 0 || !Host.HasGetObjectQuadProperty) return;
+        if (!Host.TryGetObjectQuadProperty(_playerId, TotalExperienceQuad, out long total)) return;
+        ApplyKillXp(_killXp.OnTotal(total, now), now);
+    }
+
+    private void ApplyKillXp(IReadOnlyList<KillXp> kills, DateTime now)
+    {
+        foreach (KillXp k in kills)
+        {
+            _monsterStats.OnKillXp(k.Name, k.Xp, now);
+            _xpTable.Record(k.Name, k.Xp);
+        }
+    }
+
+    /// <summary>The learned XP table follows the character's folder (next to monster_damage.txt); "" detaches it.</summary>
+    private void SetXpTableCharacter(string? charFolder)
+    {
+        try
+        {
+            _xpTable.SaveIfDirty();
+            _xpTable.SetCharacter(charFolder);
+        }
+        catch (Exception ex) { Host.Log($"[RynthAi] Couldn't read the learned XP per kill: {ex.GetType().Name}: {ex.Message}"); }
     }
 
     /// <summary>
@@ -207,6 +260,7 @@ public sealed partial class RynthAiPlugin
             }
             _monsterStatsSaveAtUtc = now + MonsterStatsSaveInterval;
         }
+        WatchKillXp(now);
         if (_monsterStatsResetWanted)
         {
             _monsterStatsResetWanted = false;
@@ -251,19 +305,85 @@ public sealed partial class RynthAiPlugin
     /// A Damage-panel row's "mstats" field and its comma, for the monster named <paramref name="name"/>
     /// (UI/Data/DamageRowStats.cs in the engine reads it); "" for a monster without numbers. Any thread.
     /// </summary>
-    internal string MonsterStatsJsonFor(string name)
+    internal string MonsterStatsJsonFor(string name) => MonsterStatsJsonFor(name, Array.Empty<uint>(), 0);
+
+    /// <summary>
+    /// <see cref="MonsterStatsJsonFor(string)"/> with the damage it did to us by shield and facing
+    /// (monster_damage.txt's TS rows over <paramref name="wcids"/>, the row's kinds, at difficulty
+    /// <paramref name="tier"/>), learned across logins. Sent even when nothing was counted since login.
+    /// </summary>
+    internal string MonsterStatsJsonFor(string name, uint[] wcids, int tier)
     {
-        if (!_monsterStatsByName.TryGetValue(name, out MonsterStatsRow? r) || r.IsEmpty) return string.Empty;
-        return MonsterStatsJson(r) + ",";
+        _monsterStatsByName.TryGetValue(name, out MonsterStatsRow? r);
+        bool session = r != null && !r.IsEmpty;
+        ShieldTakenCells cells = ShieldTakenFor(wcids, tier);
+        if (!session && cells.IsEmpty) return string.Empty;
+        return MonsterStatsJson(session ? r : null, cells) + ",";
+    }
+
+    /// <summary>
+    /// Damage taken by shield (s = in the off hand, n = none) and facing (f = front, b = behind,
+    /// u = unknown), added up over a row's kinds: per cell its hits, total damage (the mean is
+    /// total / hits) and biggest hit. Index = (shield ? 0 : 3) + front 0 / behind 1 / unknown 2.
+    /// </summary>
+    internal sealed class ShieldTakenCells
+    {
+        public static readonly string[] Keys = { "sf", "sb", "su", "nf", "nb", "nu" };
+        public readonly int[] Hits = new int[6];
+        public readonly double[] Total = new double[6];
+        public readonly double[] Max = new double[6];
+        public bool IsEmpty { get { foreach (int h in Hits) if (h > 0) return false; return true; } }
+    }
+
+    internal ShieldTakenCells ShieldTakenFor(uint[] wcids, int tier)
+    {
+        var c = new ShieldTakenCells();
+        var store = _damageStore;
+        if (store == null) return c;
+        foreach (uint w in wcids)
+        {
+            if (w == 0) continue;
+            foreach (var t in store.GetShieldTaken(w, tier))
+            {
+                int i = (t.Shield ? 0 : 3) + (t.Facing == CreatureData.HitFacing.Front ? 0 : t.Facing == CreatureData.HitFacing.Behind ? 1 : 2);
+                c.Hits[i] += t.Hits;
+                c.Total[i] += t.Avg * t.Hits;
+                if (t.Max > c.Max[i]) c.Max[i] = t.Max;
+            }
+        }
+        return c;
     }
 
     /// <summary>"mstats":{...} for one monster (the field names DamageRowStats reads).</summary>
-    internal static string MonsterStatsJson(MonsterStatsRow r)
+    internal static string MonsterStatsJson(MonsterStatsRow r) => MonsterStatsJson(r, null);
+
+    /// <summary>
+    /// "mstats":{...}: the numbers since login (<paramref name="r"/>, null = none) and the learned
+    /// damage taken by shield and facing (<paramref name="shield"/>, null or empty = none): per cell
+    /// "h" + key hits, "d" + key total damage, "m" + key biggest hit (whole numbers: the engine reads integers).
+    /// </summary>
+    internal static string MonsterStatsJson(MonsterStatsRow? r, ShieldTakenCells? shield)
     {
         CultureInfo ic = CultureInfo.InvariantCulture;
         var sb = new StringBuilder(160);
-        sb.Append("\"mstats\":{")
-          .Append("\"sw\":").Append(r.Swings.ToString(ic)).Append(",\"ev\":").Append(r.Evaded.ToString(ic))
+        sb.Append("\"mstats\":{");
+        bool first = true;
+        if (shield != null && !shield.IsEmpty)
+        {
+            for (int i = 0; i < 6; i++)
+            {
+                if (shield.Hits[i] == 0) continue;
+                string k = ShieldTakenCells.Keys[i];
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append("\"h").Append(k).Append("\":").Append(shield.Hits[i].ToString(ic))
+                  .Append(",\"d").Append(k).Append("\":").Append(((long)Math.Round(shield.Total[i], MidpointRounding.AwayFromZero)).ToString(ic))
+                  .Append(",\"m").Append(k).Append("\":").Append(((long)Math.Round(shield.Max[i], MidpointRounding.AwayFromZero)).ToString(ic));
+            }
+        }
+        if (r == null) return sb.Append('}').ToString();
+        if (!first) sb.Append(',');
+        sb.Append("\"sw\":").Append(r.Swings.ToString(ic)).Append(",\"ev\":").Append(r.Evaded.ToString(ic))
           .Append(",\"sp\":").Append(r.SpellsAtIt.ToString(ic)).Append(",\"rs\":").Append(r.Resisted.ToString(ic))
           .Append(",\"ne\":").Append(r.NoEffect.ToString(ic))
           .Append(",\"at\":").Append(r.Attacks.ToString(ic)).Append(",\"yev\":").Append(r.YouEvaded.ToString(ic))
@@ -271,6 +391,11 @@ public sealed partial class RynthAiPlugin
           .Append(",\"yne\":").Append(r.NoEffectOnYou.ToString(ic))
           .Append(",\"k\":").Append(r.Kills.ToString(ic))
           .Append(",\"dd\":").Append(r.DamageDealt.ToString(ic)).Append(",\"dt\":").Append(r.DamageTaken.ToString(ic))
+          // 2026-11-08: the XP of the kills whose rise was seen, and how many (XP/kill = xp / xk).
+          .Append(",\"xp\":").Append(r.Xp.ToString(ic)).Append(",\"xk\":").Append(r.XpKills.ToString(ic))
+          // Same day: the kill-to-corpse time (the death animation), its average in ms and how many were timed.
+          .Append(",\"cd\":").Append(((long)Math.Round(r.CorpseAvgMs ?? 0, MidpointRounding.AwayFromZero)).ToString(ic))
+          .Append(",\"cn\":").Append(r.CorpseKills.ToString(ic))
           .Append('}');
         return sb.ToString();
     }
@@ -310,6 +435,9 @@ public sealed partial class RynthAiPlugin
     {
         if (_monsterStatsStarted) DeleteMonsterStatsSave();
         _monsterStats.Reset();
+        _killXp.Reset();   // the next character's XP is a new starting point
+        _corpseTimer.Reset();
+        EndDeathWait("logged out");
         _monsterStatsStarted = false;
         _monsterStatsSavedVersion = -1;
         _creatureClassByName.Clear();
@@ -322,6 +450,7 @@ public sealed partial class RynthAiPlugin
     private void ShutdownMonsterStats()
     {
         if (_monsterStatsStarted) SaveMonsterStats(DateTime.UtcNow);
+        try { _xpTable.SaveIfDirty(); } catch { }
     }
 
     // ── Saving (MonsterStatsStore) ───────────────────────────────────────

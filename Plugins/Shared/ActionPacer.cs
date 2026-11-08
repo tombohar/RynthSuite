@@ -101,6 +101,7 @@ internal sealed class PacedAction
     public uint Target;          // a cast's target (the held-cast turn faces it)
     public bool Script;          // a cast a script chose (the combat hook): the breaker waits ScriptCastMinBreakMs
     public bool WieldedAtSend;
+    public bool OnSelf;          // an item used on the character (a kit): the heal grace may go ahead of it
     public bool ResultSeen;      // a cast's result is in (enchantment / chat); the server is in its recoil
     public bool HealQueued;      // the one heal allowed behind that recoil went out
     public long ModeSeenMs;      // when the client first read the requested mode
@@ -147,6 +148,13 @@ internal static class ActionPacer
     public const long NoUseDoneFallbackMs = 600;
     /// <summary>The longest one ask for the player's turn holds RynthAi (RynthAiYieldApiV1.MaxHoldMs).</summary>
     public const long PlayerHoldMaxMs = 3000;
+    /// <summary>
+    /// The heal grace (2026-11-07): the longest a heal under a heal line waits on a use of an item on
+    /// the character (a kit) the server hasn't answered, and between the 'too busy' probes. Past it the
+    /// heal goes (a refusal is an answer too, and the next heal retries). An item on yourself has no
+    /// server turn to stop; corpse/door uses, casts, wields and the animation gate keep their rules.
+    /// </summary>
+    public const long HealGraceMs = 2000;
 
     private static readonly object Gate = new();
     private static PacedAction? _cur;
@@ -208,6 +216,7 @@ internal static class ActionPacer
             _heldTurns = 0;
             _forcedBreaks = 0;
             _jumpAt = 0;
+            _lootJumpAt = 0;
             _cycleBySpell.Clear();
             _lastSeenSeq = int.MinValue;
             _lastFrameMs = 0;
@@ -250,7 +259,8 @@ internal static class ActionPacer
     /// BEFORE the send. Logs once when it went out over another unanswered action (a player command,
     /// a meta, or a heal let ahead).
     /// </summary>
-    public static void Begin(RynthCoreHost host, PacedKind kind, uint id, string label, string who, int seqAtSend, int modeTarget = 0)
+    public static void Begin(RynthCoreHost host, PacedKind kind, uint id, string label, string who, int seqAtSend, int modeTarget = 0,
+        bool onSelf = false)
     {
         if (!Enabled || kind == PacedKind.None) return;
         PacedAction? prev = Current(host);
@@ -258,6 +268,7 @@ internal static class ActionPacer
         var a = new PacedAction
         {
             Kind = kind, Id = id, Label = label, Who = who, SentMs = now, SeqAtSend = seqAtSend, ModeTarget = modeTarget,
+            OnSelf = onSelf && kind == PacedKind.ItemUse,
         };
         if (kind == PacedKind.ItemUse) a.WieldedAtSend = IsWieldedByPlayer(host, id);
         string? over = null;
@@ -466,6 +477,9 @@ internal static class ActionPacer
     {
         if (!Enabled) { why = ""; return true; }
         if (PlayerHoldsStart(host, who, out why)) return false;
+        // A buff, heal, kit or potion in the air is refused by ACE: wait for the landing. Combat checks
+        // it itself, at the attack, so a stance change is not held; loot and doors never.
+        if (who == "Buff" && LootJumpAirborne(host, out why)) return false;
         if (ServerBusyHolds(host, who, attackRepeat, out why, out bool tryAfterBusy, heal)) return false;
         // An emergency heal does not wait for the movement settle (150-600 ms): at Emergency Heal At
         // the heal comes first; it still obeys the in-flight rules below (OutstandingAllows, GestureHolds).
@@ -527,6 +541,15 @@ internal static class ActionPacer
             {
                 a.HealQueued = true;
                 lock (Gate) _healsAhead++;
+                return true;
+            }
+            // The heal grace: an item used on the character (a kit) still unanswered after HealGraceMs.
+            // A lost or swallowed kit is sent again instead of holding every heal to ItemUseMaxMs.
+            if (a.OnSelf && age >= HealGraceMs)
+            {
+                bool logAhead;
+                lock (Gate) { _healsAhead++; logAhead = a.LoggedWaits.Add(who + "/heal-grace"); }
+                if (logAhead) Log(host, $"[Pace] {who}: the heal goes ahead of {Describe(a.Kind, a.Label)} (unanswered for {age} ms, heal grace {HealGraceMs} ms)");
                 return true;
             }
         }
@@ -915,8 +938,11 @@ internal static class ActionPacer
             // use would send first every time and the heal would see the next slot, up to BusyProbeMaxMs later).
             if (heal == HealNeed.Heal && _busySince != 0) _healWaitAt = now;
             bool healWaiting = heal != HealNeed.Heal && _healWaitAt != 0 && now - _healWaitAt < HealWaitFreshMs;
+            // A waiting heal's probe comes at least every HealGraceMs (the doubling would reach BusyProbeMaxMs).
+            long probeWait = Math.Min(BusyProbeMs << Math.Min(_probes, 8), BusyProbeMaxMs);
+            if (heal == HealNeed.Heal) probeWait = Math.Min(probeWait, HealGraceMs);
             if (!attackRepeat && stuck == null && _busySince != 0 && _stage == BreakStage.None && !healWaiting
-                && now - Math.Max(_busySince, _lastProbeAt) >= Math.Min(BusyProbeMs << Math.Min(_probes, 8), BusyProbeMaxMs))
+                && now - Math.Max(_busySince, _lastProbeAt) >= probeWait)
             {
                 probe = true;   // spent in MayStart once the start passes its other checks (SpendTryAfterBusy)
             }
@@ -1030,6 +1056,76 @@ internal static class ActionPacer
         lock (Gate) { if (!ReferenceEquals(_stageFor, forAction)) _turnedAt = 0; _stage = stage; _stageAt = now; _stageFor = forAction; }
     }
 
+    /// <summary>
+    /// Landed after a jump at <paramref name="jumpAt"/> from height <paramref name="z0"/>: the height
+    /// is back (looked at from JumpLandMinMs on), or JumpLandMaxMs has passed whatever it says.
+    /// </summary>
+    private static bool Landed(RynthCoreHost host, long now, long jumpAt, float z0)
+    {
+        long air = now - jumpAt;
+        bool landed = air >= JumpLandMaxMs;
+        if (!landed && air >= JumpLandMinMs)
+        {
+            try { landed = !host.HasGetPlayerPose || (host.TryGetPlayerPose(out _, out _, out _, out float z, out _, out _, out _, out _) && Math.Abs(z - z0) < 0.1f); }
+            catch { landed = true; }
+        }
+        return landed;
+    }
+
+    // Jump-loot (CorpseOpenController): the corpse pickup's tap jump. ACE refuses a cast, a swing, a
+    // shot, a kit, food or a potion in the air (Player_Magic/Melee/Missile, Healer, Food: IsJumping ->
+    // YouCantDoThatWhileInTheAir, 0x4EB), so combat and buffs wait until the character has landed
+    // instead of sending into a certain refusal. Loot does not: ACE takes a pickup and a corpse use in
+    // the air, so this never holds MayStart("Loot"). The hold is a pure wait, capped at JumpLandMaxMs
+    // from the jump, so a missed landing cannot stall a heal for longer than that.
+    private static long _lootJumpAt;   // 0 = not in the air after a loot jump
+    private static float _lootJumpZ;
+
+    /// <summary>A loot jump went out (the client took it): the character is in the air from now.</summary>
+    public static void NoteLootJump(RynthCoreHost host)
+    {
+        float z = 0;
+        try { if (host.HasGetPlayerPose) host.TryGetPlayerPose(out _, out _, out _, out z, out _, out _, out _, out _); } catch { }
+        long now = NowMs();
+        lock (Gate) { _lootJumpAt = now; _lootJumpZ = z; }
+    }
+
+    /// <summary>
+    /// True (with why) while the character is in the air after a loot jump: until the height is back
+    /// (from JumpLandMinMs) or JumpLandMaxMs at most. Pure wait: nothing is counted, refused or
+    /// retried. Independent of <see cref="Enabled"/>.
+    /// </summary>
+    public static bool LootJumpAirborne(RynthCoreHost host, out string why)
+    {
+        why = "";
+        long jumpAt; float z0;
+        lock (Gate) { jumpAt = _lootJumpAt; z0 = _lootJumpZ; }
+        if (jumpAt == 0) return false;
+        long now = NowMs();
+        if (!Landed(host, now, jumpAt, z0))
+        {
+            why = $"in the air after the loot jump ({now - jumpAt} ms)";
+            return true;
+        }
+        lock (Gate) { if (_lootJumpAt == jumpAt) _lootJumpAt = 0; }
+        return false;
+    }
+
+    /// <summary>
+    /// Ms since the last loot jump went out, or -1 when none is noted (never jumped, landed and
+    /// cleared by <see cref="LootJumpAirborne"/>, or forgotten). Read it BEFORE LootJumpAirborne
+    /// when the answer matters: a landing seen there clears the jump.
+    /// </summary>
+    public static long LootJumpAgeMs()
+    {
+        long jumpAt;
+        lock (Gate) jumpAt = _lootJumpAt;
+        return jumpAt == 0 ? -1 : NowMs() - jumpAt;
+    }
+
+    /// <summary>No loot jump in the air any more (death, portal space, logout: RynthAiPlugin).</summary>
+    public static void ForgetLootJump() { lock (Gate) _lootJumpAt = 0; }
+
     /// <summary>In the air after a breaker jump: hold until landed (height back, or JumpLandMaxMs).</summary>
     private static bool AirborneHolds(RynthCoreHost host, long now, out string why)
     {
@@ -1038,12 +1134,7 @@ internal static class ActionPacer
         lock (Gate) { jumpAt = _jumpAt; z0 = _jumpZ; }
         if (jumpAt == 0) return false;
         long air = now - jumpAt;
-        bool landed = air >= JumpLandMaxMs;
-        if (!landed && air >= JumpLandMinMs)
-        {
-            try { landed = !host.HasGetPlayerPose || (host.TryGetPlayerPose(out _, out _, out _, out float z, out _, out _, out _, out _) && Math.Abs(z - z0) < 0.1f); }
-            catch { landed = true; }
-        }
+        bool landed = Landed(host, now, jumpAt, z0);
         if (!landed)
         {
             why = $"in the air after the stuck-cast jump ({air} ms)";

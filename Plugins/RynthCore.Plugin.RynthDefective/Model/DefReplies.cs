@@ -18,6 +18,21 @@ internal static class DefReplies
         _ => (false, $"This RynthCore has no {title} window (it needs plugin API v90)."),
     };
 
+    /// <summary>
+    /// /rdef daynight [show|hide]: the Day/Night timer after it (<paramref name="state"/> as <see cref="Window"/>),
+    /// then the time now when the clock can be read (null = not in world): "Day/Night timer shown. Night now
+    /// (Evensong); day in 23m of real time."
+    /// </summary>
+    public static (bool Ok, string Text) DayNight(int state, DerethNow? now)
+    {
+        string time = now is { } n
+            ? $" {(n.IsDay ? "Day" : "Night")} now ({n.HourName}); {n.Next.ToLowerInvariant()} in {DerethClock.Countdown(n.SecondsToChange)} of real time."
+            : "";
+        return state < 0
+            ? (false, "This RynthCore has no Day/Night timer window (it needs plugin API v90)." + time)
+            : (true, CommandReply.Shown("Day/Night timer", state == 1) + time);
+    }
+
     /// <summary>A slot's use started (the result shows on the bar; a problem is said in chat).</summary>
     public static string UseSlot(DefSlot slot, int number) => slot.IsSpell
         ? $"Casting {slot.SpellLabel} (slot {number})."
@@ -44,6 +59,13 @@ internal static class DefReplies
         why = $"'{t}' isn't an object id. Usage: /rdef selection [0x80001234 | stack]";
         return false;
     }
+
+    /// <summary>"/rdef shortcuts clearbusy [on|off]": what the option is now.</summary>
+    public static string ClearBusy(bool on) => on
+        ? "Shortcuts clear a stuck busy state: on. A press held only by the client's busy count (nothing of RynthDefective's or "
+          + "RynthAi's in flight, no animation, no 'too busy' from the server just now) resets the count as /ra clearbusy does, then goes."
+        : "Shortcuts clear a stuck busy state: off (the default). A busy count left by a death or a login holds a press for up to 4 s, "
+          + "then is ignored; the count itself is left alone.";
 
     /// <summary>"/rdef selection stack" with no stack in the pack.</summary>
     public const string NoStack = "No stack in your pack to select.";

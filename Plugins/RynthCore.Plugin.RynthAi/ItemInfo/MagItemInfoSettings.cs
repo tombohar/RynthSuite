@@ -99,6 +99,13 @@ public sealed class MagItemInfoSettings
     /// <summary>Chat type for pet-style lines 2+, or <see cref="SameAsHeader"/>.</summary>
     public int DetailChatType = SameAsHeader;
     /// <summary>
+    /// "Info text colour" (2026-11-05): "#RRGGBB" draws every item info line (name, details, the
+    /// described "Looted" line, your ratings) in that colour in RynthCore's chat, whatever its chat
+    /// type; the type still picks the tab and AC's own chat window, which can only show the type's
+    /// colour. "" = the type's own colour (the default, and every profile before it).
+    /// </summary>
+    public string TextColor = string.Empty;
+    /// <summary>
     /// Text put in front of every line. RynthChat files lines starting "[RynthAi Item] " under
     /// its Items tab (ChatClassifier.IsItemInfo).
     /// </summary>
@@ -131,6 +138,7 @@ public sealed class MagItemInfoSettings
         if (Layout is not (LayoutOneLine or LayoutPetLines)) Layout = LayoutPetLines;
         Prefix ??= string.Empty;
         if (Prefix.Length > 32) Prefix = Prefix[..32];
+        TextColor = MagItemInfoCatalog.NormalizeTextColor(TextColor) ?? string.Empty;
     }
 
     /// <summary>Back to first-run defaults (window stays open).</summary>
@@ -148,7 +156,7 @@ public sealed class MagItemInfoSettings
         HiddenFields = d.HiddenFields; HiddenRatings = d.HiddenRatings;
         ShowValueAndBurden = d.ShowValueAndBurden;
         SpellMode = d.SpellMode; MaxListedSpells = d.MaxListedSpells;
-        ChatType = d.ChatType; Prefix = d.Prefix;
+        ChatType = d.ChatType; Prefix = d.Prefix; TextColor = d.TextColor;
     }
 }
 
@@ -239,6 +247,84 @@ public static class MagItemInfoCatalog
         (24, "24 - Craft"),
         (25, "25 - Salvaging"),
     };
+
+    /// <summary>
+    /// Named choices for <see cref="MagItemInfoSettings.TextColor"/> ("" first: the chat type's own
+    /// colour). The chat ones are AC's own colours for those chat types, as RynthCore's chat draws
+    /// them with Retail colours on (the engine's ChatLineColors.RetailArgbByType); the last two are
+    /// RynthCore's own tab colours. <c>Word</c> is what /ra iteminfo color takes.
+    /// </summary>
+    public static readonly (string Word, string Label, string Color)[] TextColors =
+    {
+        ("default",     "Chat type's own colour",      ""),
+        ("allegiance",  "Allegiance (orange)",          "#EE921E"),
+        ("fellowship",  "Fellowship / tell (yellow)",   "#FFFF3F"),
+        ("tellout",     "Tell you send (olive)",        "#D2D264"),
+        ("speech",      "Speech (white)",               "#FFFFFF"),
+        ("emote",       "Emote (grey)",                 "#D2D2C8"),
+        ("system",      "System (purple)",              "#FF7FFF"),
+        ("channels",    "Channels (rose)",              "#FF9696"),
+        ("combat",      "Combat (red)",                 "#FF3F3F"),
+        ("magic",       "Magic (light blue)",           "#3FBFFF"),
+        ("advancement", "Advancement (cyan)",           "#3FDCDC"),
+        ("broadcast",   "Broadcast (green)",            "#80FF7F"),
+        ("items",       "Items tab (teal)",             "#9FD8C8"),
+        ("rynth",       "Rynth tab (amber)",            "#E6B450"),
+    };
+
+    /// <summary>
+    /// "#RRGGBB" (upper case) for "#rrggbb", "rrggbb" or "0xRRGGBB"; "" for ""; null for anything else.
+    /// </summary>
+    public static string? NormalizeTextColor(string? s)
+    {
+        string v = (s ?? string.Empty).Trim();
+        if (v.Length == 0) return string.Empty;
+        if (v.StartsWith('#')) v = v[1..];
+        else if (v.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) v = v[2..];
+        if (v.Length != 6) return null;
+        foreach (char c in v)
+            if (!Uri.IsHexDigit(c)) return null;
+        return "#" + v.ToUpperInvariant();
+    }
+
+    /// <summary>
+    /// /ra iteminfo color's argument: a <see cref="TextColors"/> word ("allegiance", "default",
+    /// "none" / "off" / "type" / "" = ""), or a colour code. Null when it is neither.
+    /// </summary>
+    public static string? ParseTextColor(string arg)
+    {
+        string a = arg.Trim();
+        if (a.Length == 0 || a.Equals("none", StringComparison.OrdinalIgnoreCase) || a.Equals("off", StringComparison.OrdinalIgnoreCase)
+            || a.Equals("type", StringComparison.OrdinalIgnoreCase))
+            return string.Empty;
+        foreach (var c in TextColors)
+            if (c.Word.Equals(a, StringComparison.OrdinalIgnoreCase)) return c.Color;
+        return NormalizeTextColor(a);
+    }
+
+    /// <summary>A colour as the window and the command reply name it: its label, else the code.</summary>
+    public static string TextColorLabel(string color)
+    {
+        foreach (var c in TextColors)
+            if (string.Equals(c.Color, color, StringComparison.OrdinalIgnoreCase)) return c.Color.Length > 0 ? $"{c.Label} {c.Color}" : c.Label;
+        return color;
+    }
+
+    /// <summary>"#RRGGBB" as 0..1 RGB for ImGui's colour picker (white when it isn't a colour).</summary>
+    public static System.Numerics.Vector3 TextColorRgb(string color)
+    {
+        string? n = NormalizeTextColor(color);
+        if (string.IsNullOrEmpty(n)) return System.Numerics.Vector3.One;
+        int v = Convert.ToInt32(n[1..], 16);
+        return new System.Numerics.Vector3(((v >> 16) & 0xFF) / 255f, ((v >> 8) & 0xFF) / 255f, (v & 0xFF) / 255f);
+    }
+
+    /// <summary>0..1 RGB from ImGui's colour picker as "#RRGGBB".</summary>
+    public static string TextColorFromRgb(System.Numerics.Vector3 rgb)
+    {
+        static int B(float f) => (int)MathF.Round(Math.Clamp(f, 0f, 1f) * 255f);
+        return $"#{B(rgb.X):X2}{B(rgb.Y):X2}{B(rgb.Z):X2}";
+    }
 
     /// <summary>Field by enum name or label word, case-insensitive ("ratings", "slayer", "typemastery").</summary>
     public static bool TryFindField(string key, out MagItemInfoField field)

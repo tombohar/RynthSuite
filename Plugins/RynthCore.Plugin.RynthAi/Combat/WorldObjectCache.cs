@@ -47,6 +47,11 @@ public class WorldObjectCache
     // targets: the server sends health only for the selected target). A real health update replaces
     // the estimate and takes the id out of this set.
     private readonly HashSet<int> _estimatedHealth = new();
+    // When the server's health for an id last arrived here (Clock), for ranking only: CombatManager's
+    // Lowest health compares it with the age of the engine plates' reading (API v93, 2026-11-07).
+    private readonly Dictionary<int, DateTime> _serverHealthAt = new();
+    /// <summary>The clock <see cref="TryGetServerHealthTime"/> stamps with (host tests set their own).</summary>
+    internal Func<DateTime> Clock { get; set; } = () => RynthClock.Now;
     /// <summary>The lowest an estimate goes: 0 means dead to every reader, and only the server says that.</summary>
     internal const float EstimatedHealthFloor = 0.01f;
 
@@ -206,6 +211,7 @@ public class WorldObjectCache
         _landscape.Remove(sid);
         _healthRatios.Remove(sid);
         _estimatedHealth.Remove(sid);
+        _serverHealthAt.Remove(sid);
         _classifyRetry.Remove(id);
         _slowRetry.Remove(id);
         _reclassifySkipState.Remove(id);
@@ -272,6 +278,14 @@ public class WorldObjectCache
             return _estimatedHealth.Contains(id);
     }
 
+    /// <summary>When the server's health for <paramref name="id"/> last arrived (OnUpdateHealth, on
+    /// <see cref="Clock"/>); false when it never did. An estimate doesn't move it.</summary>
+    public bool TryGetServerHealthTime(int id, out DateTime at)
+    {
+        lock (_gate)
+            return _serverHealthAt.TryGetValue(id, out at);
+    }
+
     public void OnUpdateHealth(uint id, float healthRatio)
     {
         lock (_gate)
@@ -282,6 +296,7 @@ public class WorldObjectCache
         int sid = (int)id;
         _healthRatios[sid] = Math.Clamp(healthRatio, 0f, 1f);
         _estimatedHealth.Remove(sid);   // the server's number replaces any estimate
+        _serverHealthAt[sid] = Clock();
 
         if (!_creatures.Add(sid))
             return; // creature already known — ratio updated above, nothing more to do
@@ -355,6 +370,8 @@ public class WorldObjectCache
     private readonly Dictionary<int, int> _directInventoryIndex = new();
     private DateTime _lastDirectInventoryScan = DateTime.MinValue;
     private const int DirectInventoryCooldownMs = 1000;
+    /// <summary>The clock GetDirectInventory's reuse runs on (tests freeze it; RynthClock otherwise).</summary>
+    internal Func<DateTime> WalkClock { get; set; } = static () => RynthClock.Now;
     private const int DirectInventoryForceRefreshMinMs = 250;
 
     /// <summary>Mark inventory as changed — triggers a full container scan on next Tick.</summary>
@@ -952,6 +969,7 @@ public class WorldObjectCache
         // an object filed before its name or flag was readable still can, so the bags in the
         // inventory list (a handful) are re-checked here. Packs we carry aren't corpses.
         List<(int id, AcObjectClass was)>? invCorpses = null;
+        List<(int Id, uint Flags)>? invLoose = null;   // filed as carried, but lying in the world
         foreach (int id in _inventory)
         {
             uint uid = unchecked((uint)id);
@@ -961,7 +979,19 @@ public class WorldObjectCache
             if (IsCorpseName(wo.Name)
                 || (_host.TryGetObjectName(uid, out string invName) && IsCorpseName(invName))
                 || HasCorpseFlag(uid))
+            {
                 (invCorpses ??= new()).Add((id, wo.ObjectClass));
+                continue;
+            }
+
+            // A chest that appeared before its position was known (the Dreamweave dig's Unearthed Cache)
+            // is filed here as something carried; the server says nobody holds it and it now has a
+            // position: it lies in the world. Without this it was never on the landscape, so no
+            // "use <name>" search, Loot by name or chest scan could find it (2026-11-02).
+            if (WhoHas(id) == Holder.Nobody
+                && _host.TryGetObjectPosition(uid, out _, out _, out _, out _)
+                && _host.TryGetItemType(uid, out uint looseFlags))
+                (invLoose ??= new()).Add((id, looseFlags));
         }
         if (invCorpses != null)
         {
@@ -972,6 +1002,21 @@ public class WorldObjectCache
                 FileAsCorpse(id, uid, n);
                 LogCorpseRescue(uid, n, was, "inventory, no position when classified");
             }
+        }
+
+        if (invLoose != null)
+        {
+            int moved = 0;
+            foreach (var (id, flags) in invLoose)
+            {
+                if (!_byId.TryGetValue(id, out var lw)) continue;
+                uint uid = unchecked((uint)id);
+                AcObjectClass lc = ClassifyItem(uid, flags);
+                if (lc == AcObjectClass.Unknown || !FileTypedObject(uid, id, lw.Name ?? string.Empty, lc, flags)) continue;
+                moved++;
+            }
+            if (moved > 0)
+                _host.Log($"[RynthAi] ReclassifyUnknownDynamics: {moved} object(s) filed as carried lie loose in the world -> landscape");
         }
 
         if (statics != null)
@@ -1390,7 +1435,7 @@ public class WorldObjectCache
         // snapshot copy so the caller never iterates the live list a later call will clear.
         lock (_gate)
         {
-        DateTime now = RynthClock.Now;
+        DateTime now = WalkClock();
 
         if (!_host.HasGetContainerContents)
         {

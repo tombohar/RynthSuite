@@ -50,6 +50,10 @@ public static class VirindiTankProfileImporter
         /// <summary>Full paths of .utl files copied into the Rynth loot folder this run (for activating loot).</summary>
         public List<string> CopiedLootDestPaths { get; } = new();
         public List<string> LogLines { get; } = new();
+        /// <summary>The ring options of each text .usd read (file name, values); see <see cref="ApplyRingSettings"/>.</summary>
+        internal List<(string File, VtRingSettings Ring)> RingSettingsFound { get; } = new();
+        /// <summary>"Min Ring Targets 2, Ring Range 5 (from the profile)" when they were set; else "".</summary>
+        public string RingSettingsSet { get; internal set; } = string.Empty;
     }
 
     /// <param name="lootDestDir">RynthAi LootProfiles folder.</param>
@@ -108,6 +112,9 @@ public static class VirindiTankProfileImporter
             }
         }
 
+        if (mergeMonsterRules)
+            ApplyRingSettings(settings, result);
+
         if (result.LootFilesCopied == 0 && result.MonsterRulesAdded == 0)
             result.LogLines.Add("No .utl loot files, Rynth monsters.json, or text MyMonsters .usd found under VirindiTank paths.");
 
@@ -140,7 +147,7 @@ public static class VirindiTankProfileImporter
     }
 
     /// <summary>Text SCF .usd with MyMonsters — same subset as Monster Editor import for the current character merge.</summary>
-    private static void TryMergeUsdMyMonstersScf(string usdPath, LegacyUiSettings settings, Result result)
+    internal static void TryMergeUsdMyMonstersScf(string usdPath, LegacyUiSettings settings, Result result)
     {
         if (string.IsNullOrWhiteSpace(usdPath) || !File.Exists(usdPath))
             return;
@@ -161,6 +168,9 @@ public static class VirindiTankProfileImporter
             return;
         }
 
+        var ring = VtRingSettings.Read(allText.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None));
+        if (ring.Any) result.RingSettingsFound.Add((Path.GetFileName(usdPath), ring));
+
         var tmp = new List<MonsterRule>();
         if (!VirindiTankUsdMyMonstersScfParser.TryParseMyMonsters(allText, tmp, out string? note) || tmp.Count == 0)
             return;
@@ -170,6 +180,32 @@ public static class VirindiTankProfileImporter
         int newNamed = result.MonsterRulesAdded - addedBefore;
         result.LogLines.Add(
             $"Monsters: VT MyMonsters from {Path.GetFileName(usdPath)} — parsed {tmp.Count} row(s), +{newNamed} new rule(s).{(string.IsNullOrEmpty(note) ? "" : " " + note)}");
+    }
+
+    /// <summary>
+    /// The ring options of the .usd profiles read (VtRingSettings) into Min Ring Targets and Ring
+    /// Range: the import is the player's, so these two settings may change here and only here. This
+    /// import reads every profile under the VirindiTank folders, so it sets them only when every
+    /// profile that has ring options agrees; profiles that differ leave both alone and say so.
+    /// None found: the settings are left as they are.
+    /// </summary>
+    internal static void ApplyRingSettings(LegacyUiSettings settings, Result result)
+    {
+        var found = result.RingSettingsFound;
+        if (found.Count == 0) return;
+        var first = found[0].Ring;
+        foreach (var (file, ring) in found)
+        {
+            if (ring.SameAs(first)) continue;
+            result.LogLines.Add($"Ring settings: the profiles differ ({found[0].File}: {first.Describe()}; {file}: {ring.Describe()}): " +
+                                "Min Ring Targets and Ring Range left alone. Import one profile from the Hub's VTank import to take its values.");
+            return;
+        }
+        foreach (string c in first.Clamped) result.LogLines.Add($"Ring settings: {c} (the settings' range)");
+        first.ApplyTo(settings);
+        result.RingSettingsSet = first.Describe();
+        result.LogLines.Add($"Ring settings: set {result.RingSettingsSet}" +
+                            (found.Count > 1 ? $", the same in {found.Count} profiles." : $", {found[0].File}."));
     }
 
     /// <summary>Merges VT-style rows into <paramref name="settings"/> like Monster Editor external import.</summary>

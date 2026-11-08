@@ -117,6 +117,17 @@ internal sealed class DefSettings
     /// /rdef qty, split, give and buy work either way.
     /// </summary>
     public bool QuantityBox = true;
+    /// <summary>
+    /// Shortcuts clear a stuck busy state (2026-11-04, a player's ask): a press held only by the client's
+    /// busy count (nothing of ours or RynthAi's in flight, no gesture, no "You're too busy" just now) resets
+    /// the count as RynthAi's /ra clearbusy does (the engine's ForceResetBusyCount), then goes, once per
+    /// press (Use/BusyGate.cs BusyClearRule). Off (the default, and what a file from before reads as): a
+    /// reset also zeroes actions the server hasn't answered that RynthDefective can't see (the game's own
+    /// clicks and toolbar keys, another plugin's), and each late answer then takes the count below zero;
+    /// RynthAi stopped resetting it for that on 2026-10-06. The leftover rules let a press through anyway
+    /// within 4 s; this only saves those seconds.
+    /// </summary>
+    public bool ClearStuckBusy;
     public bool BarOpen;
     public bool PickerOpen;
 
@@ -131,6 +142,69 @@ internal sealed class DefSettings
     }
 }
 
+/// <summary>
+/// One of the extra Shortcuts bars (2026-11-04): a window of its own ("Shortcuts 2" ... "Shortcuts 4",
+/// the engine remembers its place, size and whether it shows), with slots of its own, filled as the
+/// main bar's own slots are (drag an item from the pack, the selected item, one of your spells) and
+/// clicked the same way. Its slots have no keys: the keys are the main bar's ("/rdef use N").
+/// Per character, with the main bar's slots.
+///
+/// At most <see cref="Max"/>: the engine hosts at most 8 windows per plugin (SectionManifest.MaxWindows,
+/// later ones are dropped without a word) and RynthDefective already draws 4 (the bar, Game Panels,
+/// Selection, Corpses). 4 extra bars of up to 24 slots are 96 slots more than the game's 18 and the
+/// main bar's 24.
+/// </summary>
+internal sealed class ExtraBar
+{
+    public const int Max = 3, FirstNumber = 2, LastNumber = FirstNumber + Max - 1;
+    public const int SlotsMin = 1, SlotsMax = 24, DefaultSlots = 10;
+
+    /// <summary>Its number, <see cref="FirstNumber"/>-<see cref="LastNumber"/> (the main bar is 1): its window's title and id.</summary>
+    public int Number;
+    /// <summary>How many slots it shows (<see cref="SlotsMin"/>-<see cref="SlotsMax"/>).</summary>
+    public int SlotCount = DefaultSlots;
+    /// <summary>Always <see cref="SlotsMax"/> entries: fewer slots hides them, it doesn't forget them.</summary>
+    public List<DefSlot> Slots = NewSlots();
+
+    public ExtraBar(int number) => Number = number;
+
+    /// <summary>"Shortcuts 2": the window's title (the engine's key for its place, size and open state).</summary>
+    public static string TitleOf(int number) => "Shortcuts " + number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>"window:bar2": the surface its window draws (RynthPluginRenderEmbed).</summary>
+    public static string SurfaceOf(int number) => "window:bar" + number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    public static bool ValidNumber(int number) => number >= FirstNumber && number <= LastNumber;
+
+    public string Title => TitleOf(Number);
+
+    /// <summary>How many of its slots (all of them, shown or not) hold an item or a spell.</summary>
+    public int Filled
+    {
+        get
+        {
+            int n = 0;
+            foreach (DefSlot s in Slots) if (!s.Empty) n++;
+            return n;
+        }
+    }
+
+    public static List<DefSlot> NewSlots()
+    {
+        var l = new List<DefSlot>(SlotsMax);
+        for (int i = 0; i < SlotsMax; i++) l.Add(new DefSlot());
+        return l;
+    }
+
+    /// <summary>Pads or cuts the slot list to the fixed length; the count into its range.</summary>
+    public void Fix()
+    {
+        while (Slots.Count < SlotsMax) Slots.Add(new DefSlot());
+        if (Slots.Count > SlotsMax) Slots.RemoveRange(SlotsMax, Slots.Count - SlotsMax);
+        SlotCount = Math.Clamp(SlotCount, SlotsMin, SlotsMax);
+    }
+}
+
 /// <summary>One character's slots, favourites, recent weapons and settings.</summary>
 internal sealed class DefData
 {
@@ -142,6 +216,31 @@ internal sealed class DefData
     public List<ItemRef> Favourites = new();
     /// <summary>The weapons wielded from the picker or a slot, newest first.</summary>
     public List<ItemRef> Recent = new();
+    /// <summary>The extra Shortcuts bars (2026-11-04), by number; at most <see cref="ExtraBar.Max"/>, none by default.</summary>
+    public List<ExtraBar> ExtraBars = new();
+
+    /// <summary>Extra bar <paramref name="number"/>, or null.</summary>
+    public ExtraBar? Extra(int number) => ExtraBars.Find(b => b.Number == number);
+
+    /// <summary>
+    /// Adds an extra bar with the lowest free number (a removed bar's number is used again, so its window
+    /// comes back where it was). Returns it, or null at <see cref="ExtraBar.Max"/>.
+    /// </summary>
+    public ExtraBar? AddExtraBar()
+    {
+        for (int n = ExtraBar.FirstNumber; n <= ExtraBar.LastNumber; n++)
+        {
+            if (Extra(n) != null) continue;
+            var bar = new ExtraBar(n);
+            ExtraBars.Add(bar);
+            ExtraBars.Sort((a, b) => a.Number.CompareTo(b.Number));
+            return bar;
+        }
+        return null;
+    }
+
+    /// <summary>Removes extra bar <paramref name="number"/> and forgets its slots. False when there is none.</summary>
+    public bool RemoveExtraBar(int number) => ExtraBars.RemoveAll(b => b.Number == number) > 0;
 
     public static List<DefSlot> NewSlots()
     {
@@ -177,7 +276,7 @@ internal sealed class DefData
         if (Recent.Count > MaxRecent) Recent.RemoveRange(MaxRecent, Recent.Count - MaxRecent);
     }
 
-    /// <summary>The slot (1-based number) that holds an item of this identity, or 0.</summary>
+    /// <summary>The slot (1-based number) of the main bar's own slots that holds an item of this identity, or 0.</summary>
     public int SlotOf(ItemRef r)
     {
         for (int i = 0; i < Slots.Count; i++)

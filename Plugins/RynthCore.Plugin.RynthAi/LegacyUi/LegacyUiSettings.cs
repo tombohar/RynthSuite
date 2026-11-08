@@ -81,6 +81,9 @@ public sealed class LegacyUiSettings
     // Hunt Range 192 by default since 2026-10-25: the radar's default range, so the hunt covers the radar.
     public float OutdoorHuntRange = (float)OutdoorHunt.DefaultRangeYd;   // yd from the character: how far the next monster may be
     public float OutdoorHuntRadius = 0f;         // yd from where the hunt started that its picks stay within (0 = anywhere)
+    // What the next monster is chosen by (2026-11-08, OutdoorHunt.PickMode): 0 the nearest (the hunt as
+    // it was), 1 the biggest pack, 2 the pack worth the most experience (learned XP per kill).
+    public int OutdoorHuntPick = 0;
     // On: macro start, loading a Circular or Linear route, and nav taking over again after a
     // pause that moved the character (combat, looting, buffing, doors) all head for the closest
     // waypoint on the route. Off: a pause carries on to the waypoint it was heading for, a macro
@@ -121,6 +124,10 @@ public sealed class LegacyUiSettings
     // know and can learn (school trained or specialized, ACE's skill rule), then read them
     // at a safe moment; scrolls already in the pack too. Needs looting on for corpses.
     public bool ReadUnknownScrolls = true;
+    // Unbox Aetheria When Idle (a player's request, 2026-11-01; default off): with the macro on and
+    // nothing to do, an Aetheria Mana Stone is used on each Coalesced Aetheria in the pack, one at a
+    // time, to reveal its sigil (Loot/AetheriaUnboxer.cs). The stone isn't used up on ACE.
+    public bool UnboxAetheriaWhenIdle = false;
     public bool EnableCombineSalvage = true;
     public bool CombineBagsDuringSalvage = true;
     // Salvage (and combine bags) by sending the 0x027D salvage request straight to the server, no
@@ -162,6 +169,13 @@ public sealed class LegacyUiSettings
     /// can't be opened again without its key or quest item).
     /// </summary>
     public bool LootChestsMacroOffLeaveOpen = false;
+    /// <summary>
+    /// Item Tool > Chest re-lock wait (s) (2026-11-05): the chest looter's next key goes on the chest
+    /// this long after it was opened (sooner when the client reads it locked again). 125 s covers ACE's
+    /// default chest reset (120 s); a chest with a shorter timer can use less. 5..600
+    /// (ItemTool.ChestKeyLooter.ClampRelockWaitSec).
+    /// </summary>
+    public int ChestRelockWaitSec = ItemTool.ChestKeyLooter.DefaultRelockWaitSec;
     public int LootJumpHeight = 10; // kept for old profiles and metas; jump-loot uses the keyboard tap jump (fixed height)
 
     public int SalvageOpenDelayFirstMs = 400;
@@ -174,6 +188,13 @@ public sealed class LegacyUiSettings
     public bool UseDispelItems;
     public bool CastDispelSelf;
     public bool AutoFellowMgmt;
+    /// <summary>
+    /// Auto Fellowship Management > Open fellowship on create (2026-11-04, on by default, as VTank's
+    /// auto fellow management does): a fellowship RynthAi creates (/mt fellow create, a meta's
+    /// /fellowship create) is opened once it exists. Acts only with AutoFellowMgmt on; a fellowship
+    /// made or closed by hand is never touched.
+    /// </summary>
+    public bool OpenFellowOnCreate = true;
     public bool MChargesWhenOff;
 
     public int HealAt = 60;
@@ -239,10 +260,11 @@ public sealed class LegacyUiSettings
     // Range (CombatManager.TargetScheme): 0 lowest health (unknown counts as full), 1 closest,
     // 2 farthest, 3 least turning. Ties go to the closest.
     public int TargetSelection;
-    // Target Lock: keep the picked target until it dies or goes, leaves Monster Range, is
-    // blacklisted or skipped by a watchdog, or a higher-priority monster is in range. Off: switch
-    // when another is clearly better by Targeting. On by default; a profile saved before this
-    // setting loads it as on.
+    // Target Lock: keep the picked target until it dies or goes, leaves Monster Range, or is
+    // blacklisted or skipped by a watchdog; a higher-priority monster in range doesn't take it
+    // (2026-11-07). Off: a higher priority in range takes over at once, and it switches when
+    // another is clearly better by Targeting. On by default; a profile saved before this setting
+    // loads it as on.
     public bool TargetLock = true;
     // Fight the monster I select (2026-11-01): a monster the PLAYER selects in game (a click, the
     // radar, another plugin's Selection window) becomes the fight target ahead of the Targeting
@@ -351,6 +373,10 @@ public sealed class LegacyUiSettings
     public int LootMode;
     /// <summary>Also pick up loose ground items that match the loot profile, within the corpse max range.</summary>
     public bool EnableGroundLoot;
+    /// <summary>Loot by name: names separated by |. An object in the world with one of these names inside
+    /// <see cref="LootByNameRadius"/> is used (a container opens, an item is picked up) while botting.</summary>
+    public string LootByNames = string.Empty;
+    public float LootByNameRadius = 30f;
     public bool PeaceModeWhenIdle = true;
     /// <summary>After a heal, restam or remana spell with no monster to fight, put the last fight's
     /// weapons (main hand and off hand) back on instead of waiting for the next target.</summary>
@@ -458,6 +484,13 @@ public sealed class LegacyUiSettings
     public bool BuffShield = true;
     public bool StartMacroOnLogin;
     public bool PatrolOnLogin;
+    /// <summary>
+    /// Resume Meta After Reload (2026-11-07, Tom: "remembers which meta state you're in and restarts in
+    /// that state so Drakkon doesn't recall back every time"). A hot reload carries the meta's whole
+    /// runtime over (Meta/MetaResume.cs): state, variables, fired rules, call stack, watchdog, route.
+    /// A real login still starts in Default.
+    /// </summary>
+    public bool ResumeMetaOnReload = true;
     /// <summary>
     /// Decal bridge only: when VTank's macro starts, RynthAi's macro stops, and it won't start
     /// while VTank runs (one bot per client). On by default; a profile saved before this
@@ -1035,7 +1068,26 @@ public sealed class ItemRule
     /// <summary>Display only (filled by WeaponList.ForDisplay for the Items panel, never read back):
     /// Melee, Missile, "War Magic", "Void Magic", Shield, Ammo, or "" when the item isn't known.</summary>
     public string Kind { get; set; } = "";
+    /// <summary>
+    /// False = "No buff", read for a listed SHIELD only: none of the armor spells are aimed at it
+    /// (BuffManager.Shield.cs), and its timers never make buffing due. On a weapon or wand it does
+    /// nothing. True for a new entry and for every profile saved before it was read (the field was
+    /// only ever written true). Set from the engine's Items face through <see cref="NoBuff"/>.
+    /// </summary>
     public bool KeepBuffed { get; set; } = true;
+
+    /// <summary>
+    /// Items bridge wire field only (ItemsBridgePayload.Weapons), never saved in a profile: true =
+    /// "No buff" (<see cref="KeepBuffed"/> off). WeaponList.ForDisplay fills it for every entry;
+    /// WeaponList.MergeEdited applies it back for a shield entry only, and an absent field (an
+    /// engine that predates it) leaves KeepBuffed as saved.
+    /// </summary>
+    [JsonPropertyName("noBuff")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? NoBuff { get; set; }
+
+    /// <summary>True when buffing leaves this item alone (<see cref="KeepBuffed"/> off; shields only).</summary>
+    public bool ExcludedFromBuffing() => !KeepBuffed;
 
     /// <summary>True when this row is a shield (off hand), not a main-hand weapon.</summary>
     public bool IsShield() => string.Equals(Action, ShieldAction, StringComparison.OrdinalIgnoreCase);
@@ -1085,6 +1137,8 @@ public sealed class ConsumableRule
 /// <summary>Bridge payload for the engine-side Avalonia ItemsPanel.</summary>
 public sealed class ItemsBridgePayload
 {
+    /// <summary>Copies for the face (WeaponList.ForDisplay). Each carries "noBuff" (ItemRule.NoBuff,
+    /// true = not buffed); on write-back it is applied for shield entries only.</summary>
     public List<ItemRule>       Weapons           { get; set; } = new();
     public List<ConsumableRule> Consumables       { get; set; } = new();
     public bool                 EnableManaTapping { get; set; } = true;   // absent from an old profile = the new default
@@ -1184,6 +1238,8 @@ public sealed class SettingsBridgePayload
     public bool? RearmAfterVitals { get; set; }
     public bool StartMacroOnLogin { get; set; }
     public bool PatrolOnLogin { get; set; }
+    // Resume Meta After Reload. Nullable: an engine without the row doesn't send it (unchanged).
+    public bool? ResumeMetaOnReload { get; set; }
     // Dungeon patrol. Nullable: an engine that predates them doesn't send them, and its save
     // must leave them alone.
     public int? DunPatrolCoverage { get; set; }
@@ -1195,6 +1251,10 @@ public sealed class SettingsBridgePayload
     // Outdoor hunt. Nullable: an engine that predates them doesn't send them.
     public float? OutdoorHuntRange { get; set; }
     public float? OutdoorHuntRadius { get; set; }
+    public int? OutdoorHuntPick { get; set; }   // 0 Nearest, 1 Biggest pack, 2 Most XP (2026-11-08)
+    // Loot by name. Nullable: an engine that predates them doesn't send them.
+    public string? LootByNames { get; set; }
+    public float? LootByNameRadius { get; set; }
     // Absent from an older engine's payload: must not read as off.
     public bool YieldToVTank { get; set; } = true;
     public bool EnableRaycasting { get; set; } = true;   // on unless the player turns it off (2026-11-05)
@@ -1284,6 +1344,7 @@ public sealed class SettingsBridgePayload
     // without them sends none, and the saved values stay.
     public bool? UseDispelItems { get; set; }
     public bool? AutoFellowMgmt { get; set; }
+    public bool? OpenFellowOnCreate { get; set; }   // 2026-11-04: null from an older engine leaves it alone
     public bool? MChargesWhenOff { get; set; }
     public int? CustomPetRange { get; set; }
     public int MinRingTargets { get; set; }
@@ -1392,6 +1453,7 @@ public sealed class SettingsBridgePayload
     public bool LootJumpEnabled { get; set; }
     public bool LootChestsMacroOff { get; set; } = true;   // an engine that doesn't know it leaves it on
     public bool LootChestsMacroOffLeaveOpen { get; set; }   // off: an engine that doesn't know it closes, as before
+    public int? ChestRelockWaitSec { get; set; }           // Item Tool's re-lock wait; absent (the engine has no row for it) = unchanged
     public int LootJumpHeight { get; set; }
     public int LootOwnership { get; set; }
     // Nullable, as CastBuffsOverItemBuffs: an engine that predates them doesn't send them,
@@ -1404,6 +1466,7 @@ public sealed class SettingsBridgePayload
     public bool? ItemInfoOnSelect { get; set; }
     public bool EnableAutostack { get; set; }
     public bool ReadUnknownScrolls { get; set; } = true;   // absent from an older engine: keep the default
+    public bool? UnboxAetheriaWhenIdle { get; set; }        // absent from an older engine: unchanged
     public bool EnableCombineSalvage { get; set; }
     public bool CombineBagsDuringSalvage { get; set; }
     public bool? SalvageWithoutPanel { get; set; }   // absent from an older engine: unchanged

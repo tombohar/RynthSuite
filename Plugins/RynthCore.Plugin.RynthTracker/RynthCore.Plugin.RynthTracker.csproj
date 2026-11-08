@@ -29,6 +29,11 @@
     <Compile Include="..\Shared\TrackerSessionStore.cs" Link="Shared\TrackerSessionStore.cs" />
     <Compile Include="..\Shared\SessionStats.cs" Link="Shared\SessionStats.cs" />
     <Compile Include="..\Shared\SessionStatsTracker.cs" Link="Shared\SessionStatsTracker.cs" />
+    <!-- The active server's bank luminance for Lum/hr, from its owner's "RynthServer.Profile" (2026-11-02):
+         behind HasGetServerStateJson / HasGetPluginInterface, so still nothing above v66. -->
+    <Compile Include="..\Shared\EngineServerState.cs" Link="Shared\EngineServerState.cs" />
+    <Compile Include="..\Shared\ServerStateClient.cs" Link="Shared\ServerStateClient.cs" />
+    <Compile Include="..\Shared\RynthServerProfileApi.cs" Link="Shared\RynthServerProfileApi.cs" />
     <!-- One session (2026-10-13): RynthAi's session through "RynthAi.Hub" when RynthAi is loaded. -->
     <Compile Include="..\Shared\RynthAiHubApi.cs" Link="Shared\RynthAiHubApi.cs" />
     <Compile Include="..\Shared\RynthAiSessionClient.cs" Link="Shared\RynthAiSessionClient.cs" />

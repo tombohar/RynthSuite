@@ -25,9 +25,52 @@ internal static class MeleeStallTests
         r.Add("ghost: skipped until the server updates or creates it, it moves, or the landblock changes", GhostTrackerClears);
         r.Add("ghost: combat skips a marked ghost, counts it in the lock line, and takes it back when the server updates it", GhostSkippedByCombat);
         r.Add("melee interval: the first swing at a new target doesn't wait out the old 1000 ms", PhysicalNewTargetInterval);
+        r.Add("melee reach: no closer after the re-issue = out of reach, left longer each time", ReachVerdict);
+        r.Add("melee reach: walking closer, next to it, or another target is not out of reach", ReachWorking);
+        r.Add("melee reach: after 5 in a row with no swing the ladder gets its turn (a wedged client); a swing starts over", ReachGivesWayToLadder);
     }
 
     private static readonly DateTime T0 = new(2026, 10, 12, 20, 47, 35);
+
+    private static void ReachVerdict()
+    {
+        var w = new MeleeReachWatch();
+        w.NoteReissue(1, 4.5);
+        Check.True(w.CantReach(1, 4.6, DateTime.MinValue), "3 s later still 4.6 m off (the 2026-11-06 Olthoi behind a wall)");
+        Check.Eq(w.NoteFailure(1, T0), 60, "first time: 60 s");
+        w.NoteReissue(1, 4.5);
+        Check.True(w.CantReach(1, 4.5, DateTime.MinValue), "again");
+        Check.Eq(w.NoteFailure(1, T0), 120, "second time: longer");
+        Check.Eq(w.NoteFailure(1, T0), 240, "third");
+        Check.Eq(w.NoteFailure(1, T0), 300, "capped at 5 minutes");
+        w.Forget(1);
+        Check.Eq(w.NoteFailure(1, T0), 60, "forgotten: from the start");
+    }
+
+    private static void ReachWorking()
+    {
+        var w = new MeleeReachWatch();
+        Check.False(w.CantReach(1, 4.5, DateTime.MinValue), "no re-issue yet: nothing measured");
+        w.NoteReissue(1, 9.0);
+        Check.False(w.CantReach(1, 5.0, DateTime.MinValue), "closed 4 m: the walk is working");
+        Check.False(w.CantReach(2, 9.0, DateTime.MinValue), "another target than the one measured");
+        w.NoteReissue(1, 1.8);
+        Check.False(w.CantReach(1, 1.8, DateTime.MinValue), "next to it: a stall here isn't about walking, the ladder keeps it");
+    }
+
+    private static void ReachGivesWayToLadder()
+    {
+        var w = new MeleeReachWatch();
+        for (int id = 1; id <= MeleeReachWatch.MaxStreak; id++)
+        {
+            w.NoteReissue(id, 4.5);
+            Check.True(w.CantReach(id, 4.5, DateTime.MinValue), $"target {id} of the streak");
+            w.NoteFailure(id, T0);
+        }
+        w.NoteReissue(9, 4.5);
+        Check.False(w.CantReach(9, 4.5, DateTime.MinValue), "5 in a row and nothing swung: maybe the client, the ladder goes on");
+        Check.True(w.CantReach(9, 4.5, T0.AddSeconds(1)), "a swing since: that streak is over");
+    }
 
     private static void EarlyStepWhenQuiet()
     {

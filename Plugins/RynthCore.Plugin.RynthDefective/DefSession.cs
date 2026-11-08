@@ -67,18 +67,39 @@ internal sealed class DefSession
 
     // ── Using ───────────────────────────────────────────────────────────────
 
-    /// <summary>The slot's button or key: use what it holds. Returns what to tell the player when nothing could be queued.</summary>
-    public string? UseSlot(int slotNumber)
+    // A slot is on bar 0 (the main bar's own slots: DefData.Slots, /rdef use N) or on extra bar 2-4
+    // (2026-11-04, ExtraBar: slots of its own, no keys). The slot actions below take the bar last.
+
+    /// <summary>"Slot 3", or "Bar 2 slot 3" for an extra bar's.</summary>
+    public static string SlotName(int bar, int slotNumber) => bar == 0 ? $"Slot {slotNumber}" : $"Bar {bar} slot {slotNumber}";
+
+    /// <summary>The slot list slot <paramref name="slotNumber"/> of <paramref name="bar"/> is in; what is wrong when there is none.</summary>
+    private string? Locate(int bar, int slotNumber, out List<DefSlot> slots)
     {
-        if (slotNumber < 1 || slotNumber > DefSettings.SlotsMax) return $"There is no slot {slotNumber}.";
-        DefSlot slot = Data.Slots[slotNumber - 1];
+        slots = Data.Slots;
+        if (bar == 0) return slotNumber < 1 || slotNumber > DefSettings.SlotsMax ? $"There is no slot {slotNumber}." : null;
+        ExtraBar? b = Data.Extra(bar);
+        if (b == null) return $"There is no Shortcuts bar {bar}.";
+        slots = b.Slots;
+        return slotNumber < 1 || slotNumber > ExtraBar.SlotsMax ? $"Bar {bar} has no slot {slotNumber}." : null;
+    }
+
+    /// <summary>The slot's button or key: use what it holds. Returns what to tell the player when nothing could be queued.</summary>
+    public string? UseSlot(int slotNumber, int bar = 0)
+    {
+        if (Locate(bar, slotNumber, out List<DefSlot> slots) is { } problem) return problem;
+        DefSlot slot = slots[slotNumber - 1];
+        string source = (bar == 0 ? "slot " : $"bar {bar} slot ") + slotNumber;
         if (slot.IsSpell)
         {
-            Use.Request(UseRequest.Cast(slot.SpellId, slot.SpellLabel, "slot " + slotNumber, Now()));
+            Use.Request(UseRequest.Cast(slot.SpellId, slot.SpellLabel, source, Now()));
             return null;
         }
-        if (slot.Item == null) return $"Slot {slotNumber} is empty. Set it from the bar (Edit slots) or with /rdef set {slotNumber}.";
-        Use.Request(new UseRequest(slot.Item, null, slot.Mode, "slot " + slotNumber, Now()));
+        if (slot.Item == null)
+            return bar == 0
+                ? $"Slot {slotNumber} is empty. Set it from the bar (Edit slots) or with /rdef set {slotNumber}."
+                : $"{SlotName(bar, slotNumber)} is empty: drag an item onto it, or right-click it to put the selected item or one of your spells there.";
+        Use.Request(new UseRequest(slot.Item, null, slot.Mode, source, Now()));
         return null;
     }
 
@@ -107,21 +128,21 @@ internal sealed class DefSession
 
     // ── Slots ───────────────────────────────────────────────────────────────
 
-    public string SetFromSelected(int slotNumber)
+    public string SetFromSelected(int slotNumber, int bar = 0)
     {
         uint sel = SelectedId();
         if (sel == 0) return "Select the item in the game first (click it in your pack), then set the slot.";
         CarriedItem? it = FindById(sel);
         if (it == null) return "The selected object isn't in your pack, so it can't go in a slot.";
-        return SetSlot(slotNumber, it);
+        return SetSlot(slotNumber, it, bar);
     }
 
     /// <summary>An item dragged onto the slot (its object id).</summary>
-    public string SetFromId(int slotNumber, uint objectId)
+    public string SetFromId(int slotNumber, uint objectId, int bar = 0)
     {
         CarriedItem? it = FindById(objectId);
         if (it == null) return "That isn't in your pack, so it can't go in a slot.";
-        return SetSlot(slotNumber, it);
+        return SetSlot(slotNumber, it, bar);
     }
 
     public string SetFromName(int slotNumber, string name)
@@ -131,17 +152,17 @@ internal sealed class DefSession
         return SetSlot(slotNumber, it);
     }
 
-    public string SetSlot(int slotNumber, CarriedItem it)
+    public string SetSlot(int slotNumber, CarriedItem it, int bar = 0)
     {
-        if (slotNumber < 1 || slotNumber > DefSettings.SlotsMax) return $"There is no slot {slotNumber}.";
-        DefSlot slot = Data.Slots[slotNumber - 1];
+        if (Locate(bar, slotNumber, out List<DefSlot> slots) is { } problem) return problem;
+        DefSlot slot = slots[slotNumber - 1];
         slot.Item = ItemRef.From(it);
         slot.SpellId = 0;
         slot.SpellName = string.Empty;
         slot.Mode = UseMode.Auto;
         Save();
         ItemKind kind = ItemKinds.Classify(it);
-        return $"Slot {slotNumber}: {it.FullName} ({UseModes.Describe(ItemKinds.DefaultAction(kind))} when pressed).";
+        return $"{SlotName(bar, slotNumber)}: {it.FullName} ({UseModes.Describe(ItemKinds.DefaultAction(kind))} when pressed).";
     }
 
     /// <summary>
@@ -149,9 +170,9 @@ internal sealed class DefSession
     /// known spells; the engine can't tell which spell is selected in the game's spellbook). Refused for
     /// a spell the character doesn't know, when the spellbook can be read.
     /// </summary>
-    public string SetSpell(int slotNumber, uint spellId)
+    public string SetSpell(int slotNumber, uint spellId, int bar = 0)
     {
-        if (slotNumber < 1 || slotNumber > DefSettings.SlotsMax) return $"There is no slot {slotNumber}.";
+        if (Locate(bar, slotNumber, out List<DefSlot> slots) is { } problem) return problem;
         if (spellId == 0) return "That isn't a spell.";
         IReadOnlyList<SpellInfo> known = KnownSpells();
         SpellInfo? spell = null;
@@ -159,9 +180,9 @@ internal sealed class DefSession
             if (s.Id == spellId) { spell = s; break; }
         if (spell == null && known.Count > 0) return $"You don't know {SpellTable.Name(spellId)}, so it can't go in a slot.";
         SpellInfo info = spell ?? (SpellTable.TryGet(spellId, out SpellInfo t) ? t : new SpellInfo(spellId, SpellTable.Name(spellId), false, false));
-        Data.Slots[slotNumber - 1] = new DefSlot { SpellId = spellId, SpellName = info.Name };
+        slots[slotNumber - 1] = new DefSlot { SpellId = spellId, SpellName = info.Name };
         Save();
-        return $"Slot {slotNumber}: {info.Name} ({SpellTargeting.Describe(info)} when pressed).";
+        return $"{SlotName(bar, slotNumber)}: {info.Name} ({SpellTargeting.Describe(info)} when pressed).";
     }
 
     /// <summary>/rdef spell &lt;slot&gt; &lt;name&gt;: one of the character's spells by what the player typed.</summary>
@@ -178,12 +199,12 @@ internal sealed class DefSession
         return SetSpell(slotNumber, found[0].Id);
     }
 
-    public string ClearSlot(int slotNumber)
+    public string ClearSlot(int slotNumber, int bar = 0)
     {
-        if (slotNumber < 1 || slotNumber > DefSettings.SlotsMax) return $"There is no slot {slotNumber}.";
-        Data.Slots[slotNumber - 1] = new DefSlot();
+        if (Locate(bar, slotNumber, out List<DefSlot> slots) is { } problem) return problem;
+        slots[slotNumber - 1] = new DefSlot();
         Save();
-        return $"Slot {slotNumber} cleared.";
+        return $"{SlotName(bar, slotNumber)} cleared.";
     }
 
     /// <summary>Swaps slot <paramref name="a"/> with <paramref name="b"/> (1-based), as moving one place.</summary>
@@ -226,6 +247,9 @@ internal sealed class DefSession
         bool changed = false;
         foreach (DefSlot s in Data.Slots)
             if (s.Item != null && ItemMatcher.Maintain(s.Item, items)) changed = true;
+        foreach (ExtraBar bar in Data.ExtraBars)
+            foreach (DefSlot s in bar.Slots)
+                if (s.Item != null && ItemMatcher.Maintain(s.Item, items)) changed = true;
         foreach (ItemRef f in Data.Favourites)
             if (ItemMatcher.Maintain(f, items)) changed = true;
         foreach (ItemRef r in Data.Recent)
@@ -362,6 +386,55 @@ internal sealed class DefSession
         if (it != null) return ItemRef.From(it);
         string? name = ObjectName(id);
         return string.IsNullOrWhiteSpace(name) ? null : new ItemRef { Id = id, Name = name.Trim() };
+    }
+
+    // ── Extra bars (2026-11-04) ─────────────────────────────────────────────
+
+    /// <summary>Adds an extra Shortcuts bar (the lowest free number). <paramref name="added"/>: its number, 0 when none could be.</summary>
+    public string AddBar(out int added)
+    {
+        ExtraBar? bar = Data.AddExtraBar();
+        added = bar?.Number ?? 0;
+        if (bar == null)
+            return $"There are {ExtraBar.Max} extra Shortcuts bars already, as many as there can be (the engine hosts 8 windows for a plugin, "
+                   + $"and RynthDefective draws 5 others). Remove one first: /rdef bars remove <{ExtraBar.FirstNumber}-{ExtraBar.LastNumber}>.";
+        Save();
+        return $"Shortcuts bar {bar.Number} added, {bar.SlotCount} slots: drag items from your pack onto it, or right-click a slot for "
+               + "the selected item or one of your spells. It shows in a moment; drag its title to move it.";
+    }
+
+    /// <summary>Removes extra bar <paramref name="number"/>; its slots are forgotten.</summary>
+    public string RemoveBar(int number)
+    {
+        if (number == 1) return "Bar 1 is the Shortcuts bar itself: it can't be removed (/rdef hides it).";
+        ExtraBar? bar = Data.Extra(number);
+        if (bar == null) return $"There is no Shortcuts bar {number}. {DescribeBars()}";
+        int filled = bar.Filled;
+        Data.RemoveExtraBar(number);
+        Save();
+        return $"Shortcuts bar {number} removed" + (filled > 0 ? $" ({filled} of its slots held an item or a spell: they are forgotten)." : ".");
+    }
+
+    /// <summary>How many slots extra bar <paramref name="number"/> shows.</summary>
+    public string SetBarSlots(int number, int count)
+    {
+        ExtraBar? bar = Data.Extra(number);
+        if (bar == null) return $"There is no Shortcuts bar {number}. {DescribeBars()}";
+        bar.SlotCount = Math.Clamp(count, ExtraBar.SlotsMin, ExtraBar.SlotsMax);
+        Save();
+        return $"Shortcuts bar {number} shows {bar.SlotCount} slot{(bar.SlotCount == 1 ? "" : "s")}"
+               + (count != bar.SlotCount ? $" ({ExtraBar.SlotsMin} to {ExtraBar.SlotsMax})." : ".");
+    }
+
+    /// <summary>The extra bars in a line (/rdef bars).</summary>
+    public string DescribeBars()
+    {
+        if (Data.ExtraBars.Count == 0)
+            return "No extra Shortcuts bars. Add one: Add a shortcut bar in the bar's right-click menu, or /rdef bars add.";
+        var parts = new List<string>(Data.ExtraBars.Count);
+        foreach (ExtraBar b in Data.ExtraBars)
+            parts.Add($"{b.Number} ({b.SlotCount} slots, {b.Filled} set)");
+        return $"Extra Shortcuts bars: {string.Join(", ", parts)}; {ExtraBar.Max - Data.ExtraBars.Count} more can be added.";
     }
 
     // ── Favourites ──────────────────────────────────────────────────────────

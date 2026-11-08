@@ -375,31 +375,55 @@ internal static class StuckCastTests
 
     private static void ProbeWhenNothingOpen()
     {
+        // A start that is no heal: a waiting heal's probe is capped at ActionPacer.HealGraceMs (below).
+        bool Start(RynthCoreHost h) => MayAs(h, "Buff", HealNeed.None);
         var host = Setup();
         try
         {
-            Check.True(May(host), "free");
+            Check.True(Start(host), "free");
             Cast(host, "Heart Rend");
             _t += 100;
             FakeHost.UseDone(ActionPacer.TooBusyErr);   // refused: the server is busy with something of no UseDone (a pickup)
-            Check.False(May(host), "held right after the 0x1D");
+            Check.False(Start(host), "held right after the 0x1D");
             _t += ActionPacer.BusyProbeMs - 1;
-            Check.False(May(host), "held until BusyProbeMs");
+            Check.False(Start(host), "held until BusyProbeMs");
             _t += 1;
-            Check.True(May(host), "one probe at BusyProbeMs");
-            Check.False(May(host), "only one");
+            Check.True(Start(host), "one probe at BusyProbeMs");
+            Check.False(Start(host), "only one");
             Cast(host, "Heart Rend");
             _t += 100;
             FakeHost.UseDone(ActionPacer.TooBusyErr);   // refused again
             _t += ActionPacer.BusyProbeMs * 2 - 101;
-            Check.False(May(host), "the next probe waits twice as long");
+            Check.False(Start(host), "the next probe waits twice as long");
             _t += 1;
-            Check.True(May(host), "second probe at 2 x BusyProbeMs");
+            Check.True(Start(host), "second probe at 2 x BusyProbeMs");
             Check.Eq(FakeHost.TapJumps + FakeHost.CombatModeRequests.Count, 0, "no breaker: no cast of ours was left open");
             Cast(host, "Heart Rend");
             _t += 900;
             FakeHost.UseDone(0);
-            Check.True(May(host), "a UseDone(0) clears it");
+            Check.True(Start(host), "a UseDone(0) clears it");
+        }
+        finally { Done(); }
+
+        // The heal grace: a plain heal's probe comes at least every HealGraceMs, where the doubling would make it 3 s.
+        var heal = Setup();
+        try
+        {
+            Check.True(May(heal), "free");
+            Cast(heal, "Heart Rend");
+            _t += 100;
+            FakeHost.UseDone(ActionPacer.TooBusyErr);
+            Check.False(May(heal), "held right after the 0x1D");
+            _t += ActionPacer.BusyProbeMs;
+            Check.True(May(heal), "the heal's first probe at BusyProbeMs");
+            Cast(heal, "Heart Rend");
+            _t += 100;
+            FakeHost.UseDone(ActionPacer.TooBusyErr);   // refused again
+            Check.False(May(heal), "held right after the second 0x1D");
+            _t += ActionPacer.HealGraceMs - 101;
+            Check.False(May(heal), "1 ms under the heal grace: held");
+            _t += 1;
+            Check.True(May(heal), "the heal's second probe at HealGraceMs, not 2 x BusyProbeMs");
         }
         finally { Done(); }
     }

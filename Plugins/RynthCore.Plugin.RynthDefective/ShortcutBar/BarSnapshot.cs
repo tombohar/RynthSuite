@@ -13,6 +13,8 @@
 //  N is own slot N (BarMapping), and AC's toolbar isn't read at all.
 //  An own slot can hold a spell (2026-10-28): its picture is the spell's, and
 //  the snapshot carries the character's spells for the slot menu's search.
+//  An extra bar (2026-11-04, ExtraBar: "Shortcuts 2" ...) is built the same
+//  way from its own slots (BuildExtra): no AC slots, no keys.
 // ============================================================================
 
 using System;
@@ -57,6 +59,17 @@ internal sealed record BarSnapshot(BarSlot[] Slots, bool Ready, int IconSize, bo
     public static readonly BarSnapshot NotReady = new(Array.Empty<BarSlot>(), false, 36);
 
     public IReadOnlyList<SpellInfo> KnownSpells => Spells ?? Array.Empty<SpellInfo>();
+
+    /// <summary>The extra bar this is (2-4; 0 = the Shortcuts bar itself): no AC slots, no keys.</summary>
+    public int Bar { get; init; }
+    /// <summary>The fewest and most slots the edit buttons allow.</summary>
+    public int MinSlots { get; init; } = DefSettings.BarSlotsMin;
+    public int MaxSlots { get; init; } = DefSettings.BarSlotsMax;
+    /// <summary>The extra bars there are (number, slots holding something), for the bars' menus.</summary>
+    public IReadOnlyList<(int Number, int Filled)> Extras { get; init; } = Array.Empty<(int, int)>();
+
+    /// <summary>Another extra bar can be added (fewer than <see cref="ExtraBar.Max"/>).</summary>
+    public bool CanAddBar => Extras.Count < ExtraBar.Max;
 }
 
 /// <summary>Builds the snapshot on the plugin tick (reads the host and the carried items).</summary>
@@ -94,12 +107,13 @@ internal sealed class BarSnapshotBuilder
         DefSettings st = session.Settings;
         IReadOnlyList<SpellInfo> spells = session.KnownSpells();
         bool canCast = _host.HasCastSpell;
+        var extras = Extras(session);
         if (st.IndependentBar)
         {
             // Every slot is RynthDefective's own: AC's toolbar isn't read or shown (BarMapping).
             var own = new BarSlot[st.BarSlots];
             for (int n = 1; n <= st.BarSlots; n++) own[n - 1] = Own(n, BarMapping.OwnSlot(n, true), true, session, items, spells, _host);
-            return new BarSnapshot(own, true, st.ButtonSize, true, spells, canCast, st.WeaponsButtonOnBar);
+            return new BarSnapshot(own, true, st.ButtonSize, true, spells, canCast, st.WeaponsButtonOnBar) { Extras = extras };
         }
         if (_host.GetShortcuts(_ids, _spells) == 0) return BarSnapshot.NotReady;
         RefreshKeys(now);
@@ -109,7 +123,52 @@ internal sealed class BarSnapshotBuilder
         var slots = new BarSlot[st.BarSlots];
         for (int n = 1; n <= st.BarSlots; n++)
             slots[n - 1] = BarMapping.IsRetail(n, false) ? Retail(n, byId) : Own(n, BarMapping.OwnSlot(n, false), false, session, items, spells, _host);
-        return new BarSnapshot(slots, true, st.ButtonSize, false, spells, canCast, st.WeaponsButtonOnBar);
+        return new BarSnapshot(slots, true, st.ButtonSize, false, spells, canCast, st.WeaponsButtonOnBar) { Extras = extras };
+    }
+
+    /// <summary>The extra bars there are, for the menus.</summary>
+    private static (int, int)[] Extras(DefSession session)
+    {
+        var list = session.Data.ExtraBars;
+        var a = new (int, int)[list.Count];
+        for (int i = 0; i < list.Count; i++) a[i] = (list[i].Number, list[i].Filled);
+        return a;
+    }
+
+    /// <summary>
+    /// Extra bar <paramref name="number"/> (2026-11-04): its own slots, the first SlotCount of them,
+    /// shown as the main bar's own ones are (picture, count, spell), with no keys. Pure apart from the
+    /// spell table: the tests build it offline.
+    /// </summary>
+    public static BarSnapshot BuildExtra(DefSession session, int number, IReadOnlyList<CarriedItem> items, bool canCast)
+    {
+        ExtraBar? bar = session.Data.Extra(number);
+        if (bar == null) return BarSnapshot.NotReady;
+        IReadOnlyList<SpellInfo> spells = session.KnownSpells();
+        var slots = new BarSlot[bar.SlotCount];
+        for (int n = 1; n <= bar.SlotCount; n++) slots[n - 1] = ExtraSlot(n, number, bar.Slots[n - 1], items, spells);
+        DefSettings st = session.Settings;
+        return new BarSnapshot(slots, true, st.ButtonSize, true, spells, canCast, st.WeaponsButtonOnBar)
+        {
+            Bar = number,
+            MinSlots = ExtraBar.SlotsMin,
+            MaxSlots = ExtraBar.SlotsMax,
+            Extras = Extras(session),
+        };
+    }
+
+    private static BarSlot ExtraSlot(int n, int bar, DefSlot slot, IReadOnlyList<CarriedItem> items, IReadOnlyList<SpellInfo> spells)
+    {
+        string whose = $"Shortcuts bar {bar}: clicks only, no keys";
+        if (slot.IsSpell) return OwnSpell(n, n, slot, whose, string.Empty, string.Empty, spells, keys: false);
+        if (slot.Item == null)
+            return new BarSlot(n, false, n, 0, 0, string.Empty, string.Empty, CountTone.Plain, string.Empty, string.Empty,
+                $"Slot {n} ({whose}): empty.\nDrag an item from your pack onto it, or right-click: put the selected item or one of your spells here.");
+        SlotStatus s = ItemMatcher.Status(slot.Item, items);
+        string count = SlotText.Count(s, out uint color);
+        CountTone tone = color == SlotText.InHand ? CountTone.InHand : color == SlotText.Missing ? CountTone.Missing : CountTone.Plain;
+        string tip = SlotText.Tooltip(n, slot.Item, s, slot.Mode, null, keys: false) + $"\n({whose}.)";
+        return new BarSlot(n, false, n, s.Item?.Id ?? 0, 0, s.Item?.FullName ?? slot.Item.FullName, count, tone, string.Empty, string.Empty, tip);
     }
 
     private BarSlot Retail(int n, Dictionary<uint, CarriedItem> byId)
@@ -167,16 +226,17 @@ internal sealed class BarSnapshotBuilder
     /// A spell slot: the spell's picture and name. A spell the character doesn't know (another
     /// character's file, a spell lost) shows dimmed with "?" (when the spellbook can be read at all).
     /// </summary>
-    private static BarSlot OwnSpell(int n, int own, DefSlot slot, string whose, string key, string all, IReadOnlyList<SpellInfo> spells)
+    private static BarSlot OwnSpell(int n, int own, DefSlot slot, string whose, string key, string all, IReadOnlyList<SpellInfo> spells, bool keys = true)
     {
         string name = slot.SpellLabel;
         SpellInfo? info = SpellTable.TryGet(slot.SpellId, out SpellInfo si) ? si : null;
         bool known = spells.Count == 0;
         foreach (SpellInfo s in spells)
             if (s.Id == slot.SpellId) { known = true; break; }
-        string tip = $"Slot {n}: {name}, a spell.\nClick or press the key: {SpellTargeting.Describe(info)} (Magic mode first)."
+        string tip = $"Slot {n}: {name}, a spell.\n{(keys ? "Click or press the key" : "Click")}: {SpellTargeting.Describe(info)} (Magic mode first)."
                      + (known ? "" : "\nYou don't know this spell: pressing it does nothing.")
-                     + (key.Length > 0 ? "\nKey: " + key : "\nNo key yet.") + $"\n({whose}.)\nRight-click: change the slot or its keys.";
+                     + (!keys ? "" : key.Length > 0 ? "\nKey: " + key : "\nNo key yet.")
+                     + $"\n({whose}.)\nRight-click: change the slot{(keys ? " or its keys" : "")}.";
         return new BarSlot(n, false, own, 0, slot.SpellId, name, known ? string.Empty : "?", known ? CountTone.Plain : CountTone.Missing,
             SlotText.ShortKey(key), all, tip);
     }

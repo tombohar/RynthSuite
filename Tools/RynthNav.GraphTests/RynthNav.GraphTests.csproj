@@ -36,6 +36,16 @@
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\NavCoords.cs" Link="Linked\NavCoords.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\TownNet.cs" Link="Linked\TownNet.cs" />
     <Compile Include="..\RynthNav.PortalGraph\PortalRoute.cs" Link="Linked\PortalRoute.cs" />
+    <!-- The route maker on the navmesh (RouteMakerTests): loops, legs, paths, and what they're written as. -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\LoopMaker.cs" Link="Linked\LoopMaker.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\AreaFilter.cs" Link="Linked\AreaFilter.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\RouteShape.cs" Link="Linked\RouteShape.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\BuildingOutlines.cs" Link="Linked\BuildingOutlines.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\RouteRequest.cs" Link="Linked\RouteRequest.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\RouteInfo.cs" Link="Linked\RouteInfo.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\RouteJobs.cs" Link="Linked\RouteJobs.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\NavRouteExport.cs" Link="Linked\NavRouteExport.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\LegacyUi\NavRouteParser.cs" Link="Linked\NavRouteParser.cs" />
     <!-- "RynthNav.Path" v2 (FindPathEx, Raycast) and the walker's planning steps it shares; the contract it answers. -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\NavPathQuery.cs" Link="Linked\NavPathQuery.cs" />
     <Compile Include="..\..\Plugins\Shared\RynthNavPathApi.cs" Link="Linked\RynthNavPathApi.cs" />

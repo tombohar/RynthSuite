@@ -41,9 +41,18 @@ internal static class ShieldBuffTests
         r.Add("shield buffs: a shield being moved is not cast at until the move settles", MidSwapWaits);
         r.Add("shield buffs: renewed on the armor's timers (Rebuff With, Also Refresh Under, Force Rebuff)", RenewedLikeArmor);
         r.Add("shield buffs: a fizzle, a refusal or a late armor line at the shield leaves the armor alone", RefusalsLeaveArmor);
-        r.Add("shield buffs: casts at the shield with no answer, or 'cannot be cast on', rest shield buffing; the armor carries on", NoAnswerParks);
+        r.Add("shield buffs: casts at the shield with no answer rest shield buffing; 'cannot be cast on' skips that shield for good (kept, /ra buffs unbuffable clear); the armor carries on", NoAnswerParks);
         r.Add("shield buffs: the shield's timers are saved and loaded with the others", TimersSaved);
         r.Add("shield buffs: Buff the shield defaults on, loads, saves, copies, is in the settings map", Setting);
+        r.Add("shield buffs: a shield marked No buff gets nothing (rebuff batch, Force Rebuff, expiring), never makes buffing due; the armor as always", ExcludedShield);
+        r.Add("shield buffs: two shields listed, one marked No buff: the other is still buffed", ExcludedShieldOtherStillBuffed);
+        r.Add("shield buffs: cast lines naming a No buff shield (self-cast reaching it, late line, an in-flight cast) never make a rebuff due", ExcludedShieldCastLinesNeverDue);
+        r.Add("shield buffs: the kept shield choice is read again at once when an entry's No buff flips in place", ExcludedFlipInvalidatesShieldChoice);
+        r.Add("shield buffs: No buff on a weapon (non-shield) does nothing: the weapon auras as always", ExcludedWeaponDoesNothing);
+        r.Add("shield buffs: the Items bridge carries noBuff for every entry, applies it back for shields only, absent = unchanged, never saved", NoBuffPayloadContract);
+        r.Add("shield buffs: a No buff shield in the off hand: no shield is buffed, not one put away for the wand before", ExcludedWornBeatsStaleStow);
+        r.Add("shield buffs: a shield listed twice, one rule No buff: left alone, in either order", ExcludedAnyRuleEitherOrder);
+        r.Add("shield buffs: a VTank re-import keeps a shield's No buff", ReimportKeepsShieldExclusion);
     }
 
     // ── Rig ───────────────────────────────────────────────────────────────────
@@ -499,17 +508,37 @@ internal static class ShieldBuffTests
         Check.Eq(rig.Sm.UnresolvableSpellIds.Count, 0, "no spell blacklisted (it just went on the armor)");
         Check.True(Armor.All(rig.HasArmor), "the armor got everything");
 
-        // "cannot be cast on" (ACE IsInvalidTarget) parks it at once.
+        // "cannot be cast on" (ACE IsInvalidTarget): the shield takes no spells, never buffed again
+        // (2026-11-08, Tom: "if an item is deemed unbuffable it should just skip it altogether").
+        string folder = Path.Combine(Program.TempRoot, "shieldbuff-unbuffable");
+        Directory.CreateDirectory(folder);
+        foreach (string f in Directory.GetFiles(folder)) File.Delete(f);
         var invalid = new Rig(worn: true);
+        invalid.B.SetTimerPath(folder);
         invalid.PutAwayForWand();
         Check.Eq(ToFirstShieldCast(invalid), "Impenetrability VI", "a cast at the shield");
         invalid.B.OnChatWindowText("Impenetrability VI cannot be cast on Kite Shield.", 7);
         Check.Eq(invalid.B.PendingSpellId, 0, "it ends the cast");
+        Check.Eq(invalid.B.UnbuffableShields.Count, 1, "the shield is marked as taking no spells");
         invalid.EndRun();
-        Check.False(invalid.B.NeedsAnyBuff(), "the shield rests");
+        Check.False(invalid.B.NeedsAnyBuff(), "the shield never holds Buffing");
         Check.Eq(invalid.CastAll().Count, 0, "nothing more at it");
         invalid.B.ForceFullRebuff();
-        Check.Eq(string.Join(", ", At(invalid.CastAll(), "Kite Shield")), ArmorAtPlayer, "Force Rebuff gives it a fresh try");
+        Check.Eq(At(invalid.CastAll(), "Kite Shield").Count(), 0, "Force Rebuff doesn't try it again either");
+        Check.True(File.ReadAllLines(Path.Combine(folder, "bufftimers.txt")).Any(l => l.StartsWith("unbuffable|", StringComparison.Ordinal)), "kept in bufftimers.txt");
+
+        // Kept across a reload; /ra buffs unbuffable clear forgets it and it is tried again.
+        var reloaded = new Rig(worn: true);
+        reloaded.PutAwayForWand();
+        reloaded.B.SetTimerPath(folder);
+        Check.Eq(reloaded.B.UnbuffableShields.Count, 1, "loaded back");
+        Check.Eq(At(reloaded.CastAll(), "Kite Shield").Count(), 0, "still skipped after the reload");
+        var listed = reloaded.B.UnbuffableCommand(clear: false);
+        Check.True(listed.Any(l => l.Contains("Kite Shield", StringComparison.Ordinal)), "/ra buffs unbuffable lists it: " + string.Join(" | ", listed));
+        reloaded.B.UnbuffableCommand(clear: true);
+        Check.Eq(reloaded.B.UnbuffableShields.Count, 0, "cleared");
+        reloaded.B.ForceFullRebuff();
+        Check.Eq(string.Join(", ", At(reloaded.CastAll(), "Kite Shield")), ArmorAtPlayer, "cleared: tried again");
 
         // The same line with nothing aimed at a shield changes nothing.
         var other = new Rig(worn: true, listShield: false);
@@ -535,6 +564,271 @@ internal static class ShieldBuffTests
         Check.Eq(again.B.ShieldSpellCount, 3, "loaded back");
         Check.True(Armor.All(again.HasArmor), "with the armor's");
         Check.Eq(again.CastAll().Count, 0, "nothing due after the reload");
+    }
+
+    // ── No buff (ItemRule.KeepBuffed off on a listed shield) ─────────────────
+
+    private const string MarkedWhy = "the listed shield is marked No buff";
+
+    private static void ExcludeId(Rig rig, uint id) => rig.S.ItemRules.First(x => x.Id == unchecked((int)id)).KeepBuffed = false;
+
+    private static void ExcludedShield()
+    {
+        // Control: the same rig, not marked, casts at the shield (StowedShieldBuffed has the detail).
+        var control = new Rig(worn: true);
+        control.PutAwayForWand();
+        Check.Eq(At(control.CastAll(), "Kite Shield").Count(), Armor.Length, "control: the listed shield gets its armor spells");
+
+        // Put away for the wand and worn: left alone either way.
+        foreach (bool stowed in new[] { true, false })
+        {
+            var rig = new Rig(worn: true);
+            ExcludeId(rig, Kite);
+            if (stowed) rig.PutAwayForWand();
+            string how = stowed ? "put away for the wand" : "in the off hand";
+            Check.Eq(rig.B.ShieldToBuff(out string where), 0, $"{how}: no shield to buff ({where})");
+            Check.Eq(where, MarkedWhy, $"{how}: and the reason says why");
+            var sent = rig.CastAll();
+            Check.Eq(At(sent, "Kite Shield").Count(), 0, $"{how}: nothing aimed at the marked shield");
+            Check.Eq(string.Join(", ", At(sent, "player")), $"{Aura}, {ArmorAtPlayer}", $"{how}: the character's buffs as always");
+            Check.False(rig.B.NeedsAnyBuff(), $"{how}: nothing due after the run");
+
+            // Force Rebuff (and /ra buff, which runs it): still nothing at the shield.
+            rig.B.ForceFullRebuff();
+            sent = rig.CastAll();
+            Check.Eq(At(sent, "Kite Shield").Count(), 0, $"{how}: Force Rebuff casts nothing at it");
+            Check.Eq(string.Join(", ", At(sent, "player")), $"{Aura}, {ArmorAtPlayer}", $"{how}: Force Rebuff still renews the character's");
+            Check.False(rig.B.NeedsAnyBuff(), $"{how}: the run ends done");
+            Check.False(FakeHost.Casts.Any(c => c.Target == Kite), $"{how}: no cast ever went at the shield");
+        }
+
+        // A shield timer from before it was marked running low makes nothing due.
+        var was = new Rig(worn: true);
+        was.PutAwayForWand();
+        was.CastAll();
+        Check.Eq(was.B.ShieldSpellCount, Armor.Length, "buffed before it was marked");
+        was.SetShieldLeft("Flame Bane VI", 10);
+        Check.True(was.B.NeedsAnyBuff(), "control: its bane running out is due while it is buffed");
+        ExcludeId(was, Kite);
+        was.S.ItemRules = new List<ItemRule>(was.S.ItemRules);   // the Items face saves a new list
+        Check.False(was.B.NeedsAnyBuff(), "marked: its expiring bane is not due");
+        Check.Eq(was.CastAll().Count, 0, "and nothing is cast for it");
+
+        // Two shields listed, the worn one marked: the other (in a pack, not in use) is no target either.
+        var two = new Rig(worn: true);
+        two.List(Sword, Kite, Round);
+        ExcludeId(two, Kite);
+        Check.Eq(two.B.ShieldToBuff(out _), 0, "the worn shield marked, the other in a pack: none");
+        Check.Eq(At(two.CastAll(), "Round Shield").Count(), 0, "nothing goes to the other shield instead");
+    }
+
+    private static void ExcludedShieldOtherStillBuffed()
+    {
+        // The Kite marked and in a pack, the Round worn: the Round is buffed.
+        var pin = new Rig();
+        Wear(Round);
+        pin.List(Sword, Kite, Round);
+        ExcludeId(pin, Kite);
+        Check.Eq(pin.B.ShieldToBuff(out string where), unchecked((int)Round), "the other listed shield, worn: " + where);
+        var sent = pin.CastAll();
+        Check.Eq(string.Join(", ", At(sent, "Round Shield")), ArmorAtPlayer, "the other shield gets the armor spells");
+        Check.Eq(At(sent, "Kite Shield").Count(), 0, "nothing at the marked one");
+
+        // Both read as in hand, the marked Kite listed FIRST. Ignoring the flag the first listed
+        // (Kite) would be picked; with it, the Round is.
+        var both = new Rig(worn: true);
+        Wear(Round);
+        both.List(Sword, Kite, Round);
+        Check.Eq(both.B.ShieldToBuff(out _), unchecked((int)Kite), "control: nothing marked, the first listed in hand is picked");
+        ExcludeId(both, Kite);
+        Check.Eq(both.B.ShieldToBuff(out where, fresh: true), unchecked((int)Round), "the Kite marked: the Round is picked (" + where + ")");
+        sent = both.CastAll();
+        Check.Eq(string.Join(", ", At(sent, "Round Shield")), ArmorAtPlayer, "and buffed");
+        Check.Eq(At(sent, "Kite Shield").Count(), 0, "never the marked one");
+        Check.False(both.B.NeedsAnyBuff(), "nothing due after the run");
+    }
+
+    private static void ExcludedShieldCastLinesNeverDue()
+    {
+        // 1. The self-cast reached the worn, marked shield ("You cast X on Kite Shield"): no timer
+        //    is kept for it, so nothing on it can ever run low and make buffing due.
+        var self = new Rig(worn: true);
+        ExcludeId(self, Kite);
+        var sent = self.CastAll(alsoOnShield: _ => true);
+        Check.Eq(At(sent, "Kite Shield").Count(), 0, "nothing aimed at it");
+        Check.Eq(self.B.ShieldSpellCount, 0, "its self-cast lines record no shield timer");
+        Check.True(Armor.All(self.HasArmor), "the armor's are recorded as always");
+        Check.False(self.B.NeedsAnyBuff(), "nothing due");
+
+        // 2. A late line naming it, nothing pending.
+        self.B.OnChatWindowText("You cast Flame Bane VI on Kite Shield", 7);
+        Check.Eq(self.B.ShieldSpellCount, 0, "a late line names it: still no shield timer");
+        Check.False(self.B.NeedsAnyBuff(), "and nothing due");
+
+        // 3. A cast at it already in flight when it is marked: its line may record the timer, but
+        //    neither that nor the timer running low makes anything due.
+        var flight = new Rig(worn: true);
+        flight.PutAwayForWand();
+        flight.B.ForceFullRebuff();
+        string first = ToFirstShieldCast(flight);
+        Check.Eq(first, "Impenetrability VI", "a cast at the shield is pending");
+        ExcludeId(flight, Kite);
+        flight.S.ItemRules = new List<ItemRule>(flight.S.ItemRules);   // the Items face saves a new list
+        flight.Answer(Kite, first);
+        Check.Eq(flight.B.PendingSpellId, 0, "its line resolves the cast");
+        Check.Eq(flight.CastAll().Count(s => s.EndsWith("@Kite Shield", StringComparison.Ordinal)), 0, "nothing more at it");
+        Check.False(flight.B.NeedsAnyBuff(), "nothing due after the run");
+        if (flight.HasShield("Impenetrability VI"))
+        {
+            flight.SetShieldLeft("Impenetrability VI", 10);
+            Check.False(flight.B.NeedsAnyBuff(), "its recorded timer running low is not due");
+        }
+        Check.Eq(flight.CastAll().Count, 0, "and nothing is cast for it");
+
+        // Control for 1: the same lines with it not marked do record the shield's timers.
+        var control = new Rig(worn: true);
+        control.CastAll(alsoOnShield: _ => true);
+        Check.Eq(control.B.ShieldSpellCount, Armor.Length, "control: not marked, the lines record its timers");
+    }
+
+    private static void ExcludedWornBeatsStaleStow()
+    {
+        // The Kite was put away for the wand some time ago; the Round is now in the off hand.
+        Rig Make(bool excludeRound)
+        {
+            var made = new Rig(worn: true);
+            made.List(Sword, Kite, Round);
+            made.PutAwayForWand();   // the Kite into a pack, remembered as stowed
+            Wear(Round);
+            if (excludeRound) ExcludeId(made, Round);
+            return made;
+        }
+
+        var control = Make(excludeRound: false);
+        Check.Eq(control.B.ShieldToBuff(out string where), unchecked((int)Round), "control: the Round in the off hand is picked (" + where + ")");
+
+        var rig = Make(excludeRound: true);
+        Check.Eq(rig.B.ShieldToBuff(out where), 0, "the marked Round in the off hand: no shield");
+        Check.Eq(where, "the shield in the off hand is marked No buff", "and the reason says so");
+        var sent = rig.CastAll();
+        Check.Eq(At(sent, "Kite Shield").Count() + At(sent, "Round Shield").Count(), 0, "no cast names either shield: " + string.Join(", ", sent));
+        Check.Eq(string.Join(", ", At(sent, "player")), $"{Aura}, {ArmorAtPlayer}", "the character's buffs as always");
+        Check.False(rig.B.NeedsAnyBuff(), "nothing due");
+    }
+
+    private static void ExcludedAnyRuleEitherOrder()
+    {
+        foreach (bool excludedFirst in new[] { false, true })
+        {
+            var rig = new Rig(worn: true);
+            var keep = new ItemRule { Id = unchecked((int)Kite), Name = "Kite Shield", Action = WeaponList.ShieldAction, Element = "", ElementSource = "" };
+            var off = new ItemRule { Id = unchecked((int)Kite), Name = "Kite Shield", Action = WeaponList.ShieldAction, Element = "", ElementSource = "", KeepBuffed = false };
+            var sword = rig.S.ItemRules.First(x => x.Id == unchecked((int)Sword));
+            rig.S.ItemRules = excludedFirst ? new List<ItemRule> { sword, off, keep } : new List<ItemRule> { sword, keep, off };
+            string order = excludedFirst ? "the marked rule first" : "the marked rule second";
+            Check.Eq(rig.B.ShieldToBuff(out string where), 0, $"{order}: no shield ({where})");
+            Check.Eq(At(rig.CastAll(), "Kite Shield").Count(), 0, $"{order}: nothing at it");
+        }
+    }
+
+    private static void ReimportKeepsShieldExclusion()
+    {
+        ItemRule Rule(int id, string action, bool keep) => new() { Id = id, Name = "x" + id, Action = action, Element = "Slash", KeepBuffed = keep };
+        var rules = new List<ItemRule>
+        {
+            Rule(1, WeaponList.ShieldAction, false),   // a marked shield
+            Rule(2, WeaponList.ShieldAction, true),
+            Rule(3, "Weapon", false),                  // a "marked" weapon (the flag does nothing there)
+        };
+        foreach (int id in new[] { 1, 2, 3, 4 })
+            RynthCore.Plugin.RynthAi.MiniRemote.VTankUsdImporter.ReplaceItemRule(rules, Rule(id, id <= 2 ? WeaponList.ShieldAction : "Weapon", true));
+        Check.Eq(rules.Count, 4, "each id replaced once, the new one added");
+        Check.True(rules.Single(x => x.Id == 1).ExcludedFromBuffing(), "the marked shield stays marked after a re-import");
+        Check.False(rules.Single(x => x.Id == 2).ExcludedFromBuffing(), "a buffed shield stays buffed");
+        Check.False(rules.Single(x => x.Id == 3).ExcludedFromBuffing(), "a weapon takes the import as it is");
+        Check.False(rules.Single(x => x.Id == 4).ExcludedFromBuffing(), "a new entry is buffed");
+    }
+
+    private static void ExcludedFlipInvalidatesShieldChoice()
+    {
+        var rig = new Rig(worn: true);
+        long ms = 50_000;
+        rig.B.KitClockMs = () => ms;
+        rig.B.ShieldReadMs = 1000;   // the shipped value
+        Check.Eq(rig.B.ShieldToBuff(out _), unchecked((int)Kite), "the worn shield, kept for a second");
+        ms += 10;
+        Check.Eq(rig.B.ShieldToBuff(out _), unchecked((int)Kite), "control: 10 ms later the kept answer");
+        ExcludeId(rig, Kite);   // flipped in place: same list, same count
+        ms += 10;
+        Check.Eq(rig.B.ShieldToBuff(out string where), 0, "marked in place: read again at once, none (" + where + ")");
+        rig.S.ItemRules.First(x => x.Id == unchecked((int)Kite)).KeepBuffed = true;
+        ms += 10;
+        Check.Eq(rig.B.ShieldToBuff(out _), unchecked((int)Kite), "and back on: at once");
+    }
+
+    private static void ExcludedWeaponDoesNothing()
+    {
+        // Marking a weapon does nothing: the marked sword's own aura (Blood Drinker) is still due.
+        var rig = new Rig(worn: true, listShield: false);
+        ExcludeId(rig, Sword);
+        var sent = rig.CastAll();
+        Check.Eq(string.Join(", ", At(sent, "player")), $"{Aura}, {ArmorAtPlayer}", "the marked sword still makes its aura due");
+        Check.Eq(rig.B.ShieldToBuff(out _), 0, "and no shield is involved");
+    }
+
+    private static void NoBuffPayloadContract()
+    {
+        const int SwordId = 1, ShieldId = 3;
+        List<ItemRule> Saved(bool swordKeep, bool shieldKeep) => new()
+        {
+            new() { Id = SwordId,  Name = "Sword",  Action = "Weapon",                Element = "Slash", KeepBuffed = swordKeep },
+            new() { Id = ShieldId, Name = "Shield", Action = WeaponList.ShieldAction, Element = "",      KeepBuffed = shieldKeep },
+        };
+
+        // Out: every entry carries noBuff, shields and weapons alike.
+        var shown = WeaponList.ForDisplay(Saved(false, false), x => x.Name);
+        Check.True(shown.All(x => x.NoBuff == true), "a marked entry is sent noBuff true (weapon and shield)");
+        shown = WeaponList.ForDisplay(Saved(true, true), x => x.Name);
+        Check.True(shown.All(x => x.NoBuff == false), "a buffed entry is sent noBuff false");
+        string json = JsonSerializer.Serialize(new ItemsBridgePayload { Weapons = WeaponList.ForDisplay(Saved(true, false), x => x.Name) },
+            RynthAiJsonContext.Default.ItemsBridgePayload);
+        Check.Eq(System.Text.RegularExpressions.Regex.Matches(json, "\"noBuff\":").Count, 2, "the wire field is \"noBuff\", once per entry: " + json);
+        Check.True(System.Text.RegularExpressions.Regex.IsMatch(json, "\"noBuff\":\\s*false") && System.Text.RegularExpressions.Regex.IsMatch(json, "\"noBuff\":\\s*true"),
+            "with its value per entry: " + json);
+
+        // Back, in the engine's shape (lower-case names, only the fields WeaponEntry knows).
+        List<ItemRule> Back(string weapons) =>
+            WeaponList.MergeEdited(Saved(true, true),
+                JsonSerializer.Deserialize("{\"weapons\":[" + weapons + "]}", RynthAiJsonContext.Default.ItemsBridgePayload)!.Weapons);
+        const string Sw = "{\"id\":1,\"name\":\"Sword\",\"element\":\"Slash\",\"action\":\"Weapon\"";
+        const string Sh = "{\"id\":3,\"name\":\"Shield\",\"element\":\"Shield\",\"action\":\"Shield\"";
+        var m = Back(Sw + "}," + Sh + ",\"noBuff\":true}");
+        Check.True(m.Single(x => x.Id == ShieldId).ExcludedFromBuffing(), "a shield ticked noBuff is left alone");
+        m = Back(Sw + ",\"noBuff\":true}," + Sh + "}");
+        Check.False(m.Single(x => x.Id == SwordId).ExcludedFromBuffing(), "noBuff on a weapon is ignored");
+        m = WeaponList.MergeEdited(Saved(true, false),
+            JsonSerializer.Deserialize("{\"weapons\":[" + Sw + "}," + Sh + ",\"noBuff\":false}]}", RynthAiJsonContext.Default.ItemsBridgePayload)!.Weapons);
+        Check.False(m.Single(x => x.Id == ShieldId).ExcludedFromBuffing(), "a shield unticked is buffed again");
+        m = WeaponList.MergeEdited(Saved(false, false),
+            JsonSerializer.Deserialize("{\"weapons\":[" + Sw + "}," + Sh + "}]}", RynthAiJsonContext.Default.ItemsBridgePayload)!.Weapons);
+        Check.True(m.All(x => x.ExcludedFromBuffing()), "noBuff absent (an older engine): both keep their saved value");
+        m = WeaponList.MergeEdited(Saved(true, true),
+            JsonSerializer.Deserialize("{\"weapons\":[" + Sw + "}," + Sh + ",\"noBuff\":null}]}", RynthAiJsonContext.Default.ItemsBridgePayload)!.Weapons);
+        Check.False(m.Single(x => x.Id == ShieldId).ExcludedFromBuffing(), "noBuff null: unchanged");
+        Check.True(m.All(x => x.NoBuff == null), "merged entries carry no wire field");
+        var added = WeaponList.MergeEdited(new List<ItemRule>(), new[] { new ItemRule { Id = 9, Name = "New", Action = WeaponList.ShieldAction, NoBuff = true } });
+        Check.True(added.Single().ExcludedFromBuffing() && added.Single().NoBuff == null, "a new shield entry takes noBuff, and drops the wire field");
+
+        // Saved profiles: the field is never written; old profiles load with nothing marked.
+        var settings = new LegacyUiSettings { ItemRules = m };
+        string profile = JsonSerializer.Serialize(settings, RynthAiJsonContext.Default.LegacyUiSettings);
+        Check.False(profile.Contains("noBuff", StringComparison.OrdinalIgnoreCase), "a saved profile has no noBuff");
+        var old = JsonSerializer.Deserialize("{\"ItemRules\":[{\"Id\":1,\"Name\":\"Sword\",\"Action\":\"Weapon\"},{\"Id\":3,\"Name\":\"Shield\",\"Action\":\"Shield\",\"KeepBuffed\":true}]}",
+            RynthAiJsonContext.Default.LegacyUiSettings);
+        Check.True(old != null && old.ItemRules.Count == 2 && old.ItemRules.All(x => !x.ExcludedFromBuffing()), "old profiles load with nothing marked");
+        var round = JsonSerializer.Deserialize(JsonSerializer.Serialize(new LegacyUiSettings { ItemRules = { new ItemRule { Id = 3, Name = "Shield", Action = WeaponList.ShieldAction, KeepBuffed = false } } },
+            RynthAiJsonContext.Default.LegacyUiSettings), RynthAiJsonContext.Default.LegacyUiSettings);
+        Check.True(round != null && round.ItemRules.Single().ExcludedFromBuffing(), "No buff is saved and loaded");
     }
 
     private static void Setting()

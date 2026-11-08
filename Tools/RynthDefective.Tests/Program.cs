@@ -73,6 +73,9 @@ namespace RynthDefective.Tests
                 Run("busy rule with RynthAi holding: its own action and our last use hold, the rest of the count doesn't", BusyRulePaced);
                 Run("use: the player's turn - after a death the press goes next, RynthAi holds and is let go", UsePlayersTurn);
                 Run("use: just after a portal the client takes nothing for a few seconds - the press waits and goes when it can", UseAfterPortal);
+                Run("busy clear rule: only a count with nothing real in flight is cleared", BusyClearDecisions);
+                Run("use: shortcuts clear a stuck busy state - off by default, then clear once per press and use", UseClearStuckBusy);
+                Run("store, command and settings: shortcuts clear a stuck busy state", ClearBusySettingAndCommand);
                 Run("spells: the table's names and flags, the name search", SpellTableAndSearch);
                 Run("spells: whom a cast goes to", SpellCastTarget);
                 Run("spells: a slot casts, Magic mode first, refusals", SpellUse);
@@ -98,6 +101,12 @@ namespace RynthDefective.Tests
                 Run("bar: making it independent offers to copy the game's 18 slots", BarIndependentCopy);
                 Run("store: the independent bar setting; files from before read it off", BarStoreIndependent);
                 Run("window: the settings window parses and its switches reach their code", BarSettingsWindow);
+                Run("extra bars: add and remove, the lowest free number, at most 4", ExtraBarsAddRemoveCap);
+                Run("extra bars: their own slots filled, used and kept like the main bar's own", ExtraBarsSlots);
+                Run("store: the extra bars saved and read; files from before and odd ones", ExtraBarsStore);
+                Run("extra bars: /rdef bars parsing", ExtraBarsCommands);
+                Run("extra bars: what an extra bar's window draws (no game slots, no keys)", ExtraBarSnapshot);
+                Run("window: the settings window's rows for the extra bars", ExtraBarSettings);
                 Run("corpses: the server's lines", CorpseLinesParse);
                 Run("corpses: a death, the server's line before or after it, nothing dropped", CorpseDeaths);
                 Run("corpses: a corpse in view is the death beside it, else one found", CorpseSeen);
@@ -117,6 +126,10 @@ namespace RynthDefective.Tests
                 Run("quantity: a server's bank - its values, pack + bank, one that can't be read, max", QtyBankRules);
                 Run("quantity: buy and max with no bank, a bank that covers it, one that doesn't, one that can't be read", QtyBankBuy);
                 Run("store: the quantity box setting; files from before read it on", QtyStore);
+                Run("day/night: day or night, the hour and the real seconds to dawn or dusk", ClockDayNight);
+                Run("day/night: the same as RynthAi's meta expressions, a countdown with no jumps", ClockMatchesRynthAi);
+                Run("day/night: the countdown text (23m, 4m 10s, 45s)", ClockCountdownText);
+                Run("day/night: the window's view and tooltip, /rdef daynight and its answers", ClockWindowAndCommand);
             }
             finally
             {
@@ -257,6 +270,20 @@ namespace RynthDefective.Tests
                 Releases++;
                 BotHeldNow = false;
             }
+            /// <summary>
+            /// The busy-count resets asked for ("Shortcuts clear a stuck busy state"). CanClear false: an engine
+            /// without ForceResetBusyCount. ClearLands false: the reset doesn't take. It lands on the next tick.
+            /// </summary>
+            public int Clears;
+            public bool CanClear = true, ClearLands = true;
+            private bool _clearPending;
+            public bool ClearBusyCount()
+            {
+                if (!CanClear) return false;
+                Clears++;
+                _clearPending = ClearLands;
+                return true;
+            }
             public int UseDoneSeq { get; set; } = 1;
             public int CombatMode { get; set; } = Stance.NonCombat;
             public int RefusalSeq { get; set; }
@@ -307,7 +334,11 @@ namespace RynthDefective.Tests
                 return true;
             }
 
-            public void Advance(long ms) => NowMs += ms;
+            public void Advance(long ms)
+            {
+                NowMs += ms;
+                if (_clearPending) { BusyCount = 0; _clearPending = false; }   // the engine resets on the game's next tick
+            }
             public void Answer(uint error = 0)
             {
                 UseDoneSeq++;

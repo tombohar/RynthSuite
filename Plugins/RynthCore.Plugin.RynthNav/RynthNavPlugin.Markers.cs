@@ -100,23 +100,35 @@ public sealed partial class RynthNavPlugin
 
     // ── The trip ─────────────────────────────────────────────────────────
 
-    /// <summary>A new plan (Route) or goto (Go): its trip, shown, its path worked out. Tick thread.</summary>
-    private void SetTrip(List<RouteStep>? steps, string goal, double goalNs, double goalEw, List<RecallOption>? recalls,
-        string enterName, bool live)
+    /// <summary>
+    /// A new plan (Route) or goto (Go): its trip, shown, its path worked out (<paramref name="buildPath"/>
+    /// false: the caller works it out, the route maker's makeroute). Tick thread.
+    /// </summary>
+    private PlannedTrip SetTrip(List<RouteStep>? steps, string goal, double goalNs, double goalEw, List<RecallOption>? recalls,
+        string enterName, bool live, bool buildPath = true)
     {
-        var tr = new List<TripRecall>();
-        if (recalls != null) foreach (RecallOption o in recalls) tr.Add(new TripRecall(o.Name, o.SpellId, o.Command, o.CastSeconds));
-        _trip = new PlannedTrip(++_tripSeq, steps ?? new List<RouteStep>(), goal, goalNs, goalEw,
-            IsOnMap(_cellId), new WorldPt(_wx, _wy, _wz), _cellId, tr,
-            enterName.Length > 0 ? _enterPortal : "", enterName, live);
+        PlannedTrip trip = NewTrip(steps, goal, goalNs, goalEw, recalls, enterName, live);
+        _trip = trip;
         _tripPath = null;
         _tripShown = true;
         _markNext = -1; _markStep = -2;
         _markLb = CurrentLandblock;
         _saveConflict = "";
         _saveDefault = NavRouteExport.SafeName("To " + goal);
-        if (_markersOn) StartPathBuild();
+        if (_markersOn && buildPath) StartPathBuild();
         _markerStatus = "working out the path…";
+        return trip;
+    }
+
+    /// <summary>A trip planned from where you stand, frozen (not shown). Tick thread.</summary>
+    private PlannedTrip NewTrip(List<RouteStep>? steps, string goal, double goalNs, double goalEw, List<RecallOption>? recalls,
+        string enterName, bool live)
+    {
+        var tr = new List<TripRecall>();
+        if (recalls != null) foreach (RecallOption o in recalls) tr.Add(new TripRecall(o.Name, o.SpellId, o.Command, o.CastSeconds));
+        return new PlannedTrip(++_tripSeq, steps ?? new List<RouteStep>(), goal, goalNs, goalEw,
+            IsOnMap(_cellId), new WorldPt(_wx, _wy, _wz), _cellId, tr,
+            enterName.Length > 0 ? _enterPortal : "", enterName, live);
     }
 
     /// <summary>Takes the markers off the ground (the trip stays for "save as nav route"). Tick thread.</summary>

@@ -41,6 +41,7 @@ internal sealed class SettingsPanel
         w.Checkbox("Show counts and keys under the slots", "set.counts", st.ShowCounts, v => { st.ShowCounts = v; Changed(true); });
         w.Checkbox("Allow weapon swaps while RynthAi's macro runs", "set.swap", st.SwapWhileBotRuns, v => { st.SwapWhileBotRuns = v; Changed(false); });
         w.Tooltip("Off (the default): a weapon, wand or shield is not wielded while the RynthAi macro runs - it picks the weapon itself and would swap back. Kits, potions and other items always work.");
+        BarSettingsView.ClearBusyBox(w, st, () => Changed(false));
 
         w.SeparatorText("About");
         w.TextWrapped(Credit);

@@ -54,7 +54,9 @@ internal sealed class MonsterStatsWindow
         "It evades: of your melee and missile attacks, the share it evaded.\n" +
         "It resists: of your spells that reached it, the share it resisted.\n" +
         "You evade: of its melee and missile attacks, the share you evaded.\n" +
-        "You resist: of its spells that reached you, the share you resisted.\n\n" +
+        "You resist: of its spells that reached you, the share you resisted.\n" +
+        "XP/kill: the experience a kill gave you, on average (a kill counts when your XP rose within a few seconds of it).\n" +
+        "Click a monster for its death too: how long after the kill its corpse came (the death animation; looting waits that long).\n\n" +
         "Click a monster for its numbers both ways: attacks and hits, spells and how many landed, " +
         "spells that could do nothing to it (immune), damage and kills. The killing blow counts as a hit " +
         "(melee or missile) or a landed spell (magic).\n\n" +
@@ -72,7 +74,7 @@ internal sealed class MonsterStatsWindow
         _k = Math.Max(0.5f, Font(RynthUiFont.Ui11).FontSize / 11f);
         Vector2 origin = ImGui.GetCursorScreenPos();
         Vector2 size = ImGui.GetContentRegionAvail();
-        var want = new Vector2(Px(560), Px(360));
+        var want = new Vector2(Px(620), Px(360));   // 620 since the XP/kill column (2026-11-08)
         if (size.X < 60 || size.Y < 40) return want;
         ImDrawListPtr frame = ImGui.GetWindowDrawList();
         frame.AddRectFilled(origin, origin + size, Background, 4);
@@ -168,6 +170,7 @@ internal sealed class MonsterStatsWindow
         ("It resists", "Of your spells that reached it, the share it resisted."),
         ("You evade", "Of its melee and missile attacks, the share you evaded."),
         ("You resist", "Of its spells that reached you, the share you resisted."),
+        ("XP/kill", "The experience a kill gave, on average (the kills whose XP was seen since login)."),
     };
 
     private float ColW => Px(66);
@@ -256,6 +259,7 @@ internal sealed class MonsterStatsWindow
                 MonsterCombatStats.Percent(r.ItResistsRate),
                 MonsterCombatStats.Percent(r.YouEvadeRate),
                 MonsterCombatStats.Percent(r.YouResistRate),
+                MonsterStatsText.XpCell(r),
             };
             for (int c = 0; c < cells.Length; c++)
             {
@@ -281,6 +285,7 @@ internal sealed class MonsterStatsWindow
         2 => $"It resisted {r.Resisted:N0} of your {r.SpellsAtIt:N0} spells that reached it.",
         3 => $"You evaded {r.YouEvaded:N0} of its {r.Attacks:N0} melee and missile attacks.",
         4 => $"You resisted {r.YouResisted:N0} of its {r.SpellsAtYou:N0} spells that reached you.",
+        5 => r.XpKills > 0 ? $"{r.Xp:N0} XP from {r.XpKills:N0} {(r.XpKills == 1 ? "kill" : "kills")} whose XP was seen." : "No kill's XP seen yet.",
         _ => null,
     };
 
@@ -347,13 +352,32 @@ internal static class MonsterStatsText
             rows.Add(("No effect", $"{N(r.NoEffect)} (it is immune)", $"{N(r.NoEffectOnYou)} (you are immune)"));
         rows.Add(("Damage", $"{N(r.DamageDealt)} dealt", $"{N(r.DamageTaken)} taken"));
         rows.Add(("Kills", N(r.Kills), string.Empty));
+        if (r.XpKills > 0) rows.Add(("XP", $"XP/kill {N(XpPerKill(r))} ({N(r.Xp)} from {N(r.XpKills)} {(r.XpKills == 1 ? "kill" : "kills")})", string.Empty));
+        if (r.CorpseKills > 0) rows.Add(("Death", $"corpse after {Seconds(r)} ({N(r.CorpseKills)} timed)", string.Empty));
         return rows;
     }
+
+    /// <summary>"2.1 s": the average kill-to-corpse time.</summary>
+    private static string Seconds(MonsterStatsRow r)
+        => ((r.CorpseAvgMs ?? 0) / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + " s";
+
+    /// <summary>", corpse after 2.1 s" for the chat lines, or "" before any corpse was timed.</summary>
+    private static string CorpseText(MonsterStatsRow r) => r.CorpseKills > 0 ? $", corpse after {Seconds(r)}" : string.Empty;
+
+    /// <summary>The average XP per kill, whole.</summary>
+    private static long XpPerKill(MonsterStatsRow r) => r.XpPerKill is double x ? (long)Math.Round(x, MidpointRounding.AwayFromZero) : 0;
+
+    /// <summary>The window's XP/kill cell: "1,234,567", or "-" before any kill's XP was seen.</summary>
+    public static string XpCell(MonsterStatsRow r) => r.XpKills > 0 ? N(XpPerKill(r)) : "-";
+
+    /// <summary>", XP/kill 1,234,567" for the chat lines, or "" before any kill's XP was seen.</summary>
+    private static string XpText(MonsterStatsRow r) => r.XpKills > 0 ? $", XP/kill {N(XpPerKill(r))}" : string.Empty;
 
     /// <summary>/ra mstats's answer: a title line, then your side and its side (three chat lines).</summary>
     public static string[] ChatLines(MonsterStatsRow r) => new[]
     {
-        $"[RynthAi] {r.Name} since login: {N(r.Kills)} {(r.Kills == 1 ? "kill" : "kills")}.",
+        $"[RynthAi] {r.Name} since login: {N(r.Kills)} {(r.Kills == 1 ? "kill" : "kills")}"
+            + (r.XpKills > 0 ? $"{XpText(r)} ({N(r.Xp)} XP from {N(r.XpKills)})" : string.Empty) + CorpseText(r) + ".",
         $"[RynthAi]   You at it: {N(r.Swings)} swings, {N(r.Hits)} hit, it evaded {N(r.Evaded)} ({MonsterCombatStats.Percent(r.ItEvadesRate)}); "
             + $"{N(r.SpellsAtIt)} spells reached it, it resisted {N(r.Resisted)} ({MonsterCombatStats.Percent(r.ItResistsRate)})"
             + (r.NoEffect > 0 ? $", {N(r.NoEffect)} no effect" : string.Empty)
@@ -368,5 +392,5 @@ internal static class MonsterStatsText
     public static string ListLine(MonsterStatsRow r) =>
         $"[RynthAi]   {r.Name}: {N(r.Kills)} {(r.Kills == 1 ? "kill" : "kills")}, it evades {MonsterCombatStats.Percent(r.ItEvadesRate)}, "
         + $"resists {MonsterCombatStats.Percent(r.ItResistsRate)}; you evade {MonsterCombatStats.Percent(r.YouEvadeRate)}, "
-        + $"resist {MonsterCombatStats.Percent(r.YouResistRate)}";
+        + $"resist {MonsterCombatStats.Percent(r.YouResistRate)}{XpText(r)}{CorpseText(r)}";
 }

@@ -417,6 +417,7 @@ public class MissileCraftingManager
                 }
 
                 _host.UseFor((uint)targetId, "Crafting", "missile crafting: wield the new ammo");
+                LastAmmoEquipAt = RynthClock.Now;
                 ChatLog($"Equipped ammo (id=0x{targetId:X8})");
                 Reset($"Done: {_currentRecipe?.OutputName ?? "ammo"}");
             }
@@ -469,15 +470,25 @@ public class MissileCraftingManager
             if (WorldObjectCache.IsAmmo(item) || !IsPlayerWielded(item) || !LooksLikeMissileWeapon(item))
                 continue;
 
-            category = GetWeaponCategory(item.Name);
+            // The launcher's AmmoType when known (a crossbow not named so is still a crossbow), else its name.
+            int lt = CombatManager.LauncherTypeOf(item);
+            category = lt != 0 ? MissileAmmo.CategoryOf(lt) : GetWeaponCategory(item.Name);
+            _launcherType = lt;
             launcher = item;
             return true;
         }
 
         category = WeaponCategory.Bow;
         launcher = null;
+        _launcherType = 0;
         return false;
     }
+
+    // The ammo type of the launcher last seen in hand (0 = not known: by name only).
+    private int _launcherType;
+
+    /// <summary>When crafting last sent an ammo wield (combat's ammo step waits a moment after it).</summary>
+    public DateTime LastAmmoEquipAt { get; private set; } = DateTime.MinValue;
 
     private bool HasWieldedAmmo(List<WorldObject> inventory, WeaponCategory category)
     {
@@ -583,8 +594,20 @@ public class MissileCraftingManager
         return WeaponCategory.Bow;
     }
 
-    private static bool IsLooseAmmo(WorldObject item, WeaponCategory category) =>
-        AmmoRecipes.IsLooseAmmoName(item.Name, category);
+    /// <summary>
+    /// Ammo for the launcher: by name as before, or (2026-11-07) an ammunition-slot item whose AmmoType
+    /// fits the launcher's, or that has no AmmoType (servers' own ammo, often named nothing like
+    /// arrows; its wield is refused by the server when it doesn't fit, and backs off).
+    /// </summary>
+    private bool IsLooseAmmo(WorldObject item, WeaponCategory category)
+    {
+        if (AmmoRecipes.IsLooseAmmoName(item.Name, category)) return true;
+        int valid = item.Values(LongValueKey.Locations, 0);
+        if ((valid & MissileAmmo.AmmoSlot) == 0) return false;
+        int type = CombatManager.AmmoTypeOfItem(item);
+        if (type == 0) return true;
+        return _launcherType != 0 ? MissileAmmo.CanShoot(_launcherType, type) : MissileAmmo.CategoryOf(type) == category;
+    }
 
     private static int GetAmmoPriority(WorldObject item, WeaponCategory category) =>
         AmmoRecipes.OutputRank(item.Name, category);

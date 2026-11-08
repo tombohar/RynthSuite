@@ -87,6 +87,7 @@ internal static class RynthIcons
     public const string MapTrifold = "\uE31A";
     public const string Minus = "\uE32A";
     public const string Monitor = "\uE32E";
+    public const string Moon = "\uE330";
     public const string NavigationArrow = "\uEADE";
     public const string Package = "\uE390";
     public const string Path = "\uE39C";

@@ -38,6 +38,9 @@ public sealed partial class RynthAiPlugin
 
     private bool IsChestLoot(int id) => id != 0 && id == _lootChestId;
 
+    /// <summary>The last chest looted to the end (every item judged), for the meta's ralastchestlooted[] (0 = none).</summary>
+    private uint _lastChestLootedId;
+
     internal enum ChestVerdict { Loot, Wait, Skip }
 
     /// <summary>Names AC/ACE give house storage and hooks ("Storage", "Wall Hook", ...).</summary>
@@ -145,6 +148,37 @@ public sealed partial class RynthAiPlugin
         LootDiag($"[RynthAi] Chest loot: chest 0x{(uint)id:X8} waits for combat (targets in range); it is looted when the fight ends if it is still open.");
     }
 
+    // ── An open chest goes before a fight further off (2026-11-07) ──────────────────────────────
+    // Unlike a corpse, a chest closes as soon as you walk away from it. A meta opened a treasure
+    // cache with a golem 32 m off: combat had the tick, walked to the golem, the cache closed and
+    // nothing was taken. So an open chest RynthAi is to loot gets the tick ahead of combat (the
+    // loot-starvation turn, without its 8 s wait), unless a monster is within
+    // LootStarveCloseYards: that one is fought first, next to the chest.
+    private int _chestFirstLoggedFor;
+
+    /// <summary>An open chest RynthAi is to loot: the loot container, or one opened and not taken yet.</summary>
+    private bool OpenChestWaiting()
+    {
+        if (IsChestLoot(_openedContainerId)) return true;
+        return _chestCandidateId != 0 && _openedContainerId == 0 && _targetCorpseId == 0
+            && JudgeChest(_chestCandidateId, out _) == ChestVerdict.Loot;
+    }
+
+    /// <summary>The arbiter's loot-first input for an open chest (see above). Logs once per chest.</summary>
+    private bool IsOpenChestTurn(bool wantLoot, bool wantCombat)
+    {
+        if (!wantLoot || !wantCombat || !OpenChestWaiting()) return false;
+        if (_combatManager?.HasCloseThreat(LootStarveCloseYards) == true) return false;
+        int id = IsChestLoot(_openedContainerId) ? _openedContainerId : _chestCandidateId;
+        if (_chestFirstLoggedFor != id)
+        {
+            _chestFirstLoggedFor = id;
+            LootDiag($"[RynthAi] Chest loot: chest 0x{(uint)id:X8} is open, so it is looted before the fight " +
+                     $"(no monster within {LootStarveCloseYards:0} yd; a chest closes when you walk away).");
+        }
+        return true;
+    }
+
     /// <summary>
     /// TickCorpseOpening, nothing claimed or open: takes an open eligible chest as the loot
     /// container (no walk, no open: it is open and in reach). True when this tick is spent on it.
@@ -220,6 +254,8 @@ public sealed partial class RynthAiPlugin
     /// </summary>
     private void FinishChestLoot(int chestId, string why, bool close, bool sayNothingMatched)
     {
+        if (why == "completed")
+            _lastChestLootedId = unchecked((uint)chestId);   // ralastchestlooted[]
         // Pickup with macro off > Leave the chest open: a chest the player opened stays open, and chat says so.
         bool leaveOpen = close && chestId == _manualChestLootId && (_dashboard?.Settings?.LootChestsMacroOffLeaveOpen ?? false);
         if (chestId == _manualChestLootId)

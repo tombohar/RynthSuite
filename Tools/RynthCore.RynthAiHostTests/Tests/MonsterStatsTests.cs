@@ -48,6 +48,239 @@ internal static class MonsterStatsTests
         r.Add("monster stats: /ra mstats prints a monster's numbers, lists, resets, and says why not with the usage", Command);
         r.Add("monster stats: the Monster Stats window is in RynthAi's manifest and passes the engine's parser", ManifestWindow);
         r.Add("monster stats: the window's view is published at login and while the window is on screen", WindowView);
+        r.Add("kill XP (11-08): a rise after the kill, a rise before it, a quest's rise ignored, two kills two rises", XpMatcher);
+        r.Add("kill XP (11-08): the session rows count XP and XP kills; the save keeps them and reads an older save", XpInRowsAndSave);
+        r.Add("kill XP (11-08): the learned table averages the last kills and round-trips through its file", XpTableRoundTrip);
+        r.Add("kill XP (11-08): through the plugin - kill notice + TotalExperience rise -> the row's xp/xk, /ra mstats, the learned table", XpPluginWiring);
+        r.Add("death time (11-08): a kill's corpse is timed; another monster's, a late one, or another object isn't", CorpseTimerPairs);
+        r.Add("death time (11-08): rows carry it (cd, cn, 'corpse after 2.1 s'); the save keeps it and reads older saves; the table keeps it", CorpseTimeInRowsAndTable);
+    }
+
+    // ── Death animation (2026-11-08) ─────────────────────────────────────
+
+    private static void CorpseTimerPairs()
+    {
+        Check.Eq(CorpseTimer.KilledName("Corpse of Drudge Skulker"), "Drudge Skulker", "the name in a corpse's");
+        Check.Null(CorpseTimer.KilledName("Drudge Skulker"), "not a corpse");
+        Check.Null(CorpseTimer.KilledName("Corpse of "), "no name");
+        var t = new CorpseTimer();
+        t.OnKill("Drudge Skulker", 1000);
+        Check.Null(t.OnCorpse("Corpse of Mosswart Worshipper", 2000), "another monster's corpse");
+        Check.Null(t.OnCorpse("Black Opal", 2000), "not a corpse");
+        Check.True(t.OnCorpse("Corpse of drudge skulker", 3100) is ("Drudge Skulker", 2100), "the kill's corpse 2.1 s later (any case)");
+        Check.Eq(t.Waiting, 0, "and the kill is done");
+        t.OnKill("Drudge Skulker", 10_000);
+        t.OnKill("Drudge Skulker", 10_200);   // a ring: two of them
+        Check.True(t.OnCorpse("Corpse of Drudge Skulker", 12_000) is (_, 2000), "the first corpse to the first kill");
+        Check.True(t.OnCorpse("Corpse of Drudge Skulker", 12_300) is (_, 2100), "the second to the second");
+        t.OnKill("Drudge Skulker", 20_000);
+        Check.Null(t.OnCorpse("Corpse of Drudge Skulker", 20_000 + t.WindowMs + 1), "past the window: not its death");
+        Check.Eq(t.Waiting, 0, "dropped");
+        t.OnKill(" ", 1);
+        Check.Eq(t.Waiting, 0, "no name: nothing waits");
+    }
+
+    private static void CorpseTimeInRowsAndTable()
+    {
+        var s = new MonsterCombatStats();
+        s.OnKill("You killed Drudge Skulker!", KillBlow.Physical, T0, _ => "Drudge Skulker");
+        s.OnCorpseTime("Drudge Skulker", 2000, T0);
+        s.OnCorpseTime("Drudge Skulker", 2200, T0);
+        MonsterStatsRow r = s.Get("Drudge Skulker")!;
+        Check.Eq((r.CorpseMs, r.CorpseKills), (4200L, 2), "summed and counted");
+        Check.Near(r.CorpseAvgMs ?? 0, 2100, 1e-9, "2.1 s on average");
+        string json = RynthAiPlugin.MonsterStatsJson(r);
+        Check.True(json.Contains("\"cd\":2100") && json.Contains("\"cn\":2"), "mstats has cd (ms) and cn: " + json);
+        Check.True(MonsterStatsText.ChatLines(r)[0].Contains("corpse after 2.1 s"), "/ra mstats: " + MonsterStatsText.ChatLines(r)[0]);
+        Check.True(MonsterStatsText.ListLine(r).Contains("corpse after 2.1 s"), "the list line");
+        Check.True(MonsterStatsText.DetailRows(r).Any(d => d.Label == "Death" && d.Mine.Contains("corpse after 2.1 s")), "the window's detail");
+
+        var save = new MonsterStatsSave { ProcessId = 1, ProcessStartUtcTicks = 2, CharacterId = 3, SavedUtcTicks = T0.Ticks, SinceUtcTicks = T0.Ticks, Rows = s.Snapshot().ToList() };
+        string text = MonsterStatsStore.Serialize(save);
+        Check.True(MonsterStatsStore.TryParse(text, out MonsterStatsSave back) && back.Rows.Single() == r, "the save keeps it");
+        string withXpOnly = string.Join("\n", text.Split('\n').Select(l => l.StartsWith("m=") ? string.Join("\t", l.Split('\t').Take(18)) : l));
+        Check.True(MonsterStatsStore.TryParse(withXpOnly, out MonsterStatsSave mid) && mid.Rows.Single().CorpseKills == 0, "a save with XP but no corpse times reads");
+
+        string dir = TempDir("ms-deathtable");
+        try
+        {
+            var t = new MonsterXpTable();
+            t.SetCharacter(dir);
+            t.RecordDeath("Drudge Skulker", 2000);
+            t.RecordDeath("Drudge Skulker", 2400);
+            t.Record("Drudge Skulker", 500);
+            Check.Near(t.DeathMs("Drudge Skulker") ?? 0, 2200, 1e-9, "learned death");
+            Check.Null(t.DeathMs("Mosswart"), "none known");
+            t.SaveIfDirty();
+            var next = new MonsterXpTable();
+            next.SetCharacter(dir);
+            Check.True(next.DeathMs("Drudge Skulker") is double dm && Math.Abs(dm - 2200) < 1 && next.DeathsTimed("Drudge Skulker") == 2
+                       && next.XpPerKill("Drudge Skulker") == 500, "both kept across logins in one file");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    // ── Experience per kill (2026-11-08) ─────────────────────────────────
+
+    private static void XpMatcher()
+    {
+        var m = new KillXpMatcher();
+        Check.Eq(m.OnTotal(1_000_000, T0).Count, 0, "the first value read is the starting point");
+        Check.Eq(m.OnTotal(1_000_000, T0.AddSeconds(0.1)).Count, 0, "no change");
+
+        // A rise after the kill.
+        Check.Eq(m.OnKill("Drudge Skulker", T0.AddSeconds(1)).Count, 0, "a kill waits for its rise");
+        var got = m.OnTotal(1_000_500, T0.AddSeconds(1.4));
+        Check.True(got.Count == 1 && got[0].Name == "Drudge Skulker" && got[0].Xp == 500, "the rise 0.4 s later is its XP");
+
+        // A rise before the kill notice (the server's order can be either).
+        Check.Eq(m.OnTotal(1_001_300, T0.AddSeconds(5)).Count, 0, "a rise waits for a kill");
+        got = m.OnKill("Mosswart Worshipper", T0.AddSeconds(5.6));
+        Check.True(got.Count == 1 && got[0].Name == "Mosswart Worshipper" && got[0].Xp == 800, "the kill 0.6 s later takes it");
+
+        // A quest's rise: no kill near it.
+        Check.Eq(m.OnTotal(1_101_300, T0.AddSeconds(10)).Count, 0, "a quest turn-in");
+        Check.Eq(m.OnTotal(1_101_300, T0.AddSeconds(11.5)).Count, 0, "waited past RiseWaitSec");
+        Check.Eq(m.WaitingRises, 0, "and dropped");
+        Check.Eq(m.OnKill("Drudge Skulker", T0.AddSeconds(12)).Count, 0, "a later kill doesn't take the quest's XP");
+
+        // That kill gave nothing seen: past KillWaitSec it goes, and a later rise isn't its.
+        Check.Eq(m.OnTotal(1_101_300, T0.AddSeconds(15.5)).Count, 0, "no rise in KillWaitSec");
+        Check.Eq(m.WaitingKills, 0, "the kill stopped waiting");
+        Check.Eq(m.OnTotal(1_102_000, T0.AddSeconds(16)).Count, 0, "a rise after that is no kill's");
+
+        // Two kills (a ring spell), two rises.
+        m.OnKill("Drudge Skulker", T0.AddSeconds(20));
+        m.OnKill("Drudge Ravener", T0.AddSeconds(20.1));
+        var a = m.OnTotal(1_102_400, T0.AddSeconds(20.3));
+        var b = m.OnTotal(1_103_100, T0.AddSeconds(20.5));
+        Check.True(a.Count == 1 && a[0].Name == "Drudge Skulker" && a[0].Xp == 400, "the first rise to the first kill");
+        Check.True(b.Count == 1 && b[0].Name == "Drudge Ravener" && b[0].Xp == 700, "the second to the second");
+
+        // A lower total (another character): a new starting point, no rise.
+        Check.Eq(m.OnTotal(50, T0.AddSeconds(30)).Count, 0, "lower: starts over");
+        m.OnKill("Drudge Skulker", T0.AddSeconds(31));
+        Check.True(m.OnTotal(80, T0.AddSeconds(31.2)) is { Count: 1 } r && r[0].Xp == 30, "and counts from there");
+        m.Reset();
+        Check.Eq(m.OnTotal(999, T0.AddSeconds(40)).Count, 0, "after a reset the first value is the start again");
+        Check.Eq(m.OnKill("  ", T0).Count + m.WaitingKills, 0, "no name: nothing waits");
+    }
+
+    private static void XpInRowsAndSave()
+    {
+        var s = new MonsterCombatStats();
+        s.OnKill("You killed Drudge Skulker!", KillBlow.Physical, T0, _ => "Drudge Skulker");
+        s.OnKill("You killed Drudge Skulker!", KillBlow.Physical, T0);
+        s.OnKill("You killed Drudge Skulker!", KillBlow.Physical, T0);
+        int v = s.Version;
+        s.OnKillXp("Drudge Skulker", 1_000_000, T0);
+        s.OnKillXp("Drudge Skulker", 1_469_134, T0);
+        s.OnKillXp("Drudge Skulker", 0, T0);   // nothing
+        Check.True(s.Version > v, "the version moves");
+        MonsterStatsRow r = s.Get("Drudge Skulker")!;
+        Check.Eq((r.Kills, r.Xp, r.XpKills), (3, 2_469_134L, 2), "3 kills, 2 with XP seen");
+        Check.Near(r.XpPerKill ?? 0, 1_234_567, 1e-9, "XP/kill over the kills with XP seen");
+        Check.Null(new MonsterStatsRow("x", 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0).XpPerKill, "none seen: no XP/kill");
+
+        string json = RynthAiPlugin.MonsterStatsJson(r);
+        Check.True(json.Contains("\"xp\":2469134") && json.Contains("\"xk\":2"), "mstats has xp and xk: " + json);
+        Check.True(MonsterStatsText.ChatLines(r)[0].Contains("XP/kill 1,234,567"), "/ra mstats: " + MonsterStatsText.ChatLines(r)[0]);
+        Check.True(MonsterStatsText.ListLine(r).Contains("XP/kill 1,234,567"), "the list line: " + MonsterStatsText.ListLine(r));
+        Check.Eq(MonsterStatsText.XpCell(r), "1,234,567", "the window's cell");
+        Check.True(MonsterStatsText.DetailRows(r).Any(d => d.Label == "XP" && d.Mine.Contains("XP/kill 1,234,567")), "the window's detail");
+
+        var save = new MonsterStatsSave { ProcessId = 1, ProcessStartUtcTicks = 2, CharacterId = 3, SavedUtcTicks = T0.Ticks, SinceUtcTicks = T0.Ticks, Rows = s.Snapshot().ToList() };
+        string text = MonsterStatsStore.Serialize(save);
+        Check.True(MonsterStatsStore.TryParse(text, out MonsterStatsSave back) && back.Rows.Single() == r, "the save keeps XP and XP kills");
+        // A save from before 11-08: 16 fields a row.
+        string older = string.Join("\n", text.Split('\n').Select(l => l.StartsWith("m=") ? string.Join("\t", l.Split('\t').Take(16)) : l));
+        Check.True(MonsterStatsStore.TryParse(older, out MonsterStatsSave old) && old.Rows.Single().Kills == 3 && old.Rows.Single().XpKills == 0,
+                   "an older save reads, with no XP");
+        var loaded = new MonsterCombatStats();
+        loaded.Load(back.Rows);
+        Check.Eq(loaded.Get("Drudge Skulker")!.Xp, 2_469_134L, "Load keeps the XP");
+    }
+
+    private static void XpTableRoundTrip()
+    {
+        string dir = TempDir("ms-xptable");
+        try
+        {
+            var t = new MonsterXpTable();
+            t.Record("Drudge Skulker", 1000);   // no character yet: kept in memory
+            t.SaveIfDirty();
+            Check.False(Directory.Exists(dir), "no character, no file");
+            t.SetCharacter(dir);
+            Check.Eq(t.FilePath, Path.Combine(dir, MonsterXpTable.FileName), "next to the character's settings: " + t.FilePath);
+            Check.Null(t.XpPerKill("Drudge Skulker"), "a character's table starts from its file (none yet)");
+            t.Record("Drudge Skulker", 1000);
+            t.Record("Drudge Skulker", 2000);
+            Check.Near(t.XpPerKill("drudge skulker") ?? 0, 1500, 1e-9, "the first kills count fully (any case)");
+            for (int i = 0; i < 200; i++) t.Record("Olthoi Slayer", 100);
+            for (int i = 0; i < 100; i++) t.Record("Olthoi Slayer", 300);
+            Check.Near(t.XpPerKill("Olthoi Slayer") ?? 0, 300, 3, "follows the last ~20 kills (a new level, a bonus weekend)");
+            t.Record("Zero", 0);
+            t.Record("", 50);
+            Check.Eq(t.Count, 2, "no zero XP or empty name");
+            t.SaveIfDirty();
+            Check.True(File.Exists(t.FilePath), "saved");
+
+            var next = new MonsterXpTable();   // the next login
+            next.SetCharacter(dir);
+            Check.Near(next.XpPerKill("Drudge Skulker") ?? 0, 1500, 0.01, "loaded at login");
+            Check.Eq(next.KillsCounted("Drudge Skulker"), 2, "with its count");
+            Check.Eq(next.KillsCounted("Olthoi Slayer"), 300, "every kill counted");
+            File.AppendAllText(next.FilePath, "X|Bad|abc|3\nY|later|1|2\nX|Neg|-5|3\n");
+            var odd = new MonsterXpTable();
+            odd.SetCharacter(dir);
+            Check.Eq(odd.Count, 2, "bad lines and a later version's lines are skipped");
+            odd.SetCharacter("");
+            Check.True(odd.Count == 0 && odd.FilePath.Length == 0, "detached: empty");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    private static void XpPluginWiring()
+    {
+        string dir = TempDir("ms-xpwire"), charDir = TempDir("ms-xpchar");
+        try
+        {
+            var rig = new Rig(dir);
+            rig.Call("SetXpTableCharacter", charDir);
+            FakeHost.Quads[(Player, 1)] = 5_000_000;
+            rig.Call("TickMonsterStats");   // the starting point
+            rig.Set("_currentCombatMode", CombatMode.Melee);
+            rig.P.NoteCombatEvent(CombatEvents.AttackerNotification, AttackerBody("Drudge Skulker", 30));
+            rig.Call("NoteMonsterStatsKill", "You killed Drudge Skulker!");
+            FakeHost.Quads[(Player, 1)] = 5_250_000;
+            rig.Call("TickMonsterStats");
+            MonsterStatsRow r = rig.Stats.Get("Drudge Skulker")!;
+            Check.Eq((r.Kills, r.Xp, r.XpKills), (1, 250_000L, 1), "the kill's XP on its row");
+            Check.Near(rig.P.XpPerKill("Drudge Skulker") ?? 0, 250_000, 1e-9, "and in the learned table");
+
+            FakeHost.Quads[(Player, 1)] = 5_400_000;   // a quest: no kill
+            rig.Call("TickMonsterStats");
+            Check.Eq(rig.Stats.Get("Drudge Skulker")!.Xp, 250_000L, "a rise with no kill isn't a monster's");
+
+            var lines = rig.Typed("/ra mstats Drudge Skulker");
+            Check.True(lines.Count == 3 && lines[0].Text.Contains("XP/kill 250,000"), "/ra mstats says it: " + Show(lines));
+            rig.Call("ShutdownMonsterStats");
+            Check.True(File.Exists(Path.Combine(charDir, MonsterXpTable.FileName)), "the table is saved at unload");
+            rig.Call("OnLogoutMonsterStats");
+            Check.Eq(rig.Stats.Count, 0, "logout clears the session's rows");
+            Check.Near(rig.P.XpPerKill("Drudge Skulker") ?? 0, 250_000, 1e-9, "the learned table stays");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+            try { Directory.Delete(charDir, true); } catch { }
+        }
     }
 
     private static readonly DateTime T0 = new(2026, 10, 30, 12, 0, 0, DateTimeKind.Utc);
@@ -734,7 +967,9 @@ internal static class MonsterStatsTests
                 Check.Eq((I("sw"), I("ev"), I("sp"), I("rs"), I("ne")), (5, 1, 3, 1, 1), "your side: 3 hits + the killing blow, 1 evaded; 3 spells, 1 resisted, 1 no effect");
                 Check.Eq((I("at"), I("yev"), I("ysp"), I("yrs"), I("yne")), (2, 1, 2, 1, 0), "its side");
                 Check.Eq((I("k"), I("dd"), I("dt")), (1, 70, 16), "kill and damage (30 + 40 dealt, 7 + 9 taken)");
-                Check.Eq(m.EnumerateObject().Count(), 13, "the thirteen fields");
+                Check.Eq((I("xp"), I("xk")), (0, 0), "no XP seen yet (2026-11-08 fields)");
+                Check.Eq((I("cd"), I("cn")), (0, 0), "no corpse timed yet (2026-11-08 fields)");
+                Check.Eq(m.EnumerateObject().Count(), 17, "the seventeen fields");
             }
             Check.False(rows["Mosswart Worshipper"].TryGetProperty("mstats", out _), "a monster without numbers has none");
             Check.True(rows["Drudge Skulker"].TryGetProperty("key", out _) && rows["Drudge Skulker"].TryGetProperty("kills", out _), "the row's own fields are all still there");

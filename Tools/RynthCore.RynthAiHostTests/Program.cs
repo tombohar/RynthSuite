@@ -20,6 +20,9 @@ internal static class Program
     /// <summary>DungeonHazardStore's folder before Main pointed it at the scratch folder.</summary>
     public static string LiveHazardFolder { get; private set; } = "";
 
+    /// <summary>DungeonRouteMaker's folder (NavProfiles) before Main pointed it at the scratch folder.</summary>
+    public static string LiveRouteFolder { get; private set; } = "";
+
     /// <summary>CreatureProfileStore's folder before Main pointed it at the scratch folder.</summary>
     public static string LiveCreatureFolder { get; private set; } = "";
 
@@ -46,6 +49,9 @@ internal static class Program
         LiveHazardTextureFolder = RynthCore.Plugin.RynthAi.DungeonHazardSurfaces.Folder;
         RynthCore.Plugin.RynthAi.DungeonHazardSurfaces.Folder = Path.Combine(TempRoot, "HazardTextures");
         RynthCore.Plugin.RynthAi.DungeonHazardSurfaces.Reload();
+        // Dungeon routes (/ra dunroute, /ra dunpatrol-save, RynthAi.Routes) are saved to C:\Games\RynthSuite\RynthAi\NavProfiles.
+        LiveRouteFolder = RynthCore.Plugin.RynthAi.DungeonRouteMaker.Folder;
+        RynthCore.Plugin.RynthAi.DungeonRouteMaker.Folder = Path.Combine(TempRoot, "NavProfiles");
         // Appraised creatures are saved to C:\Games\RynthSuite\RynthAi\CreatureData\creatures.json.
         LiveCreatureFolder = RynthCore.Plugin.RynthAi.CreatureData.CreatureProfileStore.Folder;
         RynthCore.Plugin.RynthAi.CreatureData.CreatureProfileStore.Folder = Path.Combine(TempRoot, "CreatureData");
@@ -63,6 +69,7 @@ internal static class Program
         LootWandTests.Register(runner);
         LootRaresModeTests.Register(runner);
         LootChatLineTests.Register(runner);
+        ItemInfoTextColorTests.Register(runner);
         LootSurveyTests.Register(runner);
         PropertyDumpTests.Register(runner);
         T11LootTests.Register(runner);
@@ -79,12 +86,14 @@ internal static class Program
         PatrolSettingsTests.Register(runner);
         PatrolPocketTests.Register(runner);
         PatrolPortalTests.Register(runner);
+        DunRouteTests.Register(runner);
         BuffTests.Register(runner);
         SpellCatalogTests.Register(runner);
         CombatMathTests.Register(runner);
         WeaponTests.Register(runner);
         RadarSnapshotTests.Register(runner);
         AmmoTests.Register(runner);
+        MissileAmmoSwapTests.Register(runner);
         VTankYieldTests.Register(runner);
         OffhandTests.Register(runner);
         HandSwapTests.Register(runner);
@@ -96,10 +105,13 @@ internal static class Program
         LootRetryTimingTests.Register(runner);
         LootClaimMismatchTests.Register(runner);
         BoostNavTests.Register(runner);
+        NavHeadingTests.Register(runner);
         LootNothingLineTests.Register(runner);
         ChestLootTests.Register(runner);
         ItemToolTests.Register(runner);
         VanishedItemTests.Register(runner);
+        KitUsedUpTests.Register(runner);
+        VitalWandGateTests.Register(runner);
         OwnCorpseTests.Register(runner);
         UseRefusalTests.Register(runner);
         CorpseKillerTests.Register(runner);
@@ -107,9 +119,13 @@ internal static class Program
         MultiTargetTests.Register(runner);
         CastSafetyTests.Register(runner);
         HealLatencyTests.Register(runner);
+        HealGraceTests.Register(runner);
+        HealHoldTests.Register(runner);
         BlastTests.Register(runner);
         ArcWhenClearTests.Register(runner);
         WallTests.Register(runner);
+        RingTests.Register(runner);
+        VtRingImportTests.Register(runner);
         CombatHookTests.Register(runner);
         UseAtLoginTests.Register(runner);
         LearnSpellsTests.Register(runner);
@@ -125,13 +141,18 @@ internal static class Program
         MonsterEditorTests.Register(runner);
         InstallPathsTests.Register(runner);
         PetRefillTests.Register(runner);
+        PetSummonStopsTests.Register(runner);
         AutoStackTests.Register(runner);
         AutoVendorSplitTests.Register(runner);
         AutoVendorZeroRateTests.Register(runner);
+        AutoVendorZeroPayTests.Register(runner);
+        AutoVendorFoldersTests.Register(runner);
         BackAwayTests.Register(runner);
         ServerPluginForwardTests.Register(runner);
         IgnoreMonsterTests.Register(runner);
         WorldCacheTypedTests.Register(runner);
+        VendorFlagTests.Register(runner);
+        LootByNameTests.Register(runner);
         NavOverlayTests.Register(runner);
         ActionPacingTests.Register(runner);
         HazardEscapeTests.Register(runner);
@@ -145,12 +166,15 @@ internal static class Program
         CastNoDamageTests.Register(runner);
         ManaReserveTests.Register(runner);
         DamageRowsTests.Register(runner);
+        ShieldFacingTests.Register(runner);
         NavMapEditTests.Register(runner);
         LootSpeedTests.Register(runner);
         MeleeStallTests.Register(runner);
+        NativeAttackTests.Register(runner);
         ServerMenuTests.Register(runner);
         MiniRemoteMoveTests.Register(runner);
         SessionDeathTests.Register(runner);
+        SessionBankProfileTests.Register(runner);
         SectionsTests.Register(runner);
         ItemsCleanTests.Register(runner);
         DeathRecallTests.Register(runner);
@@ -188,9 +212,13 @@ internal static class Program
         DifficultyTierTests.Register(runner);
         TickIsolationTests.Register(runner);
         ChoresInFightTests.Register(runner);
+        AetheriaUnboxTests.Register(runner);
         CommandReplyTests.Register(runner);
         MonsterStatsTests.Register(runner);
         MetaSaveTests.Register(runner);
+        MetaResumeTests.Register(runner);
+        FellowOpenTests.Register(runner);
+        WieldBanTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

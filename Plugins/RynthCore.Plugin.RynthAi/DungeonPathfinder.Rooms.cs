@@ -115,8 +115,11 @@ internal static partial class DungeonPathfinder
     /// the same origin) into rooms. A cell in
     /// <paramref name="excluded"/> (a hazard) never merges: it stays a room of its own.
     /// </summary>
+    /// <param name="mergeSamePieces">False for a building: AC gives several walled rooms and corridors
+    /// one origin there, and read as one open room their openings got no doorway points, so a route
+    /// cut the corners into the walls between them (2026-11-06, Outdoor Hunt, B470).</param>
     internal static DungeonRooms BuildRooms(Dictionary<uint, DungeonNavNode> graph, DungeonGeometry geo,
-                                            IReadOnlySet<uint>? excluded = null)
+                                            IReadOnlySet<uint>? excluded = null, bool mergeSamePieces = true)
     {
         var parent = new Dictionary<uint, uint>(graph.Count);
         foreach (uint c in graph.Keys) parent[c] = c;
@@ -139,7 +142,8 @@ internal static partial class DungeonPathfinder
                 // Pieces of one junction: AC builds a crossing or a corner from several cells
                 // with the same origin (0x6544 has clusters of three). Their openings to each
                 // other are inside the junction; kept apart, the patrol looped round them.
-                bool samePiece = Math.Abs(node.NS - other.NS) * 240.0 < SamePieceMeters
+                bool samePiece = mergeSamePieces
+                              && Math.Abs(node.NS - other.NS) * 240.0 < SamePieceMeters
                               && Math.Abs(node.EW - other.EW) * 240.0 < SamePieceMeters
                               && Math.Abs(node.Z - other.Z) < SamePieceMeters;
                 if (!wide && !samePiece) continue;
@@ -309,7 +313,8 @@ internal static partial class DungeonPathfinder
         IReadOnlySet<uint>? hazardCells,
         double startNS, double startEW, double startZ,
         double destNS, double destEW, double destZ,
-        out int doorways)
+        out int doorways,
+        bool mergeSamePieces = true)
     {
         doorways = 0;
         var pts = new List<NavPoint>();
@@ -324,7 +329,7 @@ internal static partial class DungeonPathfinder
             return tmp.Points;
         }
 
-        var rooms = BuildRooms(graph, geo, hazardCells);
+        var rooms = BuildRooms(graph, geo, hazardCells, mergeSamePieces);
         var steps = new List<Step>();
         for (int i = 0; i + 1 < cellPath.Count; i++)
         {
@@ -857,7 +862,8 @@ internal static partial class DungeonPathfinder
 
     // The point a patrol visits to look into a room: the middle of its cell centres when that
     // is on its floor, else the cell centre nearest that middle; then pushed off the walls.
-    private static NavPoint? RoomMiddle(Dictionary<uint, DungeonNavNode> graph, DungeonGeometry geo, List<uint> cells, double wall, out uint midCell)
+    // (Also where /ra dunroute ... to room <n> and "far" end: DungeonRouteMaker.)
+    internal static NavPoint? RoomMiddle(Dictionary<uint, DungeonNavNode> graph, DungeonGeometry geo, List<uint> cells, double wall, out uint midCell)
     {
         midCell = 0;
         double sx = 0, sy = 0, sz = 0;

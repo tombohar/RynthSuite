@@ -11,7 +11,7 @@ using RynthCore.Install;
 
 namespace RynthCore.Plugin.RynthAi.Meta;
 
-internal sealed class MetaManager
+internal sealed partial class MetaManager
 {
     private readonly LegacyUiSettings _settings;
     private readonly RynthCoreHost _host;
@@ -222,6 +222,14 @@ internal sealed class MetaManager
         if (_expressions != null) _expressions.CombatTargetCount = count;
     }
 
+    // The last chest looted to the end, for ralastchestlooted[].
+    private Func<uint>? _lastChestLooted;
+    public void SetLastChestLooted(Func<uint>? lastChest)
+    {
+        _lastChestLooted = lastChest;
+        if (_expressions != null) _expressions.LastChestLooted = lastChest;
+    }
+
     public void SetPlayerId(uint id)
     {
         _playerId = id;
@@ -343,6 +351,7 @@ internal sealed class MetaManager
         engine.SetKillClock(_killClock);
         engine.CorpseOpenedByMe = _corpseOpenedByMe;
         engine.CombatTargetCount = _combatTargetCount;
+        engine.LastChestLooted = _lastChestLooted;
         // vtsetsetting[] / vtgetsetting[] take VTank names and units, as '/vt opt set|get' does.
         engine.VtOptionSetter = TrySetVtOption;
         engine.VtOptionGetter = GetVtOption;
@@ -1587,6 +1596,8 @@ internal sealed class MetaManager
         ["approachdistance"]          = "ApproachRange",
         ["navpriorityboost"]          = "BoostNavPriority",
         ["lootpriorityboost"]         = "BoostLootPriority",
+        ["pickupmacrooff"]            = "LootChestsMacroOff",   // Settings > Looting > Pickup with macro off
+        ["lootchestsmacrooff"]        = "LootChestsMacroOff",
         ["dooropenrange"]             = "OpenDoorRange",
         ["autofellowmanagement"]      = "AutoFellowMgmt",
         ["switchwandstodebuff"]       = "UseDispelItems",

@@ -28,6 +28,13 @@ internal sealed class BarSettingsView
     public Action<string> Tell = _ => { };
     /// <summary>Opens the weapon picker (/rdef weapons).</summary>
     public Action ShowWeapons = () => { };
+    /// <summary>Adds an extra Shortcuts bar (it opens once the engine hosts it; the plugin says so in chat).</summary>
+    public Action AddBar = () => { };
+    /// <summary>Removes extra bar N and forgets its slots.</summary>
+    public Action<int> RemoveBar = _ => { };
+
+    /// <summary>The extra bar whose Remove was pressed: it asks once more (0 = none).</summary>
+    private int _confirmRemove;
 
     public BarSettingsView(DefSession session) => _s = session;
 
@@ -81,6 +88,9 @@ internal sealed class BarSettingsView
         }
         w.SliderInt("Slot picture size", "set.button", st.ButtonSize, DefSettings.ButtonMin, DefSettings.ButtonMax, v => { st.ButtonSize = v; Changed(); });
         w.Tooltip("Ctrl+wheel over the bar's title makes the whole bar bigger or smaller.");
+        ClearBusyBox(w, st, Changed);
+
+        MoreBars(w, Changed);
 
         w.SeparatorText("Weapons");
         w.SmallButton("Weapon picker...", "set.weapons", () => ShowWeapons());
@@ -95,6 +105,56 @@ internal sealed class BarSettingsView
         w.TextWrapped(SettingsPanel.Credit);
         w.TextDisabled("Commands: /rdef (show or hide the bar), /rdef settings, /rdef panels, /rdef selection, /rdef weapons, /rdef use <slot or name>, "
                        + "/rdef qty, /rdef split, /rdef give, /rdef buy, /rdef help.");
+    }
+
+    /// <summary>
+    /// The extra Shortcuts bars (2026-11-04): add one, and for each: shown, how many slots, remove (asked
+    /// once more when it holds something). Only where the engine has the Shortcuts bar (they are its kind
+    /// of window).
+    /// </summary>
+    private void MoreBars(UiWindow w, Action changed)
+    {
+        if (WindowShown(BarTitle) == null) return;
+        w.SeparatorText("More shortcut bars");
+        w.TextWrapped($"Up to {ExtraBar.Max} bars of their own, anywhere on screen. Fill them as the Shortcuts bar: drag items from your pack "
+                      + "onto a slot, or right-click it for the selected item or one of your spells. Their slots are clicked; they have no keys.");
+        foreach (ExtraBar bar in _s.Data.ExtraBars)
+        {
+            int n = bar.Number;
+            WindowBox(w, bar.Title, $"Shortcuts bar {n}", $"set.xbar.{n}.shown", $"Shows or hides Shortcuts bar {n} (/rdef bars show {n}).");
+            if (WindowShown(bar.Title) == null) w.TextDisabled($"Shortcuts bar {n}: opening...");
+            w.SliderInt($"Bar {n} slots", $"set.xbar.{n}.slots", bar.SlotCount, ExtraBar.SlotsMin, ExtraBar.SlotsMax, v => { bar.SlotCount = v; changed(); });
+            w.Tooltip($"How many slots Shortcuts bar {n} shows. Fewer hides the last ones; their items stay (/rdef bars slots {n} <count>).");
+            if (_confirmRemove == n)
+            {
+                int filled = bar.Filled;
+                w.TextColored(SlotText.Waiting, filled > 0
+                    ? $"Remove Shortcuts bar {n}? {filled} of its slots hold an item or a spell: they are forgotten (the items stay in your pack)."
+                    : $"Remove Shortcuts bar {n}?");
+                w.SmallButton("Remove it", $"set.xbar.{n}.yes", () => { _confirmRemove = 0; RemoveBar(n); });
+                w.SameLine();
+                w.SmallButton("Keep it", $"set.xbar.{n}.no", () => _confirmRemove = 0);
+            }
+            else w.SmallButton($"Remove bar {n}...", $"set.xbar.{n}.remove", () => _confirmRemove = n);
+        }
+        if (_s.Data.ExtraBars.Count < ExtraBar.Max)
+        {
+            w.SmallButton("Add a shortcut bar", "set.xbar.add", () => AddBar());
+            w.Tooltip($"Another bar of {ExtraBar.DefaultSlots} slots in a window of its own (/rdef bars add). It opens in a moment: drag its title to move it.");
+        }
+        else w.TextDisabled($"{ExtraBar.Max} extra bars: as many as there can be.");
+    }
+
+    /// <summary>"Shortcuts clear a stuck busy state" (DefSettings.ClearStuckBusy): here and on the script-window bar's settings.</summary>
+    internal static void ClearBusyBox(UiWindow w, DefSettings st, Action changed)
+    {
+        w.Checkbox("Shortcuts clear a stuck busy state", "set.clearbusy", st.ClearStuckBusy, v => { st.ClearStuckBusy = v; changed(); });
+        w.Tooltip("On: a slot pressed while only the client's busy count holds it (after a death or a login the count can stay up with\n"
+                  + "nothing happening; nothing of RynthDefective's or RynthAi's in flight, no animation, no 'You're too busy' from the server\n"
+                  + "just now) resets the count as /ra clearbusy does, then the item is used. Once per press, logged.\n"
+                  + "Off (the default): such a count holds a press for up to 4 s, then is ignored. Off because a reset also wipes actions the\n"
+                  + "server hasn't answered that RynthDefective can't see (a click in the game's own windows, its toolbar keys, another\n"
+                  + "plugin's), and their late answers then take the count below zero. Kept for this character. Also: /rdef shortcuts clearbusy on|off.");
     }
 
     private void WindowBox(UiWindow w, string title, string label, string id, string tip)

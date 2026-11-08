@@ -98,6 +98,8 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
             ShowWindow = (title, show) => Host.SetPanelOpen(title, show ? RynthPanelOpen.Open : RynthPanelOpen.Close),
             Tell = text => { _session.SetStatus(text); Print(text); _nextBarBuildMs = 0; },
             ShowWeapons = () => ShowPicker(true),
+            AddBar = AddExtraBar,
+            RemoveBar = RemoveExtraBar,
         };
         _settingsWindow = _ui.Add(new UiWindow("RynthDefective/Settings", "Defective Settings")
         {
@@ -126,12 +128,15 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
         StopCorpses();
         _inWorld = false;
         _identityKnown = false;
+        RefreshExtraNumbers();   // the extra bars leave with the character (the engine opens them again when they come back)
+        _openWhenHosted.Clear();
         _session.LoggedIn = false;
         _session.Use.ResetSession();
         _world?.Reset();
         _qty.Reset();
         _qtyWorld?.Reset();
         _barView = RynthCore.Plugin.RynthDefective.ShortcutBar.BarSnapshot.NotReady;
+        _dayNightView = Clock.DayNightView.NotReady;
         foreach (UiWindow? w in new[] { _barWindow, _pickerWindow, _settingsWindow })
             if (w != null) { w.Visible = false; w.NeedsPass = true; }
         _session.DeclineCopy();
@@ -225,6 +230,15 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
                 if (UsesShortcutBar) Answer(DefReplies.Window("Corpses window", Host.SetPanelOpen(Corpses.CorpsesWindow.Title, RynthPanelOpen.Toggle)));
                 else PrintFail("This RynthCore can't show the corpses window (it needs plugin API v90).");
                 break;
+            case DefVerb.DayNight:
+            {
+                // The window shown or hidden, and the time now in the reply (an engine without the window: the time only).
+                RynthPanelOpen mode = c.Text == "show" ? RynthPanelOpen.Open : c.Text == "hide" ? RynthPanelOpen.Close : RynthPanelOpen.Toggle;
+                int state = UsesShortcutBar ? Host.SetPanelOpen(Clock.DayNightWindow.Title, mode) : -1;
+                Clock.DayNightView clock = ReadDayNight(Environment.TickCount64);
+                Answer(DefReplies.DayNight(state, clock.Ready ? clock.Now : null));
+                break;
+            }
             case DefVerb.Panels:
                 if (UsesPanelButtons) Answer(DefReplies.Window("Game Panels buttons", Host.SetPanelOpen(RynthCore.Plugin.RynthDefective.ShortcutBar.PanelButtonsWindow.Title, RynthPanelOpen.Toggle)));
                 else PrintFail("This RynthCore can't open the game's panels from buttons (it needs plugin API v90).");
@@ -281,6 +295,21 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
             case DefVerb.Status:
                 PrintStatus();
                 break;
+            case DefVerb.Bars:
+                RunBarsCommand(c);
+                break;
+            case DefVerb.Shortcuts:
+            {
+                // Shortcuts clear a stuck busy state (per character; alone: what it is now).
+                DefSettings st = _session.Settings;
+                if (c.Text.Length > 0 && st.ClearStuckBusy != (c.Text == "on"))
+                {
+                    st.ClearStuckBusy = c.Text == "on";
+                    RequestSave();
+                }
+                Print(DefReplies.ClearBusy(st.ClearStuckBusy));
+                break;
+            }
             case DefVerb.Quantity:
             case DefVerb.Split:
             case DefVerb.Give:
@@ -298,6 +327,9 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
         if (UsesShortcutBar)
             Print("RynthDefective draws the Shortcuts bar, the Game Panels buttons and the Selection window. Its settings: /rdef settings, "
                   + "or the gear on the bar; right-click the bar's title to show or hide Game Panels and Selection.");
+        if (UsesShortcutBar)
+            Print($"More bars, anywhere on screen: Add a shortcut bar in the bar's right-click menu, or /rdef bars add (up to {ExtraBar.Max}); "
+                  + "/rdef bars lists them, /rdef bars remove 2 takes one off.");
         Print("A key for a slot: /rdef bind 1 F9 (or Edit slots in the bar). Any item by name from Settings > Hotkeys: /rc hotkey add F9 /rdef use Stamina Kit.");
         Print("How many of a stack or a vendor's item: the box under it in the Selection window, or /rdef qty 25, then /rdef split, /rdef give "
               + "(to the last player or NPC you selected) or /rdef buy (the selected vendor item, or /rdef buy 25 <item name>).");
@@ -330,7 +362,7 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
     {
         int filled = 0;
         for (int i = 0; i < _session.Settings.SlotCount; i++) if (!_session.Data.Slots[i].Empty) filled++;
-        Print($"{_character}: {filled}/{_session.Settings.SlotCount} slots set, {_session.Data.Favourites.Count} favourite weapons; "
+        Print($"{_character}: {filled}/{_session.Settings.SlotCount} slots set, {_session.Data.ExtraBars.Count} extra bars, {_session.Data.Favourites.Count} favourite weapons; "
               + $"{(_session.Use.InFlight ? "an action is in flight" : _session.Use.HasPending ? "an action is waiting" : "idle")}; file {_store.PathFor(_server, _character)}");
     }
 
@@ -456,6 +488,7 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
         TickSelection(now);
         TickQuantity(now);
         TickCorpses(now);
+        TickDayNight(now);
 
         // With the shortcut bar the old script-window bar stays shut (the weapon picker is still one), and
         // has no RynthBar button (one that opened a window shut again at once). Its settings have their
@@ -489,7 +522,8 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
     /// <summary>Re-reads the inventory while a window shows or an action waits; slots follow their items.</summary>
     private void TickInventory()
     {
-        bool barShown = Environment.TickCount64 - System.Threading.Volatile.Read(ref _barDrawnMs) < 2000;
+        long now = Environment.TickCount64;
+        bool barShown = now - System.Threading.Volatile.Read(ref _barDrawnMs) < 2000 || AnyExtraShown(now);
         bool wanted = (_barWindow?.Visible ?? false) || (_pickerWindow?.Visible ?? false) || barShown || _session.Use.HasPending;
         if (!wanted || _world == null) return;
         List<CarriedItem> items = _world.Snapshot(InventoryAgeMs);
@@ -515,6 +549,7 @@ public sealed partial class RynthDefectivePlugin : RynthPluginBase
         _session.Character = name;
         _session.LoggedIn = true;
         _identityKnown = true;
+        RefreshExtraNumbers();
         _revisionSeen = -1;
         RefreshIconSupport();
         StartCorpses();

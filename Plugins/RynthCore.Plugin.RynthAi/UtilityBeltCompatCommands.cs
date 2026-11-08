@@ -78,6 +78,9 @@ public sealed partial class RynthAiPlugin
     /// </summary>
     internal bool HandleMetaChatCommand(string cmd) => RunAsMeta(() =>
     {
+        // A meta's own "/fellowship create" goes on to the chat parser; Open fellowship on create
+        // still opens it (RynthAiPlugin.FellowOpen.cs).
+        if (IsFellowshipCreateLine(cmd)) NoteFellowshipCreate();
         if (cmd.StartsWith("/ub ", StringComparison.OrdinalIgnoreCase))
         {
             var (verb, args) = SplitUbLine(cmd);

@@ -10,6 +10,7 @@ internal enum TickStep
     DataWriteProblems,
     CombatHook,
     DelayedCommands,
+    FellowOpen,
     GameInput,
     EngineCommands,
     PropertyDump,
@@ -24,6 +25,7 @@ internal enum TickStep
     WatchedFiles,
     QuestTracker,
     LocalFeatures,
+    RouteJobs,
     GiveQueue,
     ItemTool,
     Jumper,
@@ -98,6 +100,7 @@ internal sealed class TickGuard
         Add(TickStep.DataWriteProblems, "save problem report",      LogCat.General);
         Add(TickStep.CombatHook,        "script hook cast results", LogCat.Combat);
         Add(TickStep.DelayedCommands,   "delayed commands",         LogCat.Commands);
+        Add(TickStep.FellowOpen,        "open fellowship on create", LogCat.Commands);
         Add(TickStep.GameInput,         "held keys",                LogCat.Commands, essential: true);
         Add(TickStep.EngineCommands,    "engine commands",          LogCat.Commands);
         Add(TickStep.PropertyDump,      "property dump",            LogCat.Commands);
@@ -112,6 +115,7 @@ internal sealed class TickGuard
         Add(TickStep.WatchedFiles,      "monster and nav files",    LogCat.UI);
         Add(TickStep.QuestTracker,      "quest tracker",            LogCat.Quests);
         Add(TickStep.LocalFeatures,     "HUDs and panels",          LogCat.Huds);
+        Add(TickStep.RouteJobs,         "dungeon route jobs",       LogCat.Navigation);
         Add(TickStep.GiveQueue,         "give queue",               LogCat.Inventory);
         Add(TickStep.ItemTool,          "item tool",                LogCat.Inventory);
         Add(TickStep.Jumper,            "jumper",                   LogCat.Jumper, essential: true);

@@ -13,6 +13,43 @@ internal static class AutoStackTests
     {
         r.Add("autostack: stacks group by WCID; the name is only the fallback while the WCID is unknown", GroupKey);
         r.Add("autostack: a partial fill (target grew, source shrank) is progress; an untouched pair is not", Progress);
+        r.Add("autostack: name guesses match pyreals exactly and the rest as whole words (Pyreal Mote, Spear, Pearl don't stack)", NameGuess);
+        r.Add("autostack: a guessed group the server refuses 3 times running is given up; a merge between resets it", Refusals);
+    }
+
+    private static void NameGuess()
+    {
+        Check.Eq(25000, InventoryManager.NameFallbackMaxStack("Pyreal"), "pyreal coins");
+        Check.Eq(25000, InventoryManager.NameFallbackMaxStack("Pyreals"), "pyreal coins, plural");
+        Check.Eq(1, InventoryManager.NameFallbackMaxStack("Pyreal Mote"), "2026-11-08: motes don't stack");
+        Check.Eq(1, InventoryManager.NameFallbackMaxStack("Quality Pyreal Ingot"), "ingots don't stack");
+        Check.Eq(1, InventoryManager.NameFallbackMaxStack("Spear"), "'pea' inside a word");
+        Check.Eq(1, InventoryManager.NameFallbackMaxStack("Black Pearl"), "'pea' inside a word");
+        Check.Eq(1, InventoryManager.NameFallbackMaxStack("Arrowheads"), "'arrow' inside a word");
+        Check.Eq(250, InventoryManager.NameFallbackMaxStack("Greater Deadly Armor Piercing Arrow"), "arrows");
+        Check.Eq(250, InventoryManager.NameFallbackMaxStack("Deadly Fire Quarrel"), "quarrels");
+        Check.Eq(100, InventoryManager.NameFallbackMaxStack("Iron Scarab"), "scarabs");
+        Check.Eq(100, InventoryManager.NameFallbackMaxStack("Prismatic Taper"), "tapers");
+        Check.Eq(1, InventoryManager.NameFallbackMaxStack(null), "no name");
+        Check.Eq(1, InventoryManager.NameFallbackMaxStack("  "), "blank name");
+    }
+
+    private static void Refusals()
+    {
+        var r = new StackGroupRefusals();
+        Check.False(r.Refused("w:6353"), "1st refusal");
+        Check.False(r.Refused("w:6353"), "2nd refusal");
+        Check.False(r.GivenUp("w:6353"), "not yet");
+        Check.True(r.Refused("w:6353"), "3rd refusal gives it up, once");
+        Check.True(r.GivenUp("w:6353"), "given up");
+        Check.False(r.Refused("w:6353"), "already given up: no second notice");
+
+        Check.False(r.Refused("w:1"), "other group 1st");
+        Check.False(r.Refused("w:1"), "other group 2nd");
+        r.Merged("w:1");
+        Check.False(r.Refused("w:1"), "a merge between resets the count");
+        Check.False(r.GivenUp("w:1"), "the other group goes on");
+        Check.False(r.Refused(""), "an empty group never counts");
     }
 
     private static void GroupKey()

@@ -1021,7 +1021,11 @@ public sealed partial class RynthNavPlugin
         "/rnav avoid — show; avoid portals on|off|<m> | walls on|off|<m> | corners <m>\n" +
         "/rnav markers on|off | markers labels on|off | markers guide on|off — the trip on the ground\n" +
         "/rnav mesh on|off | floor on|off | walls on|off | radius <m> | triangles <n> — draw the navmesh: green floor, red walls\n" +
-        "/rnav saveroute [name] [overwrite] — save the last trip as a RynthAi nav route (NavProfiles)";
+        "/rnav saveroute [name] [overwrite] — save the last trip as a RynthAi nav route (NavProfiles)\n" +
+        "/rnav makeroute <name> to <place|coords> [overwrite] — plan a trip and save it as a nav route in one go, no walking\n" +
+        "/rnav makeloop <name> [at <coords>|here] radius <yd> [points <n>] [overwrite] — a hunting loop (circular nav) on walkable ground\n" +
+        "/rnav makepath <name> [loop|line|once] <coords>; <coords>; ... [overwrite] — a nav through those points, each leg walked\n" +
+        "/rnav routeinfo <name> — what a saved nav route is: type, points, yards, where, portals";
 
     /// <summary>One /rnav command. Tick thread.</summary>
     private void RunCommand(string raw, bool fromPanel)
@@ -1073,6 +1077,12 @@ public sealed partial class RynthNavPlugin
             case "markers": CmdMarkers(rest); break;
             case "mesh": CmdMesh(rest); break;
             case "saveroute": CmdSaveRoute(rest); break;
+            case "makeroute":
+            case "makeloop":
+            case "makepath":
+            case "routeinfo":
+                CmdRouteMaker(cmd, rest);   // RynthNavPlugin.RouteMaker.cs
+                break;
             case "arrive":
                 if (NavReplies.TryArrive(rest, out double yd)) { _arrow.ArriveUnits = yd; Say(NavReplies.Arrived(yd)); }
                 else if (rest.Length == 0) Say(NavReplies.ArriveUsage(rest, _arrow.ArriveUnits));
@@ -1115,42 +1125,57 @@ public sealed partial class RynthNavPlugin
 
     private void CmdGo(string rest)
     {
-        string name, type; double ns, ew;
+        if (!ResolveGo(rest, out string name, out string type, out double ns, out double ew, out string enter, out string enterType, out string error))
+        {
+            Note(error);
+            return;
+        }
+        StartGoto(name, type, ns, ew, enter, enterType);   // StartWalk says "walking to ..." (or why it can't)
+    }
+
+    /// <summary>
+    /// Where /rnav go (and the route maker's go op) walks to: a place or coordinates, the arrow's target
+    /// when nothing is given, and for a dungeon (or a portal) its entrance portal, walked into. False with
+    /// the line to say. Tick thread.
+    /// </summary>
+    private bool ResolveGo(string rest, out string name, out string type, out double ns, out double ew,
+        out string enter, out string enterType, out string error)
+    {
+        enter = ""; enterType = ""; error = "";
         AtlasLocation? place;
         if (rest.Length == 0)
         {
+            name = ""; type = ""; ns = 0; ew = 0;
             ArrowStep? fin = _arrow.Final;
-            if (fin == null || !fin.OnMap) { Note("go where? /rnav go <place or coords> (or set the arrow first)"); return; }
+            if (fin == null || !fin.OnMap) { error = "go where? /rnav go <place or coords> (or set the arrow first)"; return false; }
             name = fin.Name; type = fin.Type; ns = fin.Ns; ew = fin.Ew;
             place = null;
             foreach (var l in _atlas.Locations)
                 if (l.OnMap && l.Name == fin.Name && l.Type == fin.Type && NavCoords.Distance(l.Ns, l.Ew, ns, ew) < 3) { place = l; break; }
         }
-        else if (!ResolveTarget(rest, out name, out type, out ns, out ew, out string error))
+        else if (!ResolveTarget(rest, out name, out type, out ns, out ew, out error))
         {
             // A dungeon or portal the Atlas knows, but with no map position: say why, don't guess.
             foreach (var l in _atlas.Search(rest, null, 5))
                 if (!l.OnMap && Entrance.IsEntrance(l))
                 {
                     Entrance.PortalFor(_atlas, l, false, 0, 0, out string offWhy);
-                    if (offWhy.Length > 0) { Note("goto: " + offWhy); return; }
+                    if (offWhy.Length > 0) { error = "goto: " + offWhy; return false; }
                 }
-            Note(error);
-            return;
+            return false;
         }
         else place = _resolvedPlace;
 
         // A dungeon (or a portal): walk INTO its entrance portal and wait for the teleport.
-        string enter = "", enterType = "";
         if (place != null && Entrance.IsEntrance(place))
         {
             bool hasPos = PlayerMapPos(out double pns, out double pew);
             AtlasLocation? portal = Entrance.PortalFor(_atlas, place, hasPos, pns, pew, out string why);
-            if (portal == null) { Note("goto: " + why); return; }
+            if (portal == null) { error = "goto: " + why; return false; }
             ns = portal.Ns; ew = portal.Ew; enter = place.Name; enterType = place.Type;
             _nextEnterPortal = portal.Name;   // the portal object a saved nav route uses (RynthNavPlugin.SaveRoute.cs)
         }
-        StartGoto(name, type, ns, ew, enter, enterType);   // StartWalk says "walking to ..." (or why it can't)
+        return true;
     }
 
     private void CmdRoute(string rest)
@@ -1293,6 +1318,7 @@ public sealed partial class RynthNavPlugin
     /// <summary>Starts walking to a place: the arrow points along the same route.</summary>
     private void StartGoto(string name, string type, double ns, double ew, string enter = "", string enterType = "")
     {
+        _goJobId = 0;   // a goto of its own: no route maker go job's any more (RynthNavPlugin.RouteMaker.cs)
         _store.Touch(new SavedPlace { Name = name, Type = type, Ns = ns, Ew = ew });
         lock (_reqGate) { _reqGotoNamed = (name, type, ns, ew, enter, enterType); }
     }

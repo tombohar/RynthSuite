@@ -19,6 +19,11 @@
 //                 rises are ignored. "Deposited N luminance" and "Received N
 //                 luminance from X" move lum into the bank without earning it:
 //                 they are taken out of the next bank rises.
+//    Server bank  a server that banks earned luminance out of the client's
+//                 sight: its server plugin reads the bank (a chat command once
+//                 a minute) and publishes it in its profile ("bankLuminance");
+//                 SessionStatsTracker passes that in as BankLum when 9005 isn't
+//                 readable, so it counts exactly as ACECustom's bank (2026-11-02).
 //    Pass-up      ACECustom never sends the allegiance counters (9013/9014).
 //                 A vassal's pass-up lands in the bank silently, while your own
 //                 kill and quest lum prints "You've banked N Luminance.", so

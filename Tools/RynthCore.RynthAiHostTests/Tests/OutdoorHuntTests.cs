@@ -28,6 +28,219 @@ internal static class OutdoorHuntTests
         r.Add("hunt: a monster right beside it that combat doesn't take: stands, then leaves it out", RightHere);
         r.Add("hunt (test 10-23): in a building it walks back out the way it went in (the loops it made cut out)", WayBackOut);
         r.Add("hunt: in a building with no way in known, or the walks out ending still inside: it waits", IndoorsWaits);
+        r.Add("hunt pick (11-08): Nearest is the hunt as it was (the lone one 10 yd off, not the pack)", PickNearestUnchanged);
+        r.Add("hunt pick (11-08): Biggest pack goes to a 5-pack 80 yd off over a lone monster 10 yd off; logged", PickPackFar);
+        r.Add("hunt pick (11-08): a lone monster wins when the pack is very far", PickPackTooFar);
+        r.Add("hunt pick (11-08): Most XP prefers 2 high-XP monsters over 4 low-XP ones (Biggest pack the other way)", PickMostXp);
+        r.Add("hunt pick (11-08): Most XP with no XP learned falls back to the pack's size; an unknown name counts as the known average", PickXpUnknown);
+        r.Add("hunt pick (11-08): a higher Priority still comes first; paths only for the top few; the target is kept while walking", PickPriorityAndCost);
+        r.Add("hunt pick (11-08): /ra hunt pick answers with the choice, sets it, and says why not with the usage", PickCommand);
+        r.Add("hunt pick (11-08): OutdoorHuntPick round-trips (saved, copied, engine payload, clamped, an older engine leaves it)", PickSetting);
+    }
+
+    // ── Pick (2026-11-08, Tom: "a setting to go for nearest spawn or most dense or highest experience") ──
+
+    /// <summary>A pack of <paramref name="n"/> round (x, y), ids from <paramref name="firstId"/>, each within a few yd of the others.</summary>
+    private static List<OutdoorHunt.Candidate> Pack(int firstId, int n, double x, double y, OutdoorHunt.Vec me, string? name = null, int priority = 1)
+    {
+        var list = new List<OutdoorHunt.Candidate>();
+        for (int i = 0; i < n; i++)
+        {
+            double a = i * 2 * Math.PI / Math.Max(1, n);
+            double px = x + (i == 0 ? 0 : 4 * Math.Cos(a)), py = y + (i == 0 ? 0 : 4 * Math.Sin(a));
+            list.Add(C(firstId + i, px, py, me, priority, name));
+        }
+        return list;
+    }
+
+    private static List<OutdoorHunt.Candidate> Sorted(IEnumerable<OutdoorHunt.Candidate> c) => c.OrderBy(x => x.Distance).ToList();
+
+    private static void PickNearestUnchanged()
+    {
+        var me = V(1000, 1000);
+        var all = Sorted(Pack(10, 5, 1080, 1000, me).Append(C(1, 1010, 1000, me)));
+        var h = new OutdoorHunt();
+        Check.Eq(h.Pick, OutdoorHunt.PickMode.Nearest, "Nearest by default");
+        h.Start(T0, me);
+        var d = h.Tick(T0, me, true, all, new Nav().Path);
+        Check.Eq(d.TargetId, 1, "the lone one 10 yd away");
+        Check.True(h.Note.StartsWith("next: 'Monster 1', a 10 yd walk"), "the same log line as before: " + h.Note);
+    }
+
+    private static void PickPackFar()
+    {
+        var me = V(1000, 1000);
+        var all = Sorted(Pack(10, 5, 1080, 1000, me).Append(C(1, 1010, 1000, me)));
+        var h = new OutdoorHunt { Pick = OutdoorHunt.PickMode.Pack };
+        h.Start(T0, me);
+        var d = h.Tick(T0, me, true, all, new Nav().Path);
+        Check.True(d.Act == OutdoorHunt.Act.Walk && d.TargetId >= 10 && d.TargetId < 15, $"to the pack, not the lone one ({d.Act} {d.TargetId})");
+        var nearestOfPack = all.Where(c => c.Id >= 10).OrderBy(c => c.Distance).First();
+        Check.Eq(d.TargetId, nearestOfPack.Id, "the pack's member with the shortest walk");
+        Check.True(h.Note.Contains("pack of 5") && h.Note.Contains("yd walk"), "logged with the pack: " + h.Note);
+    }
+
+    private static void PickPackTooFar()
+    {
+        var me = V(1000, 1000);
+        // 3 at 180 yd: 3 / (1 + 180/60) = 0.75; one at 10 yd: 1 / (1 + 10/60) = 0.86.
+        var all = Sorted(Pack(10, 3, 1180, 1000, me).Append(C(1, 1010, 1000, me)));
+        var h = new OutdoorHunt { Pick = OutdoorHunt.PickMode.Pack };
+        h.Start(T0, me);
+        var d = h.Tick(T0, me, true, all, new Nav().Path);
+        Check.Eq(d.TargetId, 1, "the lone one near beats a small pack far away");
+        Check.True(h.Note.Contains("on its own"), "logged: " + h.Note);
+        // The same pack 80 yd off: 3 / 2.33 = 1.29 wins.
+        var near = Sorted(Pack(10, 3, 1080, 1000, me).Append(C(1, 1010, 1000, me)));
+        var h2 = new OutdoorHunt { Pick = OutdoorHunt.PickMode.Pack };
+        h2.Start(T0, me);
+        Check.True(h2.Tick(T0, me, true, near, new Nav().Path).TargetId >= 10, "and at 80 yd the pack wins");
+    }
+
+    private static Func<string, double?> Xp(params (string Name, double Xp)[] known)
+    {
+        var map = known.ToDictionary(k => k.Name, k => k.Xp);
+        return n => map.TryGetValue(n, out double v) ? v : null;
+    }
+
+    private static void PickMostXp()
+    {
+        var me = V(1000, 1000);
+        var all = Sorted(Pack(10, 2, 1050, 1000, me, "Olthoi Slayer").Concat(Pack(20, 4, 1000, 1030, me, "Drudge Skulker")));
+        var lookup = Xp(("Olthoi Slayer", 1000), ("Drudge Skulker", 100));
+        var h = new OutdoorHunt { Pick = OutdoorHunt.PickMode.Xp, XpLookup = lookup };
+        h.Start(T0, me);
+        var d = h.Tick(T0, me, true, all, new Nav().Path);
+        Check.True(d.TargetId is 10 or 11, $"the 2 high-XP ones 50 yd off ({d.TargetId})");
+        Check.True(h.Note.Contains("pack of 2") && h.Note.Contains("(2,000 XP)"), "logged with the pack's XP: " + h.Note);
+        var p = new OutdoorHunt { Pick = OutdoorHunt.PickMode.Pack, XpLookup = lookup };
+        p.Start(T0, me);
+        Check.True(p.Tick(T0, me, true, all, new Nav().Path).TargetId >= 20, "Biggest pack takes the 4 nearer ones");
+    }
+
+    private static void PickXpUnknown()
+    {
+        var me = V(1000, 1000);
+        var all = Sorted(Pack(10, 2, 1050, 1000, me, "Olthoi Slayer").Concat(Pack(20, 4, 1000, 1030, me, "Drudge Skulker")));
+        var h = new OutdoorHunt { Pick = OutdoorHunt.PickMode.Xp, XpLookup = _ => null };
+        h.Start(T0, me);
+        Check.True(h.Tick(T0, me, true, all, new Nav().Path).TargetId >= 20, "nothing learned: by size, the 4");
+        Check.True(h.Note.Contains("no XP learned yet"), "and says so: " + h.Note);
+        var none = new OutdoorHunt { Pick = OutdoorHunt.PickMode.Xp };   // no lookup at all
+        none.Start(T0, me);
+        Check.True(none.Tick(T0, me, true, all, new Nav().Path).TargetId >= 20, "no lookup: by size too");
+        // Only the Slayers known (1000): the Drudges count as that average, so 4 of them win.
+        var half = new OutdoorHunt { Pick = OutdoorHunt.PickMode.Xp, XpLookup = Xp(("Olthoi Slayer", 1000)) };
+        half.Start(T0, me);
+        Check.True(half.Tick(T0, me, true, all, new Nav().Path).TargetId >= 20, "an unknown name counts as the known average");
+    }
+
+    private static void PickPriorityAndCost()
+    {
+        var me = V(1000, 1000);
+        var all = Sorted(Pack(10, 5, 1020, 1000, me).Append(C(1, 1000, 1050, me, priority: 5)));
+        var h = new OutdoorHunt { Pick = OutdoorHunt.PickMode.Pack };
+        h.Start(T0, me);
+        var nav = new Nav();
+        var d = h.Tick(T0, me, true, all, nav.Path);
+        Check.Eq(d.TargetId, 1, "Priority 5 on its own before a Priority 1 pack of 5");
+
+        // Twenty monsters about: paths for PickCandidates only.
+        var many = new List<OutdoorHunt.Candidate>();
+        for (int i = 0; i < 20; i++) many.Add(C(100 + i, 1000 + 5 * i, 1100, me));
+        var cost = new OutdoorHunt { Pick = OutdoorHunt.PickMode.Pack };
+        cost.Start(T0, me);
+        var counted = new Nav();
+        d = cost.Tick(T0, me, true, Sorted(many), counted.Path);
+        Check.Eq(counted.Calls, cost.PickCandidates, "a path for each of the top few only");
+        int target = d.TargetId;
+        Check.True(target != 0, "one chosen");
+        // Walking to it: kept, even with a bigger pack turning up.
+        var more = Sorted(many.Concat(Pack(200, 8, 1000, 1010, me)));
+        d = cost.Tick(T0.AddSeconds(2), me, false, more, counted.Path);
+        Check.True(d.Act == OutdoorHunt.Act.None && cost.TargetId == target, $"the target is kept while walking ({d.Act} {cost.TargetId})");
+    }
+
+    private static (RynthAiPlugin P, LegacyDashboardRenderer Dash, Action<string> Ra, Func<string> All) HuntRig()
+    {
+        const System.Reflection.BindingFlags Any = System.Reflection.BindingFlags.Instance
+            | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+        RynthCore.RynthAiHostTests.Fakes.FakeHost.Reset();
+        var host = RynthCore.RynthAiHostTests.Fakes.FakeHost.Create();
+        var p = new RynthAiPlugin();
+        typeof(RynthCore.PluginCore.RynthPluginBase).GetMethod("Attach", Any)!.Invoke(p, new object[] { RynthCore.RynthAiHostTests.Fakes.FakeHost.LastApi });
+        var dash = new LegacyDashboardRenderer(host);
+        typeof(RynthAiPlugin).GetField("_dashboard", Any)!.SetValue(p, dash);
+        var chat = RynthCore.RynthAiHostTests.Fakes.FakeHost.Chat;
+        void Ra(string line)
+        {
+            chat.Clear();
+            string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            typeof(RynthAiPlugin).GetMethod("DispatchRaCommand", Any)!.Invoke(p, new object[] { parts[1].ToLowerInvariant(), parts, 0 });
+        }
+        return (p, dash, Ra, () => string.Join(" | ", chat));
+    }
+
+    private static void PickCommand()
+    {
+        var (_, dash, Ra, All) = HuntRig();
+        Ra("/ra hunt pick");
+        Check.True(All().Contains("Outdoor hunt pick: Nearest") && All().Contains(RynthAiPlugin.HuntPickUsage), "no word: the choice now and the usage: " + All());
+        Ra("/ra hunt pick pack");
+        Check.Eq(dash.Settings.OutdoorHuntPick, 1, "pack = 1");
+        Check.True(All().Contains("set: Biggest pack"), "and says so: " + All());
+        Ra("/ra hunt pick xp");
+        Check.Eq(dash.Settings.OutdoorHuntPick, 2, "xp = 2");
+        Check.True(All().Contains("set: Most XP"), "and says so: " + All());
+        Ra("/ra hunt pick most dense");
+        Check.Eq(dash.Settings.OutdoorHuntPick, 1, "Tom's words work too");
+        Ra("/ra hunt pick fastest");
+        Check.Eq(dash.Settings.OutdoorHuntPick, 1, "an unknown word changes nothing");
+        Check.True(All().Contains("isn't one of nearest, pack or xp") && All().Contains("Biggest pack now") && All().Contains("Usage: /ra hunt pick"),
+                   "why, what it is, the usage: " + All());
+        Ra("/ra hunt pick nearest");
+        Check.Eq(dash.Settings.OutdoorHuntPick, 0, "back to nearest");
+        Ra("/ra hunt status");
+        Check.True(All().Contains("Pick: Nearest"), "status says the pick: " + All());
+        Ra("/ra hunt nonsense");
+        Check.True(All().Contains(RynthAiPlugin.HuntPickUsage), "the usage lists it: " + All());
+    }
+
+    private static void PickSetting()
+    {
+        Check.Eq(new LegacyUiSettings().OutdoorHuntPick, 0, "Nearest by default");
+        var ctx = RynthAiJsonContext.Default.LegacyUiSettings;
+        var saved = System.Text.Json.JsonSerializer.Deserialize(
+            System.Text.Json.JsonSerializer.Serialize(new LegacyUiSettings { OutdoorHuntPick = 2 }, ctx), ctx)!;
+        Check.Eq(saved.OutdoorHuntPick, 2, "saved");
+        var live = new LegacyUiSettings();
+        typeof(LegacyDashboardRenderer).GetMethod("CopySettings",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)!
+            .Invoke(null, new object[] { saved, live });
+        Check.Eq(live.OutdoorHuntPick, 2, "copied");
+        var old = System.Text.Json.JsonSerializer.Deserialize("{\"OutdoorHuntRange\":70}", ctx)!;
+        Check.Eq(old.OutdoorHuntPick, 0, "a profile from before the setting: Nearest");
+
+        // The engine's face (SettingsBridgePayload): sent as "OutdoorHuntPick", applied, clamped.
+        var s = new LegacyUiSettings { OutdoorHuntPick = 1 };
+        var dash = (LegacyDashboardRenderer)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", F)!.SetValue(dash, true);
+        typeof(LegacyDashboardRenderer).GetField("_settings", F)!.SetValue(dash, s);
+        typeof(LegacyDashboardRenderer).GetField("_advancedSettingsUi", F)!.SetValue(dash, new LegacyAdvancedSettingsUi(s));
+        string json = dash.BuildSettingsJson();
+        using (var doc = System.Text.Json.JsonDocument.Parse(json))
+            Check.True(doc.RootElement.TryGetProperty("OutdoorHuntPick", out var pe) && pe.GetInt32() == 1, "sent to the engine as \"OutdoorHuntPick\"");
+        var sent = System.Text.Json.JsonSerializer.Deserialize(json, RynthAiJsonContext.Default.SettingsBridgePayload)!;
+        Check.Eq(sent.OutdoorHuntPick, 1, "in the payload");
+        dash.ApplySettingsJson("{\"PatrolOnLogin\":false}");
+        Check.Eq(s.OutdoorHuntPick, 1, "an engine without it leaves it alone");
+        dash.ApplySettingsJson("{\"OutdoorHuntPick\":2}");
+        Check.Eq(s.OutdoorHuntPick, 2, "applied: Most XP");
+        dash.ApplySettingsJson("{\"OutdoorHuntPick\":9}");
+        Check.Eq(s.OutdoorHuntPick, 2, "9 clamped to 2");
+        dash.ApplySettingsJson("{\"OutdoorHuntPick\":-3}");
+        Check.Eq(s.OutdoorHuntPick, 0, "-3 clamped to 0");
     }
 
     private static void WallBetween()

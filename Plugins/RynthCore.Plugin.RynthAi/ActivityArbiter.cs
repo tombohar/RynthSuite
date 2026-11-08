@@ -77,12 +77,20 @@ internal readonly struct ArbiterInputs
     /// looting Boost Nav Priority still lets through (it is the player's own ask).
     /// </summary>
     public readonly bool ForcedLoot;
+    /// <summary>
+    /// The death wait (2026-11-08, RynthAiPlugin.DeathWait.cs): our kill's corpse is on its way (the
+    /// death animation) or being looted. Looting outranks combat as with Boost Loot Priority, except
+    /// while engaged (a monster on you is fought), so nothing walks off before the corpse is looted.
+    /// </summary>
+    public readonly bool DeathWait;
 
     public ArbiterInputs(bool macroRunning, bool wantBuffing, bool wantCombat,
                          bool wantLooting, bool wantSalvaging, bool wantNav,
                          bool combatEngaged = false, bool boostNav = false, bool boostLoot = false,
-                         bool followActive = false, bool lootStarved = false, bool forcedLoot = false)
+                         bool followActive = false, bool lootStarved = false, bool forcedLoot = false,
+                         bool deathWait = false)
     {
+        DeathWait     = deathWait;
         ForcedLoot    = forcedLoot;
         MacroRunning  = macroRunning;
         WantBuffing   = wantBuffing;
@@ -145,6 +153,9 @@ internal sealed class ActivityArbiter
         // which was a hatch bolted onto the OnTick cascade and becomes this one
         // clause instead.
         if (s.BoostLoot && s.WantLooting && !s.CombatEngaged) return BotActivity.Looting;
+
+        // The death wait: the kill's corpse first, on the same terms (2026-11-08).
+        if (s.DeathWait && s.WantLooting && !s.CombatEngaged) return BotActivity.Looting;
 
         // Loot starvation: a corpse waited too long behind combat and nothing is close.
         if (s.LootStarved && s.WantLooting) return BotActivity.Looting;

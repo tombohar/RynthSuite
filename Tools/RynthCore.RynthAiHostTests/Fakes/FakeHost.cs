@@ -58,6 +58,14 @@ internal static unsafe class FakeHost
     /// engine's EquipmentTracker: item -> EquipMask). <see cref="EquippedNotReady"/> answers -1.</summary>
     public static bool EquippedCalls;
     public static bool EquippedNotReady;
+    /// <summary>Opt-in (set before Create): v93 GetMonsterHealth answering <see cref="PlateHealth"/> (the
+    /// engine monster plates' last server reading: id -> ratio, age in ms). <see cref="PlateHealthVersion"/>
+    /// non-zero sets the table's Version (e.g. 92: the slot is there but the engine is too old).
+    /// Calls are counted in <see cref="PlateHealthQueries"/>.</summary>
+    public static bool PlateHealthCalls;
+    public static uint PlateHealthVersion;
+    public static readonly Dictionary<uint, (float Ratio, uint AgeMs)> PlateHealth = new();
+    public static int PlateHealthQueries;
     public static readonly Dictionary<uint, uint> Equipped = new();
     /// <summary>Item id -> the creature wielding it (GetObjectOwnershipInfo's wielder). Entries here
     /// also install GetObjectOwnershipInfo; an id in neither map reads as unknown ownership.</summary>
@@ -130,6 +138,9 @@ internal static unsafe class FakeHost
     public static bool AttackSendCalls;
     /// <summary>Every melee or missile attack (kind, target, height, power), in order (opt-in with <see cref="AttackSendCalls"/>).</summary>
     public static readonly List<(string Kind, uint Target, int Height, float Power)> AttackCalls = new();
+    /// <summary>Opt-in (set before Create): wires NativeAttack and SelectItem; a native attack lands in
+    /// <see cref="AttackCalls"/> as ("native", the selected item, height, power).</summary>
+    public static bool NativeAttackCalls;
     /// <summary>Opt-in (set before Create): wires CancelAttack; calls are counted in <see cref="CancelAttacks"/>.</summary>
     public static bool CancelAttackCalls;
     public static int CancelAttacks;
@@ -260,6 +271,8 @@ internal static unsafe class FakeHost
     public static bool PluginCommandDelivered = true;
     /// <summary>Every SendPluginCommand (plugin, action, value), in order.</summary>
     public static readonly List<(string Plugin, string Action, string Value)> PluginCommands = new();
+    /// <summary>For each <see cref="PluginCommands"/> entry, how many chat lines were written before it (call order).</summary>
+    public static readonly List<int> PluginCommandChatCounts = new();
     /// <summary>Opt-in (set before Create): ForceResetBusyCount (counted in <see cref="ForceResets"/>)
     /// and GetBusyState (answering <see cref="BusyStateValue"/>).</summary>
     public static bool BusyCalls;
@@ -297,6 +310,7 @@ internal static unsafe class FakeHost
     public static void Reset()
     {
         EquippedCalls = false; EquippedNotReady = false; Equipped.Clear();
+        PlateHealthCalls = false; PlateHealthVersion = 0; PlateHealth.Clear(); PlateHealthQueries = 0;
 #if !RYNTHILT_TESTS
         RynthCore.Plugin.RynthAi.EquippedState.Invalidate();
 #endif
@@ -310,7 +324,7 @@ internal static unsafe class FakeHost
         Vitals = default; BaseVitals = default; WorldName = ""; AccountName = "";
         HeadingDeg = 0; Wcids.Clear(); Spellbook.Clear(); PlayerIdValue = 0;
         Logs.Clear(); Chat.Clear(); ChatTypes.Clear(); ChatCommands.Clear(); AfterCastSpell = null;
-        AutoRunCalls.Clear(); AutoRun = false; Jumps = 0; TapJumpCalls = false; TapJumps = 0; TapJumpRefuse = false; Order.Clear(); Turns = 0; Casts.Clear(); CastRefused = false; CastsRefused = 0; StopCalls = false; Stops = 0; SetMotionCalls = false; MotionCalls.Clear(); AttackSendCalls = false; AttackCalls.Clear(); CancelAttackCalls = false; CancelAttacks = 0; Sent.Clear(); GiveCalls = false; Gives.Clear(); GiveLands = true; GiveHandler = null;
+        AutoRunCalls.Clear(); AutoRun = false; Jumps = 0; TapJumpCalls = false; TapJumps = 0; TapJumpRefuse = false; Order.Clear(); Turns = 0; Casts.Clear(); CastRefused = false; CastsRefused = 0; StopCalls = false; Stops = 0; SetMotionCalls = false; MotionCalls.Clear(); AttackSendCalls = false; AttackCalls.Clear(); NativeAttackCalls = false; CancelAttackCalls = false; CancelAttacks = 0; Sent.Clear(); GiveCalls = false; Gives.Clear(); GiveLands = true; GiveHandler = null;
         Uses.Clear(); IdRequests.Clear(); TargetCalls = false; HealthQueries.Clear(); IdTimes.Clear(); Moves.Clear(); Appraised.Clear(); WeaponCalls = false; ContentsCalls = false; CombatModeValue = 1;
         RequestIdAccepts = true; RefusedIdRequests = 0; UseObjectAccepts = true;
         VTankFlags = -1; VTankSeq = 0; LogCostMicros = 0;
@@ -328,7 +342,7 @@ internal static unsafe class FakeHost
         CloseContainerCalls = false; Closes.Clear(); GroundContainer = 0;
         SelectedItem = 0;
         UseOnCalls = false; UsesOn.Clear();
-        PluginCommandCalls = false; PluginCommandDelivered = true; PluginCommands.Clear();
+        PluginCommandCalls = false; PluginCommandDelivered = true; PluginCommands.Clear(); PluginCommandChatCounts.Clear();
         TradeVendorCalls = false; TradeActions.Clear(); VendorSells.Clear(); VendorBuys.Clear();
         CombatModeCalls = false; CombatModeRequests.Clear(); CombatModeRefuse = false; CombatModeRefusals = 0;
         BusyCalls = false; ForceResets = 0; BusyStateValue = 0;
@@ -396,9 +410,14 @@ internal static unsafe class FakeHost
             api.MeleeAttackFn       = (IntPtr)(delegate* unmanaged[Cdecl]<uint, int, float, int>)&MeleeAttack;
             api.MissileAttackFn     = (IntPtr)(delegate* unmanaged[Cdecl]<uint, int, float, int>)&MissileAttack;
         }
+        if (NativeAttackCalls)
+        {
+            api.NativeAttackFn      = (IntPtr)(delegate* unmanaged[Cdecl]<int, float, int>)&NativeAttack;
+            api.SelectItemFn        = (IntPtr)(delegate* unmanaged[Cdecl]<uint, int>)&SelectItem;
+        }
         if (Nav3DCalls)
         {
-            api.Nav3DClearFn       = (IntPtr)(delegate* unmanaged[Cdecl]<void>)&Nav3DClear;
+            api.Nav3DClearFn      = (IntPtr)(delegate* unmanaged[Cdecl]<void>)&Nav3DClear;
             api.Nav3DAddRingFn     = (IntPtr)(delegate* unmanaged[Cdecl]<float, float, float, float, float, uint, void>)&Nav3DAddRing;
             api.Nav3DAddLineFn     = (IntPtr)(delegate* unmanaged[Cdecl]<float, float, float, float, float, float, float, uint, void>)&Nav3DAddLine;
             api.Nav3DAddTriangleFn = (IntPtr)(delegate* unmanaged[Cdecl]<float, float, float, float, float, float, float, float, float, uint, void>)&Nav3DAddTriangle;
@@ -541,6 +560,11 @@ internal static unsafe class FakeHost
         ConfigureApi?.Invoke(ref api);
         LastApi = api;
         if (EquippedCalls) api.Version = Math.Max(api.Version, 87u);   // v87 GetWieldedItems
+        if (PlateHealthCalls)
+        {
+            api.GetMonsterHealthFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, float*, uint*, int>)&GetMonsterHealth;
+            api.Version = PlateHealthVersion != 0 ? PlateHealthVersion : Math.Max(api.Version, 93u);   // v93
+        }
         return new RynthCoreHost(api);
     }
 
@@ -623,6 +647,7 @@ internal static unsafe class FakeHost
     private static int SendPluginCommand(IntPtr plugin, IntPtr action, IntPtr value)
     {
         PluginCommands.Add((Marshal.PtrToStringAnsi(plugin) ?? "", Marshal.PtrToStringAnsi(action) ?? "", Marshal.PtrToStringAnsi(value) ?? ""));
+        PluginCommandChatCounts.Add(Chat.Count);
         return PluginCommandDelivered ? 1 : 0;
     }
 
@@ -658,6 +683,16 @@ internal static unsafe class FakeHost
         *wielder = w;
         *location = 0;
         return 1;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GetMonsterHealth(uint id, float* ratio, uint* ageMs)
+    {
+        PlateHealthQueries++;
+        bool ok = PlateHealth.TryGetValue(id, out var h);
+        if (ratio != null) *ratio = ok ? h.Ratio : -1f;
+        if (ageMs != null) *ageMs = ok ? h.AgeMs : uint.MaxValue;
+        return ok ? 1 : 0;
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -882,6 +917,10 @@ internal static unsafe class FakeHost
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int MeleeAttack(uint target, int height, float power) { AttackCalls.Add(("melee", target, height, power)); return 1; }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int NativeAttack(int height, float power) { AttackCalls.Add(("native", SelectedItem, height, power)); return 1; }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int SelectItem(uint id) { SelectedItem = id; return 1; }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static int MissileAttack(uint target, int height, float power) { AttackCalls.Add(("missile", target, height, power)); return 1; }

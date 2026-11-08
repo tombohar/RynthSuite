@@ -12,8 +12,9 @@ namespace RynthCore.RynthAiHostTests.Tests;
 
 // Combat target selection (2026-10-10): the Targeting setting (lowest health, closest, farthest,
 // least turning) and Target Lock. Combat used to switch targets mid-fight on a blended score; now
-// a locked target is kept until it dies or goes, leaves Monster Range, or a higher-priority
-// monster is in range, and with the lock off a switch needs a clear margin under the rule.
+// a locked target is kept until it dies or goes or leaves Monster Range (a higher priority too,
+// since 2026-11-07), and with the lock off a higher priority in range takes over at once and any
+// other switch needs a clear margin under the rule.
 internal static class TargetingTests
 {
     private const uint Player = 0x50000E01;
@@ -22,14 +23,48 @@ internal static class TargetingTests
 
     private const int LowestHealth = 0, Closest = 1, Farthest = 2, LeastTurning = 3;
 
+    // Melee reaches through walls (2026-11-06): within 4 yd the raycast doesn't hide a monster from melee.
+    private static void MeleeThroughWalls()
+    {
+        var near = new ScanPick(20);
+        near.Place(A, "Mob A", north: 3);
+        near.Blocked.Add(A);
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Melee;
+        Check.Eq(near.Tick(), A, "melee, 3 yd, a wall between: still the target");
+
+        var far = new ScanPick(20);
+        far.Place(A, "Mob A", north: 6);
+        far.Blocked.Add(A);
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Melee;
+        Check.Eq(far.Tick(), 0u, "melee, 6 yd, a wall between: the raycast still counts");
+
+        var magic = new ScanPick(20);
+        magic.Place(A, "Mob A", north: 3);
+        magic.Blocked.Add(A);
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Magic;
+        Check.Eq(magic.Tick(), 0u, "magic, 3 yd, a wall between: spells don't go through");
+
+        var missile = new ScanPick(20);
+        missile.Place(A, "Mob A", north: 3);
+        missile.Blocked.Add(A);
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Missile;
+        Check.Eq(missile.Tick(), 0u, "missile, 3 yd, a wall between: nor do arrows");
+    }
+
     public static void Register(Runner r)
     {
+        r.Add("targeting: melee within 4 yd ignores the raycast; beyond it, or with magic or missile, it counts", MeleeThroughWalls);
         r.Add("targeting: each scheme picks its monster", SchemesPick);
         r.Add("targeting: unknown health counts as full; ties go to the closest, then the lower id", UnknownHealthAndTies);
         r.Add("targeting: Target Lock keeps the target when a better one of its tier appears", LockKeeps);
         r.Add("targeting: Target Lock lets go when the target goes (after the scan grace)", LockReleasesWhenGone);
         r.Add("targeting: Target Lock lets go when the target leaves Monster Range", LockReleasesOutOfRange);
-        r.Add("targeting: a higher-priority monster in range takes over, lock or not", HigherPriorityWins);
+        r.Add("targeting: lock off, a higher-priority monster in range takes over", HigherPriorityWins);
+        r.Add("targeting: Target Lock holds over a higher priority until the target dies or leaves Monster Range", LockHoldsOverPriority);
         r.Add("targeting: lock off switches only past each scheme's margin", LockOffMargins);
         r.Add("targeting: lock off never switches with an attack at the target in flight", NoSwitchInFlight);
         r.Add("targeting: settings default to lowest health with the lock on", Defaults);
@@ -39,6 +74,132 @@ internal static class TargetingTests
         r.Add("targeting: lock off keeps a target that blinks out of the scan (no switch on stale values)", LockOffNoSwitchOnStale);
         r.Add("targeting: lock off holds right after a cast goes out, before it is judged", LockOffHoldsJustSentCast);
         r.Add("targeting: a higher priority just past Monster Range is logged once while fighting, and /ra why names it", BeyondRangeWhileEngaged);
+        r.Add("targeting: lowest health ranks unread monsters by the engine plates' readings", PlatesRankUnread);
+        r.Add("targeting: plate readings older than 10 s, or 0, are ignored", PlatesStaleIgnored);
+        r.Add("targeting: a plate reading beats an estimate when lower, and an older own server value when clearly fresher", PlatesVersusOwn);
+        r.Add("targeting: plate readings rank only; health, fight and kill tracking are untouched", PlatesRankOnly);
+        r.Add("targeting: without the engine call (or on an older engine) lowest health is as before", PlatesNoCapability);
+    }
+
+    // ── The engine plates' health (API v93 GetMonsterHealth, 2026-11-07) ─────
+
+    private static void PlatesRankUnread()
+    {
+        // The server streams health only for the queried target: RynthAi knows none of these three.
+        var plates = new Dictionary<uint, (float, uint)> { [A] = (0.9f, 1000), [B] = (0.25f, 3000), [C] = (0.6f, 500) };
+        var t = new Rig(LowestHealth, true, plates: plates);
+        Check.True(t.Host.HasMonsterHealth, "the fake engine has the call");
+        Check.Eq(t.Pick((A, 2, 0), (B, 5, 0), (C, 3, 0)), B, "B, 25% on the plates, is the most hurt (the closest is A)");
+        Check.True(FakeHost.PlateHealthQueries > 0, "the plates were asked");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("[CombatTarget] lock 0x80000402") && l.Contains("lowest health: health 25% (the plates' reading)")),
+            "the lock line gives the plates' number and says where it came from");
+
+        // A known own value still competes: A at 20% (the streamed target) beats B's 25% on the plates.
+        t = new Rig(LowestHealth, true, new Dictionary<uint, float> { [A] = 0.2f }, plates: new() { [B] = (0.25f, 3000) });
+        Check.Eq(t.Pick((A, 4, 0), (B, 2, 0)), A, "own 20% beats the plates' 25%");
+
+        // Lock off: a plate reading clearly lower takes over, by the scheme's margin.
+        t = new Rig(LowestHealth, false, new Dictionary<uint, float> { [A] = 0.5f }, plates: new() { [B] = (0.9f, 1000) });
+        Check.Eq(t.Pick((A, 3, 0), (B, 2, 0)), A, "lock off: A at 50%, B at 90% on the plates");
+        t.Plate(B, 0.47f, 1000);
+        Check.Eq(t.Pick((A, 3, 0), (B, 2, 0)), A, "B at 47% on the plates (3 points lower): A kept");
+        t.Plate(B, 0.30f, 1000);
+        Check.Eq(t.Pick((A, 3, 0), (B, 2, 0)), B, "B at 30% on the plates (20 points lower): switch");
+    }
+
+    private static void PlatesStaleIgnored()
+    {
+        var t = new Rig(LowestHealth, true, plates: new() { [A] = (0.9f, 1000), [B] = (0.1f, 10_500) });
+        Check.Eq(t.Pick((A, 3, 0), (B, 2, 0)), A, "B's 10% is 10.5 s old: ignored (full), A's 90% wins");
+
+        t = new Rig(LowestHealth, true, plates: new() { [A] = (0.9f, 1000), [B] = (0.1f, 10_000) });
+        Check.Eq(t.Pick((A, 3, 0), (B, 2, 0)), B, "exactly 10 s old: still used");
+
+        t = new Rig(LowestHealth, true, new Dictionary<uint, float> { [B] = 0.95f }, plates: new() { [A] = (0f, 500) });
+        Check.Eq(t.Pick((A, 1, 0), (B, 3, 0)), B, "a plate 0 (dead to the plates, not to RynthAi) isn't the most hurt: B at 95%");
+
+        t = new Rig(LowestHealth, true, plates: new() { [A] = (0.9f, uint.MaxValue) });
+        Check.Eq(t.Pick((A, 3, 0), (B, 2, 0)), B, "a reading of unknown age is stale: all full, the closest");
+    }
+
+    private static void PlatesVersusOwn()
+    {
+        // Own estimate (our splash hit) vs the plates: the lower of the two.
+        var t = new Rig(LowestHealth, true, new Dictionary<uint, float> { [B] = 0.5f }, plates: new() { [A] = (0.4f, 2000) });
+        t.Cache.ApplyDamageEstimate(unchecked((int)A), 0.3);   // A estimated 70%
+        Check.True(t.Cache.IsHealthEstimated(unchecked((int)A)), "A's own value is an estimate");
+        Check.Eq(t.Pick((A, 3, 0), (B, 2, 0)), A, "A: estimate 70%, plates 40% -> 40%, below B's 50%");
+
+        t = new Rig(LowestHealth, true, new Dictionary<uint, float> { [B] = 0.5f }, plates: new() { [A] = (0.8f, 2000) });
+        t.Cache.ApplyDamageEstimate(unchecked((int)A), 0.7);   // A estimated 30%
+        Check.Eq(t.Pick((A, 3, 0), (B, 2, 0)), A, "A: estimate 30%, plates 80% -> 30% (the estimate saw hits the plates didn't)");
+
+        // Own server value 80%, 5 s old; the plates read 30% a second ago: the plates are fresher.
+        t = new Rig(LowestHealth, true, new Dictionary<uint, float> { [A] = 0.5f }, plates: new() { [B] = (0.3f, 1000) });
+        t.Health(B, 0.8f);
+        t.Advance(5000);
+        Check.Eq(t.Pick((A, 3, 0), (B, 2, 0)), B, "B: own 80% (5 s old) vs plates 30% (1 s old) -> 30%");
+
+        // Own server value just in; the plates' is older: own stands.
+        t = new Rig(LowestHealth, true, new Dictionary<uint, float> { [A] = 0.5f }, plates: new() { [B] = (0.3f, 1000) });
+        t.Health(B, 0.8f);
+        t.Advance(200);
+        Check.Eq(t.Pick((A, 3, 0), (B, 2, 0)), A, "B: own 80% (0.2 s old) stands over the plates' 30% (1 s old): A at 50%");
+
+        // A few ms apart is the same 0x01C0: not "fresher".
+        t = new Rig(LowestHealth, true, new Dictionary<uint, float> { [A] = 0.5f }, plates: new() { [B] = (0.3f, 1000) });
+        t.Health(B, 0.8f);
+        t.Advance(1300);
+        Check.Eq(t.Pick((A, 3, 0), (B, 2, 0)), A, "plates only 0.3 s fresher: own 80% stands");
+
+        // The server said dead: that stands whatever the plates say.
+        // (A dead monster never reaches the pick: the scan drops it. The rank itself is checked here.)
+        t = new Rig(LowestHealth, true, new Dictionary<uint, float> { [B] = 0f }, plates: new() { [B] = (0.4f, 100) });
+        Check.True(t.Combat.RankingHealth(unchecked((int)B), out bool fromPlates) == 0f && !fromPlates, "own 0 (dead) isn't revived by the plates");
+    }
+
+    private static void PlatesRankOnly()
+    {
+        var t = new Rig(LowestHealth, true, plates: new() { [A] = (0.9f, 1000), [B] = (0.2f, 1000) });
+        Check.Eq(t.Pick((A, 2, 0), (B, 4, 0)), B, "B is picked on the plates' 20%");
+        int a = unchecked((int)A), b = unchecked((int)B);
+        Check.Eq(t.Cache.GetHealthRatio(b), -1f, "the cache still doesn't know B's health");
+        Check.Eq(t.Cache.GetHealthRatio(a), -1f, "nor A's");
+        Check.False(t.Cache.IsHealthEstimated(b), "nothing was written as an estimate");
+        Check.False(t.Cache.TryGetServerHealthTime(b, out _), "nor as a server reading");
+        Check.Eq(t.Combat.FightTargetHealthRatio, -1f, "the fight target's health (metas, kill checks) is RynthAi's own: unknown");
+
+        // The kill path is the same as without the plates: the notice drops B, the next pick is fresh.
+        t.Combat.OnKillNotification("Mob B's perforated corpse falls before you!");
+        Check.Eq(t.Combat.activeTargetId, 0, "the kill notice drops B");
+        Check.Eq(t.Cache.GetHealthRatio(b), -1f, "and still nothing in the cache from the plates");
+        t.Plate(B, 0.2f, 1000);   // the plates still remember B's last reading
+        Check.Eq(t.Pick((A, 2, 0)), A, "A is next");
+
+        // The server's own stream still drives the cache exactly as before.
+        t.Health(A, 0.6f);
+        Check.Eq(t.Cache.GetHealthRatio(a), 0.6f, "a real UpdateHealth lands in the cache");
+        Check.Eq(t.Combat.FightTargetHealthRatio, 0.6f, "and is the fight target's health");
+    }
+
+    private static void PlatesNoCapability()
+    {
+        // No call on the engine: the plates' numbers can't be read, all unknown counts as full.
+        var t = new Rig(LowestHealth, true);
+        FakeHost.PlateHealth[B] = (0.1f, 500);   // what an engine would have said (not wired)
+        Check.False(t.Host.HasMonsterHealth, "no GetMonsterHealth on this engine");
+        Check.Eq(t.Pick((A, 2, 0), (B, 4, 0)), A, "all unknown: the closest, as before");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("lowest health: health unknown (as full)")), "logged as unknown, as before");
+
+        // The slot filled but the engine says API 92: not used, never called.
+        t = new Rig(LowestHealth, true, plates: new() { [B] = (0.1f, 500) }, plateVersion: 92);
+        Check.False(t.Host.HasMonsterHealth, "API 92: no HasMonsterHealth");
+        Check.Eq(t.Pick((A, 2, 0), (B, 4, 0)), A, "the closest, as before");
+        Check.Eq(FakeHost.PlateHealthQueries, 0, "the call was never made");
+
+        // With the call, but the plates know nothing: as before too.
+        t = new Rig(LowestHealth, true, new Dictionary<uint, float> { [B] = 0.95f }, plates: new());
+        Check.Eq(t.Pick((A, 2, 0), (B, 5, 0)), B, "a known 95% beats an unknown (full) health, as before");
     }
 
     // ── Schemes ───────────────────────────────────────────────────────────────
@@ -130,9 +291,31 @@ internal static class TargetingTests
         Check.Eq(t.Pick((A, 3, 0), (B, 4.8, 0)), B, "A coming back closer doesn't take it back (B is locked now)");
     }
 
+    // Target Lock holds until the target dies or leaves Monster Range, a higher priority or not
+    // (the owner, 2026-11-07); with the lock off a higher priority in range takes over at once.
+    private static void LockHoldsOverPriority()
+    {
+        var t = new Rig(Closest, true, monsterRange: 10);
+        t.S.MonsterRules.Add(new MonsterRule { Name = "Boss", Priority = 2 });
+        Check.Eq(t.Pick((A, 2, 0), (B, 3, 0)), A, "A is locked");
+        Check.Eq(t.Pick((A, 2, 0), (B, 3, 0), (Boss, 9, 0)), A, "a Boss inside Monster Range: the lock keeps A");
+        Check.True(FakeHost.Logs.Count(l => l.Contains("[CombatTarget] Target Lock keeps 0x80000401") && l.Contains("over 0x80000404")) == 1,
+            "the hold is logged once");
+        t.Pick((A, 2, 0), (Boss, 9, 0));
+        Check.True(FakeHost.Logs.Count(l => l.Contains("[CombatTarget] Target Lock keeps")) == 1, "and not again");
+        Check.Eq(t.Pick((A, 11, 0), (Boss, 9, 0)), Boss, "A leaves Monster Range: the Boss");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("[CombatTarget] switch 0x80000401") && l.Contains("out of Monster Range")),
+            "the switch says why: out of Monster Range");
+
+        t = new Rig(Closest, true, monsterRange: 10);
+        t.S.MonsterRules.Add(new MonsterRule { Name = "Boss", Priority = 2 });
+        t.Pick((A, 2, 0), (Boss, 9, 0));
+        Check.Eq(t.Combat.activeTargetId, unchecked((int)Boss), "nothing locked yet: the higher priority is picked first");
+    }
+
     private static void HigherPriorityWins()
     {
-        foreach (bool lockOn in new[] { true, false })
+        foreach (bool lockOn in new[] { false })
         {
             string mode = lockOn ? "lock on" : "lock off";
             var t = new Rig(Closest, lockOn, monsterRange: 10);
@@ -275,6 +458,7 @@ internal static class TargetingTests
 
         FakeHost.NotAttackable.Remove(Boss);
         t.Blocked.Remove(Boss);
+        t.S.TargetLock = false;   // with the lock on, Mob A would be kept (LockHoldsOverPriority)
         Check.Eq(t.Tick(), Boss, "in sight and attackable: the Boss takes over at once");
         string sw = FakeHost.Logs.Last(l => l.Contains("[CombatTarget] switch"));
         Check.True(sw.Contains("priority 1 < 5") && !sw.Contains("passed over"), "the switch says priority, with nothing passed over");
@@ -371,7 +555,8 @@ internal static class TargetingTests
         Check.True(why != null && why.Contains("'Boss' priority 5") && why.Contains("beyond Monster Range (10 m)"), $"/ra why names it ({why})");
 
         t.Place(Boss, "Boss", north: -9);
-        Check.Eq(t.Tick(), Boss, "inside Monster Range: the Boss takes over at once");
+        t.S.TargetLock = false;   // with the lock on, Mob A would be kept (LockHoldsOverPriority)
+        Check.Eq(t.Tick(), Boss, "inside Monster Range, lock off: the Boss takes over at once");
     }
 
     private static int PassedLines() => FakeHost.Logs.Count(l => l.Contains("[CombatTarget] passed over"));
@@ -431,9 +616,18 @@ internal static class TargetingTests
         private readonly WorldObjectCache _cache;
         private DateTime _now = RynthClock.Now;   // the clock RynthAi times with
 
-        public Rig(int scheme, bool targetLock, Dictionary<uint, float>? health = null, int monsterRange = 20)
+        /// <param name="plates">The engine plates' readings (API v93 GetMonsterHealth: id -> ratio, age ms);
+        /// null = an engine without the call. <paramref name="plateVersion"/> non-zero: the table's Version.</param>
+        public Rig(int scheme, bool targetLock, Dictionary<uint, float>? health = null, int monsterRange = 20,
+                   Dictionary<uint, (float Ratio, uint AgeMs)>? plates = null, uint plateVersion = 0)
         {
             FakeHost.Reset();
+            if (plates != null)
+            {
+                FakeHost.PlateHealthCalls = true;
+                FakeHost.PlateHealthVersion = plateVersion;
+                foreach (var kv in plates) FakeHost.PlateHealth[kv.Key] = kv.Value;
+            }
             Place(Player, "Me", 96, 96, creature: false);
             FakeHost.PlayerPose = (Lb | 0x1C, 96f, 96f, 0f);
             Place(A, "Mob A", 96, 98);
@@ -442,14 +636,20 @@ internal static class TargetingTests
             Place(Boss, "Boss", 96, 101);
             S = new LegacyUiSettings { MonsterRange = monsterRange, TargetSelection = scheme, TargetLock = targetLock };
             var host = FakeHost.Create();
+            Host = host;
             _cache = FakeHost.MakeCache(host, Player, new[] { A, B, C, Boss }, health);
+            _cache.Clock = () => _now;   // health from here on is stamped on the rig's clock
             Combat = new CombatManager(host, S, _cache);
             Combat.SetPlayerId(Player);
             Combat.SetDamageStores(null, new RynthCore.Plugin.RynthAi.CreatureData.MonsterDamageStore());
             Combat.TargetClock = () => _now;
         }
 
+        public readonly RynthCore.PluginSdk.RynthCoreHost Host;
+        public WorldObjectCache Cache => _cache;
         public void Health(uint id, float ratio) => _cache.OnUpdateHealth(id, ratio);
+        /// <summary>The engine plates now read <paramref name="id"/> at <paramref name="ratio"/>, <paramref name="ageMs"/> old.</summary>
+        public void Plate(uint id, float ratio, uint ageMs) => FakeHost.PlateHealth[id] = (ratio, ageMs);
         public void Advance(double ms) => _now = _now.AddMilliseconds(ms);
 
         /// <summary>One tick: the scan holds these (id, distance m, facing angle deg); returns the target.</summary>

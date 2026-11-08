@@ -3,21 +3,34 @@ using System;
 namespace RynthCore.Plugin.RynthDefective.Model;
 
 internal enum DefVerb { Toggle, Help, Use, Set, Clear, Bind, Unbind, Weapons, Favourite, Slots, List, Status, Error, Panels, Selection, Settings, Spell, Corpses,
-    Quantity, Split, Give, Buy }
+    Quantity, Split, Give, Buy, DayNight, Bars, Shortcuts }
 
 /// <summary>
 /// A parsed "/rdef ..." line. Use: <see cref="Slot"/> (1-based) or <see cref="Text"/> (an item name).
 /// The quantity box's verbs (qty, split, give, buy): <see cref="Amount"/> (null = the box's number) and
 /// <see cref="Text"/> (split: the pack; buy: the item's name).
+/// Bars (the extra Shortcuts bars): <see cref="Text"/> what to do (list, add, remove, slots, show),
+/// <see cref="Slot"/> the bar's number, <see cref="Count"/> its slots.
+/// Shortcuts ("shortcuts clearbusy on|off"): <see cref="Text"/> "on", "off" or "" (say what it is).
 /// </summary>
-internal sealed record DefCommand(DefVerb Verb, int Slot = 0, string Text = "", string Error = "", QtyAmount? Amount = null);
+internal sealed record DefCommand(DefVerb Verb, int Slot = 0, string Text = "", string Error = "", QtyAmount? Amount = null, int Count = 0);
 
 internal static class DefCommandParser
 {
     public const string Usage =
         "/rdef [use <slot or item name> | set <slot> [item name] | spell <slot> <spell name> | clear <slot> | bind <slot> <key> | unbind <slot> | "
         + "weapons [search] | fav | slots <count> | list | status | settings | panels (the game panel buttons) | selection | corpses [clear] | "
-        + "qty [number|max|half] | split [number] [into <pack>] | give [number] | buy [number] [item name]]";
+        + "bars [add | remove <bar> | slots <bar> <count> | show <bar>] | shortcuts clearbusy [on|off] | "
+        + "qty [number|max|half] | split [number] [into <pack>] | give [number] | buy [number] [item name] | daynight [show|hide]]";
+
+    public const string DayNightUsage = "Usage: /rdef daynight [show|hide], e.g. /rdef daynight show (the Day/Night timer: real minutes to the next dawn or dusk)";
+
+    public const string ClearBusyUsage =
+        "Usage: /rdef shortcuts clearbusy on|off, e.g. /rdef shortcuts clearbusy on (a press held only by a stuck busy count clears it first; off by default)";
+
+    public const string BarsUsage =
+        "Usage: /rdef bars [list | add | remove <bar> | slots <bar> <count> | show <bar>], e.g. /rdef bars add  or  /rdef bars remove 2 "
+        + "(the extra Shortcuts bars are 2-4)";
 
     public const string QtyUsage = "Usage: /rdef qty <number|max|half>, e.g. /rdef qty 25 (the Selection window's number)";
     public const string SplitUsage = "Usage: /rdef split [number|max|half] [into <pack>], e.g. /rdef split 25  or  /rdef split 25 into Sack";
@@ -44,6 +57,15 @@ internal static class DefCommandParser
             case "selection": case "target":
                 // "/rdef selection 0x80001234": select that object (a test hook for the Selection window).
                 return new DefCommand(DefVerb.Selection, Text: rest);
+            // The Day/Night timer (2026-11-04): Text "show", "hide" or "" (toggle).
+            case "daynight":
+                return rest.ToLowerInvariant() switch
+                {
+                    "" or "toggle" => new DefCommand(DefVerb.DayNight),
+                    "show" or "on" or "open" => new DefCommand(DefVerb.DayNight, Text: "show"),
+                    "hide" or "off" or "close" => new DefCommand(DefVerb.DayNight, Text: "hide"),
+                    _ => Fail($"'{rest}' isn't show or hide. {DayNightUsage}"),
+                };
             case "fav": case "favourite": case "favorite": return new DefCommand(DefVerb.Favourite);
             case "weapons": case "weapon": case "picker": return new DefCommand(DefVerb.Weapons, Text: rest);
             case "use": case "wield": case "equip":
@@ -79,6 +101,22 @@ internal static class DefCommandParser
                 return int.TryParse(rest, out int count) && count >= DefSettings.SlotsMin && count <= DefSettings.SlotCountMax
                     ? new DefCommand(DefVerb.Slots, count)
                     : Fail($"How many slots? {DefSettings.SlotsMin} to {DefSettings.SlotCountMax}, e.g. /rdef slots 10");
+            // The extra Shortcuts bars (2026-11-04, ExtraBar).
+            case "bars":
+                return ParseBars(rest);
+            // Shortcuts clear a stuck busy state (2026-11-04, DefSettings.ClearStuckBusy).
+            case "shortcuts":
+            {
+                string[] words = rest.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (words.Length == 0 || words.Length > 2 || !words[0].Equals("clearbusy", StringComparison.OrdinalIgnoreCase)) return Fail(ClearBusyUsage);
+                if (words.Length == 1) return new DefCommand(DefVerb.Shortcuts, Text: "");
+                return words[1].ToLowerInvariant() switch
+                {
+                    "on" or "true" or "1" or "yes" => new DefCommand(DefVerb.Shortcuts, Text: "on"),
+                    "off" or "false" or "0" or "no" => new DefCommand(DefVerb.Shortcuts, Text: "off"),
+                    _ => Fail($"'{words[1]}' isn't on or off. {ClearBusyUsage}"),
+                };
+            }
             // The quantity box (2026-10-30, Quantity/QuantityController.cs).
             case "qty": case "quantity": case "amount":
             {
@@ -107,6 +145,32 @@ internal static class DefCommandParser
             default:
                 // "/rdef Stamina Kit" is a shorthand for use.
                 return new DefCommand(DefVerb.Use, Text: a);
+        }
+    }
+
+    /// <summary>"/rdef bars ...": list (alone too), add, remove N, slots N count, show N.</summary>
+    private static DefCommand ParseBars(string rest)
+    {
+        string[] words = rest.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        string sub = words.Length == 0 ? "list" : words[0].ToLowerInvariant();
+        int n = 0;
+        bool hasBar = words.Length >= 2 && int.TryParse(words[1], out n);
+        switch (sub)
+        {
+            case "list": case "ls":
+                return words.Length <= 1 ? new DefCommand(DefVerb.Bars, Text: "list") : Fail(BarsUsage);
+            case "add": case "new":
+                return words.Length <= 1 ? new DefCommand(DefVerb.Bars, Text: "add") : Fail(BarsUsage);
+            case "remove": case "delete": case "rm":
+                return hasBar && words.Length == 2 ? new DefCommand(DefVerb.Bars, n, "remove") : Fail("Which bar? e.g. /rdef bars remove 2 (/rdef bars lists them)");
+            case "show": case "hide": case "toggle":
+                return hasBar && words.Length == 2 ? new DefCommand(DefVerb.Bars, n, "show") : Fail("Which bar? e.g. /rdef bars show 2 (shows it, or hides it when it shows)");
+            case "slots":
+                return hasBar && words.Length == 3 && int.TryParse(words[2], out int count) && count >= ExtraBar.SlotsMin && count <= ExtraBar.SlotsMax
+                    ? new DefCommand(DefVerb.Bars, n, "slots", Count: count)
+                    : Fail($"How many slots? Usage: /rdef bars slots <bar> <count>, e.g. /rdef bars slots 2 12 ({ExtraBar.SlotsMin} to {ExtraBar.SlotsMax})");
+            default:
+                return Fail($"'{words[0]}' isn't something /rdef bars does. {BarsUsage}");
         }
     }
 

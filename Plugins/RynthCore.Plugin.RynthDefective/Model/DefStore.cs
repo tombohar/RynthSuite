@@ -69,33 +69,56 @@ internal sealed class DefStore
             st.WeaponsButtonOnBar = Bool(s, "weaponsButtonOnBar", st.WeaponsButtonOnBar);   // missing (a file from before 2026-10-29): off
             st.IndependentBar = Bool(s, "independentBar", st.IndependentBar);   // missing (a file from before 2026-10-27): off
             st.QuantityBox = Bool(s, "quantityBox", st.QuantityBox);   // missing (a file from before 2026-10-30): on
+            st.ClearStuckBusy = Bool(s, "clearStuckBusy", st.ClearStuckBusy);   // missing (a file from before 2026-11-04): off
             st.BarOpen = Bool(s, "barOpen", st.BarOpen);
             st.PickerOpen = Bool(s, "pickerOpen", st.PickerOpen);
             st.Clamp();
         }
 
-        if (root.TryGetProperty("slots", out JsonElement slots) && slots.ValueKind == JsonValueKind.Array)
-        {
-            int i = 0;
-            foreach (JsonElement e in slots.EnumerateArray())
-            {
-                if (i >= DefSettings.SlotsMax) break;
-                DefSlot slot = d.Slots[i++];
-                if (e.ValueKind != JsonValueKind.Object) continue;
-                slot.Item = ParseRef(e, "item");
-                int mode = Int(e, "mode", 0);
-                slot.Mode = mode >= 0 && mode <= (int)UseMode.Equip ? (UseMode)mode : UseMode.Auto;
-                // A spell (2026-10-28; a file from before has none): only in a slot without an item.
-                if (slot.Item == null && e.TryGetProperty("spell", out JsonElement sp) && sp.ValueKind == JsonValueKind.Object)
-                {
-                    slot.SpellId = UInt(sp, "id");
-                    slot.SpellName = slot.SpellId != 0 ? Str(sp, "name") : string.Empty;
-                }
-            }
-        }
+        if (root.TryGetProperty("slots", out JsonElement slots)) ParseSlots(slots, d.Slots);
         ParseRefs(root, "favourites", d.Favourites, DefData.MaxFavourites);
         ParseRefs(root, "recent", d.Recent, DefData.MaxRecent);
+
+        // The extra bars (2026-11-04; a file from before has none): a bad entry, a number out of range or
+        // seen before, is skipped; at most ExtraBar.Max.
+        if (root.TryGetProperty("extraBars", out JsonElement bars) && bars.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement e in bars.EnumerateArray())
+            {
+                if (d.ExtraBars.Count >= ExtraBar.Max) break;
+                if (e.ValueKind != JsonValueKind.Object) continue;
+                int number = Int(e, "number", 0);
+                if (!ExtraBar.ValidNumber(number) || d.Extra(number) != null) continue;
+                var bar = new ExtraBar(number) { SlotCount = Int(e, "slotCount", ExtraBar.DefaultSlots) };
+                if (e.TryGetProperty("slots", out JsonElement bs)) ParseSlots(bs, bar.Slots);
+                bar.Fix();
+                d.ExtraBars.Add(bar);
+            }
+            d.ExtraBars.Sort((a, b) => a.Number.CompareTo(b.Number));
+        }
         return d;
+    }
+
+    /// <summary>A "slots" array into <paramref name="into"/> (fixed length: the extra entries are ignored).</summary>
+    private static void ParseSlots(JsonElement slots, List<DefSlot> into)
+    {
+        if (slots.ValueKind != JsonValueKind.Array) return;
+        int i = 0;
+        foreach (JsonElement e in slots.EnumerateArray())
+        {
+            if (i >= into.Count) break;
+            DefSlot slot = into[i++];
+            if (e.ValueKind != JsonValueKind.Object) continue;
+            slot.Item = ParseRef(e, "item");
+            int mode = Int(e, "mode", 0);
+            slot.Mode = mode >= 0 && mode <= (int)UseMode.Equip ? (UseMode)mode : UseMode.Auto;
+            // A spell (2026-10-28; a file from before has none): only in a slot without an item.
+            if (slot.Item == null && e.TryGetProperty("spell", out JsonElement sp) && sp.ValueKind == JsonValueKind.Object)
+            {
+                slot.SpellId = UInt(sp, "id");
+                slot.SpellName = slot.SpellId != 0 ? Str(sp, "name") : string.Empty;
+            }
+        }
     }
 
     private static void ParseRefs(JsonElement root, string name, List<ItemRef> into, int max)
@@ -168,26 +191,12 @@ internal sealed class DefStore
             w.WriteBoolean("weaponsButtonOnBar", s.WeaponsButtonOnBar);
             w.WriteBoolean("independentBar", s.IndependentBar);
             w.WriteBoolean("quantityBox", s.QuantityBox);
+            w.WriteBoolean("clearStuckBusy", s.ClearStuckBusy);
             w.WriteBoolean("barOpen", s.BarOpen);
             w.WriteBoolean("pickerOpen", s.PickerOpen);
             w.WriteEndObject();
 
-            w.WriteStartArray("slots");
-            foreach (DefSlot slot in d.Slots)
-            {
-                w.WriteStartObject();
-                if (slot.Item != null) WriteRef(w, "item", slot.Item);
-                else if (slot.SpellId != 0)
-                {
-                    w.WriteStartObject("spell");
-                    w.WriteNumber("id", slot.SpellId);
-                    w.WriteString("name", slot.SpellLabel);
-                    w.WriteEndObject();
-                }
-                w.WriteNumber("mode", (int)slot.Mode);
-                w.WriteEndObject();
-            }
-            w.WriteEndArray();
+            WriteSlots(w, d.Slots);
 
             w.WriteStartArray("favourites");
             foreach (ItemRef r in d.Favourites) WriteRefValue(w, r);
@@ -195,9 +204,40 @@ internal sealed class DefStore
             w.WriteStartArray("recent");
             foreach (ItemRef r in d.Recent) WriteRefValue(w, r);
             w.WriteEndArray();
+
+            w.WriteStartArray("extraBars");
+            foreach (ExtraBar bar in d.ExtraBars)
+            {
+                w.WriteStartObject();
+                w.WriteNumber("number", bar.Number);
+                w.WriteNumber("slotCount", bar.SlotCount);
+                WriteSlots(w, bar.Slots);
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
             w.WriteEndObject();
         }
         return Encoding.UTF8.GetString(ms.ToArray()) + "\n";
+    }
+
+    private static void WriteSlots(Utf8JsonWriter w, List<DefSlot> slots)
+    {
+        w.WriteStartArray("slots");
+        foreach (DefSlot slot in slots)
+        {
+            w.WriteStartObject();
+            if (slot.Item != null) WriteRef(w, "item", slot.Item);
+            else if (slot.SpellId != 0)
+            {
+                w.WriteStartObject("spell");
+                w.WriteNumber("id", slot.SpellId);
+                w.WriteString("name", slot.SpellLabel);
+                w.WriteEndObject();
+            }
+            w.WriteNumber("mode", (int)slot.Mode);
+            w.WriteEndObject();
+        }
+        w.WriteEndArray();
     }
 
     private static void WriteRef(Utf8JsonWriter w, string name, ItemRef r)

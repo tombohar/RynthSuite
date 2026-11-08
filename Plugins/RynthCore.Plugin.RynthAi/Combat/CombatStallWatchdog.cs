@@ -147,6 +147,10 @@ internal sealed class CombatStallWatchdog
     /// step still settling (the step-4 re-wield), so the hold isn't read as a tick gap.</summary>
     public void Hold(DateTime now) => _lastTick = now;
 
+    /// <summary>The stall is explained and dealt with (a target it can't reach): the next target
+    /// starts from step 1, not from where this one left the ladder.</summary>
+    public void EndEpisode() => ResetEpisode();
+
     private StallAction Fire(DateTime now)
     {
         _step++;

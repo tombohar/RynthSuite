@@ -28,6 +28,7 @@ namespace RynthCore.Plugin.RynthAi;
 ///   /ra iteminfo layout pet|line      pet-roster style lines or the Mag one-liner
 ///   /ra iteminfo loot on|off          describe what the looter takes in its "Looted" line
 ///   /ra iteminfo loot salvage on|off  salvage too (material and workmanship only)
+///   /ra iteminfo color &lt;name&gt;|#RRGGBB the lines' colour in RynthCore's chat, whatever their chat type ("default": the type's)
 ///   /ra iteminfo reset                restore defaults
 /// Every option is also editable in the "RynthAi Item Info" window (LegacyItemInfoUi).
 /// </summary>
@@ -165,6 +166,23 @@ public sealed partial class RynthAiPlugin
                 ReplyOk($"[RynthAi] Item info on loot: {OnOff(s.LootChat)} (salvage {OnOff(s.LootChatSalvage)})");
                 return;
 
+            case "color":
+            case "colour":
+                if (arg3.Length > 0)
+                {
+                    string? color = MagItemInfoCatalog.ParseTextColor(arg3);
+                    if (color == null)
+                    {
+                        ReplyFail("[RynthAi] Usage: /ra iteminfo color " + TextColorWords());
+                        return;
+                    }
+                    s.TextColor = color;
+                }
+                ReplyOk(s.TextColor.Length == 0
+                    ? "[RynthAi] Item info text colour: the chat type's own colour. Others: /ra iteminfo color " + TextColorWords()
+                    : $"[RynthAi] Item info text colour: {MagItemInfoCatalog.TextColorLabel(s.TextColor)} in RynthCore's chat (same tab; AC's chat window shows the chat type's colour)");
+                return;
+
             case "reset":
                 s.ResetToDefaults();
                 ReplyOk("[RynthAi] Item info settings reset to defaults.");
@@ -185,7 +203,15 @@ public sealed partial class RynthAiPlugin
             if (found != 0) { QueueItemInfo(unchecked((int)found), requestId: true); return; }
             ReplyFail($"[RynthAi] Item info: no \"{name}\" in your inventory.");
         }
-        ReplyFail("[RynthAi] Usage: /ra iteminfo [<item name>|me|on|off|settings|fields|field <name> on|off|rating <tag> on|off|value on|off|verbose on|off|click left|right|off|layout pet|line|loot on|off|reset]");
+        ReplyFail("[RynthAi] Usage: /ra iteminfo [<item name>|me|on|off|settings|fields|field <name> on|off|rating <tag> on|off|value on|off|verbose on|off|click left|right|off|layout pet|line|loot on|off|color <name>|#RRGGBB|reset]");
+    }
+
+    /// <summary>"default|allegiance|...|#RRGGBB": what /ra iteminfo color takes.</summary>
+    private static string TextColorWords()
+    {
+        var sb = new StringBuilder();
+        foreach (var c in MagItemInfoCatalog.TextColors) sb.Append(c.Word).Append('|');
+        return sb.Append("#RRGGBB").ToString();
     }
 
     /// <summary>
@@ -460,9 +486,34 @@ public sealed partial class RynthAiPlugin
         int headerType = s?.ChatType ?? 1;
         int detailType = s == null || s.DetailChatType == MagItemInfoSettings.SameAsHeader ? headerType : s.DetailChatType;
 
-        Host.WriteToChat(prefix + lines[0], headerType);
+        WriteItemInfoLine(prefix + lines[0], headerType);
         for (int i = 1; i < lines.Count; i++)
-            Host.WriteToChat(prefix + "  " + lines[i], detailType);
+            WriteItemInfoLine(prefix + "  " + lines[i], detailType);
+    }
+
+    /// <summary>The engine's name for a line's own colour in RynthCore's chat (engine UI/Data/ChatOwnColors.cs).</summary>
+    internal const string ChatColorTarget = "RynthCore.Chat";
+
+    // An engine from before 2026-11-05 answered "no such plugin" once: item info lines then go
+    // out exactly as before, without asking again.
+    private bool _infoColorUnsupported;
+
+    /// <summary>
+    /// One item info line, in <paramref name="chatType"/> (which picks its chat tab and AC's chat
+    /// window). With Info text colour set (<see cref="MagItemInfoSettings.TextColor"/>) the engine
+    /// is asked to draw the next line in that colour just before it is written: RynthCore's chat
+    /// shows it so, in the same tab. Unset, or an older engine: the plain WriteToChat, as before.
+    /// </summary>
+    internal void WriteItemInfoLine(string text, int chatType)
+    {
+        string color = ItemInfoSettings?.TextColor ?? string.Empty;
+        if (color.Length > 0 && text.Length > 0 && !_infoColorUnsupported && Host.HasWriteToChat && Host.HasSendPluginCommand
+            && !Host.SendPluginCommand(ChatColorTarget, "nextcolor", color))
+        {
+            _infoColorUnsupported = true;
+            ItemInfoLog("the engine has no line colours (before 2026-11-05): item info keeps its chat type's colour");
+        }
+        Host.WriteToChat(text, chatType);
     }
 
     /// <summary>Item Info window preview: the selected item's lines, or null when nothing is selected.</summary>
@@ -514,10 +565,11 @@ public sealed partial class RynthAiPlugin
         }
     }
 
-    /// <summary>Item Info window "Test" button: sample line in the chosen chat type.</summary>
+    /// <summary>Item Info window "Test" button: sample line in the chosen chat type (and the Info text colour).</summary>
     private void TestItemInfoChatType(int chatType)
     {
         string prefix = ItemInfoSettings?.Prefix ?? "[RynthAi Item] ";
-        Host.WriteToChat($"{prefix}Item info chat test (type {chatType})", chatType);
+        string color = ItemInfoSettings?.TextColor ?? string.Empty;
+        WriteItemInfoLine($"{prefix}Item info chat test (type {chatType}{(color.Length > 0 ? ", colour " + color : "")})", chatType);
     }
 }

@@ -34,7 +34,10 @@ namespace RynthCore.Plugin.RynthAi.Vendor;
 /// </summary>
 internal sealed class AutoVendorManager
 {
-    public static readonly string MainProfileDir = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "AutoVendor");
+    public static readonly string DefaultMainProfileDir = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "AutoVendor");
+    /// <summary>RynthAi\AutoVendor: the main folder, with one folder per server in it. The host tests point it at their scratch folder.</summary>
+    public static string MainProfileDir => MainProfileDirOverride ?? DefaultMainProfileDir;
+    internal static string? MainProfileDirOverride;
     public const string ProfileSubfolder = "AutoVendor";
 
     private const long BailMs = 60_000;          // UB bailTimer
@@ -502,7 +505,9 @@ internal sealed class AutoVendorManager
         string path = ResolveProfilePath(fromArg ? profileArg : _vendorName + ".utl", fromArg);
         if (!File.Exists(path))
         {
-            Error($"No vendor profile exists: {path}");
+            // Every folder it looked in: the main folder's path alone read as "only the main
+            // folder is read", with the character and server folders beside it (2026-11-04).
+            Error($"No vendor profile exists: no {Path.GetFileName(path)} or default.utl in {string.Join(", ", ProfileDirs())}");
             Stop(false);
             return;
         }
@@ -519,6 +524,9 @@ internal sealed class AutoVendorManager
         }
 
         _profilePath = path;
+        // The vendor's own profile (or one named on /ub autovendor) is the player's word for this
+        // vendor; default.utl is not (see SellsForNothing).
+        _profileIsVendors = fromArg || !string.Equals(Path.GetFileName(path), "default.utl", StringComparison.OrdinalIgnoreCase);
         _failures = 0;
         _sessionSkip.Clear();
         _sellSkipLogged.Clear();
@@ -526,6 +534,13 @@ internal sealed class AutoVendorManager
         _bailAt = Now();
         _nextActionAt = 0;
         _host.Log($"[RynthAi] AutoVendor: {_vendorName} [0x{merchantId:X8}] profile '{path}' ({_profile.Rules.Count} rules)");
+        if (_settings.AutoVendorEnableSelling && TryGetVendor(out VendorView zv, out _) && zv.Id == merchantId && SellsForNothing(zv))
+        {
+            string why = $"{_vendorName} pays nothing for items (buy rate 0): nothing is sold to it with default.utl. " +
+                         $"To hand it items anyway (a storage vault), give it its own profile, {_vendorName}.utl.";
+            Tool(why);
+            _host.Log($"[RynthAi] AutoVendor: {why}");
+        }
 
         BuildIdQueue();
         _phase = Phase.Identifying;
@@ -555,7 +570,7 @@ internal sealed class AutoVendorManager
         _idState.Clear();
         if (_profile == null || !_settings.AutoVendorEnableSelling || !_host.HasRequestId || !_host.HasHasAppraisalData)
             return;
-        if (!TryGetVendor(out VendorView v, out _))
+        if (!TryGetVendor(out VendorView v, out _) || SellsForNothing(v))
             return;
 
         var ctx = NewContext();
@@ -1110,6 +1125,11 @@ internal sealed class AutoVendorManager
         var result = new List<SellItem>();
         if (!_settings.AutoVendorEnableSelling || _profile == null)
             return result;
+        if (SellsForNothing(v))
+        {
+            heldBack?.Add($"everything - {_vendorName} pays nothing (buy rate 0) and the profile is default.utl");
+            return result;
+        }
 
         uint player = PlayerId();
         var packOrder = PackOrder(inv, player);
@@ -1369,10 +1389,11 @@ internal sealed class AutoVendorManager
         double bestDist = double.MaxValue;
         foreach (var wo in _cache.GetLandscapeObjects())
         {
-            if (wo.ObjectClass != AcObjectClass.Vendor || wo.Id == player) continue;
+            if (wo.Id == player) continue;
             string n = (wo.Name ?? string.Empty).ToLowerInvariant();
             bool match = lower.Length == 0 || (partial ? n.Contains(lower) : n == lower);
             if (!match) continue;
+            if (!IsVendorObject(wo)) continue;   // after the name test: the bitfield read costs more
             double d = _cache.Distance(player, wo.Id);
             if (best == null || d < bestDist) { best = wo; bestDist = d; }
         }
@@ -1382,7 +1403,42 @@ internal sealed class AutoVendorManager
     private bool IsVendor(uint id, out WorldObject? wo)
     {
         wo = id != 0 ? _cache[unchecked((int)id)] : null;
-        return wo != null && wo.ObjectClass == AcObjectClass.Vendor;
+        return wo != null && IsVendorObject(wo);
+    }
+
+    // The session's profile is the vendor's own (<vendor>.utl) or one named on /ub autovendor, not default.utl.
+    private bool _profileIsVendors;
+
+    /// <summary>
+    /// A vendor that pays nothing for what it takes (buy rate 0), met with default.utl: nothing is
+    /// sold to it. Since the engine trades with zero-rate vendors (a free storage vault), a
+    /// default.utl's Sell rules, written to turn loot into pyreals, would otherwise hand every
+    /// matching item to such a vendor for nothing (on stock ACE for 1 pyreal a stack). A vault the
+    /// player means to fill gets its own profile, which sells (deposits) as written. Buying is not
+    /// changed: a vendor that charges 0 already ends the session at its first buy ("No vendor price
+    /// found").
+    /// </summary>
+    private bool SellsForNothing(VendorView v) => v.BuyRate == 0f && !_profileIsVendors;
+
+    // PublicWeenieDesc._bitfield BF_VENDOR (retail's ObjectDescriptionFlag.Vendor, which ACE sets too).
+    private const uint BfVendor = 0x00000200;
+
+    /// <summary>
+    /// A vendor by the server's own vendor flag. The world cache files a vendor by its type (a
+    /// creature: Npc or Monster) and never as <see cref="AcObjectClass.Vendor"/>, so
+    /// /ub vendor open by name, id or "selected" found no vendor at all. The cache class still
+    /// counts should it ever be Vendor. An engine without the bitfield read: as before.
+    /// </summary>
+    private bool IsVendorObject(WorldObject wo)
+    {
+        if (wo.ObjectClass == AcObjectClass.Vendor) return true;
+        try
+        {
+            return _host.HasGetObjectBitfield
+                && _host.TryGetObjectBitfield(unchecked((uint)wo.Id), out uint bf)
+                && (bf & BfVendor) != 0;
+        }
+        catch { return false; }
     }
 
     // ── /ub vendor addsell ──
@@ -1780,7 +1836,10 @@ internal sealed class AutoVendorManager
 
     /// <summary>
     /// First existing file of: character folder, server folder, main folder (the named
-    /// profile), then default.utl in the same three; else the main-folder path (missing).
+    /// profile), then default.utl in the same three; else where a new one goes (missing):
+    /// the server folder, or the main folder while the server's name isn't known. UB says
+    /// the main folder there; ours made the dashboard's Edit save every new profile in the
+    /// main folder, beside the server folders it had just made (2026-11-04).
     /// A name typed on /ub autovendor also tries name + ".utl".
     /// </summary>
     public string ResolveProfilePath(string profileName, bool addUtlGuess)
@@ -1801,8 +1860,9 @@ internal sealed class AutoVendorManager
             string p = SafeCombine(dir, "default.utl");
             if (p.Length > 0 && File.Exists(p)) return p;
         }
-        string fallback = SafeCombine(MainProfileDir, profileName);
-        return fallback.Length > 0 ? fallback : Path.Combine(MainProfileDir, "default.utl");
+        string home = ServerDir() ?? MainProfileDir;
+        string fallback = SafeCombine(home, profileName);
+        return fallback.Length > 0 ? fallback : Path.Combine(home, "default.utl");
     }
 
     /// <summary>Character, server, main - UB's order.</summary>
@@ -1812,11 +1872,72 @@ internal sealed class AutoVendorManager
         string charFolder = _charFolder() ?? string.Empty;
         if (!string.IsNullOrEmpty(charFolder))
             dirs.Add(Path.Combine(charFolder, ProfileSubfolder));
-        if (_host.HasGetWorldName && _host.TryGetWorldName(out string world) && !string.IsNullOrWhiteSpace(world))
-            dirs.Add(Path.Combine(MainProfileDir, Sanitize(world)));
+        string? server = ServerDir();
+        if (server != null) dirs.Add(server);
         dirs.Add(MainProfileDir);
         return dirs;
     }
+
+    /// <summary>AutoVendor\&lt;server&gt;, or null while the server's name isn't known.</summary>
+    private string? ServerDir()
+        => _host.HasGetWorldName && _host.TryGetWorldName(out string world) && !string.IsNullOrWhiteSpace(world)
+            ? Path.Combine(MainProfileDir, Sanitize(world))
+            : null;
+
+    /// <summary>
+    /// The profile pickers' list (the Loot Editor's): the .utl files in <paramref name="dirs"/>
+    /// (ProfileDirs: character, server, main), in that order, then the other servers' folders,
+    /// each marked by its folder: "AutoVendor (character): ", "AutoVendor (&lt;server&gt;): ",
+    /// "AutoVendor: " for the main folder. The picker listed the main folder and its server
+    /// folders as one tree and never the character folder (2026-11-04).
+    /// </summary>
+    public static List<(string Path, string Display)> ListProfiles(IReadOnlyList<string> dirs)
+    {
+        var list = new List<(string Path, string Display)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string main = FullPath(MainProfileDir);
+        var folders = new List<string>();
+        foreach (string d in dirs ?? Array.Empty<string>())
+            if (!string.IsNullOrWhiteSpace(d)) folders.Add(d);
+        if (!folders.Exists(d => SameDir(d, main))) folders.Add(MainProfileDir);
+        try
+        {
+            if (Directory.Exists(MainProfileDir))
+            {
+                var others = new List<string>(Directory.GetDirectories(MainProfileDir));
+                others.Sort(StringComparer.OrdinalIgnoreCase);
+                folders.AddRange(others);
+            }
+        }
+        catch { }
+
+        foreach (string dir in folders)
+        {
+            string full = FullPath(dir);
+            if (full.Length == 0 || !seen.Add(full)) continue;
+            string label = SameDir(full, main) ? "AutoVendor: "
+                : SameDir(Path.GetDirectoryName(full) ?? string.Empty, main) ? $"AutoVendor ({Path.GetFileName(full)}): "
+                : "AutoVendor (character): ";
+            try
+            {
+                if (!Directory.Exists(full)) continue;
+                var files = new List<string>(Directory.GetFiles(full, "*.utl"));
+                files.Sort(StringComparer.OrdinalIgnoreCase);
+                foreach (string f in files) list.Add((f, label + Path.GetFileName(f)));
+            }
+            catch { }
+        }
+        return list;
+    }
+
+    private static string FullPath(string dir)
+    {
+        try { return dir.Length == 0 ? string.Empty : Path.TrimEndingDirectorySeparator(Path.GetFullPath(dir)); }
+        catch { return string.Empty; }
+    }
+
+    private static bool SameDir(string a, string b)
+        => string.Equals(FullPath(a), FullPath(b), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Create the per-character and per-server folders so players can see where profiles go (UB Init).</summary>
     public void EnsureProfileFolders()

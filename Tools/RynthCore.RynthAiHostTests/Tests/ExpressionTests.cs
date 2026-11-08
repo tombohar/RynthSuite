@@ -677,6 +677,13 @@ internal static class ExpressionTests
         Check.Near(s.NavOffTrackYards, 160, 1e-6, "NavOffTrackYards clamps to at least 160");
         Is(e, "vtsetsetting[AutoVendorTries, 99]", "1");
         Check.Eq(s.AutoVendorTries, 20, "AutoVendorTries clamps to 20");
+        Is(e, "vtgetsetting[ChestRelockWaitSec]", "125");
+        Is(e, "vtsetsetting[ChestRelockWaitSec, 30]", "1");
+        Check.Eq(s.ChestRelockWaitSec, 30, "ChestRelockWaitSec (Item Tool's re-lock wait) set");
+        Is(e, "vtsetsetting[ChestRelockWaitSec, 2]", "1");
+        Check.Eq(s.ChestRelockWaitSec, 5, "ChestRelockWaitSec clamps to at least 5");
+        Is(e, "vtsetsetting[ChestRelockWaitSec, soon]", "1");
+        Check.Eq(s.ChestRelockWaitSec, 5, "unparsable leaves the value");
         Is(e, "vtsetsetting[BowArcVelocity, NaN]", "1");
         Check.True(float.IsFinite(s.BowArcVelocity), "NaN is refused");
         Is(e, "vtsetsetting[NotASetting, 7]", "1");

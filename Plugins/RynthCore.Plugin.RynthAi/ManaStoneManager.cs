@@ -110,6 +110,7 @@ internal sealed class ManaStoneManager
     // With an Eternal Mana Charge (never used up) there's no reason to wait for 25%: top
     // gear up below 75% (Lucy carried one on her Items list and it was never used, 2026-09-30).
     private const double WornRefillPctOfMaxEternal = 0.75;
+    private const long EternalRetryMs = 20_000;
     private long _lastGearDiagAt;
     private readonly Dictionary<int, long> _manaIdRequestedAt = new();
 
@@ -239,8 +240,12 @@ internal sealed class ManaStoneManager
             // re-select it every tick and never get to Priority 2 (drain looted).
             if (_state == TapState.UsingOnPlayer && _activeStoneId != 0)
             {
-                _stoneUseOnPlayerCooldownUntil[_activeStoneId] = now + StoneUseOnPlayerCooldownMs;
-                _host.Log($"[RynthAi] ManaStone: blacklisting stone 0x{(uint)_activeStoneId:X8} for use-on-player ({StoneUseOnPlayerCooldownMs / 1000}s cooldown).");
+                // An Eternal charge can't be used up or be the problem: a use that got no answer is
+                // tried again soon (one sent mid stance change never left the client, 2026-11-06).
+                WorldObject? timedOut = _objectCache[_activeStoneId];
+                long stoneCooldown = timedOut != null && IsEternal(timedOut) ? EternalRetryMs : StoneUseOnPlayerCooldownMs;
+                _stoneUseOnPlayerCooldownUntil[_activeStoneId] = now + stoneCooldown;
+                _host.Log($"[RynthAi] ManaStone: blacklisting stone 0x{(uint)_activeStoneId:X8} for use-on-player ({stoneCooldown / 1000}s cooldown).");
             }
             // For the tap path, the STONE is the more likely culprit when an
             // action silently fails — AC won't drain into a charged stone, so
@@ -550,7 +555,7 @@ internal sealed class ManaStoneManager
         //     starves the drain path entirely.
         // Not in a fight (FightIsOn): the drain waits for it to end.
         bool drainWaits = DrainWaitsForFight();
-        int stoneId  = _settings.EnableManaTapping && !drainWaits ? FindEmptyStone() : 0;
+        int stoneId  = TappingApplies && !drainWaits ? FindEmptyStone() : 0;
         int targetId = stoneId != 0 ? FindTapTarget(threshold) : 0;
 
         if (stoneId != 0 && targetId != 0)
@@ -703,6 +708,7 @@ internal sealed class ManaStoneManager
     /// </summary>
     public int FreeEmptyStoneSlots()
     {
+        if (HasEternalChargeCached()) return 0;   // tapping is ignored: nothing is looted to drain
         if (_lootedForTap.Count > 0) return 0;
         return CountEmptyStones() > 0 ? 1 : 0;
     }
@@ -716,7 +722,7 @@ internal sealed class ManaStoneManager
     {
         if (_state == TapState.TappingItem) return true;
         if (_lootedForTap.Count == 0) return false;
-        if (!_settings.EnableManaTapping || !_settings.IsMacroRunning || !_host.HasUseObjectOn) return false;
+        if (!TappingApplies || !_settings.IsMacroRunning || !_host.HasUseObjectOn) return false;
         // The drain waits for the fight to end, so it holds nothing meanwhile. No second item is
         // looted to tap: FreeEmptyStoneSlots is 0 while this one waits.
         if (DrainWaitsForFight()) return false;
@@ -837,6 +843,37 @@ internal sealed class ManaStoneManager
         _chargedCached = HasEternalCharge() || FindChargedStone() != 0;
         return _chargedCached;
     }
+
+    // With an Eternal Mana Charge in the pack tapping is ignored (the owner, 2026-11-06): the charge
+    // does all the refilling and always wins, so a stone that drained something would just stay full.
+    // No draining, nothing looted to drain, no stones looted. The Mana Tap setting itself is untouched,
+    // so it applies again if the charge leaves the pack.
+    private bool TappingApplies => _settings.EnableManaTapping && !HasEternalChargeCached();
+
+    private long _eternalCheckAt = long.MinValue;
+    private bool _eternalCached;
+    private bool _eternalNoted;
+
+    /// <summary>An Eternal Mana Charge is in the pack (looked up at most every 2 s: the looter asks per item).</summary>
+    internal bool HasEternalChargeCached()
+    {
+        long now = NowMs;
+        if (_eternalCheckAt != long.MinValue && now - _eternalCheckAt < 2000) return _eternalCached;
+        _eternalCheckAt = now;
+        _eternalCached = HasEternalCharge();
+        if (_eternalCached != _eternalNoted)
+        {
+            _eternalNoted = _eternalCached;
+            if (_settings.EnableManaTapping)
+                _host.Log(_eternalCached
+                    ? "[RynthAi] ManaStone: an Eternal Mana Charge is in the pack: mana tapping is ignored while it is."
+                    : "[RynthAi] ManaStone: no Eternal Mana Charge in the pack any more: mana tapping applies again.");
+        }
+        return _eternalCached;
+    }
+
+    /// <summary>True for an Eternal Mana Charge (internal so the looter can tell one from a stone).</summary>
+    internal static bool IsEternalCharge(WorldObject item) => IsEternal(item);
 
     private bool HasEternalCharge()
     {

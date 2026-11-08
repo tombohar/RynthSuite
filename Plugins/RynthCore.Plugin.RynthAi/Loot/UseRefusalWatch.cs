@@ -53,8 +53,10 @@ internal sealed class UseRefusalWatch
     public const int RefusalsBeforeRetry = 3;
     /// <summary>The pause after the clean stop, before the one retry.</summary>
     public const long CleanStopPauseMs = 1500;
-    public const long FirstBackoffMs = 5 * 60_000;
-    public const long MaxBackoffMs = 20 * 60_000;
+    // A probe is one use and one jump, so it costs far less than loot left behind: 5 minutes, doubling
+    // to 20, was much too long to stop looting (the owner, 2026-11-06).
+    public const long FirstBackoffMs = 30_000;
+    public const long MaxBackoffMs = 2 * 60_000;
 
     public enum Phase { Normal, Retrying, Stuck }
 

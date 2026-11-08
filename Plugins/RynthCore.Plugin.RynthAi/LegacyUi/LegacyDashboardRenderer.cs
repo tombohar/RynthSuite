@@ -1046,6 +1046,9 @@ internal sealed partial class LegacyDashboardRenderer
     public string BuildRadarJson(uint engineKnownMapVersion)
         => _rynthRadarUi.BuildSnapshotJson(engineKnownMapVersion);
 
+    /// <summary>The share of the dungeon's floor the radar painted as visited (null: not known); /ra dunroute where.</summary>
+    internal double? ExploredShare(uint landblock) => _rynthRadarUi?.ExploredShare(landblock);
+
     // ── Monsters bridge (used by the engine-side Avalonia MonstersPanel) ────
     /// <summary>
     /// Builds a JSON payload describing the current MonsterRules + ItemRules
@@ -1276,6 +1279,7 @@ internal sealed partial class LegacyDashboardRenderer
                 RearmAfterVitals           = s.RearmAfterVitals,
                 StartMacroOnLogin          = s.StartMacroOnLogin,
                 PatrolOnLogin              = s.PatrolOnLogin,
+                ResumeMetaOnReload         = s.ResumeMetaOnReload,
                 YieldToVTank               = s.YieldToVTank,
                 EnableRaycasting           = s.EnableRaycasting,
                 UseArcs                    = s.UseArcs,
@@ -1350,6 +1354,7 @@ internal sealed partial class LegacyDashboardRenderer
                 CastDispelSelf             = s.CastDispelSelf,
                 UseDispelItems             = s.UseDispelItems,
                 AutoFellowMgmt             = s.AutoFellowMgmt,
+                OpenFellowOnCreate         = s.OpenFellowOnCreate,
                 MChargesWhenOff            = s.MChargesWhenOff,
                 CustomPetRange             = s.CustomPetRange,
                 MinRingTargets             = s.MinRingTargets,
@@ -1411,6 +1416,7 @@ internal sealed partial class LegacyDashboardRenderer
                 DunPatrolSightYd           = s.DunPatrolSightYd,
                 OutdoorHuntRange           = s.OutdoorHuntRange,
                 OutdoorHuntRadius          = s.OutdoorHuntRadius,
+                OutdoorHuntPick            = s.OutdoorHuntPick,
                 T2Speed                    = s.T2Speed,
                 T2WalkWithinYd             = s.T2WalkWithinYd,
                 T2DistanceTo               = s.T2DistanceTo,
@@ -1446,6 +1452,7 @@ internal sealed partial class LegacyDashboardRenderer
                 LootJumpEnabled            = s.LootJumpEnabled,
                 LootChestsMacroOff         = s.LootChestsMacroOff,
                 LootChestsMacroOffLeaveOpen = s.LootChestsMacroOffLeaveOpen,
+                ChestRelockWaitSec         = s.ChestRelockWaitSec,
                 LootJumpHeight             = s.LootJumpHeight,
                 LootOwnership              = s.LootOwnership,
                 LootOwnCorpse              = s.LootOwnCorpse,
@@ -1455,6 +1462,7 @@ internal sealed partial class LegacyDashboardRenderer
                 ItemInfoOnSelect           = s.ItemInfoSettings.OnSelect,
                 EnableAutostack            = s.EnableAutostack,
                 ReadUnknownScrolls         = s.ReadUnknownScrolls,
+                UnboxAetheriaWhenIdle      = s.UnboxAetheriaWhenIdle,
                 EnableCombineSalvage       = s.EnableCombineSalvage,
                 CombineBagsDuringSalvage   = s.CombineBagsDuringSalvage,
                 SalvageWithoutPanel        = s.SalvageWithoutPanel,
@@ -1486,6 +1494,8 @@ internal sealed partial class LegacyDashboardRenderer
                 OffhandDefault             = s.OffhandDefault,
                 PreferDualWield            = s.PreferDualWield,
                 EnableGroundLoot           = s.EnableGroundLoot,
+                LootByNames                = s.LootByNames,
+                LootByNameRadius           = s.LootByNameRadius,
                 // Diagnostics (per PC, RynthLog)
                 DiagDebugToChat            = RynthLog.DebugToChat,
                 DiagFileLogAll             = RynthLog.FileLogAll,
@@ -1546,6 +1556,7 @@ internal sealed partial class LegacyDashboardRenderer
             if (p.RearmAfterVitals is bool rav) s.RearmAfterVitals = rav;
             s.StartMacroOnLogin          = p.StartMacroOnLogin;
             s.PatrolOnLogin              = p.PatrolOnLogin;
+            if (p.ResumeMetaOnReload is bool resumeMeta) s.ResumeMetaOnReload = resumeMeta;   // absent = unchanged
             s.YieldToVTank               = p.YieldToVTank;
             s.EnableRaycasting           = p.EnableRaycasting;
             s.UseArcs                    = p.UseArcs;
@@ -1625,6 +1636,7 @@ internal sealed partial class LegacyDashboardRenderer
             // Absent (an engine without them) = unchanged.
             if (p.UseDispelItems is bool useDispelItems) s.UseDispelItems = useDispelItems;
             if (p.AutoFellowMgmt is bool autoFellow) s.AutoFellowMgmt = autoFellow;
+            if (p.OpenFellowOnCreate is bool openFellow) s.OpenFellowOnCreate = openFellow;
             if (p.MChargesWhenOff is bool mCharges) s.MChargesWhenOff = mCharges;
             if (p.CustomPetRange is int petRange) s.CustomPetRange = Math.Clamp(petRange, 1, 50);
             s.MinRingTargets             = p.MinRingTargets;
@@ -1689,6 +1701,7 @@ internal sealed partial class LegacyDashboardRenderer
             // Outdoor hunt: absent (an older engine) = unchanged.
             if (p.OutdoorHuntRange is float huntRange)       s.OutdoorHuntRange      = (float)Math.Clamp(huntRange, RynthAiPlugin.OutdoorHuntRangeMin, RynthAiPlugin.OutdoorHuntRangeMax);
             if (p.OutdoorHuntRadius is float huntRadius)     s.OutdoorHuntRadius     = (float)Math.Clamp(huntRadius, 0, RynthAiPlugin.OutdoorHuntRadiusMax);
+            if (p.OutdoorHuntPick is int huntPick)           s.OutdoorHuntPick       = Math.Clamp(huntPick, 0, 2);
             s.T2Speed                    = p.T2Speed;
             s.T2WalkWithinYd             = p.T2WalkWithinYd;
             s.T2DistanceTo               = p.T2DistanceTo;
@@ -1721,6 +1734,7 @@ internal sealed partial class LegacyDashboardRenderer
             s.LootJumpEnabled            = p.LootJumpEnabled;
             s.LootChestsMacroOff         = p.LootChestsMacroOff;
             s.LootChestsMacroOffLeaveOpen = p.LootChestsMacroOffLeaveOpen;
+            if (p.ChestRelockWaitSec is int relockSec) s.ChestRelockWaitSec = ItemTool.ChestKeyLooter.ClampRelockWaitSec(relockSec);   // absent = unchanged
             s.LootJumpHeight             = p.LootJumpHeight;
             s.LootOwnership              = p.LootOwnership;
             if (p.EscapeHazards is bool escape) s.EscapeHazards = escape;                 // absent = unchanged
@@ -1730,6 +1744,7 @@ internal sealed partial class LegacyDashboardRenderer
             if (p.ItemInfoOnSelect is bool infoOnSelect) s.ItemInfoSettings.OnSelect = infoOnSelect; // absent = unchanged
             s.EnableAutostack            = p.EnableAutostack;
             s.ReadUnknownScrolls         = p.ReadUnknownScrolls;
+            if (p.UnboxAetheriaWhenIdle is bool unboxAetheria) s.UnboxAetheriaWhenIdle = unboxAetheria;   // absent = unchanged
             s.EnableCombineSalvage       = p.EnableCombineSalvage;
             s.CombineBagsDuringSalvage   = p.CombineBagsDuringSalvage;
             if (p.SalvageWithoutPanel is bool salvNoPanel) s.SalvageWithoutPanel = salvNoPanel; // absent = unchanged
@@ -1762,6 +1777,8 @@ internal sealed partial class LegacyDashboardRenderer
             if (p.OffhandDefault is string od && OffhandRules.TryParse(od, out var odMode)) s.OffhandDefault = OffhandRules.SettingValue(odMode);
             if (p.PreferDualWield            is bool pdw)     s.PreferDualWield            = pdw;
             s.EnableGroundLoot           = p.EnableGroundLoot;
+            if (p.LootByNames is string lootNames) s.LootByNames = LootByNameList.Normalize(lootNames);
+            if (p.LootByNameRadius is float lootRadius) s.LootByNameRadius = (float)Math.Clamp(lootRadius, LootByNameList.MinRadius, LootByNameList.MaxRadius);
             // Diagnostics: each setter rewrites diagnostics.json, so only touch what changed.
             if (p.DiagDebugToChat != RynthLog.DebugToChat) RynthLog.DebugToChat = p.DiagDebugToChat;
             if (p.DiagFileLogAll  != RynthLog.FileLogAll)  RynthLog.FileLogAll  = p.DiagFileLogAll;
@@ -2066,6 +2083,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.DunPatrolSightYd         = tmp.DunPatrolSightYd;
         dst.OutdoorHuntRange         = tmp.OutdoorHuntRange;
         dst.OutdoorHuntRadius        = tmp.OutdoorHuntRadius;
+        dst.OutdoorHuntPick          = Math.Clamp(tmp.OutdoorHuntPick, 0, 2);
         dst.T2Speed                  = tmp.T2Speed;
         dst.T2DistanceTo             = tmp.T2DistanceTo;
         dst.T2ReissueMs              = tmp.T2ReissueMs;
@@ -2086,6 +2104,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.EnableAutostack          = tmp.EnableAutostack;
         dst.EnableAutocram           = tmp.EnableAutocram;
         dst.ReadUnknownScrolls       = tmp.ReadUnknownScrolls;
+        dst.UnboxAetheriaWhenIdle    = tmp.UnboxAetheriaWhenIdle;
         dst.EnableCombineSalvage     = tmp.EnableCombineSalvage;
         dst.CombineBagsDuringSalvage = tmp.CombineBagsDuringSalvage;
         dst.SalvageWithoutPanel      = tmp.SalvageWithoutPanel;
@@ -2109,6 +2128,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.LootJumpEnabled          = tmp.LootJumpEnabled;
         dst.LootChestsMacroOff       = tmp.LootChestsMacroOff;
         dst.LootChestsMacroOffLeaveOpen = tmp.LootChestsMacroOffLeaveOpen;
+        dst.ChestRelockWaitSec       = ItemTool.ChestKeyLooter.ClampRelockWaitSec(tmp.ChestRelockWaitSec);
         dst.LootJumpHeight           = tmp.LootJumpHeight;
         dst.SalvageOpenDelayFirstMs  = tmp.SalvageOpenDelayFirstMs;
         dst.SalvageOpenDelayFastMs   = tmp.SalvageOpenDelayFastMs;
@@ -2120,6 +2140,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.UseDispelItems           = tmp.UseDispelItems;
         dst.CastDispelSelf           = tmp.CastDispelSelf;
         dst.AutoFellowMgmt           = tmp.AutoFellowMgmt;
+        dst.OpenFellowOnCreate       = tmp.OpenFellowOnCreate;
         dst.MChargesWhenOff          = tmp.MChargesWhenOff;
         dst.HealAt                   = tmp.HealAt;
         dst.UsePotions               = tmp.UsePotions;
@@ -2193,6 +2214,8 @@ internal sealed partial class LegacyDashboardRenderer
         dst.LootOnlyRareCorpses      = tmp.LootOnlyRareCorpses;
         dst.LootMode                 = tmp.LootMode;   // read through LootModes (an unknown value = Profile)
         dst.EnableGroundLoot         = tmp.EnableGroundLoot;
+        dst.LootByNames              = LootByNameList.Normalize(tmp.LootByNames);
+        dst.LootByNameRadius         = (float)Math.Clamp(tmp.LootByNameRadius > 0 ? tmp.LootByNameRadius : LootByNameList.DefaultRadius, LootByNameList.MinRadius, LootByNameList.MaxRadius);
         dst.PeaceModeWhenIdle        = tmp.PeaceModeWhenIdle;
         dst.RearmAfterVitals         = tmp.RearmAfterVitals;
         dst.FastWeaponSwap           = tmp.FastWeaponSwap;
@@ -2316,6 +2339,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.AllowMetaKeystrokes      = tmp.AllowMetaKeystrokes;
         dst.StartMacroOnLogin        = tmp.StartMacroOnLogin;
         dst.PatrolOnLogin            = tmp.PatrolOnLogin;
+        dst.ResumeMetaOnReload       = tmp.ResumeMetaOnReload;
         dst.YieldToVTank             = tmp.YieldToVTank;
         dst.FeatureServerNames       = tmp.FeatureServerNames;
         dst.ForceServerFeatures      = tmp.ForceServerFeatures;

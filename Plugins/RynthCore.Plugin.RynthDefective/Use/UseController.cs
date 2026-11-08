@@ -39,6 +39,12 @@ internal interface IDefWorld
     bool HoldBot(uint ms);
     /// <summary>Ends the player's turn.</summary>
     void ReleaseBot();
+    /// <summary>
+    /// Resets the client's busy count as RynthAi's /ra clearbusy does (the engine's ForceResetBusyCount:
+    /// the count to 0 and the cursor re-read, on the game's next tick; every plugin's copy of the count is
+    /// told). False when this engine can't. Only for "Shortcuts clear a stuck busy state" (BusyClearRule).
+    /// </summary>
+    bool ClearBusyCount();
     /// <summary>Count of the server's UseDone events; 0 when the engine can't report them.</summary>
     int UseDoneSeq { get; }
     /// <summary>The error of the server's first UseDone after <paramref name="seqAtSend"/> (0x1D: "You're too busy"); 0 = none or unknown.</summary>
@@ -155,6 +161,10 @@ internal static class Stance
 /// behind that stream until it gave up. While RynthAi holds, it also says exactly what it has in
 /// flight, so only that and our own last use hold a press: the busy count beyond them is a leftover.
 ///
+/// Shortcuts clear a stuck busy state (2026-11-04, Settings.ClearStuckBusy, off by default): a press held
+/// only by the busy count, with nothing real in flight (<see cref="BusyClearRule"/>), resets the count as
+/// /ra clearbusy does, once per press, then goes (<see cref="ClearSettleMs"/> for the reset to read; logged).
+///
 /// After a portal (2026-10-29): the engine takes no game action until 5 s after portal space ends
 /// (its world-transition gate: AC is still loading the new place), so a press then was refused and
 /// reported as "the client didn't take the request". Within <see cref="PortalRetryWindowMs"/> of
@@ -188,6 +198,11 @@ internal sealed class UseController
     public const long PortalRetryWindowMs = 6000;
     /// <summary>How often a refused use or cast is tried again after a portal.</summary>
     public const long RefusedRetryMs = 250;
+    /// <summary>
+    /// After "Shortcuts clear a stuck busy state" cleared the count for a press: it waits this long for the
+    /// engine's reset (on the game's next tick) to read, then goes, what is left taken as a leftover.
+    /// </summary>
+    public const long ClearSettleMs = 500;
 
     private enum Stage { Sent, WaitWield, Stance, Magic }
 
@@ -227,6 +242,14 @@ internal sealed class UseController
     private long _worldBackMs = long.MinValue / 4;
     private long _refusedRetryAtMs = long.MinValue / 4;
     private UseRequest? _refusedSaid;
+    // "Shortcuts clear a stuck busy state" (Settings.ClearStuckBusy): the press a clear was sent (or tried)
+    // for, once per press; when; whether the engine took it. Our own last send answered; the server's last
+    // "You're too busy".
+    private UseRequest? _clearedFor;
+    private long _clearedAtMs;
+    private bool _clearSent;
+    private bool _ownAnswered = true;
+    private long _tooBusyAtMs = long.MinValue / 4;
 
     /// <summary>The engine refused sends this soon after the character came out of portal space: they are tried again.</summary>
     private bool JustArrived(long now) => now - _worldBackMs < PortalRetryWindowMs;
@@ -277,6 +300,7 @@ internal sealed class UseController
         _lastWait = string.Empty;
         _retryNotBeforeMs = long.MinValue / 4;
         _refusedRetryAtMs = long.MinValue / 4;
+        _clearedFor = null;
     }
 
     /// <summary>
@@ -288,6 +312,8 @@ internal sealed class UseController
     {
         Reset();
         _busy.Reset();
+        _ownAnswered = true;
+        _tooBusyAtMs = long.MinValue / 4;
     }
 
     public void Tick(IDefWorld w)
@@ -340,7 +366,7 @@ internal sealed class UseController
         if (_pending == null) return;
 
         UseRequest req = _pending;
-        string? wait = WaitReason(w, now);
+        string? wait = WaitReason(w, req, now);
         if (wait != null)
         {
             _lastWait = wait;
@@ -355,18 +381,58 @@ internal sealed class UseController
         Send(w, req, now);
     }
 
-    private string? WaitReason(IDefWorld w, long now)
+    private string? WaitReason(IDefWorld w, UseRequest req, long now)
     {
         if (now - _lastDoneMs < MinGapMs) return "the last action just finished";
         if (now < _retryNotBeforeMs) return "the server said the character was busy";
         if (now < _refusedRetryAtMs) return "the game is still loading after the portal";
-        return Hold(now) switch
+        BusyHold hold = Hold(now);
+        if (hold == BusyHold.Busy && Settings.ClearStuckBusy)
+        {
+            if (ClearStuckBusy(w, req, now) is { } clearing) return clearing;
+            hold = Hold(now);
+        }
+        return hold switch
         {
             BusyHold.Busy => "the character is busy",
             BusyHold.Animation => "an animation is playing",
             BusyHold.Bot => "RynthAi is waiting on the server",
             _ => null,
         };
+    }
+
+    /// <summary>
+    /// "Shortcuts clear a stuck busy state": <paramref name="req"/> is held by the busy count. When nothing
+    /// real is in flight (BusyClearRule) the count is reset as /ra clearbusy does, once for this press, and
+    /// the press waits <see cref="ClearSettleMs"/> for the reset to read; then what is left is a leftover
+    /// and it goes. Returns the wait while the clear settles, null for the usual rules (nothing cleared, or
+    /// the clear has settled).
+    /// </summary>
+    private string? ClearStuckBusy(IDefWorld w, UseRequest req, long now)
+    {
+        const string Clearing = "a stuck busy state is being cleared";
+        if (ReferenceEquals(_clearedFor, req))
+        {
+            if (!_clearSent) return null;   // the engine couldn't: the usual rules
+            if (now - _clearedAtMs < ClearSettleMs) return Clearing;
+            _busy.AcceptLeftover();
+            return null;
+        }
+        BusyFacts f = _busy.Facts(now, _botHeld);
+        if (!BusyClearRule.ShouldClear(true, BusyHold.Busy, f, _flight != null, _ownAnswered, now - _tooBusyAtMs)) return null;
+        _clearedFor = req;
+        _clearedAtMs = now;
+        _clearSent = w.ClearBusyCount();
+        if (!_clearSent)
+        {
+            Log?.Invoke($"[RynthDefective] {req.Source}: held only by the client's busy count ({f.Count}), but this RynthCore can't reset it "
+                        + "(ForceResetBusyCount): waiting as usual");
+            return null;
+        }
+        Log?.Invoke($"[RynthDefective] {req.Source}: held only by the client's busy count ({f.Count}; nothing of ours or RynthAi's in flight, "
+                    + "no gesture, no 'too busy' from the server): reset it as /ra clearbusy does (Shortcuts clear a stuck busy state), then the use");
+        Say?.Invoke($"{req.Label}: clearing a stuck busy state...");
+        return Clearing;
     }
 
     /// <summary>The busy gate's verdict now; a leftover it ignores for the first time is logged.</summary>
@@ -444,6 +510,7 @@ internal sealed class UseController
             return;
         }
         _busy.NoteOwnSend(now);
+        _ownAnswered = false;
 
         _flight = new Flight
         {
@@ -602,6 +669,7 @@ internal sealed class UseController
             return true;
         }
         _busy.NoteOwnSend(now);
+        _ownAnswered = false;
         f.Stage = Stage.Sent;
         f.SentMs = now;
         f.StageMs = now;
@@ -627,7 +695,12 @@ internal sealed class UseController
                 {
                     if (!answered && age >= UseTimeoutMs) Log?.Invoke($"[RynthDefective] no UseDone for {f.What} after {age} ms; carrying on");
                     Finish(now);
-                    if (answered && w.UseDoneError(f.UseDoneAtSend) == TooBusyError) RetryTooBusy(f, now);
+                    if (answered) _ownAnswered = true;
+                    if (answered && w.UseDoneError(f.UseDoneAtSend) == TooBusyError)
+                    {
+                        _tooBusyAtMs = now;   // the server really is busy: nothing is cleared for a while (BusyClearRule)
+                        RetryTooBusy(f, now);
+                    }
                     return true;
                 }
                 return false;
@@ -638,6 +711,7 @@ internal sealed class UseController
                 if (live != null && live.Wielded)
                 {
                     Wielded?.Invoke(live);
+                    _ownAnswered = true;   // a wield's answer is the item in hand
                     f.Item = live;
                     f.Stage = Stage.Stance;
                     f.StageMs = now;
@@ -645,6 +719,7 @@ internal sealed class UseController
                 }
                 if (w.RefusalSeq != f.RefusalAtSend && w.RefusalNamed(f.Item.Id))
                 {
+                    _ownAnswered = true;
                     Warn?.Invoke($"{f.Item.FullName}: the server wouldn't let you wield it (a skill, level or slot requirement?).");
                     Finish(now);
                     return true;

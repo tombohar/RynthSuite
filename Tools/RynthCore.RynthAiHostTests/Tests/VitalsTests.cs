@@ -26,10 +26,12 @@ internal static class VitalsTests
         r.Add("vitals: a recharge started in a fight, or under Re-stam At just after one, finishes to Re-stam To", RestamRunOutlivesFight);
         r.Add("vitals: a Re-stam To run counts casts sent, not the ticks spent waiting for one", RestamRunCountsSentCasts);
         r.Add("vitals: out of Magic stance a listed stamina potion goes before Revitalize; a caster casts first", StaminaPotionFirst);
+        r.Add("vitals: no wand swap for the between-fights stamina top-off; under Re-stam At, with a potion or in Magic it acts as before", NoWandSwapForStaminaTopOff);
         r.Add("vitals: a listed potion whose stack ran out is drunk from the next stack of that name", ListedPotionNextStack);
         r.Add("vitals: after a kit, nothing else heals until the kit's result line lands", KitResultWait);
         r.Add("vitals: Heal Self known only above the tier Life Magic allows (vitae) is still cast", HealAboveAllowedTier);
         r.Add("vitals: low health wins the arbiter even on a busy tick; backs off when nothing can heal", HealthWinsArbiter);
+        r.Add("vitals: health falling with nothing in the scan uses the fight's Heal At, not Top Off HP, for 5 s", BeingHitIsAFight);
         r.Add("vitals: 'You're too busy!' paces vital casts, and a long streak stops the character once", TooBusyVitals);
         r.Add("vitals: no components for the top level - the next lower level is cast, not the same one again", NoComponentsFallsBack);
         // Drakkon's death, 2026-10-05 13:43:20 (ops\overnight\2026-10-05-death-fixes.md).
@@ -112,6 +114,32 @@ internal static class VitalsTests
     // 2026-10-04, "nav and looting have priority over healing, almost dying in packs": the
     // arbiter only saw a heal on ticks where CheckVitals ran (never while looting kept the client
     // busy). Health under a line now says "wants vitals" by itself.
+    // 2026-11-06: a mob behind a wall isn't in the scan, so a character it hit read as idle and every
+    // hit put him under Top Off HP: kits for 45 s and nothing else ran.
+    private static void BeingHitIsAFight()
+    {
+        FakeHost.Reset();
+        FakeHost.WeaponCalls = true;
+        foreach (var row in SpellTable.Rows) FakeHost.Spellbook.Add((uint)row.Id);
+        FakeHost.Skills[(Player, STypeLife)] = (400, 2);
+        var host = FakeHost.Create();
+        var s = new LegacyUiSettings { IsMacroRunning = true, HealAt = 60, TopOffHP = 95, EmergencyHealAt = 0, StaminaToHealthAt = 0, UsePotions = false };
+        var skills = new CharacterSkills(host);
+        skills.SetPlayerId(Player);
+        var sm = new SpellManager(host, s);
+        sm.InitializeNatively();
+        sm.SetCharacterSkills(skills);
+        var v = new PlayerVitalsCache { MaxHealth = 100, CurrentHealth = 100, MaxStamina = 100, CurrentStamina = 100, MaxMana = 100, CurrentMana = 100 };
+        var b = new BuffManager(host, s, sm, v);
+        b.SetCharacterSkills(skills);
+
+        Check.False(b.WantsVitalRecharge, "full health: nothing to do");
+        v.CurrentHealth = 80;
+        Check.False(b.WantsVitalRecharge, "hit down to 80%: a fight, and over Heal At 60");
+        v.CurrentHealth = 50;
+        Check.True(b.WantsVitalRecharge, "50% is under Heal At: heals");
+    }
+
     private static void HealthWinsArbiter()
     {
         BuffManager Make(byte lifeTraining, out PlayerVitalsCache vitals, out LegacyUiSettings s)
@@ -291,6 +319,56 @@ internal static class VitalsTests
                 Check.True(FakeHost.Casts.Count > 0, "caster: Revitalize is cast");
             }
         }
+    }
+
+    // The owner, 2026-11-07: a melee character with no stamina kit or potion swapped weapons for the
+    // wand and back (about 5.5 s) for every between-fights stamina top-off. Out of a fight and over
+    // Re-stam At it now waits for regeneration; under Re-stam At, in Magic stance, or with a potion,
+    // stamina is handled as before.
+    private static void NoWandSwapForStaminaTopOff()
+    {
+        const uint Tincture = 0x80001234;
+        BuffManager Rig(int mode, int stamina, bool potion, out PlayerVitalsCache vitals)
+        {
+            FakeHost.Reset();
+            FakeHost.WeaponCalls = true;
+            FakeHost.CombatModeValue = mode;
+            foreach (var row in SpellTable.Rows) FakeHost.Spellbook.Add((uint)row.Id);
+            FakeHost.Skills[(Player, STypeLife)] = (400, 2);
+            if (potion) FakeHost.Names[Tincture] = "Stamina Tincture";
+            var host = FakeHost.Create();
+            var s = new LegacyUiSettings { IsMacroRunning = true, HealAt = 0, TopOffHP = 0, EmergencyHealAt = 0, StaminaToHealthAt = 0,
+                                           GetManaAt = 0, TopOffMana = 0, RestamAt = 30, RestamTo = 90, TopOffStam = 60,
+                                           UsePotions = potion, EnableBuffing = false };
+            if (potion) s.ConsumableRules.Add(new ConsumableRule { Id = unchecked((int)Tincture), Name = "Stamina Tincture", Type = "Stamina" });
+            var skills = new CharacterSkills(host);
+            skills.SetPlayerId(Player);
+            var sm = new SpellManager(host, s);
+            sm.InitializeNatively();
+            sm.SetCharacterSkills(skills);
+            vitals = new PlayerVitalsCache { MaxHealth = 100, CurrentHealth = 100, MaxStamina = 100, CurrentStamina = (uint)stamina, MaxMana = 100, CurrentMana = 100 };
+            var b = new BuffManager(host, s, sm, vitals) { InCombatOverride = () => false };
+            b.SetCharacterSkills(skills);
+            b.SetWorldObjectCache(FakeHost.MakeCache(host, Player, potion ? new[] { Tincture } : System.Array.Empty<uint>()));
+            return b;
+        }
+
+        var melee = Rig(CombatMode.Melee, 50, potion: false, out _);
+        Check.False(melee.CheckVitals(), "melee, idle, 50% under Top Off 60, nothing but the spell: nothing to do");
+        Check.Eq(FakeHost.Casts.Count, 0, "no Revitalize");
+        Check.False(FakeHost.Wields.Count > 0 || FakeHost.CombatModeRequests.Contains(CombatMode.Magic), "and no wand swap or Magic stance");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("no wand swap for it out of a fight")), "logged why");
+
+        melee = Rig(CombatMode.Melee, 25, potion: false, out _);
+        Check.True(melee.CheckVitals(), "melee, idle, 25% under Re-stam At 30: the recharge goes (wand swap and Revitalize)");
+
+        var drink = Rig(CombatMode.Melee, 50, potion: true, out _);
+        Check.True(drink.CheckVitals(), "melee, idle, 50% with a tincture: still topped off");
+        Check.True(FakeHost.Uses.Contains(Tincture), "the tincture is drunk");
+
+        var caster = Rig(CombatMode.Magic, 50, potion: false, out _);
+        Check.True(caster.CheckVitals(), "in Magic stance (no swap needed): the top-off casts as before");
+        Check.True(FakeHost.Casts.Count > 0, "Revitalize is cast");
     }
 
     // Report 2026-10-10: 200+ Stamina Tinctures, and RynthAi stopped drinking them whenever the stack

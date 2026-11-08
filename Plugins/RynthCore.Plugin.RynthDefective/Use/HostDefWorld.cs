@@ -44,6 +44,14 @@ internal sealed unsafe class HostDefWorld : IDefWorld
     public bool HoldBot(uint ms) => BotYield.Hold(_host, ms);
     public void ReleaseBot() => BotYield.Release(_host);
 
+    /// <summary>The busy-count reset of /ra clearbusy (ForceResetBusyCount; the engine runs it on the game's thread).</summary>
+    public bool ClearBusyCount()
+    {
+        if (!_host.HasForceResetBusyCount) return false;
+        _host.ForceResetBusyCount();
+        return true;
+    }
+
     public int RefusalSeq => _host.HasGetLastWeenieError && _host.TryGetLastWeenieError(out int seq, out _, out _, out _) ? seq : 0;
 
     public bool RefusalNamed(uint objectId) =>

@@ -121,6 +121,7 @@ public partial class CombatManager
                 _lockedPriority = priority;
                 _lockedLastSeen = c;
                 _lockedLastSeenInScan = now;
+                _lockByPlayer = true;
                 return true;
             }
             if (bySelection)
@@ -129,6 +130,7 @@ public partial class CombatManager
             else
                 LockTarget(c, priority, $"target lock: picked by the player, {DescribeTargetPos(fid)}",
                     _lockedTargetId != 0 ? "target lock" : null);
+            _lockByPlayer = true;   // once the player's pick ends, normal priority takes over again
             return true;
         }
 

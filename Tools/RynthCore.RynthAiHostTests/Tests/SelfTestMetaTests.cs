@@ -40,6 +40,9 @@ internal static class SelfTestMetaTests
         Check.Eq(bare.M.Expressions.Evaluate("ratargetcount[]"), "-1", "not wired: -1");
         bare.M.SetCombatTargetCount(() => 3);
         Check.Eq(bare.M.Expressions.Evaluate("ratargetcount[]"), "3", "wired: combat's count");
+        Check.Eq(bare.M.Expressions.Evaluate("ralastchestlooted[]"), "0", "ralastchestlooted[] not wired: 0");
+        bare.M.SetLastChestLooted(() => 0x80061193u);
+        Check.Eq(bare.M.Expressions.Evaluate("ralastchestlooted[]"), "2147881363", "wired: the chest's id, as wobjectgetid[] gives it");
 
         Run Beside(int targets)
         {

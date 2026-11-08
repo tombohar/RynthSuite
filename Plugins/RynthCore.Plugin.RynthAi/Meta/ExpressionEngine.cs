@@ -110,9 +110,19 @@ internal sealed partial class ExpressionEngine
     /// fake clock; the plugin never changes it.</summary>
     internal Func<long> TickMs { get; set; } = static () => Environment.TickCount64;
 
-    // Stopwatch store: handle → Stopwatch. Persistent (not cleared per eval) — handles are stored in variables.
-    private readonly Dictionary<string, System.Diagnostics.Stopwatch> _stopwatches = new(StringComparer.Ordinal);
+    // Stopwatch store: handle → stopwatch. Persistent (not cleared per eval) — handles are stored in variables.
+    // On TickMs, and its elapsed time can be set, so Resume Meta After Reload carries a stopwatch over with the
+    // variable that names it (a handle kept without its stopwatch read 0 s for ever, 2026-11-07).
+    private readonly Dictionary<string, MetaStopwatch> _stopwatches = new(StringComparer.Ordinal);
     private int _nextSwId;
+
+    private sealed class MetaStopwatch
+    {
+        public long AccumulatedMs;
+        public long StartedAtMs;   // while Running
+        public bool Running;
+        public long ElapsedMs(long now) => AccumulatedMs + (Running ? Math.Max(0, now - StartedAtMs) : 0);
+    }
 
     // Motion name → (AC motion uint, wanted state). Matches UB Motion enum values.
     private static readonly Dictionary<string, uint> MotionValues = new(StringComparer.OrdinalIgnoreCase)
@@ -210,6 +220,11 @@ internal sealed partial class ExpressionEngine
     // self-test meta uses it to tell "nothing here to fight" from "a fight that never happened":
     // wobjectfindnearestmonster[] also finds attackable NPCs (a buff bot) combat rightly leaves alone.
     internal Func<int>? CombatTargetCount { get; set; }
+
+    // ralastchestlooted[] (RynthAi only, 2026-11-07): the id of the last chest RynthAi looted to the end
+    // (every item judged; one that closed first doesn't count), 0 before any. A meta that opens a chest
+    // keeps opening it until this is its id: an open use can go unanswered, and a chest can close mid-loot.
+    internal Func<uint>? LastChestLooted { get; set; }
 
     // ── Backward-compat shim ──────────────────────────────────────────────────
 
@@ -393,6 +408,7 @@ internal sealed partial class ExpressionEngine
             // Whole seconds since our last kill; before the first, since the macro start (or login).
             "secondssincelastkill" => (_killClock?.SecondsSinceLastKill() ?? 0).ToString(CultureInfo.InvariantCulture),
             "ratargetcount"        => (CombatTargetCount?.Invoke() ?? -1).ToString(CultureInfo.InvariantCulture),
+            "ralastchestlooted"    => (LastChestLooted?.Invoke() ?? 0u).ToString(CultureInfo.InvariantCulture),
 
             // ── World object queries ──────────────────────────────────────────
             "wobjectfindnearestbytemplatetype"        => EvalWobjectFindNearestByTemplateType(A(0)),
@@ -789,26 +805,34 @@ internal sealed partial class ExpressionEngine
     private string EvalStopwatchCreate()
     {
         string handle = $"SW:{_nextSwId++}";
-        _stopwatches[handle] = new System.Diagnostics.Stopwatch();
+        _stopwatches[handle] = new MetaStopwatch();
         return handle;
     }
 
     private string EvalStopwatchStart(string handle)
     {
-        if (_stopwatches.TryGetValue(handle, out var sw)) sw.Start();
+        if (_stopwatches.TryGetValue(handle, out var sw) && !sw.Running)
+        {
+            sw.StartedAtMs = TickMs();
+            sw.Running = true;
+        }
         return handle;
     }
 
     private string EvalStopwatchStop(string handle)
     {
-        if (_stopwatches.TryGetValue(handle, out var sw)) sw.Stop();
+        if (_stopwatches.TryGetValue(handle, out var sw) && sw.Running)
+        {
+            sw.AccumulatedMs = sw.ElapsedMs(TickMs());
+            sw.Running = false;
+        }
         return handle;
     }
 
     private string EvalStopwatchElapsedSeconds(string handle)
     {
         if (!_stopwatches.TryGetValue(handle, out var sw)) return "0";
-        return sw.Elapsed.TotalSeconds.ToString("G", CultureInfo.InvariantCulture);
+        return (sw.ElapsedMs(TickMs()) / 1000.0).ToString("G", CultureInfo.InvariantCulture);
     }
 
     private static string EvalOrd(string s)
@@ -3614,6 +3638,7 @@ internal sealed partial class ExpressionEngine
             ["EnableAutostack"]     = (() => B(s.EnableAutostack),     v => s.EnableAutostack     = ToDouble(v) != 0),
             ["EnableAutocram"]      = (() => B(s.EnableAutocram),      v => s.EnableAutocram      = ToDouble(v) != 0),
             ["ReadUnknownScrolls"]  = (() => B(s.ReadUnknownScrolls),  v => s.ReadUnknownScrolls  = ToDouble(v) != 0),
+            ["UnboxAetheriaWhenIdle"] = (() => B(s.UnboxAetheriaWhenIdle), v => s.UnboxAetheriaWhenIdle = ToDouble(v) != 0),
             ["EnableCombineSalvage"]= (() => B(s.EnableCombineSalvage),v => s.EnableCombineSalvage= ToDouble(v) != 0),
             ["SalvageWithoutPanel"] = (() => B(s.SalvageWithoutPanel), v => s.SalvageWithoutPanel = ToDouble(v) != 0),
             ["PeaceModeWhenIdle"]   = (() => B(s.PeaceModeWhenIdle),   v => s.PeaceModeWhenIdle   = ToDouble(v) != 0),
@@ -3645,12 +3670,15 @@ internal sealed partial class ExpressionEngine
             ["ItemInfoLootSalvage"] = (() => B(s.ItemInfoSettings.LootChatSalvage), v => s.ItemInfoSettings.LootChatSalvage = ToDouble(v) != 0),
             // -1 = the Item Info chat type.
             ["ItemInfoLootChatType"] = (() => I(s.ItemInfoSettings.LootChatType), v => { if (int.TryParse(v, out int i)) s.ItemInfoSettings.LootChatType = Math.Clamp(i, -1, 31); }),
+            // Info text colour: "#RRGGBB" or a name ("allegiance"); "" / "default" = the chat type's own colour.
+            ["ItemInfoTextColor"] = (() => s.ItemInfoSettings.TextColor, v => { if (RynthCore.Plugin.RynthAi.ItemInfo.MagItemInfoCatalog.ParseTextColor(v ?? string.Empty) is { } c) s.ItemInfoSettings.TextColor = c; }),
             ["StopMacroWhenPackFull"] = (() => B(s.StopMacroWhenPackFull), v => s.StopMacroWhenPackFull = ToDouble(v) != 0),
             ["SummonPets"]          = (() => B(s.SummonPets),          v => s.SummonPets          = ToDouble(v) != 0),
             ["MineOnly"]            = (() => B(s.MineOnly),            v => s.MineOnly            = ToDouble(v) != 0),
             ["UseDispelItems"]      = (() => B(s.UseDispelItems),      v => s.UseDispelItems      = ToDouble(v) != 0),
             ["CastDispelSelf"]      = (() => B(s.CastDispelSelf),      v => s.CastDispelSelf      = ToDouble(v) != 0),
             ["AutoFellowMgmt"]      = (() => B(s.AutoFellowMgmt),      v => s.AutoFellowMgmt      = ToDouble(v) != 0),
+            ["OpenFellowOnCreate"]  = (() => B(s.OpenFellowOnCreate),  v => s.OpenFellowOnCreate  = ToDouble(v) != 0),
             ["UseRecklessness"]     = (() => B(s.UseRecklessness),     v => s.UseRecklessness     = ToDouble(v) != 0),
             // The range a monster rule's Variable attack power picks from (percent of the bar).
             ["VariablePowerMin"]    = (() => I(s.VariablePowerMin),    v => { if (int.TryParse(v, out int i)) s.VariablePowerMin = Math.Clamp(i, 0, 100); }),
@@ -3744,6 +3772,8 @@ internal sealed partial class ExpressionEngine
             ["CurrentLootPath"]     = (() => s.CurrentLootPath,        v => s.CurrentLootPath = v),
             // Loot Mode: 0 = profile, 1 = rares and needed mana stones only (the words work too).
             ["LootMode"]            = (() => I(Loot.LootModes.Clamp(s.LootMode)), v => { if (Loot.LootModes.TryParse(v, out int m)) s.LootMode = m; }),
+            // Item Tool > Chest re-lock wait (s): 5..600.
+            ["ChestRelockWaitSec"]  = (() => I(s.ChestRelockWaitSec),  v => { if (double.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out double d) && double.IsFinite(d)) s.ChestRelockWaitSec = ItemTool.ChestKeyLooter.ClampRelockWaitSec((int)Math.Round(Math.Clamp(d, 0, 100_000))); }),
             ["CurrentMetaPath"]     = (() => s.CurrentMetaPath,        v => s.CurrentMetaPath = v),
             ["OpenDoors"]           = (() => B(s.OpenDoors),           v => s.OpenDoors       = ToDouble(v) != 0),
             ["NavRecoveryEnabled"]  = (() => B(s.NavRecoveryEnabled),  v => s.NavRecoveryEnabled = ToDouble(v) != 0),
@@ -3751,10 +3781,12 @@ internal sealed partial class ExpressionEngine
             ["NavOffTrackYards"]    = (() => F(s.NavOffTrackYards),    v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f)) s.NavOffTrackYards = Math.Clamp(f, 160f, 1000f); }),
             ["OutdoorHuntRange"]    = (() => F(s.OutdoorHuntRange),    v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f)) s.OutdoorHuntRange = (float)Math.Clamp(f, RynthAiPlugin.OutdoorHuntRangeMin, RynthAiPlugin.OutdoorHuntRangeMax); }),
             ["OutdoorHuntRadius"]   = (() => F(s.OutdoorHuntRadius),   v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f)) s.OutdoorHuntRadius = (float)Math.Clamp(f, 0, RynthAiPlugin.OutdoorHuntRadiusMax); }),
-            ["NavMaxDetourAttempts"] = (() => I(s.NavMaxDetourAttempts), v => { if (int.TryParse(v, out int i)) s.NavMaxDetourAttempts = Math.Clamp(i, 1, 10); }),
+            ["OutdoorHuntPick"]     = (() => I(s.OutdoorHuntPick),     v => { if (int.TryParse(v, System.Globalization.NumberStyles.Integer, CultureInfo.InvariantCulture, out int i)) s.OutdoorHuntPick = Math.Clamp(i, 0, 2); }),
+            ["NavMaxDetourAttempts"] =(() => I(s.NavMaxDetourAttempts), v => { if (int.TryParse(v, out int i)) s.NavMaxDetourAttempts = Math.Clamp(i, 1, 10); }),
             ["OpenDoorRange"]       = (() => F(s.OpenDoorRange),       v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f)) s.OpenDoorRange = f; }),
             ["BoostNavPriority"]    = (() => B(s.BoostNavPriority),    v => s.BoostNavPriority  = ToDouble(v) != 0),
             ["BoostLootPriority"]   = (() => B(s.BoostLootPriority),   v => s.BoostLootPriority = ToDouble(v) != 0),
+            ["LootChestsMacroOff"]  = (() => B(s.LootChestsMacroOff),  v => s.LootChestsMacroOff  = ToDouble(v) != 0),
         };
         return _settingsMap;
     }

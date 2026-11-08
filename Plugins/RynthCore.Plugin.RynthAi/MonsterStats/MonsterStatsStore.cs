@@ -45,6 +45,11 @@ internal static class MonsterStatsStore
     private const string FilePrefix = "monsters-";
     private const string FileSuffix = ".txt";
     private const int Fields = 16;   // the name and 15 numbers
+    // 2026-11-08: two more at the end, XP and kills with XP counted. The header stays v2: an older
+    // copy reads the first 16 and leaves the rest, and a row from an older save has XP 0.
+    private const int FieldsWithXp = 18;
+    // Then two more (same day): the kill-to-corpse ms summed and how many (the death animation).
+    private const int FieldsWithCorpse = 20;
 
     private static readonly CultureInfo Ic = CultureInfo.InvariantCulture;
 
@@ -73,7 +78,7 @@ internal static class MonsterStatsStore
                      {
                          r.Hits, r.Evaded, r.SpellsLanded, r.Resisted, r.NoEffect, r.Kills, r.DamageDealt,
                          r.HitsTaken, r.YouEvaded, r.SpellsTaken, r.YouResisted, r.NoEffectOnYou, r.DamageTaken,
-                         r.FirstUtcTicks, r.LastUtcTicks,
+                         r.FirstUtcTicks, r.LastUtcTicks, r.Xp, r.XpKills, r.CorpseMs, r.CorpseKills,
                      })
                 sb.Append('\t').Append(v.ToString(Ic));
             sb.Append('\n');
@@ -134,10 +139,22 @@ internal static class MonsterStatsStore
         for (int i = 0; i < 13; i++)
             if (i != 6 && i != 12 && n[i] > int.MaxValue) return false;   // counts are ints; damage is long
         if (!ValidTicks(n[13]) || !ValidTicks(n[14])) return false;
+        long xp = 0, xpKills = 0;
+        if (f.Length >= FieldsWithXp)
+        {
+            if (!long.TryParse(f[16], NumberStyles.None, Ic, out xp) || !long.TryParse(f[17], NumberStyles.None, Ic, out xpKills)
+                || xpKills > int.MaxValue) return false;
+        }
+        long corpseMs = 0, corpseKills = 0;
+        if (f.Length >= FieldsWithCorpse)
+        {
+            if (!long.TryParse(f[18], NumberStyles.None, Ic, out corpseMs) || !long.TryParse(f[19], NumberStyles.None, Ic, out corpseKills)
+                || corpseKills > int.MaxValue) return false;
+        }
         row = new MonsterStatsRow(f[0].Trim(),
             (int)n[0], (int)n[1], (int)n[2], (int)n[3], (int)n[4], (int)n[5], n[6],
             (int)n[7], (int)n[8], (int)n[9], (int)n[10], (int)n[11], n[12],
-            n[13], n[14]);
+            n[13], n[14], xp, (int)xpKills, corpseMs, (int)corpseKills);
         return true;
     }
 

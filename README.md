@@ -31,6 +31,12 @@ A combat and navigation assistant for Asheron's Call, ported from the legacy Nex
 | `/na raycast` | Show raycast system status |
 | `/na lostest` | Run line-of-sight test against current target |
 
+### RynthNav
+
+Walks the character on a navmesh of the landscape, plans trips with portals and recalls, keeps an Atlas of
+places, and makes RynthAi nav routes on real walkable paths (`/rnav makeroute`, `makeloop`, `makepath`,
+`routeinfo`, and the "RynthNav.Routes" interface for other plugins). See [Docs/RYNTHNAV.md](Docs/RYNTHNAV.md).
+
 ---
 
 ## Monster rules

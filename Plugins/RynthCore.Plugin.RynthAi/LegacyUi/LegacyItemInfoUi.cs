@@ -88,7 +88,13 @@ internal sealed class LegacyItemInfoUi
         if (string.IsNullOrEmpty(_previewText))
             ImGui.TextDisabled("Select an item to preview its info line.");
         else
+        {
+            // In the Info text colour when one is set, as RynthCore's chat will draw it.
+            bool tinted = s.TextColor.Length > 0;
+            if (tinted) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(MagItemInfoCatalog.TextColorRgb(s.TextColor), 1f));
             SafeImGui.TextWrapped(s.Prefix + _previewText);
+            if (tinted) ImGui.PopStyleColor();
+        }
         ImGui.EndChild();
 
         if (ImGui.Button("Print to chat##iiPrint")) _printSelected?.Invoke();
@@ -278,34 +284,92 @@ internal sealed class LegacyItemInfoUi
 
         RenderLayout(s, "##iiLayout");
 
-        ChatTypeCombo("Chat type / colour##iiChat", ref s.ChatType, allowSameAsHeader: false);
+        ChatTypeCombo("Chat type##iiChat", ref s.ChatType, allowSameAsHeader: false);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("The chat type picks where the lines go (the chat tab, AC's own chat\n" +
+                             "windows) and their colour, unless Info text colour below sets one.");
         ImGui.SameLine();
         if (ImGui.Button("Test##iiChatTest")) _testChatType?.Invoke(s.ChatType);
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Print a sample line with this chat type to see its colour.");
+            ImGui.SetTooltip("Print a sample line with this chat type to see where it goes and its colour.");
 
         // Pet-style only: the roster draws its detail lines in a second colour.
         ImGui.BeginDisabled(s.Layout != MagItemInfoSettings.LayoutPetLines);
-        ChatTypeCombo("Detail lines colour##iiChatDetail", ref s.DetailChatType, allowSameAsHeader: true);
+        ChatTypeCombo("Detail lines chat type##iiChatDetail", ref s.DetailChatType, allowSameAsHeader: true);
         ImGui.SameLine();
         if (ImGui.Button("Test##iiChatDetailTest"))
             _testChatType?.Invoke(s.DetailChatType == MagItemInfoSettings.SameAsHeader ? s.ChatType : s.DetailChatType);
         ImGui.EndDisabled();
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-            ImGui.SetTooltip("Chat type for lines 2-4 of the pet-style layout\n(the name line uses the colour above).");
+            ImGui.SetTooltip("Chat type for lines 2-4 of the pet-style layout\n(the name line uses the chat type above).");
 
         ImGui.BeginDisabled(!s.LootChat);
-        ChatTypeCombo("Loot lines colour##iiChatLoot", ref s.LootChatType, allowSameAsHeader: true);
+        ChatTypeCombo("Loot lines chat type##iiChatLoot", ref s.LootChatType, allowSameAsHeader: true);
         ImGui.SameLine();
         if (ImGui.Button("Test##iiChatLootTest")) _testChatType?.Invoke(LootChatLine.ChatTypeOf(s));
         ImGui.EndDisabled();
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
             ImGui.SetTooltip("Chat type of a described \"Looted\" line\n(\"Same as name line\": the chat type above).");
 
+        RenderTextColor(s);
+
         ImGui.SetNextItemWidth(220);
         ImGui.InputText("Line prefix##iiPrefix", ref s.Prefix, 32);
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Text put in front of every item info line (may be empty).");
+    }
+
+    private const string TextColorTip =
+        "The colour of every item info line in RynthCore's chat: the name line, the\n" +
+        "detail lines, a described \"Looted\" line and your own ratings. The lines keep\n" +
+        "their chat type, so they stay in the same chat tab.\n" +
+        "\"Chat type's own colour\": as before, the chat type decides the colour.\n" +
+        "AC's own chat window can only show the chat type's colour.\n" +
+        "Also: /ra iteminfo color allegiance|fellowship|...|#RRGGBB|default.";
+
+    /// <summary>
+    /// "Info text colour": the chat type's own colour (""), a named chat colour, or any colour from
+    /// the picker beside it. A new choice shows on the next line printed (Test prints one).
+    /// </summary>
+    private void RenderTextColor(MagItemInfoSettings s)
+    {
+        string current = s.TextColor.Length == 0 ? MagItemInfoCatalog.TextColors[0].Label : "Custom " + s.TextColor;
+        foreach (var (_, label, color) in MagItemInfoCatalog.TextColors)
+            if (color.Length > 0 && string.Equals(color, s.TextColor, StringComparison.OrdinalIgnoreCase)) { current = label; break; }
+
+        ImGui.SetNextItemWidth(220);
+        if (ImGui.BeginCombo("Info text colour##iiTextColor", current))
+        {
+            float swatch = ImGui.GetTextLineHeight();
+            foreach (var (word, label, color) in MagItemInfoCatalog.TextColors)
+            {
+                if (color.Length > 0)
+                {
+                    ImGui.ColorButton("##iiTcSw" + word, new Vector4(MagItemInfoCatalog.TextColorRgb(color), 1f),
+                        ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.NoPicker, new Vector2(swatch, swatch));
+                    ImGui.SameLine();
+                }
+                else
+                {
+                    ImGui.Dummy(new Vector2(swatch, swatch));
+                    ImGui.SameLine();
+                }
+                if (ImGui.Selectable(label + "##iiTc" + word, string.Equals(color, s.TextColor, StringComparison.OrdinalIgnoreCase)))
+                    s.TextColor = color;
+            }
+            ImGui.EndCombo();
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(TextColorTip);
+
+        ImGui.SameLine();
+        Vector3 rgb = MagItemInfoCatalog.TextColorRgb(s.TextColor);
+        if (ImGui.ColorEdit3("##iiTextColorPick", ref rgb, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoLabel))
+            s.TextColor = MagItemInfoCatalog.TextColorFromRgb(rgb);
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Pick any colour for the item info lines.");
+
+        ImGui.SameLine();
+        if (ImGui.Button("Test##iiTextColorTest")) _testChatType?.Invoke(s.ChatType);
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Print a sample line in this colour (and the chat type above).");
     }
 
     /// <summary>Chat type picker; <paramref name="allowSameAsHeader"/> adds the "same as name line" entry (-1).</summary>

@@ -40,6 +40,8 @@
     <Compile Include="..\..\Tools\RynthNav.PortalGraph\PortalRoute.cs" Link="PortalRoute.cs" />
     <!-- Interfaces shared with other RynthSuite plugins (RynthAi uses RynthNav.Path). -->
     <Compile Include="..\Shared\RynthNavPathApi.cs" Link="Shared\RynthNavPathApi.cs" />
+    <!-- The route maker for other plugins (2026-10-30): JSON jobs to make nav routes, plan, walk. -->
+    <Compile Include="..\Shared\RynthNavRoutesApi.cs" Link="Shared\RynthNavRoutesApi.cs" />
     <!-- One logged, guarded way to use an object (who used what, and why). -->
     <Compile Include="..\Shared\UseAudit.cs" Link="Shared\UseAudit.cs" />
     <!-- Text in the world on the Nav3D buffer (the path markers' labels; RynthAi's waypoint labels use it too). -->

@@ -84,7 +84,7 @@ namespace RynthDefective.Tests
         {
             // Wrong words: the parser's error is the reply, with an example or the usage.
             string[] wrong = { "use", "set", "set x", "set 0", "spell 3", "spell", "clear", "clear x", "bind 3", "bind", "unbind", "unbind x", "slots", "slots 99",
-                "qty 0", "qty lots", "split 0", "give someone", "give -1", "buy 0 Mana Scarab" };
+                "qty 0", "qty lots", "split 0", "give someone", "give -1", "buy 0 Mana Scarab", "bars remove", "bars slots 2", "bars frob", "shortcuts", "shortcuts clearbusy maybe", "daynight later" };
             foreach (string w in wrong)
             {
                 DefCommand c = DefCommandParser.Parse(w);
@@ -105,6 +105,9 @@ namespace RynthDefective.Tests
                 ("Stamina Kit", DefVerb.Use), ("corpses", DefVerb.Corpses), ("corpses clear", DefVerb.Corpses),
                 ("qty", DefVerb.Quantity), ("qty 25", DefVerb.Quantity), ("split", DefVerb.Split), ("split 25 into Sack", DefVerb.Split),
                 ("give 10", DefVerb.Give), ("buy 25 Mana Scarab", DefVerb.Buy), ("buy max", DefVerb.Buy),
+                ("daynight", DefVerb.DayNight), ("daynight show", DefVerb.DayNight), ("daynight hide", DefVerb.DayNight),
+                ("bars", DefVerb.Bars), ("bars add", DefVerb.Bars), ("bars remove 2", DefVerb.Bars), ("bars slots 2 12", DefVerb.Bars),
+                ("bars show 3", DefVerb.Bars), ("shortcuts clearbusy on", DefVerb.Shortcuts), ("shortcuts clearbusy", DefVerb.Shortcuts),
             };
             var seen = new HashSet<DefVerb>();
             foreach (var (typed, verb) in right)

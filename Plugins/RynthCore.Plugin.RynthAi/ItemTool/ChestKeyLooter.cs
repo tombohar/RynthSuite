@@ -17,11 +17,15 @@
 //      proof (ChestOpenedAt).
 //    * Looting: the chest is handed to the corpse looter (the CURRENT loot profile's rules, the
 //      same TickOpenCorpseLooting as a corpse) and this waits for it to finish and close it.
-//    * Waiting: a chest re-locks and regenerates on a timer after it was opened (ACE Chest.Reset,
-//      ResetInterval, default 120 s). The next cycle starts after RegenWaitMs; where the client
-//      reads the chest as locked it starts earlier. A key use that answers "already unlocked" on
-//      a later cycle means the timer has not run yet: it waits ProbeMs and asks again, at most
-//      MaxProbes times.
+//    * Waiting: a chest re-locks and regenerates on a timer after it was opened (ACE Chest.Open
+//      queues Chest.Reset ResetInterval seconds later; default 120 s, never under 15 s, and a
+//      ChestRegenOnClose chest resets as it closes). The next cycle starts RelockWaitSec after
+//      the open (the Item Tool's "Chest re-lock wait (s)", 2026-11-05; default 125 s, which
+//      covers ACE's default); where the client reads the chest as locked again (Reset's
+//      Locked=true public update) it starts earlier. A key use that answers "already unlocked"
+//      on a later cycle means the timer has not run yet (nothing is spent): it waits ProbeEveryMs
+//      (the wait, 5..30 s) and asks again, for at most MaxProbes * ProbeMs (4 min) of asking. So
+//      a wait shorter than the chest's own timer costs one unspent key use per probe, never a key.
 //
 //  Out of keys: the key item is gone (used up: "Your key is used up."; no other carried item has
 //  its name) after a cycle, or before one. A key with unlimited uses never runs out: MaxCycles
@@ -85,13 +89,27 @@ internal sealed class ChestKeyLooter
     public const long ChatSettleMs = 250;
     /// <summary>After the chest's answer, it gets this long to read open before the open counts as failed.</summary>
     public const long OpenSettleMs = 1500;
-    /// <summary>The next cycle starts this long after the chest was opened (ACE's default chest reset is 120 s).</summary>
-    public const long RegenWaitMs = 125_000;
+    /// <summary>
+    /// "Chest re-lock wait (s)": the next cycle starts this long after the chest was opened. The
+    /// default covers ACE's default chest reset (120 s). The least, 5 s, still sends nothing faster
+    /// than one key use per 5 s: each waits for its answer, a too-early one answers "already
+    /// unlocked" and spends nothing, and the asking is bounded (MaxProbes * ProbeMs). Under 15 s
+    /// only a chest that resets as it closes (ChestRegenOnClose) can be ready; ACE floors every
+    /// timed reset at 15 s.
+    /// </summary>
+    public const int DefaultRelockWaitSec = 125, MinRelockWaitSec = 5, MaxRelockWaitSec = 600;
+    /// <summary>The default wait in ms (DefaultRelockWaitSec).</summary>
+    public const long RegenWaitMs = DefaultRelockWaitSec * 1000L;
     /// <summary>A chest the client reads as locked is tried again this soon after it was opened.</summary>
     public const long MinRelockMs = 15_000;
-    /// <summary>Asking a chest that was still unlocked again.</summary>
+    /// <summary>Asking a chest that was still unlocked again: at most this long apart (ProbeEveryMs follows a shorter wait).</summary>
     public const long ProbeMs = 30_000;
+    /// <summary>... and at least this long apart.</summary>
+    public const long MinProbeMs = MinRelockWaitSec * 1000L;
+    /// <summary>The asking lasts MaxProbes * ProbeMs (MaxProbes asks at the default wait).</summary>
     public const int MaxProbes = 8;
+
+    public static int ClampRelockWaitSec(int seconds) => Math.Clamp(seconds, MinRelockWaitSec, MaxRelockWaitSec);
     /// <summary>Nothing may go out for this long (combat, busy client...) before the run stops.</summary>
     public const long HoldMaxMs = 90_000;
     /// <summary>The loot session may take this long.</summary>
@@ -125,11 +143,25 @@ internal sealed class ChestKeyLooter
     /// <summary>What the run did last, for the status line when it is not running.</summary>
     public string LastResult { get; private set; } = "";
 
+    /// <summary>"Chest re-lock wait (s)" (the host sets it from the settings each tick; clamped). A change applies to a wait already running.</summary>
+    public int RelockWaitSec
+    {
+        get => _relockWaitSec;
+        set => _relockWaitSec = ClampRelockWaitSec(value);
+    }
+    private int _relockWaitSec = DefaultRelockWaitSec;
+
+    private long RelockWaitMs => _relockWaitSec * 1000L;
+    /// <summary>How far apart a chest that was still unlocked is asked again: the wait, 5..30 s.</summary>
+    internal long ProbeEveryMs => Math.Clamp(RelockWaitMs, MinProbeMs, ProbeMs);
+    /// <summary>How many asks fit in MaxProbes * ProbeMs (MaxProbes at the default wait).</summary>
+    internal int ProbeLimit => (int)((MaxProbes * ProbeMs + ProbeEveryMs - 1) / ProbeEveryMs);
+
     // Run state.
     private long _lastThink, _nextTryAt, _goneSince, _holdSince;
-    private long _keySentAt, _openSentAt, _answeredAt, _lootStartedAt, _waitUntil, _openedAt;
+    private long _keySentAt, _openSentAt, _answeredAt, _lootStartedAt, _waitUntil, _openedAt, _lootDoneAt;
     private int _seqAtSend;
-    private bool _answerSeen, _sawUnlocked, _keyUsedUp, _lootSeen, _relockExpected;
+    private bool _answerSeen, _sawUnlocked, _keyUsedUp, _lootSeen, _relockExpected, _regenWait;
     private int _timeouts, _busy, _openFails, _sendFails, _probes, _refusals, _openElsewhere, _cycles, _keyUsesThisCycle;
     private string _holdWhy = "";
 
@@ -356,13 +388,14 @@ internal sealed class ChestKeyLooter
                     _nextTryAt = now + 400;
                     return;
                 }
-                if (++_probes > MaxProbes)
+                int limit = ProbeLimit;
+                if (++_probes > limit)
                 {
-                    Finish($"{ChestName} hasn't re-locked after {MaxProbes} tries ({(MaxProbes * ProbeMs + RegenWaitMs) / 60000} min): its reset timer may be longer, or it doesn't lock");
+                    Finish($"{ChestName} hasn't re-locked after {limit} tries ({Math.Max(1, (MaxProbes * ProbeMs + RelockWaitMs) / 60000)} min): its reset timer may be longer, or it doesn't lock");
                     return;
                 }
-                _env.Log($"[RynthAi] Chest looter: {ChestName} is still unlocked (not reset yet); asking again in {ProbeMs / 1000} s (try {_probes} of {MaxProbes})");
-                EnterWaiting(now + ProbeMs);
+                _env.Log($"[RynthAi] Chest looter: {ChestName} is still unlocked (not reset yet); asking again in {ProbeEveryMs / 1000} s (try {_probes} of {limit})");
+                EnterWaiting(now + ProbeEveryMs);
                 return;
 
             case ErrKeyDoesntFit:
@@ -473,12 +506,18 @@ internal sealed class ChestKeyLooter
         if (_cycles >= MaxCycles) { Finish($"reached {MaxCycles} cycles (a key with unlimited uses never runs out)"); return; }
         KeyId = key;
         _keyUsedUp = false;   // that was the old key; the one chosen now has not been used
-        EnterWaiting(Math.Max(now + 2000, _openedAt + RegenWaitMs));
+        _lootDoneAt = now;
+        EnterWaiting(RegenWaitUntil());
+        _regenWait = true;
     }
+
+    /// <summary>The re-lock wait's end: RelockWaitSec after the open, and never sooner than 2 s after the loot ended.</summary>
+    private long RegenWaitUntil() => Math.Max(_lootDoneAt + 2000, _openedAt + RelockWaitMs);
 
     private void EnterWaiting(long until)
     {
         _waitUntil = until;
+        _regenWait = false;
         State = Phase.Waiting;
     }
 
@@ -486,6 +525,7 @@ internal sealed class ChestKeyLooter
     {
         // The key may leave the pack meanwhile (traded, dropped): nothing to wait for then.
         if (_env.FindKey(KeyId, KeyName, _keyUsedUp ? KeyId : 0) == 0) { Finish($"out of keys - no '{KeyName}' left"); return; }
+        if (_regenWait) _waitUntil = RegenWaitUntil();   // the setting may have changed meanwhile
         if (now >= _waitUntil) { State = Phase.Ready; return; }
         if (_probes == 0 && now >= _openedAt + MinRelockMs && _env.ChestLockedHint(ChestId) == true)
         {

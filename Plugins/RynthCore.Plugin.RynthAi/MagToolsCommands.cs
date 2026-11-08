@@ -250,6 +250,8 @@ public sealed partial class RynthAiPlugin
         ["approachdistance"]          = "ApproachRange",
         ["navpriorityboost"]          = "BoostNavPriority",
         ["lootpriorityboost"]         = "BoostLootPriority",
+        ["pickupmacrooff"]            = "LootChestsMacroOff",   // Settings > Looting > Pickup with macro off
+        ["lootchestsmacrooff"]        = "LootChestsMacroOff",
         ["dooropenrange"]             = "OpenDoorRange",
         ["autofellowmanagement"]      = "AutoFellowMgmt",
         ["switchwandstodebuff"]       = "UseDispelItems",
@@ -277,6 +279,7 @@ public sealed partial class RynthAiPlugin
         ["follownavmin"]              = "FollowNavMin",
         ["outdoorhuntrange"]          = "OutdoorHuntRange",
         ["outdoorhuntradius"]         = "OutdoorHuntRadius",
+        ["outdoorhuntpick"]           = "OutdoorHuntPick",
         // UtilityBelt AutoVendor options (/ub opt set AutoVendor.TestMode true)
         ["autovendor.enabled"]          = "AutoVendorEnabled",
         ["autovendor.enablebuying"]     = "AutoVendorEnableBuying",
@@ -873,6 +876,7 @@ public sealed partial class RynthAiPlugin
                 if (parts.Length >= 4)
                 {
                     string fellowName = string.Join(" ", parts, 3, parts.Length - 3);
+                    NoteFellowshipCreate();   // Open fellowship on create (RynthAiPlugin.FellowOpen.cs)
                     Host.InvokeChatParser($"/fellowship create {fellowName}");
                     Reply.Answered();
                 }

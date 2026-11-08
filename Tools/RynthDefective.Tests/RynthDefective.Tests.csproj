@@ -13,7 +13,8 @@
     (RynthCore src/RynthCore.Engine/UI/ScriptWindows/DisplayListParser.cs, compiled in from the
     sibling RynthCore checkout) and that clicks reach the code that drew the button; the quantity box
     (counts, max and half, a vendor's price and the most you can buy, every refusal, split / give / buy
-    against a scripted world).
+    against a scripted world); the Day/Night timer's clock (day or night, the real seconds to the next dawn or
+    dusk, the countdown text, /rdef daynight).
     Nothing native is loaded: no AC, no ImGui context. Files go to a temp folder, never C:\Games.
     Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
   -->
@@ -41,6 +42,8 @@
     <Compile Include="..\..\Plugins\Shared\RynthAiStatusApi.cs" Link="Shared\RynthAiStatusApi.cs" />
     <Compile Include="..\..\Plugins\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
     <Compile Include="..\..\Plugins\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+    <!-- The Day/Night timer's clock math (2026-11-04). -->
+    <Compile Include="..\..\Plugins\Shared\DerethClock.cs" Link="Shared\DerethClock.cs" />
     <!-- The server plugin's bank values for the quantity box's buys (2026-10-31). -->
     <Compile Include="..\..\Plugins\Shared\EngineServerState.cs" Link="Shared\EngineServerState.cs" />
     <Compile Include="..\..\Plugins\Shared\ServerStateClient.cs" Link="Shared\ServerStateClient.cs" />

@@ -110,9 +110,13 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra meta list        — list the metas in MetaFiles");
         ChatLine("[RynthAi] /ra lua run <name>  — run a RynthLua script (same as /lua run; also stop, list, exec <code>)");
         ChatLine("[RynthAi] /ra items fill      — add weapons, healing kits, lockpicks and pet essences from your pack");
+        ChatLine("[RynthAi] /ra aetheria [status|unbox|on|off] — unbox Coalesced Aetheria with an Aetheria Mana Stone (Unbox Aetheria When Idle)");
         ChatLine("[RynthAi] /ra offhand [auto|shield|weapon|none] [rule] — the off hand (shield / dual wield), global or for a Monsters rule; dual on|off");
         ChatLine("[RynthAi] /ra dunnav <NS> <EW>  — navigate to NS/EW coords through dungeon (no nav file needed)");
         ChatLine("[RynthAi] /ra dunnav-patrol      — circular hunt patrol through the whole dungeon (no nav file needed)");
+        ChatLine("[RynthAi] /ra dunroute <name> to exit|far|portal <name>|<x> <y> <z>|room <n> [overwrite] — save a Once nav from here to there in this dungeon");
+        ChatLine("[RynthAi] /ra dunpatrol-save <name> [overwrite] — save the patrol dunnav-patrol would walk from here as a circular nav");
+        ChatLine("[RynthAi] /ra dunroute info <name> | where — describe a saved nav (points, length, cells, this dungeon's?) | where you are, the portals known");
         ChatLine("[RynthAi] /ra hazard add|del|list|near — mark current cell as lava/acid so patrol avoids it");
         ChatLine("[RynthAi] /ra jump[swzxc] [heading] [holdtime] — jump with optional face/direction (s=run w=fwd x=back z=strafeL c=strafeR)");
         ChatLine("[RynthAi] /ra corpseinfo    — show corpse range/open diagnostics");
@@ -124,6 +128,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra lootparse     — inspect the selected loot profile");
         ChatLine("[RynthAi] /ra lootcheckinv  — test the loot profile against inventory");
         ChatLine("[RynthAi] /ra lootcheck     — classify selected item (on|off = auto on click)");
+        ChatLine("[RynthAi] /ra lootname add|remove|list|radius|clear <name> — loot anything in the world with that name while botting (a chest is opened, an item picked up; *part* matches part of a name)");
         ChatLine("[RynthAi] /ra loot why      — which loot rule takes the selected item, and why the rules above it didn't");
         ChatLine("[RynthAi] /ra loot mode [profile|rares] — loot by the loot profile, or rares and needed mana stones only");
         ChatLine("[RynthAi] /ra loot add [keep|keep N|salvage|sell|read] [name|like] [preview] — add a loot rule for the selected item");
@@ -1177,20 +1182,56 @@ public sealed partial class RynthAiPlugin
 
         double rad = deg * Math.PI / 180.0;
         double unit = yards / 240.0;   // nav coordinates are 240-yard units
+        double goalNs = ns + Math.Cos(rad) * unit, goalEw = ew + Math.Sin(rad) * unit;
         var route = new NavRouteParser { RouteType = NavRouteType.Once };
-        route.Points.Add(new NavPoint
+
+        // The way there round what's in the way (owner, 2026-11-06: "nav route is not navving around
+        // obstacles"; a treasure map meta walks 50 yd steps on a heading and stuck on rocks and walls): RynthNav's
+        // path, planned like the Outdoor Hunt's walks. A straight line when RynthNav has no mesh or no way here.
+        string how = "straight";
+        if (TryHuntPosition(out _, out OutdoorHunt.Vec at))
         {
-            Type = NavPointType.Point,
-            NS = ns + Math.Cos(rad) * unit,
-            EW = ew + Math.Sin(rad) * unit,
-            Z = z / 240.0,
-        });
+            var goal = new OutdoorHunt.Vec(at.X + Math.Sin(rad) * yards, at.Y + Math.Cos(rad) * yards, at.Z);
+            OutdoorHunt.PathResult path = HuntPath(at, goal);
+            if ((path.Status == OutdoorHunt.PathStatus.Ok || path.Status == OutdoorHunt.PathStatus.Partial) && path.Corners.Count > 0)
+            {
+                route = HeadingRoute(path.Corners);
+                how = path.Status == OutdoorHunt.PathStatus.Ok
+                    ? $"round obstacles, {route.Points.Count} point(s)"
+                    : $"round obstacles as far as it goes, {route.Points.Count} point(s)";
+            }
+            else how = path.Status switch
+            {
+                OutdoorHunt.PathStatus.NoMesh => "straight (no RynthNav map here)",
+                OutdoorHunt.PathStatus.Unavailable => "straight (RynthNav isn't loaded)",
+                _ => "straight (RynthNav found no way)",
+            };
+        }
+        if (route.Points.Count == 0)
+            route.Points.Add(new NavPoint { Type = NavPointType.Point, NS = goalNs, EW = goalEw, Z = z / 240.0 });
+
         settings.CurrentNavPath = "<navheading>";
         settings.CurrentRoute = route;
         settings.ActiveNavIndex = 0;
         settings.EnableNavigation = true;
-        Host.Log($"[RynthAi] navheading: {yards:0} yd on {deg:0}° -> NS {route.Points[0].NS:0.0000} EW {route.Points[0].EW:0.0000}");
-        ReplyOk($"[RynthAi] Navigating {yards:0} yd on heading {deg:0}° (to NS {route.Points[0].NS:0.000} EW {route.Points[0].EW:0.000}).");
+        Host.Log($"[RynthAi] navheading: {yards:0} yd on {deg:0}° -> NS {goalNs:0.0000} EW {goalEw:0.0000}, {how}");
+        ReplyOk($"[RynthAi] Navigating {yards:0} yd on heading {deg:0}° (to NS {goalNs:0.000} EW {goalEw:0.000}), {how}.");
+    }
+
+    /// <summary>A Once route through RynthNav's corners (world x east, y north, as the Outdoor Hunt installs them).</summary>
+    internal static NavRouteParser HeadingRoute(IReadOnlyList<OutdoorHunt.Vec> corners)
+    {
+        var route = new NavRouteParser { RouteType = NavRouteType.Once };
+        foreach (var c in corners)
+            route.Points.Add(new NavPoint
+            {
+                Type = NavPointType.Point,
+                EW = (c.X / 24.0 - 1019.5) / 10.0,
+                NS = (c.Y / 24.0 - 1019.5) / 10.0,
+                Z = c.Z / 240.0,
+                Doorway = c.Door,
+            });
+        return route;
     }
 
     private void HandleAddNavPointCommand()
@@ -1600,7 +1641,8 @@ public sealed partial class RynthAiPlugin
     internal LootEditorBridge LootEditor => _lootEditor ??= new LootEditorBridge(
         () => _dashboard?.Settings?.CurrentLootPath ?? string.Empty,
         OnLootProfileEdited,
-        Vendor.AutoVendorManager.MainProfileDir)
+        // AutoVendor's own folders, so the picker lists what a vendor reads (before login: the main folder).
+        () => (IReadOnlyList<string>?)_autoVendor?.ProfileDirs() ?? new[] { Vendor.AutoVendorManager.MainProfileDir })
     {
         Items = new LootItemHooks
         {
@@ -3210,49 +3252,94 @@ public sealed partial class RynthAiPlugin
         }
     }
 
-    private void BuildDunPatrol(bool isRebuild, bool settingsChanged = false, bool portalAppeared = false, bool followedIn = false)
+    /// <summary>Why <see cref="TryBuildDunPatrol"/> or <see cref="TryGetDunWorld"/> built nothing.</summary>
+    private enum DunBuildRefusal
     {
-        // The one way into the dungeon patrol (the command, the dashboard button, a meta's "Patrol", the hazard
-        // reroute): where a server's owners asked for it to be off (a Thread on DreamWeave) nothing is built (ServerPolicy).
-        if (ServerPolicy.PatrolOff(Host))
-        {
-            if (_dunPatrolActive) StopPatrolForServer();
-            if (!isRebuild) ChatLine(ServerPolicy.PatrolOffMessage);
-            return;
-        }
+        /// <summary>Built.</summary>
+        None,
+        /// <summary>Anything else: settings not ready, an empty graph, no start cell.</summary>
+        Other,
+        /// <summary>A server's owners asked for the patrol to be off here (ServerPolicy).</summary>
+        Policy,
+        /// <summary>The client isn't ready: no position or nav coordinates, the cell dat not loaded (a job waits).</summary>
+        NotReady,
+        /// <summary>Not in a dungeon (a running patrol stands down).</summary>
+        NotInDungeon,
+        /// <summary>No walkable patrol from here (a running patrol stands down).</summary>
+        EmptyRoute,
+    }
+
+    /// <summary>
+    /// A dungeon patrol laid from where the character stands: what /ra dunnav-patrol installs (Route,
+    /// started at StartIdx, the lead-in points included) and what /ra dunpatrol-save writes (Loop: the
+    /// lap alone, BuildPatrolRoute's points, without the walk out of a hazard or a portal's reach).
+    /// </summary>
+    private sealed class DunPatrolBuild
+    {
+        public DunRouteWorld World = null!;
+        public DungeonPatrolOptions Options = null!;
+        public NavRouteParser Route = null!;
+        public List<NavPoint> Loop = null!;
+        public int StartIdx;
+        public uint StartCell;
+        public bool Evacuated;
+        public NavPoint? WalkOut;
+        public List<PortalAvoidance>? PortalReport;
+    }
+
+    /// <summary>Tests: a landblock's cell graph and map geometry without the dats (null: the dats, as live).</summary>
+    internal Func<uint, (Dictionary<uint, DungeonNavNode> Graph, DungeonGeometry? Geo)?>? DungeonMapOverride;
+
+    /// <summary>
+    /// Where the character is, for the patrol and for a dungeon route: the dungeon's cell graph and map,
+    /// the start cell, the hazard cells (the stored ones and the lava/acid floors seeded first) and the
+    /// portals the client knows here. <paramref name="who"/> names the command in the "inside a dungeon"
+    /// line, <paramref name="label"/> starts the others ("DunNav-Patrol"). Null with the line to show.
+    /// </summary>
+    private DunRouteWorld? TryGetDunWorld(string who, string label, out DungeonPatrolOptions patrolOptions, out string error, out DunBuildRefusal refusal)
+    {
+        patrolOptions = DungeonPatrolOptions.Default;
+        error = "";
+        refusal = DunBuildRefusal.Other;
         var settings = _dashboard?.Settings;
-        if (settings == null) { if (!isRebuild) ReplyFail("[RynthAi] Settings not ready."); return; }
-        var patrolOptions = PatrolOptionsFrom(settings);
+        if (settings == null) { error = "[RynthAi] Settings not ready."; return null; }
+        patrolOptions = PatrolOptionsFrom(settings);
 
         if (!Host.TryGetPlayerPose(out uint playerCell, out float playerLocalX, out float playerLocalY,
                                    out float patrolWZ, out _, out _, out _, out _))
         {
-            if (!isRebuild) ReplyFail("[RynthAi] Cannot get player position."); return;
+            refusal = DunBuildRefusal.NotReady;
+            error = "[RynthAi] Cannot get player position.";
+            return null;
         }
 
         uint landblockKey = playerCell >> 16;
         bool isDungeon    = (playerCell & 0xFFFF) >= 0x0100;
         if (!isDungeon)
         {
-            // Left the dungeon (e.g. portalled out) — stop tracking; nothing to rebuild.
-            _dunPatrolActive = false;
-            if (!isRebuild) ReplyFail("[RynthAi] dunnav-patrol requires you to be inside a dungeon (cell >= 0x0100).");
-            return;
+            refusal = DunBuildRefusal.NotInDungeon;
+            error = $"[RynthAi] {who} requires you to be inside a dungeon (cell >= 0x0100).";
+            return null;
         }
 
-        var cellDat = _raycast?.GeometryLoader.CellDat;
-        if (cellDat == null || !cellDat.IsLoaded)
+        var map = DungeonMapOverride?.Invoke(landblockKey);
+        var cellDat = DungeonMapOverride == null ? _raycast?.GeometryLoader.CellDat : null;
+        if (DungeonMapOverride == null && (cellDat == null || !cellDat.IsLoaded))
         {
-            if (!isRebuild) ReplyFail("[RynthAi] Cell dat not loaded — raycast system must be initialized first."); return;
+            refusal = DunBuildRefusal.NotReady;
+            error = "[RynthAi] Cell dat not loaded — raycast system must be initialized first.";
+            return null;
         }
 
         if (!NavCoordinateHelper.TryGetNavCoords(Host, out double playerNS, out double playerEW))
         {
-            if (!isRebuild) ReplyFail("[RynthAi] Cannot get player nav coordinates."); return;
+            refusal = DunBuildRefusal.NotReady;
+            error = "[RynthAi] Cannot get player nav coordinates.";
+            return null;
         }
 
-        var graph = DungeonPathfinder.GetGraph(landblockKey, cellDat);
-        if (graph.Count == 0) { if (!isRebuild) ReplyFail("[RynthAi] DunNav-Patrol: dungeon graph is empty."); return; }
+        var graph = map?.Graph ?? (cellDat != null ? DungeonPathfinder.GetGraph(landblockKey, cellDat) : new Dictionary<uint, DungeonNavNode>());
+        if (graph.Count == 0) { error = $"[RynthAi] {label}: dungeon graph is empty."; return null; }
 
         // Prefer the actual cell the player is standing in. NearestCell-by-distance can
         // pick a same-floor cell across an interior wall when the player is hugging a
@@ -3265,7 +3352,7 @@ public sealed partial class RynthAiPlugin
         else
         {
             startCell = DungeonPathfinder.NearestCell(graph, playerNS, playerEW, patrolWZ);
-            if (startCell == 0) { if (!isRebuild) ReplyFail("[RynthAi] DunNav-Patrol: cannot find starting cell."); return; }
+            if (startCell == 0) { error = $"[RynthAi] {label}: cannot find starting cell."; return null; }
         }
 
         // Pull in hazards discovered on previous visits to this dungeon so the route avoids
@@ -3290,6 +3377,55 @@ public sealed partial class RynthAiPlugin
         var hazards = DungeonPathfinder.PatrolHazards(_objectCache?.GetHazardCells(), surfaceHazards,
             patrolOptions.AvoidHazardFloors ? null : DungeonHazardStore.Load(landblockKey), patrolOptions);
 
+        // The dungeon map geometry (doorways, floors, walls): doorways taken straight on and
+        // big rooms crossed directly. Null (old cell walk) until DungeonLOS is up.
+        var geometry = map != null ? map.Value.Geo : DungeonPathfinder.GetGeometry(landblockKey, cellDat!, _raycast?.GeometryLoader?.DungeonLOS);
+
+        refusal = DunBuildRefusal.None;
+        return new DunRouteWorld
+        {
+            Landblock = landblockKey,
+            PlayerCell = playerCell,
+            StartCell = startCell,
+            X = ((playerCell >> 24) & 0xFF) * 192.0 + playerLocalX,
+            Y = ((playerCell >> 16) & 0xFF) * 192.0 + playerLocalY,
+            Z = patrolWZ,
+            Graph = graph,
+            Geo = geometry,
+            Hazards = hazards,
+            // Portals (DungeonPathfinder.Portals.cs, 2026-10-23): every portal the client knows in this dungeon.
+            Portals = PatrolPortalsIn(landblockKey),
+            Wall = patrolOptions.WallClearance,
+        };
+    }
+
+    /// <summary>
+    /// Lays the circular dungeon patrol from the character's current cell, excluding all
+    /// currently-known hazard cells and keeping out of the portals known: the one place a
+    /// patrol is built (/ra dunnav-patrol installs it, /ra dunpatrol-save writes it).
+    /// <paramref name="who"/> names the command in the "inside a dungeon" line. Null with the
+    /// line to show (<paramref name="refusal"/> says why).
+    /// </summary>
+    private DunPatrolBuild? TryBuildDunPatrol(string who, out string error, out DunBuildRefusal refusal)
+    {
+        // The one way into the dungeon patrol (the command, the dashboard button, a meta's "Patrol", the hazard
+        // reroute, /ra dunpatrol-save): where a server's owners asked for it to be off (a Thread on DreamWeave)
+        // nothing is built (ServerPolicy).
+        if (ServerPolicy.PatrolOff(Host))
+        {
+            refusal = DunBuildRefusal.Policy;
+            error = ServerPolicy.PatrolOffMessage;
+            return null;
+        }
+        var w = TryGetDunWorld(who, "DunNav-Patrol", out var patrolOptions, out error, out refusal);
+        if (w == null) return null;
+        var graph = w.Graph;
+        var hazards = w.Hazards;
+        var geometry = w.Geo;
+        var portals = w.Portals;
+        uint playerCell = w.PlayerCell, startCell = w.StartCell;
+        float playerLocalX = (float)(w.X - w.OriginX), playerLocalY = (float)(w.Y - w.OriginY), patrolWZ = (float)w.Z;
+
         // Start-in-hazard evacuation: if the player is standing on an excluded (acid/lava) cell, build
         // the patrol from the nearest SAFE cell and prepend a lead-in waypoint so the first move walks
         // out of the hazard onto safe ground — instead of producing an empty, hazard-locked route.
@@ -3306,15 +3442,11 @@ public sealed partial class RynthAiPlugin
             }
         }
 
-        // The dungeon map geometry (doorways, floors, walls): doorways taken straight on and
-        // big rooms crossed directly. Null (old cell walk) until DungeonLOS is up.
-        var geometry = DungeonPathfinder.GetGeometry(landblockKey, cellDat, _raycast?.GeometryLoader?.DungeonLOS);
         // Portals (DungeonPathfinder.Portals.cs, 2026-10-23): the patrol keeps out of every portal the
         // client knows in this dungeon (Tiny Hive: it walked onto the Surface Portal). A character
         // standing in a portal's circle walks out first, and the patrol is built from where it gets
         // to (that cell, that side of the portal).
-        var portals = PatrolPortalsIn(landblockKey);
-        double playerWX = ((playerCell >> 24) & 0xFF) * 192.0 + playerLocalX, playerWY = ((playerCell >> 16) & 0xFF) * 192.0 + playerLocalY;
+        double playerWX = w.X, playerWY = w.Y;
         (double X, double Y, double Z) startAt = (playerWX, playerWY, patrolWZ);
         NavPoint? walkOut = null;
         uint losCell = playerCell;
@@ -3324,7 +3456,9 @@ public sealed partial class RynthAiPlugin
         // Diagnostics: record which rule laid each waypoint (logged below, one line each).
         var pointLog = new Dictionary<NavPoint, DungeonPathfinder.PatrolPointInfo>(ReferenceEqualityComparer.Instance);
         DungeonPathfinder.PointLog = pointLog;
+        DungeonPathfinder.MainRouteNote = null;
         NavRouteParser route;
+        List<NavPoint> loop;
         try
         {
             if (portals.Count > 0)
@@ -3344,6 +3478,7 @@ public sealed partial class RynthAiPlugin
             }
             route = DungeonPathfinder.BuildPatrolRoute(graph, startCell, hazards, geometry, patrolOptions, portals, startAt);
             portalReport = DungeonPathfinder.LastPortalAvoidance;
+            loop = new List<NavPoint>(route.Points);   // the lap, before any lead-in goes in front of it
         }
         finally { DungeonPathfinder.PointLog = null; }
 
@@ -3377,11 +3512,53 @@ public sealed partial class RynthAiPlugin
         // patrol started or enable nav — the bot would just stand in place (in the hazard) taking damage.
         if (route.Points.Count == 0)
         {
-            _dunPatrolActive = false;
-            if (!isRebuild)
-                ReplyFail("[RynthAi] DunNav-Patrol: no walkable route from here — you're standing in or surrounded by a hazard. Move to safe ground and retry.");
+            refusal = DunBuildRefusal.EmptyRoute;
+            error = "[RynthAi] DunNav-Patrol: no walkable route from here — you're standing in or surrounded by a hazard. Move to safe ground and retry.";
+            return null;
+        }
+
+        // The lap from the waypoint the patrol starts at (the first of the lap at or after StartIdx).
+        var inLoop = new HashSet<NavPoint>(loop, ReferenceEqualityComparer.Instance);
+        int loopStart = 0;
+        for (int k = 0; k < route.Points.Count; k++)
+        {
+            var p = route.Points[(startIdx + k) % route.Points.Count];
+            if (!inLoop.Contains(p)) continue;
+            loopStart = loop.IndexOf(p);
+            break;
+        }
+        if (loopStart > 0) loop = loop.GetRange(loopStart, loop.Count - loopStart).Concat(loop.GetRange(0, loopStart)).ToList();
+
+        refusal = DunBuildRefusal.None;
+        return new DunPatrolBuild
+        {
+            World = w, Options = patrolOptions, Route = route, Loop = loop, StartIdx = startIdx, StartCell = startCell,
+            Evacuated = evacuate, WalkOut = walkOut, PortalReport = portalReport,
+        };
+    }
+
+    private void BuildDunPatrol(bool isRebuild, bool settingsChanged = false, bool portalAppeared = false, bool followedIn = false)
+    {
+        var b = TryBuildDunPatrol("dunnav-patrol", out string error, out var refusal);
+        if (b == null)
+        {
+            if (refusal == DunBuildRefusal.Policy)
+            {
+                if (_dunPatrolActive) StopPatrolForServer();
+                if (!isRebuild) ChatLine(error);
+                return;
+            }
+            // Left the dungeon (e.g. portalled out), or no walkable route from here: stop tracking; nothing to rebuild.
+            if (refusal is DunBuildRefusal.NotInDungeon or DunBuildRefusal.EmptyRoute) _dunPatrolActive = false;
+            if (!isRebuild) ReplyFail(error);
             return;
         }
+        var settings = _dashboard!.Settings;
+        var patrolOptions = b.Options;
+        var route = b.Route;
+        int startIdx = b.StartIdx;
+        var portals = b.World.Portals;
+        var hazards = b.World.Hazards;
 
         if (!isRebuild)
         {
@@ -3407,7 +3584,7 @@ public sealed partial class RynthAiPlugin
         // hazard is sighted in this same landblock.
         _dunPatrolActive        = true;
         _dunPatrolRoute         = route;
-        _dunPatrolLandblock     = landblockKey;
+        _dunPatrolLandblock     = b.World.Landblock;
         _dunPatrolFollowTriedLb = uint.MaxValue;
         _dunPatrolHazardVersion = _objectCache?.HazardVersion ?? 0;
         _dunPatrolSettings.MarkBuilt(patrolOptions);
@@ -3418,7 +3595,7 @@ public sealed partial class RynthAiPlugin
         string portalNote = portals.Count > 0 ? $", kept out of {portals.Count} portal(s)" : "";
         if (isRebuild && followedIn)
         {
-            ChatLine($"[RynthAi] DunNav-Patrol: followed you into dungeon 0x{landblockKey:X4} → {route.Points.Count} waypoints, patrolling here{hazardNote}{portalNote}. Stop the macro or load a route to end it.");
+            ChatLine($"[RynthAi] DunNav-Patrol: followed you into dungeon 0x{b.World.Landblock:X4} → {route.Points.Count} waypoints, patrolling here{hazardNote}{portalNote}. Stop the macro or load a route to end it.");
         }
         else if (isRebuild && settingsChanged)
         {
@@ -3437,10 +3614,10 @@ public sealed partial class RynthAiPlugin
             string skipNote = startIdx > 0 ? $", skipped {startIdx} blocked waypoint(s)" : "";
             int doorwayPts = 0;
             foreach (var p in route.Points) if (p.Doorway) doorwayPts++;
-            string layout = geometry != null && doorwayPts > 0
+            string layout = b.World.Geo != null && doorwayPts > 0
                 ? $", {doorwayPts} of them lined up on doorways"
-                : geometry == null ? " (dungeon map not loaded yet: cell-centre route)" : "";
-            ReplyOk($"[RynthAi] DunNav-Patrol: {graph.Count} cells, {route.Points.Count} waypoints{layout} → circular patrol started{skipNote}{hazardNote}{portalNote}");
+                : b.World.Geo == null ? " (dungeon map not loaded yet: cell-centre route)" : "";
+            ReplyOk($"[RynthAi] DunNav-Patrol: {b.World.Graph.Count} cells, {route.Points.Count} waypoints{layout} → circular patrol started{skipNote}{hazardNote}{portalNote}");
         }
     }
 

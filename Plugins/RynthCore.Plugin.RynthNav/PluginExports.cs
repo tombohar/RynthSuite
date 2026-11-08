@@ -23,6 +23,8 @@ public static unsafe class PluginExports
         try
         {
             string iface = ifaceAnsi == IntPtr.Zero ? "" : Marshal.PtrToStringAnsi(ifaceAnsi) ?? "";
+            // "RynthNav.Routes" v1 (2026-10-30): the route maker's JSON jobs (RoutesInterface.cs).
+            if (iface == RynthCore.Plugin.Shared.RynthNavRoutesApiV1.InterfaceName) return RoutesInterface.Query(iface, version);
             return PathInterface.Query(iface, version);
         }
         catch
@@ -44,6 +46,8 @@ public static unsafe class PluginExports
         catch (Exception ex) { LogShutdownError(plugin, "Runtime.Shutdown", ex); }
         try { PathInterface.Release(); }
         catch (Exception ex) { LogShutdownError(plugin, "PathInterface.Release", ex); }
+        try { RoutesInterface.Release(); }
+        catch (Exception ex) { LogShutdownError(plugin, "RoutesInterface.Release", ex); }
     }
 
     private static void LogShutdownError(RynthNavPlugin? plugin, string step, Exception ex)

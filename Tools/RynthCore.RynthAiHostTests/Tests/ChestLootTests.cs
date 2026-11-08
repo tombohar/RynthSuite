@@ -46,6 +46,7 @@ internal static class ChestLootTests
         r.Add("chest loot: reopening the chest loots it again (never marked done)", ReopenLootsAgain);
         r.Add("chest loot: a salvage-only item is left when no UST is carried, as on corpses", SalvageWithoutUstLeft);
         r.Add("chest loot: opened mid-fight it waits for combat, then is looted if still open", ChestWaitsForCombat);
+        r.Add("chest loot: an open chest is looted before a fight further than 5 yd off (a chest closes when you walk away)", OpenChestBeforeDistantFight);
         r.Add("chest loot: closed by the player mid-loot -> session ends, chest not reopened", ClosedMidLootNotReopened);
         r.Add("chest loot: a chest gets 2 minutes (not the 12 s corpse timeout), restarted by each pickup", ChestTimeoutLongAndRestarted);
     }
@@ -482,6 +483,56 @@ internal static class ChestLootTests
         Check.Eq(FakeHost.Closes.Count, 1, "looted and closed after the fight");
     }
 
+    private const uint Monster = 0x80263301;
+
+    /// <summary>The chest world with a monster <paramref name="meters"/> off and combat on.</summary>
+    private static Bot ChestWithMonster(float meters, out CombatManager combat)
+    {
+        BaseWorld("Unearthed Cache");
+        FakeHost.Names[Monster] = "Drumtaken Ironstone Golem";
+        FakeHost.ItemTypes[Monster] = 0x10;   // creature
+        FakeHost.Positions[Monster] = (Me0.Cell, Me0.X + meters, Me0.Y + 0.5f, Me0.Z);
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        bot.S.EnableCombat = true;
+        bot.S.MonsterRange = 50;
+        bot.Create(Chest, Gem, Spoon);
+        _ = bot.Cache[unchecked((int)Monster)];
+        bot.Cache.OnUpdateHealth(Monster, 1f);
+        bot.Cache.Tick();
+        combat = new CombatManager(host, bot.S, bot.Cache);
+        combat.SetPlayerId(Player);
+        typeof(CombatManager).GetField("_lastScanTime", Any)?.SetValue(combat, DateTime.MinValue);
+        combat.ScanNearbyTargets();
+        bot.Set("_combatManager", combat);
+        return bot;
+    }
+
+    // 2026-11-07: a meta opened a treasure cache with a golem 32 m off; combat walked to the golem, the
+    // cache closed and nothing was taken.
+    private static void OpenChestBeforeDistantFight()
+    {
+        var bot = ChestWithMonster(30f, out var combat);
+        Check.True(combat.HasEngageableTarget, "a monster 30 m off: combat wants the tick");
+        Check.False((bool)bot.Call("IsOpenChestTurn", true, true)!, "no chest open: no chest turn");
+        bot.ServerOpens(Chest);
+        Check.True(bot.HasLootWork(), "the open chest wants the tick");
+        Check.True((bool)bot.Call("IsOpenChestTurn", true, true)!, "open chest, nothing within 5 yd: the chest goes first");
+        Check.False((bool)bot.Call("IsOpenChestTurn", false, true)!, "(only when there is loot work)");
+        var inputs = new ArbiterInputs(true, false, true, true, false, false, lootStarved: true);
+        Check.Eq(ActivityArbiter.Decide(in inputs), BotActivity.Looting, "the arbiter gives Looting the tick");
+        bot.Set("_lootStarveTurn", true);
+        LootGemAndFinish(bot, Gem);
+        Check.True(FakeHost.Closes.Count >= 1, "the gem taken before the fight, the chest closed");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("looted before the fight")), "logged");
+        Check.Eq(bot.Get<uint>("_lastChestLootedId"), Chest, "ralastchestlooted[] names the chest looted to the end");
+
+        var close = ChestWithMonster(2f, out var combat2);
+        Check.True(combat2.HasCloseThreat(RynthAiPlugin.LootStarveCloseYards), "a monster within 5 yd");
+        close.ServerOpens(Chest);
+        Check.False((bool)close.Call("IsOpenChestTurn", true, true)!, "a monster at the chest is fought first");
+    }
+
     private static void ClosedMidLootNotReopened()
     {
         BaseWorld();
@@ -499,6 +550,7 @@ internal static class ChestLootTests
         Check.False(FakeHost.Uses.Contains(Chest), "the chest is never reopened by the looter");
         Check.Eq(FakeHost.Closes.Count, 0, "nothing to close: it is closed already");
         Check.False(bot.Marked(Chest), "and not marked: opening it again loots it");
+        Check.Eq(bot.Get<uint>("_lastChestLootedId"), 0u, "a chest closed mid-loot doesn't count as looted (a meta opens it again)");
         Check.True(FakeHost.Logs.Any(l => l.Contains("Chest loot:") && l.Contains("before looting finished")), "logged");
     }
 }

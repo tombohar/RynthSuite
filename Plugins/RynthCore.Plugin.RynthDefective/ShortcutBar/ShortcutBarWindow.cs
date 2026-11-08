@@ -25,6 +25,10 @@
 //  /rdef use N. A key comes off whatever had it, after the player says so.
 //  An independent bar (DefSettings.IndependentBar) has only RynthDefective's
 //  own slots: every key is an engine hotkey (BarMapping, BarSlot.Own).
+//  Extra bars (2026-11-04, ExtraBar): the same window class draws "Shortcuts
+//  2" ... with that bar's own slots (BarSnapshot.Bar): no AC slots and no keys,
+//  1-24 slots. The bars' menu adds one (at most ExtraBar.Max), shows or hides
+//  them and removes one (its own menu: "Remove this bar").
 //  Spells (2026-10-28): an own slot's menu has "Put a spell here...", a search
 //  over the character's spells (the engine can't read the spell selected in
 //  the game's spellbook); the slot then casts it (UseController).
@@ -62,6 +66,10 @@ internal interface IBarActions
     /// <summary>RynthDefective's settings window (the weapon swap switch, the independent bar ...).</summary>
     void ShowSettings();
     void Hide();
+    /// <summary>Adds an extra Shortcuts bar (2026-11-04: "Shortcuts 2" ..., at most ExtraBar.Max).</summary>
+    void AddBar();
+    /// <summary>Removes extra bar <paramref name="number"/> and forgets its slots.</summary>
+    void RemoveBar(int number);
 
     // A slot's keys (any thread: the engine queues the change). AC's slot: AC's keymap action
     // UseQuickSlot_N; one of RynthDefective's own: its seam for own-slot keys (BindOwnSlotKey).
@@ -76,13 +84,16 @@ internal sealed class ShortcutBarWindow
 
     private readonly RynthCoreHost _host;
     private readonly IBarActions _act;
+    /// <summary>The window this one draws: <see cref="Title"/>, or an extra bar's ("Shortcuts 2", ExtraBar.TitleOf).</summary>
+    private readonly string _title;
     private bool _edit;
     private float _k = 1f, _r = 1f;
 
-    public ShortcutBarWindow(RynthCoreHost host, IBarActions actions)
+    public ShortcutBarWindow(RynthCoreHost host, IBarActions actions, string title = Title)
     {
         _host = host;
         _act = actions;
+        _title = title;
     }
 
     private float Px(float v) => v * _k;
@@ -97,7 +108,7 @@ internal sealed class ShortcutBarWindow
     private void Scale()
     {
         float fontK = Math.Max(0.5f, Font(RynthUiFont.Ui10).FontSize / 10f);
-        int pct = _host.PanelScale(Title);
+        int pct = _host.PanelScale(_title);
         _k = pct > 0 ? pct / 100f : fontK;
         _r = _k / fontK;
     }
@@ -154,7 +165,7 @@ internal sealed class ShortcutBarWindow
         ImGui.SetCursorScreenPos(origin);
         ImGui.Dummy(new Vector2(width, height));
         SlotMenu(view);
-        BarMenu();
+        BarMenu(view);
         if (_openKeyPopup)
         {
             _openKeyPopup = false;
@@ -193,12 +204,13 @@ internal sealed class ShortcutBarWindow
         bool menu = ImGui.IsItemClicked(ImGuiMouseButton.Right);
         _host.PanelDragWithLastItem();
         if (menu) ImGui.OpenPopup(BarMenuId);
-        SafeImGui.SetItemTooltip("Drag to move the bar. Ctrl+wheel here: bigger or smaller. Right-click: settings, Game Panels, Selection.\n"
+        SafeImGui.SetItemTooltip("Drag to move the bar. Ctrl+wheel here: bigger or smaller. Right-click: settings, Game Panels, Selection, more bars.\n"
                                  + "Drag the window's edge to change how many slots fit in a row.");
 
         ImFontPtr tf = Font(RynthUiFont.NarrowBold11);
         float size = Fs(tf) * 10f / 11f;
-        float tx = Tracked(dl, tf, size, new Vector2(x0, MathF.Round(y + (h - size) * 0.5f)), _text, "SHORTCUTS", 0.18f * size);
+        string name = view.Bar > 0 ? HeaderName(view.Bar) : "SHORTCUTS";
+        float tx = Tracked(dl, tf, size, new Vector2(x0, MathF.Round(y + (h - size) * 0.5f)), _text, name, 0.18f * size);
         ImFontPtr nf = Font(RynthUiFont.Dash9);
         string count = view.Ready ? view.Slots.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
         dl.AddText(nf, Fs(nf), new Vector2(MathF.Round(tx + Px(6)), MathF.Round(y + (h - Fs(nf)) * 0.5f + Px(1))), _faint, count);
@@ -218,10 +230,24 @@ internal sealed class ShortcutBarWindow
                 "Settings (/rdef settings): weapon swaps under RynthAi, a bar independent of the game's toolbar,\nand showing the Game Panels buttons and the Selection window."))
             _act.ShowSettings();
         cx += chip + Px(1);
-        if (Chip("##sb_hide", RynthIcons.X, new Vector2(cx, cy), _faint, "Hide the bar (/rdef shows it again). Its keys keep working."))
+        if (Chip("##sb_hide", RynthIcons.X, new Vector2(cx, cy), _faint, view.Bar > 0
+                ? $"Hide this bar (the Shortcuts bar's right-click menu, or /rdef bars show {view.Bar}, shows it again)."
+                : "Hide the bar (/rdef shows it again). Its keys keep working."))
             _act.Hide();
         return y + h;
     }
+
+    private static readonly string[] HeaderNames = BuildHeaderNames();
+
+    private static string[] BuildHeaderNames()
+    {
+        var a = new string[ExtraBar.LastNumber + 1];
+        for (int n = ExtraBar.FirstNumber; n <= ExtraBar.LastNumber; n++) a[n] = "SHORTCUTS " + n;
+        return a;
+    }
+
+    /// <summary>"SHORTCUTS 2" (no string built per frame).</summary>
+    private static string HeaderName(int bar) => bar >= 0 && bar < HeaderNames.Length && HeaderNames[bar] != null ? HeaderNames[bar] : "SHORTCUTS";
 
     private bool Chip(string id, string icon, Vector2 pos, uint color, string tip, bool held = false)
     {
@@ -256,7 +282,7 @@ internal sealed class ShortcutBarWindow
 
         // Items dragged out of AC's UI: the slots' area takes them (the engine keeps the drop from AC).
         Vector2 areaMin = new(x0, y), areaMax = new(x0 + perRow * (cell + gap), y + rows * (cell + gap));
-        uint dropped = _host.HasDropTargets ? _host.DropTarget(Title, areaMin, areaMax, true, out _dragging) : 0;
+        uint dropped = _host.HasDropTargets ? _host.DropTarget(_title, areaMin, areaMax, true, out _dragging) : 0;
         int under = SlotAt(ImGui.GetIO().MousePos, x0, y, cell, gap, perRow, view.Slots.Length);
         _dropSlot = _dragging ? under : 0;
         if (dropped != 0 && under > 0) _act.DropItem(under, dropped);
@@ -266,7 +292,7 @@ internal sealed class ShortcutBarWindow
             int col = i % perRow, row = i / perRow;
             Vector2 p = new(MathF.Round(x0 + col * (cell + gap)), MathF.Round(y + row * (cell + gap)));
             if (i < view.Slots.Length) Slot(dl, view.Slots[i], p, cell);
-            else EditButton(dl, i == view.Slots.Length ? -1 : 1, p, cell, view.Slots.Length, view.Independent);
+            else EditButton(dl, i == view.Slots.Length ? -1 : 1, p, cell, view);
         }
         return y + rows * (cell + gap) - gap;
     }
@@ -345,16 +371,18 @@ internal sealed class ShortcutBarWindow
         }
     }
 
-    private void EditButton(ImDrawListPtr dl, int delta, Vector2 p, float cell, int count, bool independent)
+    private void EditButton(ImDrawListPtr dl, int delta, Vector2 p, float cell, BarSnapshot view)
     {
         Vector2 size = new(cell, cell);
-        bool can = delta < 0 ? count > DefSettings.BarSlotsMin : count < DefSettings.BarSlotsMax;
+        int count = view.Slots.Length;
+        bool can = delta < 0 ? count > view.MinSlots : count < view.MaxSlots;
         ImGui.SetCursorScreenPos(p);
         bool clicked = ImGui.InvisibleButton(delta < 0 ? "##sb_less" : "##sb_more", size);
         bool hot = can && ImGui.IsItemHovered();
         SafeImGui.SetItemTooltip(delta < 0
             ? "One slot fewer (the last one's item stays: add the slot back and it is there)."
-            : independent ? "One more slot (RynthCore's: this bar is independent of the game's toolbar)."
+            : view.Bar > 0 ? $"One more slot (up to {view.MaxSlots})."
+            : view.Independent ? "One more slot (RynthCore's: this bar is independent of the game's toolbar)."
             : count < DefSettings.RetailSlots ? "One more slot (the game's own, up to 18)."
             : "One more slot (RynthCore's: the game's toolbar holds 18).");
         float r = Px(3);
@@ -378,7 +406,7 @@ internal sealed class ShortcutBarWindow
         {
             BarSlot? s = _menuSlot >= 1 && _menuSlot <= view.Slots.Length ? view.Slots[_menuSlot - 1] : null;
             if (s == null) { ImGui.CloseCurrentPopup(); return; }
-            ImGui.TextDisabled($"Slot {s.Number}{(s.Retail ? " (the game's own)" : " (RynthCore's)")}");
+            ImGui.TextDisabled(view.Bar > 0 ? $"Slot {s.Number} (Shortcuts bar {view.Bar})" : $"Slot {s.Number}{(s.Retail ? " (the game's own)" : " (RynthCore's)")}");
             if (s.Name.Length > 0) SafeImGui.Text(s.Name);
             ImGui.Separator();
             bool hasSelection = _host.HasGetSelectedItemId && _host.GetSelectedItemId() != 0;
@@ -394,7 +422,13 @@ internal sealed class ShortcutBarWindow
             }
             if (ImGui.MenuItem("Empty this slot", null, false, !s.Empty)) _act.Clear(s.Number);
             ImGui.Separator();
-            if (!_host.HasKeyBinding)
+            if (view.Bar > 0)
+            {
+                // An extra bar's slots are clicked: the keys are the Shortcuts bar's own slots' (/rdef use N).
+                ImGui.TextDisabled("No keys: click it");
+                SafeImGui.SetItemTooltip("Keys go on the Shortcuts bar's own slots (right-click one there > Add a key).");
+            }
+            else if (!_host.HasKeyBinding)
             {
                 ImGui.TextDisabled(s.AllKeys.Length > 0 ? "Keys: " + s.AllKeys
                     : s.Retail ? "No key: bind UseQuickSlot_" + s.Number + " in Configure Keyboard." : "No key: /rdef bind " + s.Own + " F9");
@@ -425,7 +459,7 @@ internal sealed class ShortcutBarWindow
 
     private const string BarMenuId = "##sb_bar_menu";
 
-    private void BarMenu()
+    private void BarMenu(BarSnapshot view)
     {
         if (!ImGui.IsPopupOpen(BarMenuId)) return;
         ImGui.PushStyleColor(ImGuiCol.PopupBg, WithAlpha(_bg, 0xFA));
@@ -438,16 +472,81 @@ internal sealed class ShortcutBarWindow
         if (!open) return;
         try
         {
-            ImGui.TextDisabled("RynthDefective's Shortcuts bar");
+            ImGui.TextDisabled(view.Bar > 0 ? $"RynthDefective's Shortcuts bar {view.Bar}" : "RynthDefective's Shortcuts bar");
             ImGui.Separator();
             BarMenuItems();
             ImGui.Separator();
+            MoreBarsItems(view);
+            ImGui.Separator();
             if (ImGui.MenuItem("Weapons...")) _act.ShowWeapons();
-            if (ImGui.MenuItem("Hide the bar")) _act.Hide();
-            SafeImGui.SetItemTooltip("/rdef, or the lightning button on the RynthCore bar, shows it again. Its keys keep working.");
+            if (ImGui.MenuItem(view.Bar > 0 ? "Hide this bar" : "Hide the bar")) _act.Hide();
+            SafeImGui.SetItemTooltip(view.Bar > 0
+                ? $"The Shortcuts bar's right-click menu, Defective Settings, or /rdef bars show {view.Bar} shows it again."
+                : "/rdef, or the lightning button on the RynthCore bar, shows it again. Its keys keep working.");
         }
         finally { ImGui.EndPopup(); }
     }
+
+    /// <summary>
+    /// The extra bars (2026-11-04): add one; on the Shortcuts bar, show or hide each (they have no RynthCore
+    /// bar button) and remove one; on an extra bar, remove it. Removing asks once more (a submenu) when the
+    /// bar holds something: its slots are forgotten.
+    /// </summary>
+    private void MoreBarsItems(BarSnapshot view)
+    {
+        if (ImGui.MenuItem("Add a shortcut bar", null, false, view.CanAddBar)) _act.AddBar();
+        SafeImGui.SetItemTooltip(view.CanAddBar
+            ? $"Another bar of {ExtraBar.DefaultSlots} slots in a window of its own, to put anywhere (/rdef bars add).\n"
+              + "Fill it as this one: drag items from your pack onto it, or right-click a slot. Its slots are clicked; they have no keys."
+            : $"There are {ExtraBar.Max} extra bars, as many as there can be. Remove one first.");
+        if (view.Bar > 0)
+        {
+            int filled = 0;
+            foreach ((int n, int f) in view.Extras) if (n == view.Bar) filled = f;
+            RemoveItem("Remove this bar", view.Bar, filled);
+            return;
+        }
+        if (view.Extras.Count == 0) return;
+        foreach ((int n, _) in view.Extras)
+            PanelToggle(ExtraBar.TitleOf(n), BarLabel(n), $"Show or hide Shortcuts bar {n} (/rdef bars show {n}).");
+        if (ImGui.BeginMenu("Remove a bar"))
+        {
+            try
+            {
+                foreach ((int n, int f) in view.Extras) RemoveItem(BarLabel(n), n, f);
+            }
+            finally { ImGui.EndMenu(); }
+        }
+    }
+
+    /// <summary>A bar's remove item: at once when it is empty, else a submenu that says what goes with it.</summary>
+    private void RemoveItem(string label, int bar, int filled)
+    {
+        if (filled == 0)
+        {
+            if (ImGui.MenuItem(label)) _act.RemoveBar(bar);
+            SafeImGui.SetItemTooltip($"Shortcuts bar {bar} is empty: it goes (/rdef bars remove {bar}).");
+            return;
+        }
+        if (!ImGui.BeginMenu(label)) return;
+        try
+        {
+            if (ImGui.MenuItem($"Remove bar {bar} and its {filled} slot{(filled == 1 ? "" : "s")}")) _act.RemoveBar(bar);
+            SafeImGui.SetItemTooltip("Its slots are forgotten (the items stay in your pack).");
+        }
+        finally { ImGui.EndMenu(); }
+    }
+
+    private static readonly string[] BarLabels = BuildBarLabels();
+
+    private static string[] BuildBarLabels()
+    {
+        var a = new string[ExtraBar.LastNumber + 1];
+        for (int n = ExtraBar.FirstNumber; n <= ExtraBar.LastNumber; n++) a[n] = "Shortcuts bar " + n;
+        return a;
+    }
+
+    private static string BarLabel(int n) => n >= 0 && n < BarLabels.Length && BarLabels[n] != null ? BarLabels[n] : "Shortcuts bar " + n;
 
     /// <summary>Settings..., and the two windows RynthDefective draws besides the bar (no RynthBar buttons of their own).</summary>
     private void BarMenuItems()

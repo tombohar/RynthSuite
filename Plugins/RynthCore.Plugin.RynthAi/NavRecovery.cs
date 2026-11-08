@@ -74,7 +74,7 @@ internal sealed class NavRecoveryPlanner : INavRecoveryPlanner
     // Area check: dungeon cells can sit outside their landblock's 192-unit square, so a
     // waypoint that maps to a neighbouring landblock still counts as "in this dungeon"
     // when it is this close to one of its cells.
-    private const double AreaCellReachYd     = 60.0;
+    internal const double AreaCellReachYd    = 60.0;
     private const int    MaxNavmeshCorners   = 128;
 
     private readonly RynthCoreHost _host;
@@ -333,7 +333,7 @@ internal sealed class NavRecoveryPlanner : INavRecoveryPlanner
         return result;
     }
 
-    private static bool ComputeIsDungeon(uint lb, DatDatabase cellDat)
+    internal static bool ComputeIsDungeon(uint lb, DatDatabase cellDat)
     {
         try
         {

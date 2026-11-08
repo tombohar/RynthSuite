@@ -37,6 +37,25 @@ namespace RynthCore.Plugin.RynthAi;
 /// pet for 10 s and parked the essence only 30 s — short of the 45 s item cooldown —
 /// so the next try timed out again. Failed summons no longer assume a pet; every
 /// Use parks the essence for <see cref="DeviceUseCooldownMs"/>.
+///
+/// Summons stopped for the rest of the session (2026-11-06 report: "keeps fighting and looting,
+/// but just doesn't summon anymore" until the game is restarted), two ways:
+/// <list type="bullet">
+/// <item>The client's cast-gesture gate (<c>CanCastNow</c>) can stay closed for good (a refused
+///   action leaves a motion node that never pops; see <see cref="CastGateWatchdog"/>). Buffs and
+///   combat go on through the watchdog's override, but the summon and the refill read the raw gate
+///   and waited on it forever, with no log line. Past <see cref="GestureStuckMs"/> closed the gate is
+///   taken as stuck here too.</item>
+/// <item>A pet the client still shows but the server no longer has (a ghost, the same way as
+///   <see cref="GhostCheck"/>'s monsters) or one whose delete the cache missed read as "a pet is
+///   out" forever. A pet counts as out only while the client has it and the server has talked
+///   about it in the last <see cref="PetGhostSilentMs"/>.</item>
+/// <item>A death or a portal left the pet behind (<see cref="OnPlayerDeath"/>, <see cref="OnPortal"/>):
+///   it stops counting at once, and the summon state in flight is dropped.</item>
+/// <item>An inventory rescan: a read of 0 right after one of 2+ is not believed once, an empty read
+///   the server never confirmed is tried before it is parked, and an essence the client can no longer
+///   name is not used.</item>
+/// </list>
 /// </summary>
 internal sealed class PetManager
 {
@@ -97,6 +116,40 @@ internal sealed class PetManager
     private const long RefillWindowMs            = 120_000;  // two refills inside this and the
     private const int  RefillsPerWindow          = 2;        // essence still reads empty:
     private const long RefillLoopParkMs          = 300_000;  // park it this long
+    /// <summary>The gesture gate closed this long is stuck, not a gesture (CastGateWatchdog's 4 s).</summary>
+    internal const long GestureStuckMs           = 4_000;
+    /// <summary>
+    /// A pet the server said nothing about for this long is a ghost. A live combat pet near monsters
+    /// gets motion updates every few seconds; an idle one that is silent costs one Use answered
+    /// "is already active", which turns this check off for <see cref="GhostCheckOffMs"/>.
+    /// </summary>
+    internal const long PetGhostSilentMs         = 60_000;
+    private const long GhostCheckOffMs           = 300_000;
+
+    // The gesture gate as read every heartbeat: closed since when (0 = open), and whether it was
+    // taken as stuck (logged once until it reads open again).
+    private long _gateClosedSince;
+    private bool _gateStuck;
+
+    // Pets not counted as out (ghost / gone from the client), each logged once.
+    private readonly HashSet<int> _ignoredPetsLogged = new();
+    private long _ghostCheckOffUntil;   // the server said a pet is already active: trust the client's pets until then
+
+    // Pets that were out when the character died or went through a portal. A pet never follows
+    // through either, and the server drops it without telling a player who is no longer near it,
+    // so the client kept showing it ("it thinks it's already summoned if you die"). Cleared when
+    // the server says a pet is already active.
+    private readonly HashSet<int> _petsLeftBehind = new();
+    // Pets the engine has no server record for (-1), since when: no record for PetGhostSilentMs of
+    // watching is silence too (an engine reload loses every record; a live pet gets one at once).
+    private readonly Dictionary<int, long> _noServerRecordSince = new();
+
+    // Essences: the last charge count read above 0. A summon spends one charge, so a read of 0 right
+    // after one of 2 or more is a read in progress (a rescan, properties not back yet), not empty.
+    private readonly Dictionary<int, int> _lastCharges = new();
+    // Essences the server itself called empty ("not enough charges"). An empty read the server has
+    // not confirmed is tried with a summon before it is parked: an empty Use is refused harmlessly.
+    private readonly HashSet<int> _serverSaidEmpty = new();
 
     private string _playerName = string.Empty;
     private long   _playerNameAt;
@@ -144,6 +197,7 @@ internal sealed class PetManager
         if (!_settings.IsMacroRunning) { Reset(); return; }
 
         long now = NowMs;
+        ObserveGestureGate(now);
 
         // Positive completion checks for the in-flight action (don't wait for chat).
         if (_state == PetState.Summoning)
@@ -214,6 +268,11 @@ internal sealed class PetManager
             // "<pet> is already active" — a pet is up but our detection lagged. Back off.
             if (text.Contains("is already active", StringComparison.OrdinalIgnoreCase))
             {
+                // The server has a pet: a silent one the ghost check passed over is real after all.
+                _ghostCheckOffUntil = NowMs + GhostCheckOffMs;
+                _petsLeftBehind.Clear();
+                _host.Log($"[RynthAi] Pet: the server says a pet is already active (essence 0x{(uint)_activeDeviceId:X8}); " +
+                          $"pets the server has gone quiet about count as out for the next {GhostCheckOffMs / 60_000} min.");
                 AssumePetFor(NowMs, AssumeActiveAfterSummonMs);
                 GoIdle();
                 return;
@@ -224,6 +283,8 @@ internal sealed class PetManager
             {
                 _host.Log($"[RynthAi] Pet: essence 0x{(uint)_activeDeviceId:X8} reports empty; will refill.");
                 _serverSaidFullUntil.Remove(_activeDeviceId);   // really empty: the read is right again
+                _lastCharges.Remove(_activeDeviceId);
+                if (_activeDeviceId != 0) _serverSaidEmpty.Add(_activeDeviceId);
                 // Empty Use does not burn the retail 45 s spawn cooldown the way a real summon
                 // does; drop the Use park so the next think can refill (or re-try pyreal path).
                 if (_activeDeviceId != 0)
@@ -252,6 +313,47 @@ internal sealed class PetManager
                 GoIdle();
             }
         }
+    }
+
+    /// <summary>The character died (RynthAiPlugin.HoldForDeath's edge): pets out now are left behind.</summary>
+    public void OnPlayerDeath() => ForgetPetsOut("died");
+
+    /// <summary>Portal space started (a portal, a recall, the death portal): pets out now are left behind.</summary>
+    public void OnPortal() => ForgetPetsOut("portal space");
+
+    /// <summary>
+    /// A pet never follows through a death or a portal: every pet out now stops counting as out, and
+    /// the summon or refill in flight, the "pet assumed out" window and the server's "already active"
+    /// trust are dropped, so the first fight after it gets a pet at once. The essences' cooldowns and
+    /// charge knowledge are the server's and stay; parks that ran out are pruned.
+    /// </summary>
+    private void ForgetPetsOut(string why)
+    {
+        long now = NowMs;
+        int left = 0;
+        string me = PlayerName();
+        if (me.Length > 0)
+        {
+            string prefix = me + "'s ";
+            foreach (var wo in _objectCache.GetLandscape())
+                if (wo != null && wo.ObjectClass != AcObjectClass.Corpse && !string.IsNullOrEmpty(wo.Name)
+                    && wo.Name.StartsWith(prefix, StringComparison.Ordinal) && _petsLeftBehind.Add(wo.Id))
+                    left++;
+        }
+        if (_petsLeftBehind.Count > 64) _petsLeftBehind.Clear();
+        bool inFlight = _state != PetState.Idle || now < _assumePetActiveUntil || now < _ghostCheckOffUntil;
+        Reset();
+        _assumePetActiveUntil = 0;
+        _petSeenSinceSummon = false;
+        _ghostCheckOffUntil = 0;
+        _lastThinkAt = 0;
+        var expired = new List<int>();
+        foreach (var kv in _deviceCooldownUntil)
+            if (kv.Value <= now) expired.Add(kv.Key);
+        foreach (int id in expired) _deviceCooldownUntil.Remove(id);
+        if (left > 0 || inFlight)
+            _host.Log($"[RynthAi] Pet: {why}: {left} pet(s) out are left behind and no longer count as out" +
+                      (inFlight ? ", the summon state was cleared" : "") + "; the next fight gets a new pet.");
     }
 
     // ── Decision ───────────────────────────────────────────────────────────────
@@ -315,6 +417,21 @@ internal sealed class PetManager
             if (charges == 0 && ServerSaidFull(deviceId, now))
                 charges = -1;
 
+            // 0 right after a read of 2 or more: a summon spends one charge, so this is a read in
+            // progress (an inventory rescan, a reload with properties not back yet). Summon as for
+            // an unreadable one instead of refilling or parking it.
+            if (charges > 0)
+            {
+                _lastCharges[deviceId] = charges;
+                _serverSaidEmpty.Remove(deviceId);
+            }
+            else if (charges == 0 && _lastCharges.TryGetValue(deviceId, out int last) && last > 1)
+            {
+                _lastCharges.Remove(deviceId);   // once: the next 0 is believed
+                _host.Log($"[RynthAi] Pet: essence 0x{(uint)deviceId:X8} reads 0 charges right after {last}; taken as a read in progress, summoning from it.");
+                charges = -1;
+            }
+
             if (charges != 0)
             {
                 // Has charges (or unreadable → attempt; an empty one is rejected
@@ -344,6 +461,16 @@ internal sealed class PetManager
                     continue;   // parked by RefillLooping; try the next essence
             }
 
+            // Reads empty, no spirit (or refill off), and the server never said so: try it. An
+            // empty essence is refused harmlessly ("not enough charges", which then parks it);
+            // parking on the read alone left a stale 0 parked for as long as it stayed stale.
+            if (!_serverSaidEmpty.Contains(deviceId))
+            {
+                _host.Log($"[RynthAi] Pet: essence 0x{(uint)deviceId:X8} reads empty and nothing refills it; the server hasn't called it empty, so trying it.");
+                IssueSummon(deviceId, -1);
+                return;
+            }
+
             // Out of charges and no spirit (or refill off): park this essence
             // briefly and move on to the next configured one.
             _deviceCooldownUntil[deviceId] = now + DeviceNoSpiritCooldownMs;
@@ -355,7 +482,8 @@ internal sealed class PetManager
         // Don't fire the essence-use while a cast gesture is animating — AC
         // refuses item use mid-gesture, which would burn the 8s timeout and the
         // 45 s essence cooldown for nothing. No state change; caller retries next tick.
-        if (!_host.CanCastNow) return;
+        // A gate closed past GestureStuckMs is stuck, not a gesture: the Use goes anyway.
+        if (!GestureGateOpen()) return;
         long now = NowMs;
         _state            = PetState.Summoning;
         _activeDeviceId   = deviceId;
@@ -371,7 +499,7 @@ internal sealed class PetManager
     private void IssueRefill(int deviceId, int spiritId)
     {
         if (!_host.HasUseObjectOn) return;
-        if (!_host.CanCastNow) return; // same gesture gate as IssueSummon
+        if (!GestureGateOpen()) return; // same gesture gate as IssueSummon
         _state          = PetState.Refilling;
         _activeDeviceId = deviceId;
         _activeSpiritId = spiritId;
@@ -389,11 +517,35 @@ internal sealed class PetManager
     {
         if (deviceId == 0) return;
         _serverSaidFullUntil[deviceId] = NowMs + ServerSaidFullTrustMs;
+        _serverSaidEmpty.Remove(deviceId);
         if (_host.HasRequestId) _host.RequestId(unchecked((uint)deviceId));
         _host.Log(refilled
             ? $"[RynthAi] Pet: refill complete (essence 0x{(uint)deviceId:X8}, server confirmed)."
             : $"[RynthAi] Pet: essence 0x{(uint)deviceId:X8} is already full (its charge read was stale); summoning from it.");
     }
+
+    /// <summary>
+    /// Reads the client's gesture gate (every heartbeat, so a gate that opens between two think
+    /// ticks restarts the count). Closed past <see cref="GestureStuckMs"/>: stuck, logged once.
+    /// </summary>
+    private void ObserveGestureGate(long now)
+    {
+        if (_host.CanCastNow)
+        {
+            if (_gateStuck)
+                _host.Log("[RynthAi] Pet: the gesture gate reads clear again.");
+            _gateClosedSince = 0;
+            _gateStuck = false;
+            return;
+        }
+        if (_gateClosedSince == 0) { _gateClosedSince = now; return; }
+        if (_gateStuck || now - _gateClosedSince <= GestureStuckMs) return;
+        _gateStuck = true;
+        _host.Log($"[RynthAi] Pet: the gesture gate has read busy for {(now - _gateClosedSince) / 1000}s - taken as stuck; summons and refills go on without it.");
+    }
+
+    /// <summary>Clear for a summon or refill: no gesture animating, or the gate is stuck.</summary>
+    private bool GestureGateOpen() => _gateStuck || _host.CanCastNow;
 
     private bool ServerSaidFull(int deviceId, long now)
     {
@@ -518,8 +670,50 @@ internal sealed class PetManager
             string n = wo.Name;
             if (string.IsNullOrEmpty(n) || !n.StartsWith(prefix, StringComparison.Ordinal)) continue;
             if (n.Contains("Corpse", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!PetIsLive(wo)) continue;
             return true;
         }
+        return false;
+    }
+
+    /// <summary>
+    /// False for a pet the client no longer has (the cache missed its delete) or one the server
+    /// has said nothing about for <see cref="PetGhostSilentMs"/> (a ghost: the client still shows
+    /// it, the server has no such pet). Each such pet is logged once.
+    /// </summary>
+    private bool PetIsLive(WorldObject wo)
+    {
+        uint uid = unchecked((uint)wo.Id);
+        string? why = null;
+        long now = NowMs;
+        if (_petsLeftBehind.Contains(wo.Id))
+            why = "it was out before the last death or portal (a pet never follows; left behind)";
+        else if (!_host.TryGetObjectName(uid, out _) && !_host.TryGetObjectPosition(uid, out _, out _, out _, out _))
+            why = "the client no longer has it (its delete was missed)";
+        else if (now >= _ghostCheckOffUntil && _host.HasGetObjectServerAge)
+        {
+            int age = _host.GetObjectServerAge(uid);
+            if (age >= 0)
+            {
+                _noServerRecordSince.Remove(wo.Id);
+                if (age >= PetGhostSilentMs)
+                    why = $"the server has said nothing about it for {age / 1000}s (a ghost the client still shows)";
+            }
+            else
+            {
+                // No record: fine for a moment (a fresh pet, a full table just cleared), silence
+                // once it lasts as long as the rule's wait.
+                if (_noServerRecordSince.Count > 64) _noServerRecordSince.Clear();
+                if (!_noServerRecordSince.TryGetValue(wo.Id, out long since))
+                    _noServerRecordSince[wo.Id] = since = now;
+                if (now - since >= PetGhostSilentMs)
+                    why = $"the server has sent nothing about it in {(now - since) / 1000}s of watching (a ghost the client still shows)";
+            }
+        }
+        if (why == null) return true;
+        if (_ignoredPetsLogged.Count > 64) _ignoredPetsLogged.Clear();
+        if (_ignoredPetsLogged.Add(wo.Id))
+            _host.Log($"[RynthAi] Pet: '{wo.Name}' (0x{uid:X8}) does not count as out: {why}; a new pet can be summoned.");
         return false;
     }
 
@@ -550,15 +744,18 @@ internal sealed class PetManager
         {
             if (!rule.Type.Equals("Pet", StringComparison.OrdinalIgnoreCase)) continue;
 
+            // An essence the client can no longer name is gone (dropped on a death corpse that
+            // went away, given, destroyed): its cache entry reads as "in the pack" (container 0),
+            // so it was used and parked forever. The same-named search below finds its successor.
             var byId = _objectCache[rule.Id];
-            if (byId != null && IsOwnedByPlayer(byId, playerId)) { yield return rule.Id; continue; }
+            if (byId != null && IsOwnedByPlayer(byId, playerId) && ClientHas(rule.Id)) { yield return rule.Id; continue; }
 
             if (string.IsNullOrWhiteSpace(rule.Name)) continue;
             foreach (var wo in _objectCache.AllKnownObjects())
             {
                 if (wo == null) continue;
                 if (wo.Name.Equals(rule.Name, StringComparison.OrdinalIgnoreCase)
-                    && IsOwnedByPlayer(wo, playerId))
+                    && IsOwnedByPlayer(wo, playerId) && ClientHas(wo.Id))
                 {
                     yield return wo.Id;
                     break;
@@ -627,6 +824,9 @@ internal sealed class PetManager
         }
         return 0;
     }
+
+    /// <summary>The client still has the object (it can name it).</summary>
+    private bool ClientHas(int id) => _host.TryGetObjectName(unchecked((uint)id), out string n) && !string.IsNullOrEmpty(n);
 
     /// <summary>True if the item's container chain roots at the player's pack (not a corpse).</summary>
     private bool IsOwnedByPlayer(WorldObject item, int playerId)

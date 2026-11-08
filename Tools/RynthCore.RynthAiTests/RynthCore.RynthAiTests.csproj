@@ -28,6 +28,7 @@
     <!-- Learned per-monster damage (System only), for the Aelrynth difficulty-tier tests. -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\CreatureData\MonsterDamageStore.cs" Link="Linked\MonsterDamageStore.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\CreatureData\PlayerWeenies.cs" Link="Linked\PlayerWeenies.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\CreatureData\ShieldFacing.cs" Link="Linked\ShieldFacing.cs" />
     <!-- Loot: the measured loot-timer baseline and its [LootSettings] log line. -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\LootBaseline.cs" Link="Linked\LootBaseline.cs" />
     <!-- RynthChat: the channel classifier (no dependencies). -->

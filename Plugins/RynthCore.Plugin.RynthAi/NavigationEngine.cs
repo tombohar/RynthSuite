@@ -416,13 +416,18 @@ internal sealed class NavigationEngine
             }
             if (!_hasStopped)
             {
-                ClearTurnMotions();
+                // The macro switched off with nav idle (no route, between routes): the character may be
+                // the player's, running by hand, and is left running (the owner, 2026-11-07). Nav's own
+                // movement is still stopped.
+                bool navMoving = _isMovingForward || _isTurning || _tier1TurnDir != 0;
+                bool sendStops = _settings.IsMacroRunning || navMoving;
+                if (sendStops) ClearTurnMotions();
                 if (_stopRequestedAt == long.MaxValue)
                     _stopRequestedAt = Now;
 
                 if (Now - _stopRequestedAt >= (long)StopDebounceMs)
                 {
-                    _host.SetAutoRunBy("Nav", false);
+                    if (sendStops) _host.SetAutoRunBy("Nav", false);
                     _isMovingForward = false;
                     _isTurning       = false;
                     _hasStopped      = true;
@@ -466,20 +471,27 @@ internal sealed class NavigationEngine
         // so a new route doesn't inherit the old route's pause/portal/stuck progress.
         if (!ReferenceEquals(route, _lastRoute))
         {
+            // Outdoor Hunt plans its walk again every 8 s: that is the same walk, not a new route.
+            // Resetting here kept a character pinned at a wall on the first rung of the stuck ladder
+            // (a jump) for good: no count ever built up, so no detour was ever tried (2026-11-06).
+            bool sameWalk = route.OutdoorHuntWalk && _lastRoute?.OutdoorHuntWalk == true;
             _lastRoute      = route;
             _inPause        = false;
             _closestDist    = double.MaxValue;
             _linearDir      = 1;
-            _watchdogNs     = double.NaN;
-            _watchdogEw     = double.NaN;
-            _stuckCount     = 0;
-            _inRecovery     = false;
+            if (!sameWalk)
+            {
+                _watchdogNs = double.NaN;
+                _watchdogEw = double.NaN;
+                _stuckCount = 0;
+                _inRecovery = false;
+            }
             _hasGoodHeading = false;
             // The loader chose the new route's start index; a pause on the old route says nothing.
             ClearPausePosition();
             ResetPortalState();
-            ResetRecovery("the route changed");
-            _host.Log($"Nav: route swap detected, {route.Points.Count} pts, startIdx={_settings.ActiveNavIndex}");
+            if (!sameWalk) ResetRecovery("the route changed");
+            _host.Log($"Nav: route swap detected, {route.Points.Count} pts, startIdx={_settings.ActiveNavIndex}{(sameWalk ? " (the same hunt walk: the stuck count carries on)" : "")}");
         }
 
         // STEP 5: the self-promote from "Default" to "Navigating" is gone. Tick()

@@ -88,7 +88,7 @@ public static unsafe class PluginExports
         catch { return IntPtr.Zero; }
     }
 
-    /// <summary>The bar's and the panel buttons' window bodies ("window:bar", "window:panels"; ":popout" when popped out). 1 drawn, 0 not ready, -2 failed.</summary>
+    /// <summary>The bar's and the panel buttons' window bodies ("window:bar", "window:panels", the extra bars' "window:bar2" ...; ":popout" when popped out). 1 drawn, 0 not ready, -2 failed.</summary>
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginRenderEmbed", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static int RenderEmbed(byte* surface, float width, float height, float* wantWidth, float* wantHeight)
     {
@@ -106,6 +106,8 @@ public static unsafe class PluginExports
             else if (name == RynthDefectivePlugin.PanelsSurface) result = plugin.RenderPanels(out wantH);
             else if (name == RynthDefectivePlugin.SelectionSurface) result = plugin.RenderSelection(out wantH);
             else if (name == RynthDefectivePlugin.CorpsesSurface) result = plugin.RenderCorpses(out wantH);
+            else if (name == RynthDefectivePlugin.DayNightSurface) result = plugin.RenderDayNight(out wantH);
+            else if (RynthDefectivePlugin.TryExtraSurface(name, out int extra)) result = plugin.RenderExtraBar(extra, popped, out wantH);
             else return 0;
             if (result != 1) return result;
             if (wantWidth != null) *wantWidth = width;

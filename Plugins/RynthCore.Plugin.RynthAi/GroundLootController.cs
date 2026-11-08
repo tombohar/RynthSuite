@@ -216,7 +216,7 @@ public sealed partial class RynthAiPlugin
             LootDiag($"[RynthAi] Ground loot: pickup confirmed for 0x{(uint)id:X8} '{_groundTargetName}'.");
             if (DescribeLootPickup(id, _groundTargetAction, _groundTargetName, _groundTargetRule,
                     _groundTargetIsSalvage, IsStackAtSend(id), where: "ground") is { } described)
-                Host.WriteToChat(described.Line, described.ChatType);
+                WriteItemInfoLine(described.Line, described.ChatType);
             else
                 ChatLine($"[RynthAi] Looted [{_groundTargetAction}] {_groundTargetName} (ground)");
             if (_groundTargetIsSalvage)

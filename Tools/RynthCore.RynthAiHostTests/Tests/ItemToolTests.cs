@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Threading;
 using RynthCore.Loot;
 using RynthCore.Plugin.RynthAi;
@@ -38,6 +39,8 @@ internal static class ItemToolTests
         r.Add("chest looter: combat/busy holds every send, then the run stops after the cap", ChestHoldsThenStops);
         r.Add("chest looter: can't start without a chest, a key, a loaded near chest; Stop always works and ends the loot session", ChestStartRefusalsAndStop);
         r.Add("chest looter: a key that never runs out is cut off at MaxCycles", ChestMaxCycles);
+        r.Add("chest looter: the re-lock wait is the 'Chest re-lock wait (s)' setting, clamped 5..600; a change applies to the wait running", ChestRelockSetting);
+        r.Add("chest looter: after a short re-lock wait the asks follow it (never under 5 s apart), bounded; a long wait still ends when the chest reads locked", ChestRelockProbes);
         // Quick give state machine
         r.Add("quick give: one give at a time, each after the last landed, paced; done when none is left", GiveOneAtATime);
         r.Add("quick give: a refused item is left out; three refusals in a row stop it", GiveRefusals);
@@ -49,6 +52,8 @@ internal static class ItemToolTests
         r.Add("item tool: Quick give hands over exactly the picked item to the picked NPC, never worn gear or other names", PluginQuickGive);
         r.Add("item tool: Quick give starts only from the panel or a typed line, never from a meta, a script or a remote line; stop works from anywhere", PluginGiveTrust);
         r.Add("item tool: Quick give targets are players or NPCs only", PluginGiveTargets);
+        r.Add("item tool: /ra itemtool relock sets, clamps and saves the re-lock wait and always answers with the value; refused before the profile loads", PluginRelockCommand);
+        r.Add("item tool: the re-lock wait is saved in the profile and loaded (old profiles: 125 s), sent to the engine and left alone by an engine without it", RelockSavedAndLoaded);
     }
 
     // ── Fake environments ────────────────────────────────────────────────────
@@ -418,6 +423,92 @@ internal static class ItemToolTests
         Check.Eq(ck.Looted, ChestKeyLooter.MaxCycles, "after MaxCycles chests");
         string said = Said(env);
         Check.True(said.Contains($"{ChestKeyLooter.MaxCycles} cycles"), "says why: " + said.Substring(Math.Max(0, said.Length - 200)));
+    }
+
+    /// <summary>Runs one cycle on two same-named keys and returns how long after the open the second key went.</summary>
+    private static long NextKeyAfterOpen(int relockSec, Action<ChestEnv, ChestKeyLooter>? duringWait = null)
+    {
+        var env = NewChest(out var ck);
+        env.Keys.Clear(); env.Keys.Add(11); env.Keys.Add(12);
+        Serve(env, ck);
+        env.AutoLootMs = 1000;
+        ck.RelockWaitSec = relockSec;
+        ck.Start(out _);
+        env.Run(5000, () => env.LootStarts > 0);
+        env.Run(3000, () => ck.State == ChestKeyLooter.Phase.Waiting);
+        Check.Eq(ck.State, ChestKeyLooter.Phase.Waiting, $"waiting for the re-lock ({relockSec} s)");
+        long openedAt = env.OpenedAt;
+        int sent = env.Sent.Count;
+        duringWait?.Invoke(env, ck);
+        env.Run(700_000, () => env.Sent.Count > sent);
+        Check.True(env.Sent.Count > sent, $"the next key goes after the wait ({relockSec} s)");
+        return env.T - openedAt;
+    }
+
+    private static void ChestRelockSetting()
+    {
+        // The setting, clamped.
+        NewChest(out var c0);
+        Check.Eq(c0.RelockWaitSec, ChestKeyLooter.DefaultRelockWaitSec, "default 125 s (the wait before the setting)");
+        Check.Eq(ChestKeyLooter.RegenWaitMs, 125_000L, "the default is the old wait");
+        c0.RelockWaitSec = 1;
+        Check.Eq(c0.RelockWaitSec, ChestKeyLooter.MinRelockWaitSec, "1 s is raised to the least, 5 s");
+        c0.RelockWaitSec = -40;
+        Check.Eq(c0.RelockWaitSec, 5, "a negative value too");
+        c0.RelockWaitSec = 100_000;
+        Check.Eq(c0.RelockWaitSec, ChestKeyLooter.MaxRelockWaitSec, "100000 s is cut to the most, 600 s");
+        Check.Eq(ChestKeyLooter.ClampRelockWaitSec(45), 45, "in range: kept");
+
+        // The wait uses it: the next key goes that long after the open, not 125 s.
+        long at = NextKeyAfterOpen(20);
+        Check.True(at >= 20_000 && at < 22_000, $"20 s: the next key ~20 s after the open ({at} ms)");
+        at = NextKeyAfterOpen(ChestKeyLooter.DefaultRelockWaitSec);
+        Check.True(at >= 125_000 && at < 127_000, $"default: ~125 s after the open, as before ({at} ms)");
+        at = NextKeyAfterOpen(5);
+        Check.True(at >= 5_000 && at < 7_000, $"5 s: ~5 s after the open ({at} ms)");
+        at = NextKeyAfterOpen(1);
+        Check.True(at >= 5_000, $"1 s is used as 5 s ({at} ms)");
+
+        // Changed while the wait runs (the panel, mid-run): the running wait follows.
+        at = NextKeyAfterOpen(ChestKeyLooter.DefaultRelockWaitSec, (env, ck) => { env.Run(10_000); ck.RelockWaitSec = 30; });
+        Check.True(at >= 30_000 && at < 32_000, $"125 -> 30 s during the wait: the key goes ~30 s after the open ({at} ms)");
+        at = NextKeyAfterOpen(20, (env, ck) => { env.Run(5_000); ck.RelockWaitSec = 60; });
+        Check.True(at >= 60_000 && at < 62_000, $"20 -> 60 s during the wait: it waits the longer time ({at} ms)");
+    }
+
+    private static void ChestRelockProbes()
+    {
+        foreach (int sec in new[] { 20, 5, ChestKeyLooter.DefaultRelockWaitSec })
+        {
+            var env = NewChest(out var ck);
+            env.Unlimited = true;
+            env.AutoLootMs = 1000;
+            ck.RelockWaitSec = sec;
+            bool unlocked = false;
+            var keyAt = new List<long>();
+            env.OnKey = _ => { keyAt.Add(env.T); return unlocked ? ChestKeyLooter.ErrLockAlreadyUnlocked : 0u; };   // the chest never re-locks
+            ck.Start(out _);
+            env.Run(3000, () => env.LootStarts > 0);
+            unlocked = true;
+            env.Run(2_000_000, () => !ck.Running);
+            Check.False(ck.Running, $"{sec} s: gave up on a chest that never re-locks");
+            long every = Math.Clamp(sec * 1000L, ChestKeyLooter.MinProbeMs, ChestKeyLooter.ProbeMs);
+            int limit = (int)((ChestKeyLooter.MaxProbes * ChestKeyLooter.ProbeMs + every - 1) / every);
+            Check.Eq(ck.ProbeLimit, limit, $"{sec} s: the asks fit in {ChestKeyLooter.MaxProbes * ChestKeyLooter.ProbeMs / 1000} s");
+            Check.Eq(keyAt.Count, 1 + limit + 1, $"{sec} s: bounded: the first use, the one after the wait, one per ask");
+            for (int i = 2; i < keyAt.Count; i++)
+                Check.True(keyAt[i] - keyAt[i - 1] >= every, $"{sec} s: ask {i} came {keyAt[i] - keyAt[i - 1]} ms after the last (at least {every})");
+            Check.True(keyAt.Zip(keyAt.Skip(1), (a, b) => b - a).All(d => d >= ChestKeyLooter.MinProbeMs), $"{sec} s: never two key uses under 5 s apart");
+            Check.Eq(env.Sent.Count(s => s == "open"), 1, $"{sec} s: the empty chest is not opened again");
+            Check.True(Said(env).Contains("hasn't re-locked"), $"{sec} s: says why: " + Said(env));
+        }
+        Check.Eq(new ChestKeyLooter(new ChestEnv()).ProbeLimit, ChestKeyLooter.MaxProbes, "the default wait asks MaxProbes times, as before");
+
+        // A long wait still ends when the client reads the chest locked again (ACE's Reset sends Locked=true).
+        long at = NextKeyAfterOpen(ChestKeyLooter.MaxRelockWaitSec, (env, _) => env.Locked = true);
+        Check.True(at >= ChestKeyLooter.MinRelockMs && at < ChestKeyLooter.MinRelockMs + 2000, $"600 s, the chest reads locked: the key goes at ~{ChestKeyLooter.MinRelockMs / 1000} s ({at} ms)");
+        at = NextKeyAfterOpen(ChestKeyLooter.MaxRelockWaitSec, (env, _) => env.Locked = false);
+        Check.True(at >= 600_000, $"600 s, the chest reads unlocked: the whole wait ({at} ms)");
     }
 
     // ── Quick give state machine ─────────────────────────────────────────────
@@ -913,5 +1004,104 @@ internal static class ItemToolTests
         bot.Cmd("give"); bot.Tick();
         Check.True(Chat().Contains("giving every 'Mana Mote'") && Chat().Contains("to Some Player"), "the start line names the player: " + Chat());
         bot.Cmd("stop"); bot.Tick();
+    }
+
+    // ── Chest re-lock wait (the setting) ─────────────────────────────────────
+
+    private static void PluginRelockCommand()
+    {
+        BaseWorld();
+        var bot = MakeBot("itemtool-relock.json");
+        Check.Eq(bot.S.ChestRelockWaitSec, ChestKeyLooter.DefaultRelockWaitSec, "a new profile: 125 s");
+
+        string Run(string words)
+        {
+            FakeHost.Chat.Clear();
+            bot.Cmd(words);
+            bot.Tick();
+            return Chat();
+        }
+
+        string said = Run("relock 30");
+        Check.Eq(bot.S.ChestRelockWaitSec, 30, "relock 30 sets 30 s");
+        Check.True(said.Contains("re-lock wait = 30 s"), "answers with the value now: " + said);
+        Check.Eq(bot.Get<ChestKeyLooter>("_chestKey").RelockWaitSec, 30, "the looter has it");
+
+        said = Run("relock 2");
+        Check.Eq(bot.S.ChestRelockWaitSec, ChestKeyLooter.MinRelockWaitSec, "2 s is raised to 5 s");
+        Check.True(said.Contains("re-lock wait = 5 s") && said.Contains("the least is 5 s"), "says it was clamped: " + said);
+
+        said = Run("chest relock 9999");
+        Check.Eq(bot.S.ChestRelockWaitSec, ChestKeyLooter.MaxRelockWaitSec, "'chest relock' works too; 9999 is cut to 600");
+        Check.True(said.Contains("re-lock wait = 600 s") && said.Contains("the most is 600 s"), "says it was clamped: " + said);
+
+        said = Run("relock 45s");
+        Check.Eq(bot.S.ChestRelockWaitSec, 45, "'45s' is read as 45");
+
+        said = Run("relock soon");
+        Check.Eq(bot.S.ChestRelockWaitSec, 45, "not a number: unchanged");
+        Check.True(said.Contains("'soon' isn't a number") && said.Contains("still 45 s") && said.Contains("/ra itemtool relock <seconds>"), "says why, the value and the usage: " + said);
+
+        said = Run("relock");
+        Check.True(said.Contains("re-lock wait = 45 s") && said.Contains("5-600 s, default 125"), "no number: says the value and the range: " + said);
+        Check.Eq(bot.S.ChestRelockWaitSec, 45, "and changes nothing");
+
+        // The panel reads it.
+        string json = bot.P.BuildItemToolJson();
+        Check.True(json.Contains("\"relockSec\":45") && json.Contains("\"relockMin\":5") && json.Contains("\"relockMax\":600") && json.Contains("\"relockReady\":true"),
+            "the Item Tool panel's data carries the setting: " + json);
+
+        // The wait the running looter uses is the setting's (the tick hands it over).
+        bot.S.ChestRelockWaitSec = 77;
+        bot.Tick();
+        Check.Eq(bot.Get<ChestKeyLooter>("_chestKey").RelockWaitSec, 77, "a change made elsewhere (meta, engine) reaches the looter on the next tick");
+
+        // Before the character's profile loads nothing lands on the defaults.
+        var dash = bot.Get<LegacyDashboardRenderer>("_dashboard");
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", Any)!.SetValue(dash, false);
+        said = Run("relock 40");
+        Check.Eq(bot.S.ChestRelockWaitSec, 77, "refused before the profile loads");
+        Check.True(said.Contains("isn't loaded yet") && said.Contains("unchanged"), "and says so: " + said);
+        Check.True(bot.P.BuildItemToolJson().Contains("\"relockReady\":false"), "the panel greys the control meanwhile");
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", Any)!.SetValue(dash, true);
+    }
+
+    private static void RelockSavedAndLoaded()
+    {
+        // The profile file (LegacyUiSettings as JSON): saved and read back; an older profile reads 125.
+        var saved = JsonSerializer.Deserialize(
+            JsonSerializer.Serialize(new LegacyUiSettings { ChestRelockWaitSec = 40 }, RynthAiJsonContext.Default.LegacyUiSettings),
+            RynthAiJsonContext.Default.LegacyUiSettings);
+        Check.Eq(saved?.ChestRelockWaitSec, 40, "40 s is saved and loaded");
+        var old = JsonSerializer.Deserialize("{\"EnableBuffing\":true}", RynthAiJsonContext.Default.LegacyUiSettings);
+        Check.Eq(old?.ChestRelockWaitSec, ChestKeyLooter.DefaultRelockWaitSec, "a profile saved before the setting: 125 s");
+
+        // A profile load or switch (CopySettings, the hand-written field list) copies it, clamped.
+        var copy = typeof(LegacyDashboardRenderer).GetMethod("CopySettings", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var dst = new LegacyUiSettings();
+        copy.Invoke(null, new object[] { saved!, dst });
+        Check.Eq(dst.ChestRelockWaitSec, 40, "a profile with 40 s loads 40 s");
+        copy.Invoke(null, new object[] { old!, dst });
+        Check.Eq(dst.ChestRelockWaitSec, 125, "an old profile loads 125 s");
+        var edited = JsonSerializer.Deserialize("{\"ChestRelockWaitSec\":0}", RynthAiJsonContext.Default.LegacyUiSettings)!;
+        copy.Invoke(null, new object[] { edited, dst });
+        Check.Eq(dst.ChestRelockWaitSec, ChestKeyLooter.MinRelockWaitSec, "a hand-edited 0 loads as 5 s");
+
+        // The engine's settings payload: carries it; an engine that has no row for it leaves it alone.
+        var payload = JsonSerializer.Deserialize("{\"PatrolOnLogin\":false}", RynthAiJsonContext.Default.SettingsBridgePayload);
+        Check.True(payload != null && payload.ChestRelockWaitSec == null, "an engine's payload without it has no value");
+        var s = new LegacyUiSettings { ChestRelockWaitSec = 33 };
+        var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
+        typeof(LegacyDashboardRenderer).GetField("_profileLoaded", Any)!.SetValue(dash, true);   // a stand-in with its profile in memory
+        typeof(LegacyDashboardRenderer).GetField("_settings", Any)!.SetValue(dash, s);
+        typeof(LegacyDashboardRenderer).GetField("_advancedSettingsUi", Any)!.SetValue(dash, new LegacyAdvancedSettingsUi(s));   // BuildSettingsJson reads its crafting state
+        var sent = JsonSerializer.Deserialize(dash.BuildSettingsJson(), RynthAiJsonContext.Default.SettingsBridgePayload);
+        Check.Eq(sent?.ChestRelockWaitSec, 33, "sent to the engine");
+        dash.ApplySettingsJson("{\"PatrolOnLogin\":false}");
+        Check.Eq(s.ChestRelockWaitSec, 33, "a save without the field leaves it");
+        dash.ApplySettingsJson("{\"ChestRelockWaitSec\":9999}");
+        Check.Eq(s.ChestRelockWaitSec, ChestKeyLooter.MaxRelockWaitSec, "a save with it is clamped (600 s)");
+        dash.ApplySettingsJson("{\"ChestRelockWaitSec\":20}");
+        Check.Eq(s.ChestRelockWaitSec, 20, "and applied");
     }
 }

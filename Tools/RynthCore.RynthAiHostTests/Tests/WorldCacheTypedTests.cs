@@ -37,6 +37,7 @@ internal static class WorldCacheTypedTests
         r.Add("world cache: corpses: named at once, and a Container-typed one named late is rescued", Corpses);
         r.Add("world cache: an Unknown whose type arrives late is filed as the item it is", LateType);
         r.Add("world cache: scrolls, slot-typed weapons, chests, lifestones; signs stay scenery", LootClasses);
+        r.Add("world cache: a chest created before its position was known lands on the landscape once it has one", LooseChestWithoutPosition);
     }
 
     // ── Rig ───────────────────────────────────────────────────────────────
@@ -110,6 +111,32 @@ internal static class WorldCacheTypedTests
         Where(c, stone, AcObjectClass.ManaStone, false, true, "ground mana stone");
         Reclassify(c);
         Check.False(FakeHost.Logs.Any(l => l.Contains("stuck Unknown", StringComparison.Ordinal)), "nothing left for the Unknown re-probe");
+    }
+
+    /// <summary>The Dreamweave dig's Unearthed Cache (2026-11-02): a container created with no position yet, nobody holding
+    /// it. It was filed as carried for good, so "use <name>" and Loot by name never found it.</summary>
+    private static void LooseChestWithoutPosition()
+    {
+        World();
+        uint cache = _next++;
+        FakeHost.Names[cache] = "Unearthed Cache";
+        FakeHost.ItemTypes[cache] = TContainer;
+        FakeHost.Containers[cache] = 0;     // nobody holds it
+        FakeHost.NotAttackable.Add(cache);
+        uint bag = _next++;                 // a side pack we carry, also created before it had a position
+        FakeHost.Names[bag] = "Caravaneer's Pack";
+        FakeHost.ItemTypes[bag] = TContainer;
+        FakeHost.Containers[bag] = Player;
+        FakeHost.NotAttackable.Add(bag);
+
+        var c = Classify(cache, bag);
+        Check.True(InInventory(c, cache), "no position yet: filed with what is carried (as before)");
+
+        FakeHost.Positions[cache] = (Here, 98f, 98f, 0f);
+        FakeHost.Positions[bag] = (Here, 99f, 99f, 0f);
+        Reclassify(c);
+        Where(c, cache, AcObjectClass.Container, false, true, "the cache once it has a position");
+        Where(c, bag, AcObjectClass.Container, true, false, "a pack we carry stays in the inventory");
     }
 
     private static void OtherPlayersGear()

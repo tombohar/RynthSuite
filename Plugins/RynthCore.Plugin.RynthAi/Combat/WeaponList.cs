@@ -141,6 +141,7 @@ internal static class WeaponList
             list.Add(new ItemRule
             {
                 Id = r.Id, Name = fullName(r), Action = r.Action, KeepBuffed = r.KeepBuffed,
+                NoBuff = !r.KeepBuffed,   // the face's "No buff" toggle (drawn on shield rows only)
                 Kind = kind?.Invoke(r) ?? "",
                 // A shield shows "Shield" in the element column (it has no element).
                 Element = IsShieldRule(r) ? ShieldAction : r.Element.Length > 0 ? r.Element : UnknownLabel,
@@ -181,7 +182,9 @@ internal static class WeaponList
     /// The Items panel's edited list, mapped onto the saved one by id: the saved name stays
     /// (the panel shows the full name; entries are matched and saved by id), an element the
     /// user changed becomes theirs ("set"), and "Unknown" stays unknown. Order and deletions
-    /// follow the panel.
+    /// follow the panel. The face's "noBuff" (<see cref="ItemRule.NoBuff"/>) sets KeepBuffed on a
+    /// shield entry only; on a weapon it is ignored, and absent (an older engine) it changes
+    /// nothing.
     /// </summary>
     public static List<ItemRule> MergeEdited(IReadOnlyList<ItemRule> saved, IEnumerable<ItemRule> edited)
     {
@@ -197,8 +200,9 @@ internal static class WeaponList
                 bool changed = !elem.Equals(old.Element, StringComparison.OrdinalIgnoreCase);
                 list.Add(new ItemRule
                 {
-                    // The panel carries only id, name and element: the rest stays as saved.
-                    Id = old.Id, Name = old.Name, Action = old.Action, KeepBuffed = old.KeepBuffed,
+                    // The panel carries id, name, element and (shields) noBuff: the rest stays as saved.
+                    Id = old.Id, Name = old.Name, Action = old.Action,
+                    KeepBuffed = IsShieldRule(old) && e.NoBuff is bool noBuff ? !noBuff : old.KeepBuffed,
                     Element = changed ? elem : old.Element,
                     ElementSource = changed ? (elem.Length > 0 ? SourceSet : "") : old.ElementSource,
                 });
@@ -206,6 +210,8 @@ internal static class WeaponList
             else
             {
                 e.Element = elem;
+                if (IsShieldRule(e) && e.NoBuff is bool noBuff) e.KeepBuffed = !noBuff;
+                e.NoBuff = null;   // wire only: never saved
                 list.Add(e);
             }
         }

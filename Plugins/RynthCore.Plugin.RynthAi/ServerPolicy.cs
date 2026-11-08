@@ -17,8 +17,8 @@ namespace RynthCore.Plugin.RynthAi;
 /// Network hall; wiki.acdreamweave.com/index.php/Threads). 24 retail dungeons are in its rotation and the same
 /// dungeons can still be walked outside a Thread, so the rule follows the Thread run, not a landblock list.
 /// Everywhere else on DreamWeave the patrol works as before, and nothing else changes in a Thread: recorded nav
-/// routes, going to a dungeon cell (dunnav) and the rest work as they always did. The patrol is built in one
-/// place (BuildDunPatrol), which asks here first.
+/// routes, going to a dungeon cell (dunnav, /ra dunroute) and the rest work as they always did. The patrol is
+/// built in one place (TryBuildDunPatrol: /ra dunnav-patrol and /ra dunpatrol-save), which asks here first.
 ///
 /// How a client knows it is in a Thread, from DreamWeave's own chat (our clients' logs, 2026-10-07..10-15):
 ///   "The Thread Gem opens a way into Watery Grotto. It will bring you back 5 more time(s) ..."

@@ -26,6 +26,7 @@ namespace RynthCore.Plugin.RynthAi;
 //
 // Commands (/ra itemtool ...; the panel sends the same words through RynthPluginItemToolCommand):
 //   chest set | key | start | stop | status | clear
+//   relock <seconds> (also "chest relock"): "Chest re-lock wait (s)", saved in the profile (2026-11-05)
 //   giveitem | givetarget | give | givestop | givestatus | clear
 //   stop (both)
 //
@@ -98,6 +99,7 @@ public sealed partial class RynthAiPlugin
             EnsureItemTool();
             while (_itemToolCmds.TryDequeue(out var cmd))
                 RunItemToolCommand(cmd.Args, cmd.Trusted);
+            if (_dashboard?.Settings is LegacyUiSettings s) _chestKey!.RelockWaitSec = s.ChestRelockWaitSec;
             _chestKey!.Tick();
             _quickGive!.Tick();
         }
@@ -131,7 +133,7 @@ public sealed partial class RynthAiPlugin
             case "":
             case "status":
                 ChatLine("[RynthAi] Item Tool - " + _chestKey!.Status + " | " + _quickGive!.Status);
-                ChatLine("[RynthAi]   /ra itemtool chest set|key|start|stop|status   and   /ra itemtool giveitem|givetarget|give|givestop|givestatus");
+                ChatLine("[RynthAi]   /ra itemtool chest set|key|start|stop|status   /ra itemtool relock <seconds>   and   /ra itemtool giveitem|givetarget|give|givestop|givestatus");
                 return;
             case "stop":
                 if (_chestKey!.Running) _chestKey.Stop("stopped by you");
@@ -144,7 +146,11 @@ public sealed partial class RynthAiPlugin
                 ChatLine("[RynthAi] Item Tool: the picks are cleared (anything running keeps its own).");
                 return;
             case "chest":
+                if (sub == "relock") { RunRelockCommand(t.Length > 2 ? t[2] : ""); return; }
                 RunChestCommand(sub);
+                return;
+            case "relock":
+                RunRelockCommand(sub);
                 return;
             case "giveitem": PickGiveItem(); return;
             case "givetarget": PickGiveTarget(); return;
@@ -186,9 +192,44 @@ public sealed partial class RynthAiPlugin
                 ChatLine("[RynthAi] Chest looter - " + ck.Status);
                 return;
             default:
-                ChatLine("[RynthAi] Usage: /ra itemtool chest set|key|start|stop|status");
+                ChatLine("[RynthAi] Usage: /ra itemtool chest set|key|start|stop|status   and   /ra itemtool relock <seconds>");
                 return;
         }
+    }
+
+    private const string RelockUsage = "/ra itemtool relock <seconds>";
+
+    /// <summary>
+    /// "/ra itemtool relock [seconds]" (the panel's "Chest re-lock wait (s)" sends the same): how long
+    /// after a chest was opened the next key goes on it. Saved in the settings profile; always answers
+    /// with the value now.
+    /// </summary>
+    private void RunRelockCommand(string arg)
+    {
+        string range = $"{ChestKeyLooter.MinRelockWaitSec}-{ChestKeyLooter.MaxRelockWaitSec} s, default {ChestKeyLooter.DefaultRelockWaitSec}";
+        var dash = _dashboard;
+        LegacyUiSettings? s = dash?.Settings;
+        if (dash == null || s == null || !dash.ProfileLoaded)
+        {
+            ReplyFail($"[RynthAi] Chest looter: the settings profile isn't loaded yet (log in first); the re-lock wait is unchanged. Usage: {RelockUsage} ({range}).");
+            return;
+        }
+        if (arg.Length == 0)
+        {
+            ChatLine($"[RynthAi] Chest looter: re-lock wait = {s.ChestRelockWaitSec} s ({range}). Usage: {RelockUsage}.");
+            return;
+        }
+        if (!int.TryParse(arg.TrimEnd('s', 'S'), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int want))
+        {
+            ReplyFail($"[RynthAi] Chest looter: '{arg}' isn't a number of seconds; the re-lock wait is still {s.ChestRelockWaitSec} s. Usage: {RelockUsage} ({range}).");
+            return;
+        }
+        int now = ChestKeyLooter.ClampRelockWaitSec(want);
+        s.ChestRelockWaitSec = now;
+        if (_chestKey != null) _chestKey.RelockWaitSec = now;
+        dash.SaveSettings();
+        string clamped = now == want ? "" : now > want ? $" (the least is {now} s)" : $" (the most is {now} s)";
+        ReplyOk($"[RynthAi] Chest looter: re-lock wait = {now} s{clamped}. The next key goes on the chest {now} s after it was opened, or sooner when it reads locked again.");
     }
 
     // ── Picking ──────────────────────────────────────────────────────────────
@@ -372,7 +413,12 @@ public sealed partial class RynthAiPlugin
         AppendJson(sb, "key", ck?.KeyName ?? ""); sb.Append(',');
         AppendJson(sb, "status", ck?.Status ?? "Idle."); sb.Append(',');
         sb.Append("\"running\":").Append(ck?.Running == true ? "true" : "false").Append(',');
-        sb.Append("\"looted\":").Append(ck?.Looted ?? 0);
+        sb.Append("\"looted\":").Append(ck?.Looted ?? 0).Append(',');
+        // "Chest re-lock wait (s)": the panel's control (absent from an older RynthAi: the panel hides it).
+        sb.Append("\"relockSec\":").Append(_dashboard?.Settings?.ChestRelockWaitSec ?? ChestKeyLooter.DefaultRelockWaitSec).Append(',');
+        sb.Append("\"relockMin\":").Append(ChestKeyLooter.MinRelockWaitSec).Append(',');
+        sb.Append("\"relockMax\":").Append(ChestKeyLooter.MaxRelockWaitSec).Append(',');
+        sb.Append("\"relockReady\":").Append(_dashboard?.ProfileLoaded == true ? "true" : "false");
         sb.Append("},\"give\":{");
         AppendJson(sb, "item", qg?.Item.Name ?? ""); sb.Append(',');
         AppendJson(sb, "target", qg == null || qg.TargetId == 0 ? "" : (_giveTargetClass == (int)AcObjectClass.Player ? "PLAYER " : "") + qg.TargetName); sb.Append(',');

@@ -23,5 +23,12 @@ internal static class RynthClock
     private static readonly long AnchorStamp = Stopwatch.GetTimestamp();
 
     /// <summary>Local time that only moves forward with real time; use for intervals and timeouts.</summary>
-    public static DateTime Now => Anchor + Stopwatch.GetElapsedTime(AnchorStamp);
+    public static DateTime Now => TestNow?.Invoke() ?? Anchor + Stopwatch.GetElapsedTime(AnchorStamp);
+
+    /// <summary>
+    /// Host tests only (null in the plugin): a simulated clock, so a whole fight (a weapon swap, the
+    /// casts, the swap back) runs in simulated seconds with every interval and timeout as in play
+    /// (MissileAmmoSwapTests). Set and restored around one test.
+    /// </summary>
+    internal static Func<DateTime>? TestNow;
 }

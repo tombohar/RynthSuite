@@ -98,9 +98,9 @@ public sealed partial class RynthAiPlugin
         string prefix = s?.Prefix ?? "[RynthAi Item] ";
         int headerType = s?.ChatType ?? 1;
         int detailType = s == null || s.DetailChatType == MagItemInfoSettings.SameAsHeader ? headerType : s.DetailChatType;
-        Host.WriteToChat(prefix + lines[0], headerType);
+        WriteItemInfoLine(prefix + lines[0], headerType);
         for (int i = 1; i < lines.Count; i++)
-            Host.WriteToChat(prefix + "  " + lines[i], detailType);
+            WriteItemInfoLine(prefix + "  " + lines[i], detailType);
     }
 
     /// <summary>One of the player's int properties from the cache (PlayerDescription, else the last identify); 0 when absent.</summary>

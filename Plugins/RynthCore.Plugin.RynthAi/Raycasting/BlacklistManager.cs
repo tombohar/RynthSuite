@@ -58,6 +58,13 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             }
         }
 
+        /// <summary>Blacklists a target for its own duration rather than the configured one.</summary>
+        public void BlacklistFor(int targetId, int seconds)
+        {
+            _blacklistExpirations[targetId] = RynthClock.Now.AddSeconds(seconds);
+            Log?.Invoke($"0x{(uint)targetId:X8} blacklisted {seconds}s (out of reach)");
+        }
+
         /// <summary>
         /// Immediately blacklists a target for the configured timeout duration.
         /// </summary>

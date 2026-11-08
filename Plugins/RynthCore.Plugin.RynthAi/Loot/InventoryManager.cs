@@ -35,13 +35,17 @@ public sealed class InventoryManager
     // engine return is enqueue-accepted, not moved-confirmed (AcMainThreadQueue
     // gesture-defers a move up to ~250 ticks ≈ 4-8s), so success and failure are
     // indistinguishable at the call site. We confirm on a LATER snapshot.
-    private sealed class Pending { public DateTime EnqueuedAt; public int FromContainer; public int TargetCount; public int SourceCount; }
+    private sealed class Pending { public DateTime EnqueuedAt; public int FromContainer; public int TargetCount; public int SourceCount; public string Group = ""; public string Name = ""; public bool Guessed; }
     private sealed class Backoff { public DateTime NextRetry; public int Attempts; public DateTime LastTouched; }
     private readonly Dictionary<int, Pending> _cramPending = new();        // item id -> in-flight move
     private readonly Dictionary<int, Backoff> _cramBackoff = new();        // item id -> confirmed-fail backoff
     private readonly Dictionary<string, Pending> _stackPending = new();    // "tgt_src" -> in-flight merge
     private readonly Dictionary<string, Backoff> _stackBackoff = new();    // "tgt_src" -> confirmed-fail backoff
     private DateTime _lastBackoffPrune = DateTime.MinValue;
+    // Groups whose stack size is only a name guess and whose merges the server never takes
+    // (2026-11-08: 17 Pyreal Motes, which don't stack, were "Pyreal" 25000 stacks; 136 pairs each
+    // failed and backed off on their own, two merges a second for hours).
+    private readonly StackGroupRefusals _guessRefusals = new();
 
     // Grace window for confirm-via-snapshot. MUST be strictly larger than the
     // AcMainThreadQueue max gesture-defer (DrainDeferTickCap=250 ticks ≈ 4-8s at the
@@ -269,7 +273,7 @@ public sealed class InventoryManager
         var groupList = playerItems
             .Where(x => GetMaxStackSize(x) > 1)
             .GroupBy(StackGroupKey)
-            .Where(g => g.Count() > 1)
+            .Where(g => g.Count() > 1 && !_guessRefusals.GivenUp(g.Key))
             .ToList();
 
         foreach (var g in groupList)
@@ -302,7 +306,8 @@ public sealed class InventoryManager
             (WorldObject Item, int Count)? chosenTarget = null;
             (WorldObject Item, int Count)? chosenSource = null;
             string? pairKey = null;
-            for (int ti = 0; ti < parts.Count && chosenTarget == null; ti++)
+            bool guessed = g.First().Values(LongValueKey.MaxStackSize, 0) <= 1;
+            for (int ti = 0; ti < parts.Count && chosenTarget == null && !_guessRefusals.GivenUp(g.Key); ti++)
             {
                 for (int si = parts.Count - 1; si > ti; si--)
                 {
@@ -320,12 +325,18 @@ public sealed class InventoryManager
                         {
                             _stackPending.Remove(key);
                             _stackBackoff.Remove(key);
+                            _guessRefusals.Merged(sp.Group);
                             continue; // this pair resolved — try another
                         }
                         if ((RynthClock.Now - sp.EnqueuedAt).TotalMilliseconds < MoveConfirmGraceMs)
                             continue; // still in flight — skip this pair this tick
                         _stackPending.Remove(key);
                         RegisterFailure(_stackBackoff, key);
+                        if (sp.Guessed && _guessRefusals.Refused(sp.Group))
+                        {
+                            _host.Log($"[RynthAi] AutoStack: '{sp.Name}' never merged in {StackGroupRefusals.GiveUpAfter} tries and its stack size was only guessed from its name: it doesn't stack, leaving those alone until the plugin reloads.");
+                            break;
+                        }
                         _host.Log($"[RynthAi] AutoStack: CONFIRMED merge failure {key} (source survived after {MoveConfirmGraceMs:0}ms) — backing off");
                         continue;
                     }
@@ -351,6 +362,7 @@ public sealed class InventoryManager
             if (!ok)
             {
                 RegisterFailure(_stackBackoff, pairKey);
+                if (guessed) _guessRefusals.Refused(g.Key);
                 _host.Log($"[RynthAi] AutoStack: MergeStackInternal REJECTED src=0x{source.Item.Id:X8} tgt=0x{target.Item.Id:X8} — backing off");
                 return true; // one action per tick
             }
@@ -358,7 +370,11 @@ public sealed class InventoryManager
             // Enqueue accepted — record PENDING, confirm on a later snapshot. Do NOT
             // add the pair-key on success (the old bug that poisoned good merges and
             // starved multi-partial consolidation).
-            _stackPending[pairKey] = new Pending { EnqueuedAt = RynthClock.Now, FromContainer = playerId, TargetCount = target.Count, SourceCount = source.Count };
+            _stackPending[pairKey] = new Pending
+            {
+                EnqueuedAt = RynthClock.Now, FromContainer = playerId, TargetCount = target.Count, SourceCount = source.Count,
+                Group = g.Key, Name = source.Item.Name ?? "", Guessed = guessed,
+            };
             return true; // one action per tick
         }
 
@@ -431,26 +447,68 @@ public sealed class InventoryManager
     {
         int max = item.Values(LongValueKey.MaxStackSize, 0);
         if (max > 1) return max;
+        return NameFallbackMaxStack(item.Name);
+    }
 
-        // Name-based fallbacks for items whose quality property didn't resolve yet.
-        string n = item.Name;
-        if (string.IsNullOrEmpty(n)) return 1;
-
-        if (n.Contains("Pyreal", StringComparison.OrdinalIgnoreCase)) return 25000;
-        if (n.Contains("Trade Note", StringComparison.OrdinalIgnoreCase)) return 100;
-        if (n.Contains("Taper", StringComparison.OrdinalIgnoreCase)
-            || n.Contains("Scarab", StringComparison.OrdinalIgnoreCase)
-            || n.Contains("Prismatic", StringComparison.OrdinalIgnoreCase)) return 100;
-        if (n.Contains("Arrow", StringComparison.OrdinalIgnoreCase)
-            || n.Contains("Bolt", StringComparison.OrdinalIgnoreCase)
-            || n.Contains("Quarrel", StringComparison.OrdinalIgnoreCase)
-            || n.Contains("Atlatl Dart", StringComparison.OrdinalIgnoreCase)) return 250;
-        if (n.Contains("Pea", StringComparison.OrdinalIgnoreCase)
-            || n.Contains("Grain", StringComparison.OrdinalIgnoreCase)) return 100;
+    /// <summary>
+    /// The stack size guessed from a name while the item's MaxStackSize isn't known. Pyreals by
+    /// their exact name only, the rest by whole words: "Pyreal Mote" (it doesn't stack) used to be
+    /// a 25000 pyreal stack and a "Spear" or "Pearl" a 100 "Pea" stack.
+    /// </summary>
+    internal static int NameFallbackMaxStack(string? n)
+    {
+        if (string.IsNullOrWhiteSpace(n)) return 1;
+        n = n.Trim();
+        if (n.Equals("Pyreal", StringComparison.OrdinalIgnoreCase) || n.Equals("Pyreals", StringComparison.OrdinalIgnoreCase)) return 25000;
+        if (HasWord(n, "Trade Note")) return 100;
+        if (HasWord(n, "Taper") || HasWord(n, "Scarab") || HasWord(n, "Prismatic")) return 100;
+        if (HasWord(n, "Arrow") || HasWord(n, "Arrows") || HasWord(n, "Bolt") || HasWord(n, "Bolts")
+            || HasWord(n, "Quarrel") || HasWord(n, "Quarrels") || HasWord(n, "Atlatl Dart") || HasWord(n, "Atlatl Darts")) return 250;
+        if (HasWord(n, "Pea") || HasWord(n, "Peas") || HasWord(n, "Grain")) return 100;
 
         // Salvage bags are intentionally NOT here — each bag is a unique item
         // with quality props; they do not stack.
 
         return 1;
     }
+
+    /// <summary><paramref name="word"/> in <paramref name="name"/> as whole words (letters on neither side), any case.</summary>
+    private static bool HasWord(string name, string word)
+    {
+        for (int at = name.IndexOf(word, StringComparison.OrdinalIgnoreCase); at >= 0;
+             at = name.IndexOf(word, at + 1, StringComparison.OrdinalIgnoreCase))
+        {
+            int end = at + word.Length;
+            if ((at == 0 || !char.IsLetter(name[at - 1])) && (end == name.Length || !char.IsLetter(name[end])))
+                return true;
+        }
+        return false;
+    }
+}
+
+/// <summary>
+/// Stack groups whose merges the server keeps refusing, when their stack size was only guessed
+/// from the name: after GiveUpAfter refusals with no merge between, the group is left alone for
+/// the plugin's life. A merge that goes through clears the count.
+/// </summary>
+internal sealed class StackGroupRefusals
+{
+    internal const int GiveUpAfter = 3;
+    private readonly Dictionary<string, int> _refused = new();
+    private readonly HashSet<string> _givenUp = new();
+
+    /// <summary>A refused merge in <paramref name="group"/>: true when this one gives the group up.</summary>
+    public bool Refused(string group)
+    {
+        if (string.IsNullOrEmpty(group) || _givenUp.Contains(group)) return false;
+        int n = _refused.TryGetValue(group, out int c) ? c + 1 : 1;
+        _refused[group] = n;
+        if (n < GiveUpAfter) return false;
+        _givenUp.Add(group);
+        return true;
+    }
+
+    public void Merged(string group) { if (!string.IsNullOrEmpty(group)) _refused.Remove(group); }
+
+    public bool GivenUp(string group) => _givenUp.Contains(group);
 }

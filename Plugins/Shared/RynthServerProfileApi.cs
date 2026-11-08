@@ -51,8 +51,11 @@
 //                                       //  (RynthAelrynth; RynthAi keeps learned HP and kills per tier)
 //      "vendorBank": 1,                 //  the server's bank pays a pyreal vendor what the packs are short
 //                                       //  of (absent or 0 = it doesn't: readers count the packs only),
-//      "vendorBankPyreals": 5000        //  and what the bank can add beyond the pyreals the game shows
-//    }                                  //  (absent = not known: the server decides). RynthDefective's buys.
+//      "vendorBankPyreals": 5000,       //  and what the bank can add beyond the pyreals the game shows
+//                                       //  (absent = not known: the server decides). RynthDefective's buys.
+//      "bankLuminance": 8904758         //  the luminance in the server's bank, deposits taken out, for a
+//    }                                  //  server that banks earned luminance where the client can't see
+//                                       //  it (RynthDreamWeave's /b); rises are luminance earned (Lum/hr).
 //  }
 // ============================================================================
 
@@ -103,6 +106,16 @@ public static class RynthServerProfile
     /// leave the money to the server.
     /// </summary>
     public const string ValueVendorBankPyreals = "vendorBankPyreals";
+
+    /// <summary>
+    /// The luminance in this character's bank on the server, as last read, less what the server
+    /// plugin saw deposited from the character since login (whole luminance, 0 or more), for a
+    /// server that banks earned luminance where the client can't read it (no bank property). A rise
+    /// is luminance earned; a drop is spending. Absent: not known (not read yet, or the server has
+    /// no such bank). The session stats (SessionStatsTracker) count its rises when the client has
+    /// no bank property of its own. (2026-11-02, RynthDreamWeave's every-minute /b.)
+    /// </summary>
+    public const string ValueBankLuminance = "bankLuminance";
 }
 
 [StructLayout(LayoutKind.Sequential)]

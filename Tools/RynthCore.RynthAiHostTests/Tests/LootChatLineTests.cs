@@ -42,7 +42,29 @@ internal static class LootChatLineTests
         r.Add("loot chat: pyreals, notes, comps and other stacks print the plain line only", StackablePlain);
         r.Add("loot chat: Describe looted items off prints the plain lines", SettingOffPlain);
         r.Add("loot chat: the settings survive a profile save and load, the settings map and /ra iteminfo loot", SettingsRoundTrip);
+        r.Add("loot chat: Info text colour colours the described line only, in its own chat type", DescribedLineInTextColor);
     }
+
+    // 2026-11-05: Item Info's "Info text colour" covers the described "Looted" line too; the plain
+    // lines (salvage by default, pyreals) are not item info and never ask for a colour.
+    private static void DescribedLineInTextColor() => Clocked(() =>
+    {
+        List<string> looted = LootCorpse(s => { s.TextColor = "#EE921E"; s.LootChatType = 18; }, pluginCommands: true);
+        string line = LineFor(looted, "Blunt Crossbow");
+        int at = FakeHost.Chat.IndexOf(line);
+        var asks = Enumerable.Range(0, FakeHost.PluginCommands.Count).Where(i => FakeHost.PluginCommands[i].Plugin == "RynthCore.Chat").ToList();
+        Check.Eq(asks.Count, 1, "one colour asked for (the described keeper): " + string.Join(" | ", FakeHost.PluginCommands));
+        if (asks.Count == 1)
+        {
+            Check.Eq(FakeHost.PluginCommands[asks[0]], ("RynthCore.Chat", "nextcolor", "#EE921E"), "the colour");
+            Check.Eq(FakeHost.PluginCommandChatCounts[asks[0]], at, "asked for just before the line is written");
+        }
+        Check.Eq(FakeHost.ChatTypes[at], 18, "the line keeps its loot chat type");
+        Check.True(line.Contains("(rule \"Keep bows\"): Gold"), "and its text: " + line);
+
+        looted = LootCorpse(pluginCommands: true);
+        Check.False(FakeHost.PluginCommands.Any(c => c.Plugin == "RynthCore.Chat"), "no colour set: nothing asked (as before)");
+    });
 
     private static long _now;
 
@@ -146,9 +168,10 @@ internal static class LootChatLineTests
     }
 
     /// <summary>Opens the corpse and loots it, each item landing in the main pack as soon as its move goes out.</summary>
-    private static List<string> LootCorpse(Action<MagItemInfoSettings>? configure = null)
+    private static List<string> LootCorpse(Action<MagItemInfoSettings>? configure = null, bool pluginCommands = false)
     {
         World();
+        FakeHost.PluginCommandCalls = pluginCommands;
         var host = FakeHost.Create(Player);
         var bot = new Bot(host);
         configure?.Invoke(bot.S.ItemInfoSettings);

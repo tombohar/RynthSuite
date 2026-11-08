@@ -202,7 +202,7 @@ internal sealed class BuildingMap : OutdoorHunt.IBuildings
 
         var pts = DungeonPathfinder.BuildPathPoints(cells, blk.Graph, blk.Geo, null,
             DungeonGeometry.WorldToNav(from.Y), DungeonGeometry.WorldToNav(from.X), from.Z,
-            DungeonGeometry.WorldToNav(to.Y), DungeonGeometry.WorldToNav(to.X), to.Z, out _);
+            DungeonGeometry.WorldToNav(to.Y), DungeonGeometry.WorldToNav(to.X), to.Z, out _, mergeSamePieces: false);
         var way = new List<Vec>(pts.Count + 2) { from };
         foreach (var p in pts)
             way.Add(new Vec(DungeonGeometry.NavToWorld(p.EW), DungeonGeometry.NavToWorld(p.NS), p.Z * 240.0, p.Doorway));

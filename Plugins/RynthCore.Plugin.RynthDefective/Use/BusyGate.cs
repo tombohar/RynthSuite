@@ -37,11 +37,23 @@
 //  After a death or a login RynthAi's stream of rebuffs kept the count moving,
 //  so it never read "steady" and a press waited until it gave up.
 //
-//  RynthDefective never resets the client's count itself (ForceResetBusyCount):
-//  the count is the engine's (its reconciler and watchdogs own it), RynthAi
-//  stopped resetting it on 2026-10-06 because a reset zeroes actions the server
-//  hasn't answered yet (each later answer then drives it negative), and nothing
-//  here needs it at zero: ignoring a leftover is enough to send.
+//  RynthDefective doesn't reset the client's count itself (ForceResetBusyCount)
+//  unless the player asks: the count is the engine's (its reconciler and
+//  watchdogs own it), RynthAi stopped resetting it on 2026-10-06 because a reset
+//  zeroes actions the server hasn't answered yet (each later answer then drives
+//  it negative), and nothing here needs it at zero: ignoring a leftover is
+//  enough to send.
+//
+//  "Shortcuts clear a stuck busy state" (DefSettings.ClearStuckBusy, 2026-11-04,
+//  off by default; a player's ask): a press held ONLY by the count (BusyHold.Busy
+//  with nothing of ours in flight or unanswered, no gesture, RynthAi with no
+//  action of its own, no "You're too busy" from the server in ServerBusyRecentMs)
+//  sends the reset RynthAi's /ra clearbusy sends (the engine's
+//  ForceResetBusyCount: the count to 0, the cursor re-read, every plugin's
+//  mirror told), once per press, then the press goes (BusyClearRule; the use
+//  controller waits ClearSettleMs for the reset to land on the game's tick,
+//  then takes what is left as a leftover). Not /ra clearbusy's StopCompletely:
+//  a press must not stop a run. Never with a real action in flight.
 // ============================================================================
 
 using System;
@@ -129,6 +141,34 @@ internal static class BusyRule
 }
 
 /// <summary>
+/// Whether a press held by the busy count clears it first (DefSettings.ClearStuckBusy, off by default).
+/// Pure: the use controller asks, the tests check every case.
+/// </summary>
+internal static class BusyClearRule
+{
+    /// <summary>The server answered "You're too busy" this recently: it really is busy, nothing is cleared.</summary>
+    public const long ServerBusyRecentMs = 5000;
+
+    /// <param name="enabled">The player's option.</param>
+    /// <param name="hold">What <see cref="BusyRule"/> says holds the press.</param>
+    /// <param name="f">The readings it said it from.</param>
+    /// <param name="ownInFlight">A use or cast of ours is in flight (sent, not answered or let go).</param>
+    /// <param name="ownAnswered">Our own last use or cast was answered (UseDone, the item in hand, a refusal); false while one went unanswered.</param>
+    /// <param name="sinceServerBusyMs">Since the server last answered "You're too busy".</param>
+    public static bool ShouldClear(bool enabled, BusyHold hold, in BusyFacts f, bool ownInFlight, bool ownAnswered, long sinceServerBusyMs)
+    {
+        if (!enabled || hold != BusyHold.Busy || f.Count <= 0) return false;   // only the count, and only when it holds
+        if (ownInFlight) return false;                                           // ours, under way
+        if (f.SinceOwnSendMs < BusyRule.OwnTrustMs && !ownAnswered) return false; // ours, never answered: it may still be
+        if (f.Animating) return false;                                           // a gesture: the character is acting
+        if (f.BotPaced == true) return false;                                    // RynthAi's own action, unanswered
+        // A RynthAi that doesn't say what it has in flight: its "waiting on the server" bit while fresh.
+        if (f.BotPaced == null && f.BotWaiting == true && f.BotSteadyMs < BusyRule.BotTrustMs) return false;
+        return sinceServerBusyMs >= ServerBusyRecentMs;                          // the server said busy just now
+    }
+}
+
+/// <summary>
 /// The clocks behind <see cref="BusyRule"/>: how long each reading has read the same, our own last
 /// send, and the leftover count. <see cref="Observe"/> every tick (in or out of the world: a count
 /// left by a death has read the same all through the death portal), <see cref="Judge"/> when a use
@@ -193,6 +233,15 @@ internal sealed class BusyGate
 
     /// <summary>Our own use or cast went out now.</summary>
     public void NoteOwnSend(long now) => _ownSendMs = now;
+
+    /// <summary>
+    /// The count as it reads now is a leftover (after the player's clear: what the reset didn't take holds
+    /// this press no more). Only a count above it holds again.
+    /// </summary>
+    public void AcceptLeftover()
+    {
+        if (_count > _leftover) _leftover = _count;
+    }
 
     public BusyFacts Facts(long now) => Facts(now, false);
 
