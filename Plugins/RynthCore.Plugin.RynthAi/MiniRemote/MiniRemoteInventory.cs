@@ -9,6 +9,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using RynthCore.Loot;
+using RynthCore.Plugin.Shared;
 using RynthCore.PluginSdk;
 
 namespace RynthCore.Plugin.RynthAi.MiniRemote;
@@ -119,7 +120,14 @@ internal sealed class MiniRemoteInventory
 
     // ── Actions ─────────────────────────────────────────────────────────────
 
-    public bool Use(WorldObject wo) => _host.HasUseObject && _host.UseObject(unchecked((uint)wo.Id));
+    /// <summary>
+    /// Uses the item through UseFor, so the log names the feature and the reason
+    /// ("[Use] RynthAi/Pets ... - keep the cosmetic pet out"). It was a bare UseObject: a pet the
+    /// Pets tab summoned (cosmetic, heal pet, the Summon button) left only the engine's "[Use]
+    /// engine:" line, and nothing told it from a combat summon (2026-11-08, R-20261108-194528-ab84).
+    /// </summary>
+    public bool Use(WorldObject wo, string why, UseKind kind = UseKind.Auto)
+        => _host.HasUseObject && _host.UseFor(unchecked((uint)wo.Id), "Pets", why, kind);
 
     /// <summary>Forgets cached WCIDs / appraisal throttles (logout).</summary>
     public void Reset()

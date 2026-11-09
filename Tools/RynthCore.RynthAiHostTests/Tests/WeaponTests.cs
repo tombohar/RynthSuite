@@ -61,6 +61,7 @@ internal static class WeaponTests
         r.Add("weapon swap: one in flight, confirmed, retry cap, then what's in hand", SwapOneInFlight);
         r.Add("weapon swap: no flip-flop between two weapons", SwapNoFlipFlop);
         r.Add("weapon swap: a new target that wants the weapon just swapped away from gets it at once (Drakkon 2026-10-12)", SwapBackForNewTarget);
+        r.Add("weapon swap: the weapon set for a monster goes in past the 4-swaps-a-minute cap for a new target (R-20261107-141028-b33e)", PerMobWandPastWindowCap);
         r.Add("weapon swap: a server refusal counts as a failed try", SwapRefused);
         r.Add("weapon swap: 'too busy' is no try, and a portal or recall ends the rest (Kelpie 2026-10-15)", SwapBusyNotCounted);
         r.Add("weapon swap: combat reads ACE's busy answer (0x1D then SaveFailed 0) as busy, a real refusal as a try", CombatReadsBusyWield);
@@ -1163,6 +1164,103 @@ internal static class WeaponTests
         }
         int next = hand == Tetsubo ? Quadrelle : Tetsubo;
         Check.Eq(tr2.Next(next, hand, u.AddSeconds(5), forKey: 0x8010), WeaponSwapTracker.Step.Hold, "a fifth swap inside a minute: held");
+    }
+
+    /// <summary>
+    /// R-20261107-141028-b33e (Conquest, 2026-11-07): a mage fought wasps, wisps and gromnies with
+    /// four wands; four swaps landed inside a minute, then the player selected an Oaken Guardian and
+    /// its Fire Staff was kept out ("keeping Frost Sceptre instead of Fire Staff (4 swaps in 60s)").
+    /// The Guardian died to Cold. A weapon the player set for the monster (here its Monsters rule's
+    /// weapon) now goes in for a new target past the window cap; a weakness pick, and the same target,
+    /// are still capped.
+    /// </summary>
+    private static void PerMobWandPastWindowCap()
+    {
+        const int OtherA = 0x7101, OtherB = 0x7102, OtherC = 0x7103, OtherD = 0x7104;
+        DateTime now = new(2026, 11, 7, 15, 9, 31);
+        try
+        {
+            RynthClock.TestNow = () => now;
+
+            // Four swaps for other targets in the last minute, ending with `second` in hand.
+            void FillWindow(WeaponSwapTracker tr, int first, int second, int lastKey)
+            {
+                int hand = second;
+                int[] keys = { OtherA, OtherB, OtherC, lastKey };
+                for (int i = 0; i < 4; i++)
+                {
+                    DateTime at = now.AddSeconds(-40 + i * 10);
+                    int want = hand == first ? second : first;
+                    tr.Next(want, hand, at, forKey: keys[i]);
+                    tr.Sent(want, hand, at);
+                    tr.Next(want, want, at.AddSeconds(1), forKey: keys[i]);   // landed
+                    hand = want;
+                }
+            }
+            var equip = typeof(CombatManager).GetMethod("EquipWeaponAndSetStance", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            // The Monsters rule's weapon for this monster, a new target: wielded at once.
+            var rig = new Rig(1535, "Ethereal Wisp");
+            rig.S.ItemRules.Add(new() { Id = unchecked((int)FireWand), Name = "Fire Wand", Element = "Fire", ElementSource = "icon" });
+            rig.S.EnsureDefaultRule();
+            var own = new MonsterRule { Name = "Ethereal", WeaponId = unchecked((int)FireWand) };
+            rig.S.MonsterRules.Add(own);
+            rig.C.InHandOverride = () => unchecked((int)ListedWand);
+            rig.C.activeTargetId = rig.Target.Id;
+            FillWindow(rig.C.SwapTracker, unchecked((int)FireWand), unchecked((int)ListedWand), OtherD);
+            Check.True(rig.C.PlanFor(rig.Target, own).ForThisMonster, "the rule's weapon is the monster's own pick");
+            equip.Invoke(rig.C, new object[] { rig.Target, "Auto" });
+            Check.Eq(FakeHost.Uses.FirstOrDefault(), FireWand,
+                "four swaps in the minute, a new target: its rule's fire wand is wielded, not held: "
+                + string.Join(" | ", FakeHost.Logs.Where(l => l.Contains("EquipDiag")).Take(4)));
+
+            // The weakness's pick for a new target: still capped, and the hold says what wanted it.
+            var weak = new Rig(1535, "Ethereal Wisp");
+            weak.S.ItemRules.Add(new() { Id = unchecked((int)FireWand), Name = "Fire Wand", Element = "Fire", ElementSource = "icon" });
+            weak.S.EnsureDefaultRule();
+            weak.C.InHandOverride = () => unchecked((int)FireWand);
+            weak.C.activeTargetId = weak.Target.Id;
+            FillWindow(weak.C.SwapTracker, unchecked((int)ListedWand), unchecked((int)FireWand), OtherD);
+            var wp = weak.C.PlanFor(weak.Target, null);
+            Check.Eq(unchecked((uint)wp.WeaponId), ListedWand, "the weakness picks the Lightning wand");
+            Check.False(wp.ForThisMonster, "a weakness pick isn't the monster's own");
+            equip.Invoke(weak.C, new object[] { weak.Target, "Auto" });
+            Check.Eq(FakeHost.Uses.Count, 0, "a weakness swap past four in a minute: held");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("(4 swaps in 60s; wanted for: weak to Lightning")),
+                "the hold names what wanted the swap: " + string.Join(" | ", FakeHost.Logs.Where(l => l.Contains("keeping")).Take(3)));
+
+            // The same target as the last swap: the cap still holds the monster's own pick.
+            var tr = new WeaponSwapTracker();
+            const int Hand = 1, Own = 2, Third = 3, Guardian = 0x7200;
+            FillWindow(tr, Third, Hand, Guardian);
+            Check.Eq(tr.Next(Own, Hand, now, forKey: Guardian, forThisMonster: true), WeaponSwapTracker.Step.Hold,
+                "the target the last swap was for: capped");
+            Check.Eq(tr.Next(Own, Hand, now, forKey: 0, forThisMonster: true), WeaponSwapTracker.Step.Hold, "no target known: capped");
+            Check.Eq(tr.Next(Own, Hand, now, forKey: 0x7201, forThisMonster: true), WeaponSwapTracker.Step.Swap, "a new target: its own pick goes");
+            Check.Eq(tr.Next(Own, Hand, now, forKey: 0x7201), WeaponSwapTracker.Step.Hold, "the same swap not set for it: capped");
+
+            // Which plans are the monster's own: its Damage tab pick, its rule's weapon or damage
+            // type; not the Default row's damage type or weapon, nor the weakness.
+            var p = new Rig(1535, "Ethereal Wisp");
+            p.S.ItemRules.Add(new() { Id = unchecked((int)FireWand), Name = "Fire Wand", Element = "Fire", ElementSource = "icon" });
+            p.S.EnsureDefaultRule();
+            var defRow = p.S.MonsterRules[0];
+            Check.True(p.C.PlanFor(p.Target, new MonsterRule { Name = "Ethereal", DamageType = "Fire" }).ForThisMonster, "the rule's damage type");
+            defRow.DamageType = "Fire";
+            var dp = p.C.PlanFor(p.Target, defRow);
+            Check.Eq(unchecked((uint)dp.WeaponId), FireWand, "the Default row's damage type picks the fire wand");
+            Check.False(dp.ForThisMonster, "but that is every monster's, not this one's");
+            defRow.DamageType = "Auto";
+            p.Store.SetManualWeapon(1535, FireWand);
+            Check.True(p.C.PlanFor(p.Target, new MonsterRule { Name = "Ethereal" }).ForThisMonster, "this monster's Damage tab pick");
+            p.Store.SetManualWeapon(1535, 0);
+            p.Store.SetDefaultWeapon(FireWand);
+            Check.False(p.C.PlanFor(p.Target, new MonsterRule { Name = "Ethereal" }).ForThisMonster, "the Damage tab DEFAULT row's weapon");
+        }
+        finally
+        {
+            RynthClock.TestNow = null;
+        }
     }
 
     /// <summary>

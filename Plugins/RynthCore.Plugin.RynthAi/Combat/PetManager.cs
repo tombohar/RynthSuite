@@ -56,6 +56,15 @@ namespace RynthCore.Plugin.RynthAi;
 ///   the server never confirmed is tried before it is parked, and an essence the client can no longer
 ///   name is not used.</item>
 /// </list>
+///
+/// A pet that is none of the player's combat pets held the slot for good (2026-11-08,
+/// R-20261108-194528-ab84: "combat pets are not autosummoning anymore", with a drudge the player
+/// says they never chose standing beside them). Any "&lt;me&gt;'s ..." creature counted as the pet out, so a
+/// passive (cosmetic) pet, which never despawns, stopped every summon with no log line. Now a pet
+/// holds the slot only when it came from RynthAi's own summon, is named for an essence in the
+/// Items list, or the server said it is active; any other pet is logged once and the chosen
+/// essence is summoned anyway (ACE puts a passive pet away for a combat pet, and answers "is
+/// already active" for a combat pet, which then holds the slot).
 /// </summary>
 internal sealed class PetManager
 {
@@ -151,6 +160,29 @@ internal sealed class PetManager
     // not confirmed is tried with a summon before it is parked: an empty Use is refused harmlessly.
     private readonly HashSet<int> _serverSaidEmpty = new();
 
+    // Which pet out holds the summon slot (2026-11-08, R-20261108-194528-ab84). Pets that came from
+    // our own summon or that the server called active; pets out when our last summon went (they are
+    // not its pet); until when a new pet counts as that summon's; pets out that hold nothing, each
+    // logged once.
+    private readonly HashSet<int> _slotPets = new();
+    private readonly HashSet<int> _petsOutAtSummon = new();
+    private long _claimNewPetsUntil;
+    private readonly HashSet<int> _otherPetsLogged = new();
+
+    // No combat pet device (R-20261108-215240-651b, PetDeviceKind): listed essences skipped, each
+    // logged once; essences not appraised yet, when we asked for their appraisal; the essence a
+    // summon just landed from, judged again until then; pets out of such an essence (they hold
+    // nothing).
+    private readonly HashSet<int> _notCombatLogged = new();
+    private readonly Dictionary<int, long> _appraisalAskedAt = new();
+    private int  _landedDeviceId;
+    private long _landedCheckUntil;
+    private readonly HashSet<int> _passivePets = new();
+    /// <summary>A listed essence not appraised yet waits this long for its appraisal, once.</summary>
+    private const long AppraisalWaitMs = 3_000;
+    /// <summary>After a summon lands, its essence is judged again this long (its appraisal may still come).</summary>
+    private const long LandedCheckMs = 15_000;
+
     private string _playerName = string.Empty;
     private long   _playerNameAt;
 
@@ -187,6 +219,7 @@ internal sealed class PetManager
         _objectCache = objectCache;
         _combat      = combat;
         _skills      = skills;
+        PetDeviceKind.ResetSession();
     }
 
     // ── Public API ─────────────────────────────────────────────────────────────
@@ -209,6 +242,12 @@ internal sealed class PetManager
                 _summonElement = PetChoice.ElementOf(_host, unchecked((uint)_activeDeviceId),
                     _objectCache[_activeDeviceId]?.Name ?? "");
                 AssumePetFor(now, AssumeActiveAfterSummonMs);
+                // Judge the essence again now its pet is out: one used before its appraisal landed
+                // (it waits only AppraisalWaitMs) may turn out no combat pet device.
+                _landedDeviceId = _activeDeviceId;
+                _landedCheckUntil = now + LandedCheckMs;
+                if (PetDeviceKind.Judge(_host, unchecked((uint)_activeDeviceId)) == PetDeviceKind.Verdict.Unknown && _host.HasRequestId)
+                    _host.RequestId(unchecked((uint)_activeDeviceId));
                 GoIdle();
             }
         }
@@ -221,6 +260,7 @@ internal sealed class PetManager
                 GoIdle();
             }
         }
+        CheckLandedDevice(now);
 
         // Timeout BEFORE the busy gate — busyCount can stick > 0 (a server-side
         // decrement that never lands), and waiting on it would wedge the subsystem.
@@ -271,6 +311,9 @@ internal sealed class PetManager
                 // The server has a pet: a silent one the ghost check passed over is real after all.
                 _ghostCheckOffUntil = NowMs + GhostCheckOffMs;
                 _petsLeftBehind.Clear();
+                // ACE says it only for a combat pet: whatever pet is out holds the slot, named for
+                // a listed essence or not (one summoned by hand from an unlisted essence).
+                foreach (var wo in OwnPetsInView()) _slotPets.Add(wo.Id);
                 _host.Log($"[RynthAi] Pet: the server says a pet is already active (essence 0x{(uint)_activeDeviceId:X8}); " +
                           $"pets the server has gone quiet about count as out for the next {GhostCheckOffMs / 60_000} min.");
                 AssumePetFor(NowMs, AssumeActiveAfterSummonMs);
@@ -346,6 +389,8 @@ internal sealed class PetManager
         _assumePetActiveUntil = 0;
         _petSeenSinceSummon = false;
         _ghostCheckOffUntil = 0;
+        _claimNewPetsUntil = 0;
+        _landedDeviceId = 0;
         _lastThinkAt = 0;
         var expired = new List<int>();
         foreach (var kv in _deviceCooldownUntil)
@@ -396,6 +441,23 @@ internal sealed class PetManager
         // Only summon when mobs are near (the user's trigger).
         if (!MonstersNearby()) return;
 
+        // A pet out that is none of the player's combat pets (R-20261108-194528-ab84: a drudge the
+        // player says they never chose) holds nothing: the chosen essence is summoned anyway. The ticked
+        // cosmetic pet is still dismissed first, which costs no essence cooldown.
+        if (OtherPetOut() is { } other)
+        {
+            if (YieldPetForCombat != null && YieldPetForCombat())
+            {
+                AssumePetFor(now, 3000);
+                return;
+            }
+            if (_otherPetsLogged.Count > 64) _otherPetsLogged.Clear();
+            if (_otherPetsLogged.Add(other.Id))
+                _host.Log($"[RynthAi] Pet: '{other.Name}' (0x{(uint)other.Id:X8}) is out, but it is none of your combat pets " +
+                          "(not from RynthAi's summon, not named for a Pet essence in the Items list); summoning yours anyway " +
+                          "(the server puts a passive pet away for it, or says a combat pet is already active).");
+        }
+
         // Skill gate: must have Summoning trained to use any essence.
         if (!IsSummoningTrained()) return;
 
@@ -404,7 +466,7 @@ internal sealed class PetManager
         // Best essence for the monster being fought first (Damage panel pet choice:
         // a specific essence, an element, or Auto = lowest learned resist), then the
         // rest in Items-panel order as fallbacks.
-        foreach (int deviceId in OrderDevicesForTarget(EnumeratePetDevices()))
+        foreach (int deviceId in OrderDevicesForTarget(CombatDevices(EnumeratePetDevices(), now)))
         {
             if (_deviceCooldownUntil.TryGetValue(deviceId, out long until) && now < until)
                 continue;
@@ -492,6 +554,12 @@ internal sealed class PetManager
         _actionIssuedAt   = now;
         // Server starts the PetDevice cooldown on Use, whether the pet spawns or not.
         _deviceCooldownUntil[deviceId] = now + DeviceUseCooldownMs;
+        // A pet that shows up from now until the summon's answer and the assume window are over is
+        // this summon's, whatever it is named (a "Duo Summon Gem" pet is not named after its gem);
+        // the pets out now are not.
+        _petsOutAtSummon.Clear();
+        foreach (var wo in OwnPetsInView()) _petsOutAtSummon.Add(wo.Id);
+        _claimNewPetsUntil = now + ActionTimeoutMs + AssumeActiveAfterSummonMs;
         RynthLog.Write(LogCat.Pets, $"[RynthAi] Pet: summoning from essence 0x{(uint)deviceId:X8} (charges={charges}); essence cooldown {DeviceUseCooldownMs / 1000}s.");
         _host.UseFor(unchecked((uint)deviceId), "Pet", "summon a pet from the essence");
     }
@@ -657,10 +725,27 @@ internal sealed class PetManager
         return _petOutCached ? _summonElement : null;
     }
 
+    /// <summary>A live pet out that holds the summon slot (<see cref="HoldsSlot"/>).</summary>
     private bool IsPetActive()
     {
+        foreach (var wo in OwnPetsInView())
+            if (PetIsLive(wo) && HoldsSlot(wo)) return true;
+        return false;
+    }
+
+    /// <summary>A live pet out that holds nothing (none of the player's combat pets), or null.</summary>
+    private WorldObject? OtherPetOut()
+    {
+        foreach (var wo in OwnPetsInView())
+            if (PetIsLive(wo) && !HoldsSlot(wo)) return wo;
+        return null;
+    }
+
+    /// <summary>Every "&lt;me&gt;'s ..." creature in the landscape cache (corpses left out), live or not.</summary>
+    private IEnumerable<WorldObject> OwnPetsInView()
+    {
         string me = PlayerName();
-        if (me.Length == 0) return false;
+        if (me.Length == 0) yield break;
         string prefix = me + "'s ";
         foreach (var wo in _objectCache.GetLandscape())
         {
@@ -670,8 +755,40 @@ internal sealed class PetManager
             string n = wo.Name;
             if (string.IsNullOrEmpty(n) || !n.StartsWith(prefix, StringComparison.Ordinal)) continue;
             if (n.Contains("Corpse", StringComparison.OrdinalIgnoreCase)) continue;
-            if (!PetIsLive(wo)) continue;
+            yield return wo;
+        }
+    }
+
+    /// <summary>
+    /// The pet holds the summon slot: it came from our own summon (it showed up after the Use and
+    /// was not out before it), the server answered "is already active" while it was out, or it is
+    /// named for a Pet essence in the Items list. Anything else (a passive pet, one from an essence
+    /// the player never listed) holds nothing (2026-11-08, R-20261108-194528-ab84).
+    /// </summary>
+    private bool HoldsSlot(WorldObject pet)
+    {
+        if (_passivePets.Contains(pet.Id)) return false;   // out of an essence that is no combat pet device
+        if (_slotPets.Contains(pet.Id)) return true;
+        if (NowMs < _claimNewPetsUntil && !_petsOutAtSummon.Contains(pet.Id))
+        {
+            if (_slotPets.Count > 64) _slotPets.Clear();
+            _slotPets.Add(pet.Id);
             return true;
+        }
+        return NamedForListedEssence(pet.Name);
+    }
+
+    /// <summary>"&lt;me&gt;'s Fire Moar" for a listed "Fire Moar Essence (50)": the part before " Essence".</summary>
+    private bool NamedForListedEssence(string petName)
+    {
+        foreach (var rule in _settings.ConsumableRules)
+        {
+            if (!rule.Type.Equals("Pet", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(rule.Name)) continue;
+            if (PetDeviceKind.IsNotCombat(_host, unchecked((uint)rule.Id))) continue;   // a passive pet's essence names no combat pet
+            string n = rule.Name;
+            int i = n.IndexOf(" Essence", StringComparison.OrdinalIgnoreCase);
+            string b = (i > 0 ? n[..i] : n).Trim();
+            if (b.Length >= 3 && petName.Contains(b, StringComparison.OrdinalIgnoreCase)) return true;
         }
         return false;
     }
@@ -764,6 +881,74 @@ internal sealed class PetManager
         }
     }
 
+    /// <summary>
+    /// The listed essences that summon combat pets (2026-11-08, R-20261108-215240-651b: a listed
+    /// "Common Golem Essence" brought out a passive pet that held the slot ahead of the two combat
+    /// pets ticked). One that is no combat pet device (PetDeviceKind) is skipped, logged once. One
+    /// whose appraisal hasn't landed is asked for it and waits up to <see cref="AppraisalWaitMs"/>
+    /// once, then is used (a summon from it is judged again when it lands).
+    /// </summary>
+    private IEnumerable<int> CombatDevices(IEnumerable<int> ids, long now)
+    {
+        foreach (int id in ids)
+        {
+            uint uid = unchecked((uint)id);
+            var v = PetDeviceKind.IsLearned(id) ? PetDeviceKind.Verdict.NotCombat : PetDeviceKind.Judge(_host, uid);
+            if (v == PetDeviceKind.Verdict.NotCombat)
+            {
+                if (_notCombatLogged.Count > 64) _notCombatLogged.Clear();
+                if (_notCombatLogged.Add(id))
+                    _host.Log($"[RynthAi] Pet: essence 0x{uid:X8} '{_objectCache[id]?.Name ?? "?"}' is no combat pet device " +
+                              "(no charges, no Summoning requirement, no summoning-gem icon); the combat summoner skips it. " +
+                              "A passive pet's essence shows under Cosmetic in the Mini Remote Pets tab.");
+                continue;
+            }
+            if (v == PetDeviceKind.Verdict.Unknown && _host.HasRequestId)
+            {
+                if (!_appraisalAskedAt.TryGetValue(id, out long asked))
+                {
+                    if (_appraisalAskedAt.Count > 64) _appraisalAskedAt.Clear();
+                    _appraisalAskedAt[id] = now;
+                    _host.RequestId(uid);
+                    continue;
+                }
+                if (now - asked < AppraisalWaitMs) continue;
+            }
+            yield return id;
+        }
+    }
+
+    /// <summary>
+    /// The essence a summon just landed from turns out no combat pet device (its appraisal came
+    /// after the Use): learned for the session, logged, and the pets it brought hold nothing, so
+    /// the player's combat pet is summoned now instead of after the passive pet (which never goes).
+    /// </summary>
+    private void CheckLandedDevice(long now)
+    {
+        if (_landedDeviceId == 0) return;
+        if (now >= _landedCheckUntil) { _landedDeviceId = 0; return; }
+        var v = PetDeviceKind.Judge(_host, unchecked((uint)_landedDeviceId));
+        if (v == PetDeviceKind.Verdict.Unknown) return;
+        int dev = _landedDeviceId;
+        _landedDeviceId = 0;
+        if (v == PetDeviceKind.Verdict.Combat) return;
+
+        PetDeviceKind.Learn(dev);
+        _notCombatLogged.Add(dev);
+        int pets = 0;
+        foreach (var wo in OwnPetsInView())
+        {
+            if (_petsOutAtSummon.Contains(wo.Id)) continue;   // out before that summon: not its pet
+            _slotPets.Remove(wo.Id);
+            if (_passivePets.Count > 64) _passivePets.Clear();
+            if (_passivePets.Add(wo.Id)) pets++;
+        }
+        _claimNewPetsUntil = 0;
+        _assumePetActiveUntil = 0;
+        _host.Log($"[RynthAi] Pet: essence 0x{(uint)dev:X8} '{_objectCache[dev]?.Name ?? "?"}' brought out {pets} pet(s) but is no combat pet device " +
+                  "(no charges, no Summoning requirement, no summoning-gem icon); not used for combat again this session, and its pet holds nothing.");
+    }
+
     private int _lastChoiceTarget;
     private string _lastChoiceReason = "";
 
@@ -788,6 +973,18 @@ internal sealed class PetManager
         if (_host.HasGetObjectWcid) _host.TryGetObjectWcid(unchecked((uint)target), out wcid);
         string tname = _objectCache[target]?.Name ?? "";
         string choice = wcid != 0 ? _combat.DamageStore?.GetManualPet(wcid) ?? "" : "";
+        // A Damage-panel pick ("I:<id>") is the Items entry's id. When that essence is gone and its
+        // same-named successor stands in (EnumeratePetDevices), the pick follows it by the entry's
+        // name; it read "picked essence not in pack, using Auto" and Auto could summon an essence the
+        // player had not picked for this monster (2026-11-08, R-20261108-194528-ab84 follow-up).
+        if (choice.StartsWith("I:", StringComparison.Ordinal) && int.TryParse(choice.AsSpan(2), out int pickId)
+            && !raw.Exists(r => r.Id == pickId))
+        {
+            var picked = _settings.ConsumableRules.Find(r => r.Id == pickId && r.Type.Equals("Pet", StringComparison.OrdinalIgnoreCase));
+            int same = picked == null || string.IsNullOrWhiteSpace(picked.Name) ? -1
+                : raw.FindIndex(r => r.Name.Equals(picked.Name, StringComparison.OrdinalIgnoreCase));
+            if (same >= 0) choice = "I:" + raw[same].Id;
+        }
 
         // Monsters-tab rule for this monster: its pet damage (PetDamage) wins over its
         // weapon damage type. Same name match combat uses.

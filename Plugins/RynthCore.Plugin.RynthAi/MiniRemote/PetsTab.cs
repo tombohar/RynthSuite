@@ -190,10 +190,26 @@ internal sealed class PetsTab
         }
         assigned = false;
         if (NameIs(wo, S.HealPetName)) return PetKind.Healing;
+        if (IsPassiveEssence(wo)) return PetKind.Cosmetic;
         if (!IsPetDevice(wo)) return null;
         if (LooksLikeHealPet(wo.Name)) return PetKind.Healing;
         if (LooksLikeCosmeticPet(wo.Name)) return PetKind.Cosmetic;
         return PetKind.Combat;
+    }
+
+    /// <summary>
+    /// An essence that summons a passive pet: the combat summoner learned it this session (its pet
+    /// came out and it is no combat pet device), or it is in the combat list and its appraisal
+    /// shows no combat pet device (PetDeviceKind). It is shown under Cosmetic, not ticked as a
+    /// combat pet (2026-11-08, R-20261108-215240-651b: a "Common Golem Essence" listed as a combat
+    /// pet by the pack fill, which the Pets tab didn't show at all: no charges, so no pet device).
+    /// An appraised item that is not listed stays as before (an "... Essence" trade item is no pet).
+    /// </summary>
+    private bool IsPassiveEssence(WorldObject wo)
+    {
+        if (PetDeviceKind.IsLearned(wo.Id)) return true;
+        if (!PetRules().Any(r => r.Id == wo.Id || r.Name.Equals(wo.Name, StringComparison.OrdinalIgnoreCase))) return false;
+        return PetDeviceKind.Judge(_ctx.Host, unchecked((uint)wo.Id)) == PetDeviceKind.Verdict.NotCombat;
     }
 
     private static bool NameIs(WorldObject wo, string name)
@@ -233,7 +249,7 @@ internal sealed class PetsTab
         var essence = FindCarried(S.CosmeticPetName);
         if (pet == null || essence == null) return false;
         if (!PetMatchesEssence(pet, essence) && _cosmeticOutEssenceId != essence.Id) return false;
-        if (_ctx.Inventory.IsBusy || !_ctx.Inventory.Use(essence)) return false;
+        if (_ctx.Inventory.IsBusy || !_ctx.Inventory.Use(essence, "dismiss the cosmetic pet so a combat pet can be summoned")) return false;
 
         long now = MiniRemoteContext.NowMs;
         _cosmeticOutEssenceId = 0;
@@ -341,7 +357,7 @@ internal sealed class PetsTab
                 var essence = FindHealEssence();
                 if (essence == null) { _healStatus = "no heal-pet essence found"; return; }
                 if (_ctx.Inventory.Uses(essence) == 0 && !AllowSummonOnEmpty()) { _healStatus = "heal-pet essence is empty"; return; }
-                if (!_ctx.Inventory.Use(essence)) return;
+                if (!_ctx.Inventory.Use(essence, $"summon the heal pet (HP {pct}%)")) return;
                 _healEssenceId = essence.Id;
                 _lastSummonEssenceId = essence.Id;
                 _healStartedAt = now;
@@ -379,7 +395,7 @@ internal sealed class PetsTab
     {
         var cache = _ctx.Inventory.Cache;
         var essence = cache?[_healEssenceId];
-        if (essence != null) _ctx.Inventory.Use(essence);
+        if (essence != null) _ctx.Inventory.Use(essence, "dismiss the heal pet");
     }
 
     // ── Active pet ──────────────────────────────────────────────────────────
@@ -458,7 +474,7 @@ internal sealed class PetsTab
             _cosmeticNextAt = now + 30_000;
             return;
         }
-        if (!_ctx.Inventory.Use(essence)) return;
+        if (!_ctx.Inventory.Use(essence, "keep the cosmetic pet out")) return;
         _cosmeticOutEssenceId = essence.Id;
         _lastSummonEssenceId = essence.Id;
         // Covers the summon round-trip so the pet isn't re-summoned before it appears.
@@ -479,7 +495,7 @@ internal sealed class PetsTab
         WorldObject? essence = essenceId != 0 ? _ctx.Inventory.Items().FirstOrDefault(w => w.Id == essenceId) : ChosenEssence(kind);
         if (essence == null) { _ctx.Chat($"[Mini Remote] No {KindNames[(int)kind].ToLowerInvariant()} pet selected."); return; }
         if (_ctx.Inventory.Uses(essence) == 0 && !AllowSummonOnEmpty()) { _ctx.Chat($"[Mini Remote] {essence.Name} has no uses left."); return; }
-        if (!_ctx.Inventory.Use(essence)) return;
+        if (!_ctx.Inventory.Use(essence, "Summon (Mini Remote Pets tab)", UseKind.Asked)) return;
 
         _lastSummonEssenceId = essence.Id;
         if (NameIs(essence, S.CosmeticPetName)) _cosmeticOutEssenceId = essence.Id;
@@ -494,7 +510,7 @@ internal sealed class PetsTab
         if (_ctx.Inventory.IsBusy) { _ctx.Chat("[Mini Remote] Busy — try again in a moment."); return; }
         var essence = ResolveActiveEssence(pet);
         if (essence == null) { _ctx.Chat($"[Mini Remote] Couldn't find the essence for {pet.Name}."); return; }
-        if (!_ctx.Inventory.Use(essence)) return;
+        if (!_ctx.Inventory.Use(essence, "Despawn (Mini Remote Pets tab)", UseKind.Asked)) return;
 
         // A manual dismiss shouldn't be undone straight away by "Keep cosmetic pet out".
         _cosmeticNextAt = MiniRemoteContext.NowMs + Math.Max(5, S.CosmeticRespawnSeconds) * 1000L;
@@ -516,7 +532,7 @@ internal sealed class PetsTab
                 foreach (var r in rules)
                 {
                     var wo = _ctx.Inventory.Items().FirstOrDefault(w => w.Id == r.Id || NameIs(w, r.Name));
-                    if (wo != null) return wo;
+                    if (wo != null && !IsPassiveEssence(wo)) return wo;   // a listed passive pet is no combat pick
                 }
                 return null;
         }

@@ -19,7 +19,12 @@ namespace RynthCore.Plugin.RynthAi;
 ///     Lightning Quadrelle for a Giant Maggot, then the next target, a Grub weak to Bludgeon,
 ///     was fought with the Quadrelle for 5-10 s until the 20 s dwell from the last swap ran out
 ///     - "he attacks for about 5 seconds with the wrong element weapon"). The window cap still
-///     bounds a fight that alternates between two kinds of monster.
+///     bounds a fight that alternates between two kinds of monster, except for a weapon the
+///     player set for the new target (<c>forThisMonster</c>: its Damage tab pick, its Monsters
+///     rule's weapon or damage type), which goes in at once (2026-11-08, R-20261107-141028-b33e,
+///     Conquest: four swaps among wasps and other kinds, then the Fire Staff meant for an Oaken
+///     Guardian the player had selected was kept out with "4 swaps in 60s" and the Guardian was
+///     fought with the Frost Sceptre until it died, about 18 s later). Its swap still counts toward the cap for others.
 ///   * A swap counts as landed when its weapon reaches the hand, even if the choice moved on
 ///     while it was in flight.
 ///   * A 'too busy' answer (<see cref="Busy"/>) is not a try: the server never looked at the
@@ -118,8 +123,11 @@ internal sealed class WeaponSwapTracker
     /// What to do about <paramref name="chosenId"/> with <paramref name="inHandId"/> in hand
     /// (0 = nothing readable in hand). <paramref name="forKey"/> is the fight the weapon is
     /// chosen for (the target id; 0 = unknown, treated as the same fight as the last swap).
+    /// <paramref name="forThisMonster"/>: the player set <paramref name="chosenId"/> for that
+    /// target (WeaponPlan.ForThisMonster); for a new target the window cap doesn't hold it.
     /// </summary>
-    public Step Next(int chosenId, int inHandId, DateTime now, Func<int, string>? nameOf = null, int forKey = 0)
+    public Step Next(int chosenId, int inHandId, DateTime now, Func<int, string>? nameOf = null, int forKey = 0,
+        bool forThisMonster = false)
     {
         HoldReason = "";
         _askKey = forKey;
@@ -165,7 +173,11 @@ internal sealed class WeaponSwapTracker
                 return Step.Hold;
             }
             _landed.RemoveAll(t => (now - t).TotalMilliseconds > SwapWindowMs);
-            if (_landed.Count >= MaxSwapsPerWindow)
+            // The player's own weapon for a new target isn't a choice going back and forth: the
+            // cap counted the swaps for the other kinds and kept it out (R-20261107-141028-b33e).
+            // The same target (or no key) is still capped.
+            bool newTargetsOwnPick = forThisMonster && forKey != 0 && forKey != _lastKey;
+            if (_landed.Count >= MaxSwapsPerWindow && !newTargetsOwnPick)
             {
                 HoldReason = $"{_landed.Count} swaps in {SwapWindowMs / 1000:0}s";
                 return Step.Hold;

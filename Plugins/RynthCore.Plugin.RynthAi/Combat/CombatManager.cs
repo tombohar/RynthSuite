@@ -5313,8 +5313,12 @@ public partial class CombatManager : IDisposable
         // swap is under way: a launcher whose ammo already went into the pack is never kept.
         double minGain = _settings.WeaponSwapMinGainPct > 0 && SwapHoldsAllowed(InHandWeaponId())
             ? _settings.WeaponSwapMinGainPct / 100.0 : 0;
-        return WeaponPlanner.Choose(listed, ruleElement, weak, e => CanCastElement(e, rule),
+        var plan = WeaponPlanner.Choose(listed, ruleElement, weak, e => CanCastElement(e, rule),
             fixedId, fixedSource, learnedId, ctype, fixedIsDefault, minGain, PreferredDamageFor(rule));
+        // A damage type on the Default row is every monster's, not a choice for this one.
+        if (plan.ForThisMonster && !ownRule && (fixedId == 0 || fixedIsDefault))
+            plan = plan with { ForThisMonster = false };
+        return plan;
     }
 
     /// <summary>The preferred damage type for a fight: the rule's own, else (Auto) the Default row's.</summary>
@@ -6025,11 +6029,18 @@ public partial class CombatManager : IDisposable
     /// Asks the swap tracker about <paramref name="chosenId"/> with <paramref name="inHandId"/>
     /// in hand, after folding in a server refusal of the wield in flight. Logs a give-up once.
     /// </summary>
-    private WeaponSwapTracker.Step SwapStep(int chosenId, int inHandId)
+    private WeaponSwapTracker.Step SwapStep(int chosenId, int inHandId) => SwapStepFor(chosenId, inHandId, false, null);
+
+    /// <summary>
+    /// <see cref="SwapStep"/> for the fight's chosen weapon. <paramref name="forThisMonster"/>: the
+    /// player set it for the target (see WeaponSwapTracker.Next); <paramref name="source"/> (the
+    /// plan's reason) goes on a hold's log line.
+    /// </summary>
+    private WeaponSwapTracker.Step SwapStepFor(int chosenId, int inHandId, bool forThisMonster, string? source)
     {
         DateTime now = RynthClock.Now;
         FoldServerAnswer(SwapTracker, now);
-        var step = SwapTracker.Next(chosenId, inHandId, now, WeaponName, forKey: activeTargetId);
+        var step = SwapTracker.Next(chosenId, inHandId, now, WeaponName, forKey: activeTargetId, forThisMonster: forThisMonster);
         if (SwapTracker.Notice != null)
         {
             _host.Log($"[EquipDiag] {SwapTracker.Notice}");
@@ -6046,7 +6057,10 @@ public partial class CombatManager : IDisposable
         if (step == WeaponSwapTracker.Step.Hold && (RynthClock.Now - _lastSwapHoldLogAt).TotalSeconds > 10)
         {
             _lastSwapHoldLogAt = RynthClock.Now;
-            _host.Log($"[EquipDiag] keeping 0x{(uint)inHandId:X8} '{WeaponName(inHandId)}' instead of 0x{(uint)chosenId:X8} '{WeaponName(chosenId)}' ({SwapTracker.HoldReason})");
+            // The chosen weapon's source too (2026-11-08): R-20261107-141028-b33e's log couldn't say
+            // whether the held Fire Staff was the monster's own pick or the weakness's.
+            string wanted = string.IsNullOrEmpty(source) ? "" : $"; wanted for: {source}";
+            _host.Log($"[EquipDiag] keeping 0x{(uint)inHandId:X8} '{WeaponName(inHandId)}' instead of 0x{(uint)chosenId:X8} '{WeaponName(chosenId)}' ({SwapTracker.HoldReason}{wanted})");
         }
         return step;
     }
@@ -6257,7 +6271,7 @@ public partial class CombatManager : IDisposable
     /// weapon can't turn into a UseObject that takes it off. Wand-for-wand used to never
     /// happen: Magic mode was trusted, so whatever wand was in hand stayed there (2026-09-30).
     /// </summary>
-    private bool SwapToChosenSameKind(int weaponId, int desiredMode)
+    private bool SwapToChosenSameKind(int weaponId, int desiredMode, bool forThisMonster = false, string? source = null)
     {
         int inHand = InHandWeaponId();
         // Empty hands in the stance already, the chosen weapon positively in a pack: wield it. The
@@ -6283,7 +6297,7 @@ public partial class CombatManager : IDisposable
         if (WeaponKind(inHand) != desiredMode) return false;   // a cross-kind case; the branches below handle it
 
         _equippedWeaponId = inHand;
-        switch (SwapStep(weaponId, inHand))
+        switch (SwapStepFor(weaponId, inHand, forThisMonster, source))
         {
             case WeaponSwapTracker.Step.Wait: return true;
             case WeaponSwapTracker.Step.Swap:
@@ -6385,6 +6399,11 @@ public partial class CombatManager : IDisposable
         int inHand = InHandWeaponId();
         bool allowWield = true;
         _curOffhandMode = OffhandChoiceFor(target, rule).Mode;
+        // The player set this weapon for this monster (R-20261107-141028-b33e): the swap tracker's
+        // window cap lets it in for a new target. Only while it is still the plan's weapon (not a
+        // dual-wield stand-in or the wand from FindWandInItems).
+        var ownPlan = PlanFor(target, rule);
+        bool ForThisMonster(int id) => ownPlan.ForThisMonster && ownPlan.WeaponId == id;
 
         // Dual wield: the chosen weapon already swings in the off hand, beside another listed
         // one-handed weapon in the main hand. Fight with both rather than moving it across.
@@ -6427,7 +6446,7 @@ public partial class CombatManager : IDisposable
         }
         else if (inHand != targetWeaponId)
         {
-            var step = SwapStep(targetWeaponId, inHand);
+            var step = SwapStepFor(targetWeaponId, inHand, ForThisMonster(targetWeaponId), weaponSource);
             if (step == WeaponSwapTracker.Step.Wait) { if (inHand != 0) _equippedWeaponId = inHand; return false; }
             if (step == WeaponSwapTracker.Step.Swap && inHand != 0
                 && SwapDeferReason(target, targetWeaponId, inHand, out bool settling) is string defer)
@@ -6625,7 +6644,7 @@ public partial class CombatManager : IDisposable
             // pick and the Damage tab choose between weapons of one kind, and trusting the
             // mode here meant the chosen one was never put in hand. That covered melee only;
             // a wand in hand in Magic mode was kept whatever the list said (2026-09-30).
-            if (SwapToChosenSameKind(targetWeaponId, desiredMode))
+            if (SwapToChosenSameKind(targetWeaponId, desiredMode, ForThisMonster(targetWeaponId), weaponSource))
                 return false;
             // The chosen weapon read in hand (the wield-location read was only late): a launcher's ammo,
             // then the off hand.

@@ -17,7 +17,11 @@ internal sealed record WeaponCandidate(int Id, string Name, int Kind, string Ele
 
 /// <summary>What to fight a monster with: the weapon (0 = none), the element to cast or
 /// debuff with, and why.</summary>
-internal readonly record struct WeaponPlan(int WeaponId, string Element, string Source);
+/// <param name="ForThisMonster">The player set this weapon for this monster: its own Damage tab
+/// pick or Monsters rule weapon (step 1), or the wand of its Monsters rule's damage type (step 4).
+/// Not a weakness, slayer or DEFAULT row pick. The swap tracker's window cap lets such a weapon in
+/// for a new target (R-20261107-141028-b33e, WeaponSwapTracker).</param>
+internal readonly record struct WeaponPlan(int WeaponId, string Element, string Source, bool ForThisMonster = false);
 
 /// <summary>The kind of damage a character prefers to fight with (a Monsters rule's PreferredDamage).</summary>
 internal enum DamageStyle { Auto, Melee, Missile, War, Void }
@@ -168,7 +172,8 @@ internal static class WeaponPlanner
         //    this monster: a slayer of it beats that one (step 3).
         if (fixedPick != null && !fixedIsDefault)
             return FixedPlan(fixedPick, Slays(fixedPick, creatureType)
-                ? fixedSource + ", " + SlayerSource(creatureType, fixedPick.SlayerBonus) : fixedSource, rule, weak, canCast);
+                ? fixedSource + ", " + SlayerSource(creatureType, fixedPick.SlayerBonus) : fixedSource, rule, weak, canCast)
+                with { ForThisMonster = true };
 
         if (listed.Count == 0)
         {
@@ -219,7 +224,7 @@ internal static class WeaponPlanner
         if (ruleSet)
         {
             var w = BestOf(pool, rule, null) ?? (styled ? null : BestOf(listed, rule, null));
-            if (w != null) return new WeaponPlan(w.Id, rule, "Monsters rule " + rule);
+            if (w != null) return new WeaponPlan(w.Id, rule, "Monsters rule " + rule, ForThisMonster: true);
             var keep = InHand(pool) ?? pool[0];
             // A wand casts its own element: the rule's element only when the weapon has none.
             string keepElem = WandElement(keep, canCast) ?? rule;

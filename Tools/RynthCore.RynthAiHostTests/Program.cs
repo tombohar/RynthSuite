@@ -142,6 +142,7 @@ internal static class Program
         InstallPathsTests.Register(runner);
         PetRefillTests.Register(runner);
         PetSummonStopsTests.Register(runner);
+        PetSelectionTests.Register(runner);
         AutoStackTests.Register(runner);
         AutoVendorSplitTests.Register(runner);
         AutoVendorZeroRateTests.Register(runner);

@@ -84,7 +84,8 @@ internal static class PetChoice
         if (choice.StartsWith("I:", StringComparison.Ordinal)
             && int.TryParse(choice.AsSpan(2), out int wantId))
         {
-            // Same essence by id, or (after it was replaced) by the name it had.
+            // Same essence by id. A replaced essence's pick arrives already pointed at its
+            // same-named successor (PetManager.OrderDevicesForTarget; this matched the id only).
             int idx = list.FindIndex(d => d.Id == wantId);
             reason = idx >= 0 ? $"picked {list[idx].Name}" : "picked essence not in pack, using Auto";
             if (idx >= 0)

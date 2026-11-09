@@ -129,6 +129,11 @@ internal sealed class LegacyWeaponsUi
             }
             string? type = PackConsumableType(wo);
             if (type == null || _settings.ConsumableRules.Any(x => x.Id == wo.Id)) continue;
+            // An "...Essence" that is no combat pet device (appraised: no charges, no Summoning
+            // requirement, no summoning-gem icon; PetDeviceKind) is not listed as a combat pet: a
+            // listed "Common Golem Essence" summoned a passive pet that held the slot
+            // (2026-11-08, R-20261108-215240-651b). One not appraised yet is still listed, as before.
+            if (type == "Pet" && PetDeviceKind.IsNotCombat(_host, unchecked((uint)wo.Id))) continue;
             _settings.ConsumableRules.Add(new ConsumableRule { Id = wo.Id, Name = wo.Name, Type = type });
             consumables++;
         }
