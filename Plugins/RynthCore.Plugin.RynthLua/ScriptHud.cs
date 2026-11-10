@@ -41,6 +41,8 @@ internal sealed class ScriptHud
     public bool NoBackground = false;
     public bool NoScrollbar = false;
     public bool NoScrollWithMouse = false;
+    /// <summary>No ↗: the window can't pop out of the game window (a bare, Chrome "none", one never can).</summary>
+    public bool NoPopOut = false;
     /// <summary>Panel logical units; 0 = the engine's default. Persistent.</summary>
     public Vector2 DefaultSize = Vector2.Zero;
     public Vector2 MinSize = Vector2.Zero;
@@ -148,6 +150,7 @@ internal sealed class ScriptHud
         if (NoBackground) f |= HudFormat.FlagNoBackground;
         if (NoScrollbar) f |= HudFormat.FlagNoScrollbar;
         if (NoScrollWithMouse) f |= HudFormat.FlagNoScrollWithMouse;
+        if (NoPopOut) f |= HudFormat.FlagNoPopOut;
         if (LastError != null) f |= HudFormat.FlagHasError;
         if (PosIsDefault && !HudFormat.IsNone(RequestPos)) f |= HudFormat.FlagPosIsDefault;
         return f;
@@ -278,6 +281,7 @@ internal static class HudFormat
     public const uint FlagNoBackground = 1u << 4;
     public const uint FlagNoScrollbar = 1u << 5;
     public const uint FlagNoScrollWithMouse = 1u << 6;
+    public const uint FlagNoPopOut = 1u << 8;
     public const uint FlagHasError = 1u << 9;
     public const uint FlagPosIsDefault = 1u << 10;
 

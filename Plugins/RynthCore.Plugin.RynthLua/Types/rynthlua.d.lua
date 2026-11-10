@@ -2556,6 +2556,7 @@ Vector4 = {}
 ---@field Title string                  The header text (default, and nil: the name).
 ---@field Visible boolean               Starts as the player's last choice for this hud on this character, else false. Set by the script, it isn't remembered.
 ---@field ShowInBar boolean             Listed in the bar's Scripts menu (default true).
+---@field NoPopOut boolean              No ↗: the window can't pop out of the game window (default false; bare windows never do).
 ---@field WindowSettings ImGuiWindowFlags|integer  The whole flag set (0 to 4294967295; nil = 0). Honoured: NoTitleBar, NoInputs/NoMouseInputs, NoBackground, NoScrollbar, NoScrollWithMouse.
 ---@field Chrome RynthLua.HudChrome     "standard" (the RynthCore frame) or "none" (no header or grip).
 ---@field DefaultSize Vector2           Size while nothing is saved for the window; nil = the engine default. Also takes {x, y}.

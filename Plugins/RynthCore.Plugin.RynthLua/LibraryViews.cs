@@ -8,7 +8,7 @@ namespace RynthCore.Plugin.RynthLua;
 /// views.Huds.GetIconTexture / GetObjectIconTexture / GetSpellIconTexture (LibraryIcons.cs).
 /// The imgui module is in LibraryImGui.cs.
 ///
-/// hud (§1.2): Name, LastError, IsDisposed (read-only); Title, Visible, ShowInBar,
+/// hud (§1.2): Name, LastError, IsDisposed (read-only); Title, Visible, ShowInBar, NoPopOut,
 /// WindowSettings, Chrome, DefaultSize, RefreshRate (read/write); OnPreRender / OnRender /
 /// OnShow / OnHide (events with Add / Once / Until / Remove); Dispose(). ImGui calls only
 /// record into the hud's display list during its render pass (ScriptWindows.cs); results
@@ -77,6 +77,7 @@ public sealed partial class RynthLuaPlugin
                 "Title" => DynValue.NewString(hud.Title),
                 "Visible" => DynValue.NewBoolean(hud.Visible),
                 "ShowInBar" => DynValue.NewBoolean(hud.ShowInBar),
+                "NoPopOut" => DynValue.NewBoolean(hud.NoPopOut),
                 "WindowSettings" => DynValue.NewNumber(hud.WindowSettings),
                 "Chrome" => DynValue.NewString(hud.ChromeNone ? "none" : "standard"),
                 "DefaultSize" => LibraryImGuiValues.NewVec2(s, hud.DefaultSize.X, hud.DefaultSize.Y),
@@ -104,6 +105,13 @@ public sealed partial class RynthLuaPlugin
                 {
                     bool show = v.CastToBool();
                     if (hud.ShowInBar != show) { hud.ShowInBar = show; hud.PropsDirty = true; }
+                    break;
+                }
+                case "NoPopOut":
+                {
+                    // No ↗ for this window; set while it is popped out, it goes back into the game window.
+                    bool no = v.CastToBool();
+                    if (hud.NoPopOut != no) { hud.NoPopOut = no; hud.PropsDirty = true; }
                     break;
                 }
                 case "WindowSettings":

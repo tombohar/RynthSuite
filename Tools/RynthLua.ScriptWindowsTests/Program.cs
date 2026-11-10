@@ -1643,6 +1643,19 @@ namespace RynthLua.ScriptWindowsTests
             r.Do("hud.ShowInBar = false");
             Check(!h.ShowInBar && h.PropsDirty && (h.HeaderFlags() & HudFormat.FlagShowInBar) == 0, "ShowInBar false clears the header bit");
 
+            // NoPopOut (header bit8: no ↗; the engine redocks a popped-out window when it turns on).
+            Check(!r.Eval("hud.NoPopOut").CastToBool() && (h.HeaderFlags() & HudFormat.FlagNoPopOut) == 0, "NoPopOut starts false");
+            h.PropsDirty = false;
+            r.Do("hud.NoPopOut = true");
+            Check(h.NoPopOut && h.PropsDirty && (h.HeaderFlags() & HudFormat.FlagNoPopOut) != 0 && r.Eval("hud.NoPopOut").CastToBool(), "NoPopOut true sets the header bit");
+            int rcPop = Parse(new[] { h }, out var wPop, out string errPop, out _);
+            Check(rcPop == 0 && (wPop[0].Flags & WindowFlags.NoPopOut) != 0 && HudFormat.FlagNoPopOut == WindowFlags.NoPopOut, "the engine reads NoPopOut " + errPop);
+            h.PropsDirty = false;
+            r.Do("hud.NoPopOut = true");
+            Check(!h.PropsDirty, "setting the same NoPopOut again changes nothing");
+            r.Do("hud.NoPopOut = false");
+            Check(!h.NoPopOut && h.PropsDirty && (h.HeaderFlags() & HudFormat.FlagNoPopOut) == 0, "NoPopOut false clears it");
+
             // Read-only members and the script's own fields.
             LuaFails(r, "hud.Name = 'x'", "read-only");
             LuaFails(r, "hud.LastError = 'x'", "read-only");
