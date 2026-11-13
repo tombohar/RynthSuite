@@ -27,6 +27,8 @@ public sealed partial class RynthAiPlugin
         _spellsUi.SetHooks(
             path => Interlocked.Exchange(ref _pendingBuffProfilePath, path ?? string.Empty),
             () => _dashboard?.RefreshBuffProfileFiles());
+        // The Buff Items tab's Add buttons: /ra buffitems add|addselected on the plugin tick.
+        _spellsUi.SetBuffItemsCommand(args => EnqueueRemoteCommand("buffitems", args));
     }
 
     /// <summary>Pump thread: applies the window's profile choice and feeds the open window.</summary>
@@ -50,6 +52,7 @@ public sealed partial class RynthAiPlugin
             _spellsKnownPushedAt = now;
             ui.SetKnownSpells(_spellManager.CopyKnownSpellIds());
         }
+        PushBuffItemRows();
     }
 
     /// <summary>/ra spells [show|hide|toggle] (also the dashboard's "spells" remote command).</summary>

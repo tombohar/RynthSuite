@@ -25,7 +25,10 @@ internal sealed class LuaScriptHost
     public static string LegacyScriptFolder => RynthLuaPaths.LegacyScripts;
 
     private const int MaxConsoleLines   = 400;
-    private const int AutoYieldCounter  = 5_000;   // VM instructions before a forced pause
+    // VM instructions before a forced pause. A forced pause resumes at once while the tick has time,
+    // so this only sets how often the time budget and the memory guard look: 1,000 (it was 5,000,
+    // which let one stretch of string.rep in a loop use over a gigabyte before the guard saw it).
+    private const int AutoYieldCounter  = 1_000;
 
     private sealed class LuaThread
     {
@@ -256,6 +259,90 @@ internal sealed class LuaScriptHost
     public bool HasHandlers(string evt)
         => _script != null && _handlers.TryGetValue(evt, out var l) && l.Count > 0;
 
+    // ── Memory guard ────────────────────────────────────────────────────────
+    //
+    // A script can allocate without limit, and the game client is a 32-bit process with 4 GB for
+    // everything. 11-10: a player's script took a client from 0.7 GB to 1.9 GB in 6 seconds,
+    // twice, and the third burst ended it with an OutOfMemoryException inside MoonSharp; another of
+    // his clients took +730 MB in 1.3 s every 5 minutes (hence 512 MB in 5 s, not more). Each run
+    // of a script (a thread's turn in Tick, a hud pass) is measured with the allocating thread's
+    // own counter, so other plugins' allocations don't count against it; a script that allocates
+    // more than RunLimitBytes in one run, or WindowLimitBytes within 5 seconds, is stopped. Kept
+    // memory is the other way to run out (small tables piling up never reach either limit): once the
+    // .NET heap passes HeapPressureBytes, a script that allocated over HeapPressureScriptBytes in
+    // the last 5 seconds is stopped too.
+
+    /// <summary>The most one run of a script (a thread's turn, a hud pass) may allocate.</summary>
+    internal const long RunLimitBytes = 256L * 1024 * 1024;
+    /// <summary>The most a script may allocate in <see cref="WindowMs"/>.</summary>
+    internal const long WindowLimitBytes = 512L * 1024 * 1024;
+    private const long WindowMs = 5000;
+    /// <summary>A turn past this much allocation makes its thread pause every <see cref="FastAllocYieldCounter"/> instructions.</summary>
+    private const long FastAllocBytes = 32L * 1024 * 1024;
+    private const int FastAllocYieldCounter = 250;
+    /// <summary>The .NET heap size (every plugin's) past which a script still allocating is stopped; RynthCore's own is ~100-200 MB.</summary>
+    internal const long HeapPressureBytes = 800L * 1024 * 1024;
+    /// <summary>What a script may still allocate in 5 s while the heap is past <see cref="HeapPressureBytes"/>.</summary>
+    internal const long HeapPressureScriptBytes = 64L * 1024 * 1024;
+    private long _allocWindowStart;
+    private long _allocWindowBytes;
+    private static long _heapReadAt;
+    private static long _heapBytes;
+
+    /// <summary>The .NET heap size, read at most every 250 ms.</summary>
+    private static long HeapBytes(long nowMs)
+    {
+        if (nowMs - _heapReadAt >= 250) { _heapReadAt = nowMs; _heapBytes = GC.GetTotalMemory(false); }
+        return _heapBytes;
+    }
+
+    /// <summary>Set by the plugin: says a stop for memory in chat (the console alone is easy to miss).</summary>
+    public Action<string>? MemoryStopped;
+
+    private static long AllocatedNow() => GC.GetAllocatedBytesForCurrentThread();
+
+    /// <summary>
+    /// Counts <paramref name="bytes"/> allocated by one run of this script (<paramref name="what"/>:
+    /// "turn", "hud pass"). Stops the script and returns true when a limit is passed.
+    /// </summary>
+    internal bool ChargeAllocation(long bytes, string what)
+    {
+        if (_script == null || bytes <= 0) return false;
+        long now = Environment.TickCount64;
+        if (now - _allocWindowStart > WindowMs) { _allocWindowStart = now; _allocWindowBytes = 0; }
+        _allocWindowBytes += bytes;
+        string? why = bytes >= RunLimitBytes ? $"{bytes >> 20} MB of memory in one {what}"
+            : _allocWindowBytes >= WindowLimitBytes ? $"{_allocWindowBytes >> 20} MB of memory in 5 seconds"
+            : null;
+        if (why == null && _allocWindowBytes >= HeapPressureScriptBytes)
+        {
+            long heap = HeapBytes(now);
+            if (heap >= HeapPressureBytes)
+                why = $"{_allocWindowBytes >> 20} MB of memory in 5 seconds while the game's .NET memory was at {heap >> 20} MB";
+        }
+        if (why == null) return false;
+        StopForMemory($"it used {why} (limits: {RunLimitBytes >> 20} MB in one run, {WindowLimitBytes >> 20} MB in 5 s, "
+            + $"{HeapPressureScriptBytes >> 20} MB in 5 s once the game's .NET memory passes {HeapPressureBytes >> 20} MB)", $"used {why}");
+        return true;
+    }
+
+    /// <summary>Stops the script for its memory use, saying why in its console and in chat.</summary>
+    internal void StopForMemory(string because, string shortReason)
+    {
+        if (_script == null) return;
+        string name = ScriptName.Length > 0 ? ScriptName : "editor script";
+        string msg = $"{name} was stopped: {because}. The game has 4 GB for everything, so a script that "
+            + "uses memory this fast crashes it. Restart it once it's fixed: /lua start " + name;
+        Print(msg);
+        try { MemoryStopped?.Invoke(msg); } catch { }
+        Stop("stopped: " + shortReason);
+    }
+
+    /// <summary>True when the run that started at <paramref name="startBytes"/> is already past the one-run limit.</summary>
+    internal static bool RunOverLimit(long startBytes) => AllocatedNow() - startBytes >= RunLimitBytes;
+
+    internal static long AllocationMark() => AllocatedNow();
+
     // ── Scheduler ───────────────────────────────────────────────────────────
 
     /// <summary>
@@ -309,6 +396,7 @@ internal sealed class LuaScriptHost
 
             _current = t;
             DynValue r = DynValue.Nil;
+            long alloc0 = AllocatedNow();
             try
             {
                 while (_script != null)
@@ -316,8 +404,14 @@ internal sealed class LuaScriptHost
                     r = t.Started ? t.Co.Coroutine.Resume() : t.Co.Coroutine.Resume(t.Args);
                     t.Started = true;
                     if (t.Co.Coroutine.State == CoroutineState.Dead) break;
-                    // Forced (auto) yield: keep going while this tick has budget.
-                    if (r.Type == DataType.YieldRequest && !OverBudget()) continue;
+                    // A thread allocating fast pauses far more often, so the guard sees it before
+                    // a single stretch of 5,000 instructions can use a gigabyte (string.rep in a loop).
+                    if (t.Co.Coroutine.AutoYieldCounter > FastAllocYieldCounter
+                        && AllocatedNow() - alloc0 >= FastAllocBytes)
+                        t.Co.Coroutine.AutoYieldCounter = FastAllocYieldCounter;
+                    // Forced (auto) yield: keep going while this tick has budget, and while
+                    // this turn hasn't used too much memory (the guard below stops it then).
+                    if (r.Type == DataType.YieldRequest && !OverBudget() && !RunOverLimit(alloc0)) continue;
                     break;
                 }
             }
@@ -327,6 +421,13 @@ internal sealed class LuaScriptHost
                 _threads.Remove(t);
                 Done(t, null, ex.DecoratedMessage ?? ex.Message);
                 continue;
+            }
+            catch (OutOfMemoryException)
+            {
+                // The client is out of memory: this script goes at once, whoever used it up.
+                _current = null;
+                StopForMemory("the game ran out of memory while it was running", "the game ran out of memory while it ran");
+                return;
             }
             catch (Exception ex)
             {
@@ -338,6 +439,7 @@ internal sealed class LuaScriptHost
             finally { _current = null; }
 
             if (_script == null) return;
+            if (ChargeAllocation(AllocatedNow() - alloc0, "turn")) return;
             if (t.Co.Coroutine.State == CoroutineState.Dead)
             {
                 _threads.Remove(t);
@@ -351,9 +453,28 @@ internal sealed class LuaScriptHost
 
     private readonly Dictionary<string, DynValue> _modules = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>The longest string string.rep may make (32M characters, 64 MB): one call is one VM step, which the memory guard can't stop part-way.</summary>
+    internal const long MaxRepChars = 32L * 1024 * 1024;
+
     private void RegisterCore(Script s)
     {
         _modules.Clear();
+
+        // string.rep(s, n [, sep]) with a size cap: MoonSharp builds the whole result in one step.
+        DynValue strLib = s.Globals.Get("string");
+        DynValue rep = strLib.Type == DataType.Table ? strLib.Table.Get("rep") : DynValue.Nil;
+        if (rep.Type == DataType.ClrFunction)
+        {
+            strLib.Table.Set("rep", DynValue.NewCallback((ctx, a) =>
+            {
+                long len = a.Count > 0 && a[0].Type is DataType.String or DataType.Number ? a[0].CastToString().Length : 0;
+                long n = a.Count > 1 && a[1].Type == DataType.Number ? (long)Math.Max(0, a[1].Number) : 0;
+                long sep = a.Count > 2 && a[2].Type is DataType.String or DataType.Number ? a[2].CastToString().Length : 0;
+                if (n > 0 && len * n + sep * (n - 1) > MaxRepChars)
+                    throw new ScriptRuntimeException($"string.rep: the result would be {(len * n + sep * (n - 1)) / (1024 * 1024)}M characters (the limit is {MaxRepChars / (1024 * 1024)}M; the game client is short of memory)");
+                return rep.Callback.Invoke(ctx, a.GetArray());
+            }, "rep"));
+        }
 
         // sleep(ms): park the calling thread. Implemented as a CLR call that
         // sets the wake time, then a Lua-side yield (a CLR callback can't

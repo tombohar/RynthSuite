@@ -62,16 +62,21 @@ public static unsafe class PluginExports
 
     // The same state for RynthAi's own dashboard (2026-10-23): a plugin reads another's exports only
     // through the engine's RynthPluginGet*Json broker (GetPluginExportJson). {"auto":-1|0|1}, a
-    // literal (nothing to free).
+    // literal (nothing to free). 2026-11-11: "moving":1 while items are being moved (RynthSortPlugin.Moving),
+    // for the key's sorting look; a reader that only looks for "auto" is unchanged.
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetAutoSortJson", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static IntPtr AutoSortJson()
     {
         int state;
-        try { state = Runtime.Plugin?.AutoState ?? -1; } catch { state = -1; }
-        return state switch
+        bool moving;
+        try { state = Runtime.Plugin?.AutoState ?? -1; moving = Runtime.Plugin?.Moving ?? false; }
+        catch { state = -1; moving = false; }
+        return (state, moving) switch
         {
-            1 => LiteralPointer("{\"auto\":1}"u8),
-            0 => LiteralPointer("{\"auto\":0}"u8),
+            (1, true) => LiteralPointer("{\"auto\":1,\"moving\":1}"u8),
+            (1, false) => LiteralPointer("{\"auto\":1,\"moving\":0}"u8),
+            (0, true) => LiteralPointer("{\"auto\":0,\"moving\":1}"u8),
+            (0, false) => LiteralPointer("{\"auto\":0,\"moving\":0}"u8),
             _ => LiteralPointer("{\"auto\":-1}"u8),
         };
     }

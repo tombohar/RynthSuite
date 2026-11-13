@@ -71,8 +71,10 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra version       — RynthAi version and build date, and the engine it runs on");
         ChatLine("[RynthAi] /ra server        - which server RynthCore says this is, its overrides, and the server plugin's settings");
         ChatLine("[RynthAi] /ra power <0-100|auto> — set attack power (auto = recklessness-aware)");
+        ChatLine("[RynthAi] /ra dfheight [on|off|status|window] — Dirty Fighting rotation: attack heights by the effects on the target");
         ChatLine("[RynthAi] /ra cast <spellId> — cast spell on current target");
         ChatLine("[RynthAi] /ra buffs         — show active buff timers");
+        ChatLine("[RynthAi] /ra buffitems [list|allow|block|add|addselected|remove|repeat|open] — the buff items RynthAi may use");
         ChatLine("[RynthAi] /ra scan          — show nearby monsters");
         ChatLine("[RynthAi] /ra cache         — show object cache summary");
         ChatLine("[RynthAi] /ra cache2        — show raw object cache IDs");
@@ -108,9 +110,11 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra meta load <name> — load a meta from MetaFiles (none by that name: a new blank one)");
         ChatLine("[RynthAi] /ra meta new <name>  — create a blank meta and load it");
         ChatLine("[RynthAi] /ra meta list        — list the metas in MetaFiles");
+        ChatLine("[RynthAi] /ra meta repair      — fill the loaded .af's CallState rules that call no state from the .met of the same name");
         ChatLine("[RynthAi] /ra lua run <name>  — run a RynthLua script (same as /lua run; also stop, list, exec <code>)");
         ChatLine("[RynthAi] /ra items fill      — add weapons, healing kits, lockpicks and pet essences from your pack");
         ChatLine("[RynthAi] /ra aetheria [status|unbox|on|off] — unbox Coalesced Aetheria with an Aetheria Mana Stone (Unbox Aetheria When Idle)");
+        ChatLine("[RynthAi] /ra autoconfirm [status|on|off|<50-100>] — Yes to the craft-chance prompt at that % or better (Mini Remote > Crafting)");
         ChatLine("[RynthAi] /ra offhand [auto|shield|weapon|none] [rule] — the off hand (shield / dual wield), global or for a Monsters rule; dual on|off");
         ChatLine("[RynthAi] /ra dunnav <NS> <EW>  — navigate to NS/EW coords through dungeon (no nav file needed)");
         ChatLine("[RynthAi] /ra dunnav-patrol      — circular hunt patrol through the whole dungeon (no nav file needed)");
@@ -135,6 +139,8 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra dumpinv       — dump all inventory items (cache + direct)");
         ChatLine("[RynthAi] /ra combat        — dump combat state machine snapshot");
         ChatLine("[RynthAi] /ra mstats [monster] — its evades, resists, hits, spells and kills this session (list | reset | show | hide)");
+        ChatLine("[RynthAi] /ra timed [server|all] list | add <seconds> <command> | remove|on|off|run <n> | show — commands sent every N seconds (window: the RynthAi options menu > Timed commands)");
+        ChatLine("[RynthAi] /ra gear          — which worn items have their magic on, mana and time left (check | list | hide; the Active Gear window)");
         ChatLine("[RynthAi] /ra why           — one-glance diagnosis of why the bot is idle/attacking");
         ChatLine("[RynthAi] /ra start | stop   — start/stop the macro from chat");
         ChatLine("[RynthAi] /ra pause [sec]    — stop the macro, auto-resume after sec (default 60)");
@@ -1290,6 +1296,14 @@ public sealed partial class RynthAiPlugin
                 var names = _dashboard.NavFileNames();
                 ChatLine(names.Count == 0 ? "[RynthAi] No navs in NavProfiles." : $"[RynthAi] Navs ({names.Count}): {string.Join(", ", names)}");
                 break;
+            case "new":
+            case "saveas":
+            case "rename":
+            case "delete":
+            case "folder":
+                // The Loaded files drawer's NAV buttons (RynthAiPlugin.ProfileFiles.cs).
+                TryProfileVerb(ProfileKind.Nav, sub, rest, NavUsage);
+                break;
             case "restart":
             {
                 // Stopping and starting the macro keeps the route where it was (a finished Once
@@ -1308,12 +1322,20 @@ public sealed partial class RynthAiPlugin
             }
             default:
                 // Bare "/ra nav" asks what it takes; anything else is a wrong form.
-                const string navUsage = "[RynthAi] /ra nav save [name] | /ra nav load <name> | /ra nav list | /ra nav restart";
-                if (sub.Length == 0) ChatLine(navUsage);
-                else ReplyFail($"[RynthAi] Unknown /ra nav verb '{sub}'. Usage: /ra nav save [name] | load <name> | list | restart");
+                if (sub.Length == 0) ChatLine("[RynthAi] " + NavUsage);
+                else ReplyFail($"[RynthAi] Unknown /ra nav verb '{sub}'. Usage: {NavUsage}");
                 break;
         }
     }
+
+    private const string NavUsage =
+        "/ra nav save [name] | /ra nav load <name> | /ra nav new <name> | /ra nav saveas <name> | /ra nav rename <name> | /ra nav delete | /ra nav folder | /ra nav list | /ra nav restart";
+    private const string MetaUsage =
+        "/ra meta load <name> | new <name> | save | saveas <name> | rename <name> | delete | folder | list | repair";
+    private const string SettingsUsage =
+        "/ra settings loadchar <name> | savechar <name> | save | saveas <name> | rename <name> | delete | folder | list";
+    private const string LootFileUsage =
+        "/ra loot new <name> | saveas <name> | rename <name> | delete | folder | edit";
 
     private void HandleMetaCommand(string[] parts)
     {
@@ -1331,9 +1353,21 @@ public sealed partial class RynthAiPlugin
                 var names = _dashboard.MetaFileNames();
                 ChatLine(names.Count == 0 ? "[RynthAi] No metas in MetaFiles." : $"[RynthAi] Metas ({names.Count}): {string.Join(", ", names)}");
                 break;
+            case "repair":
+                if (rest.Length > 0) { ReplyFail("[RynthAi] Usage: /ra meta repair (repairs the loaded .af from the .met of the same name)"); break; }
+                ReplyResult(_dashboard.RepairMetaFromMet());
+                break;
+            case "save":
+            case "saveas":
+            case "rename":
+            case "delete":
+            case "folder":
+                // The Loaded files drawer's META buttons (RynthAiPlugin.ProfileFiles.cs).
+                TryProfileVerb(ProfileKind.Meta, sub, rest, MetaUsage);
+                break;
             default:
-                if (sub.Length == 0) ChatLine("[RynthAi] /ra meta load <name> | /ra meta new <name> | /ra meta list");
-                else ReplyFail($"[RynthAi] Unknown /ra meta verb '{sub}'. Usage: /ra meta load <name> | new <name> | list");
+                if (sub.Length == 0) ChatLine("[RynthAi] " + MetaUsage);
+                else ReplyFail($"[RynthAi] Unknown /ra meta verb '{sub}'. Usage: {MetaUsage}");
                 break;
         }
     }
@@ -1818,11 +1852,15 @@ public sealed partial class RynthAiPlugin
             HandleLootModeCommand(parts);
             return;
         }
+        // The Loaded files drawer's LOOT buttons (RynthAiPlugin.ProfileFiles.cs).
+        if (TryProfileVerb(ProfileKind.Loot, sub, parts.Length > 3 ? string.Join(" ", parts, 3, parts.Length - 3) : string.Empty, LootFileUsage))
+            return;
         if (sub != "add")
         {
             ChatLine("[RynthAi] /ra loot mode [profile|rares] — what is looted: the loot profile, or rares and needed mana stones only");
             ChatLine("[RynthAi] /ra loot why [window] — which loot rule takes the selected item, and why the rules above it didn't (window: in the Loot why window)");
             ChatLine("[RynthAi] /ra loot add [keep|keep N|salvage|sell|read] [name|like] [t11] [preview] — add a loot rule for the selected item to the loot profile in use");
+            ChatLine("[RynthAi] " + LootFileUsage + " — the loot profile's file: a new one in the Loot Editor, a copy, rename, move to Deleted, its folder, the editor");
             ChatLine("[RynthAi]   default: exact name + class; Read for scrolls, Keep # (one full stack) for stacks, else Keep. name = name only, like = items like this. t11 = also require its T11 tier, grade and modifiers (at least this good). preview = show it, add nothing.");
             ChatLine("[RynthAi]   Also: right-click an item in the Inventory panel, or 'Add selected item' in the Loot Editor; 'Why this loot rule?' there and on the Selection window's right-click.");
             return;
@@ -2120,7 +2158,7 @@ public sealed partial class RynthAiPlugin
             !s.EnableCombat          ? "combat is disabled in settings." :
             s.BusyCount > 0          ? "AC busy>0 — waiting on a server action (cast/use/move); try /ra clearbusy if stuck." :
             forced != 0 && forced == s.ActiveTargetId && bySelection
-                                     ? "fighting the monster you selected (Fight the monster I select: Settings > Ranges)." :
+                                     ? "fighting the monster you selected (Fight the monster I select: Settings > Combat > Targeting)." :
             forced != 0 && forced == s.ActiveTargetId
                                      ? "fighting the target-locked monster (/ra targetlock; /ra targetlock off releases it)." :
             total < 0              ? "no combat scan has run yet (cold start / just logged in)." :
@@ -2498,16 +2536,30 @@ public sealed partial class RynthAiPlugin
 
     private void HandleSettingsCommand(string[] parts)
     {
+        string sub = parts.Length > 2 ? parts[2].ToLowerInvariant() : string.Empty;
+        string rest = parts.Length > 3 ? string.Join(" ", parts, 3, parts.Length - 3).Trim() : string.Empty;
+        if (sub is "save" or "saveas" or "rename" or "delete" or "folder")
+        {
+            // The Loaded files drawer's PROFILE buttons (RynthAiPlugin.ProfileFiles.cs).
+            TryProfileVerb(ProfileKind.Settings, sub, rest, SettingsUsage);
+            return;
+        }
+        if (sub == "list")
+        {
+            if (_dashboard == null) { ReplyFail("[RynthAi] Dashboard not ready."); return; }
+            DashboardFiles files = _dashboard.ReadDashboardFiles();
+            ChatLine($"[RynthAi] Settings profiles ({files.Profiles.Length}): {string.Join(", ", files.Profiles)}; in use: {files.ProfileName}.");
+            return;
+        }
         if (parts.Length < 4)
         {
-            ReplyFail("[RynthAi] Usage: /ra settings loadchar <name> | /ra settings savechar <name>");
+            ReplyFail("[RynthAi] Usage: " + SettingsUsage);
             return;
         }
 
-        string sub = parts[2].ToLower();
         if (sub != "loadchar" && sub != "savechar")
         {
-            ReplyFail("[RynthAi] Usage: /ra settings loadchar <name> | /ra settings savechar <name>");
+            ReplyFail("[RynthAi] Usage: " + SettingsUsage);
             return;
         }
 

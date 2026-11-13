@@ -40,6 +40,7 @@ internal static unsafe class Program
         int passed = 0, checks = 0;
         var failed = new List<string>();
         if (filter.Length == 0 && !CheckBuiltInVerbsMatchSwitch()) failed.Add("built-in /lua verbs");
+        if ((filter.Length == 0 || "memoryguard".Contains(filter, StringComparison.OrdinalIgnoreCase)) && !CheckMemoryGuard()) failed.Add("memory guard");
         try
         {
             foreach (string file in scripts)
@@ -163,6 +164,54 @@ internal static unsafe class Program
     {
         string beside = Path.Combine(Path.GetDirectoryName(source) ?? string.Empty, "Scripts");
         return Directory.Exists(beside) ? beside : Path.Combine(AppContext.BaseDirectory, "Scripts");
+    }
+
+    /// <summary>
+    /// The memory guard (LuaScriptHost.ChargeAllocation): a script that allocates fast is stopped
+    /// with a message, and a quiet one keeps running. Three scripts, each in a fresh plugin: one
+    /// that makes a 400 MB string in one go (the one-run limit), one that keeps 2 MB strings
+    /// (the 5-second limit), and one that sleeps (must still be running after 3 s).
+    /// </summary>
+    private static bool CheckMemoryGuard()
+    {
+        var cases = new (string Name, string Code, bool MustStop, string Said)[]
+        {
+            // One string.rep can't be stopped part-way, so it has a size cap: a plain Lua error.
+            ("memhog_rep", "local s = string.rep('x', 200000000) print(#s)", true, "string.rep: the result would be"),
+            ("memhog_window", "local t = {} while true do t[#t + 1] = string.rep('y', 1000000) .. #t end", true, "was stopped: it used"),
+            ("memhog_table", "local t = {} local i = 0 while true do i = i + 1 t[i] = { i, i, i } end", true, "was stopped: it used"),
+            ("memquiet", "while true do local s = string.rep('z', 1000) sleep(50) end", false, "was stopped: it used"),
+        };
+        bool allOk = true;
+        foreach (var c in cases)
+        {
+            FakeWorld.W = new FakeWorld();
+            Harness.Reset();
+            RynthCoreApiNative api = FakeHost.Build();
+            var runtime = new RynthPluginRuntime<RynthLuaPlugin>();
+            if (runtime.Init(&api) != 0 || runtime.Plugin == null) { Console.WriteLine($"FAIL memory guard {c.Name}: no plugin"); allOk = false; continue; }
+            RynthLuaPlugin plugin = runtime.Plugin;
+            plugin.OnLoginComplete();
+            for (int i = 0; i < 3; i++) Tick(plugin);
+            Directory.CreateDirectory(RynthLuaPaths.Scripts);
+            File.WriteAllText(Path.Combine(RynthLuaPaths.Scripts, c.Name + ".lua"), c.Code);
+            string? err = plugin.StartScript(c.Name);
+            var sw = Stopwatch.StartNew();
+            long limitMs = c.MustStop ? 20_000 : 3_000;
+            while (err == null && plugin.ScriptIsLoaded(c.Name) && sw.ElapsedMilliseconds < limitMs) { Tick(plugin); Thread.Sleep(1); }
+            bool loaded = plugin.ScriptIsLoaded(c.Name);
+            string console = plugin.ScriptConsoleText(c.Name);
+            bool said = console.Contains(c.Said, StringComparison.Ordinal);
+            bool ok = err == null && (c.MustStop ? (!loaded && said) : (loaded && !said));
+            string lastLine = console.Trim().Split('\n').LastOrDefault() ?? string.Empty;
+            Console.WriteLine($"{(ok ? "PASS" : "FAIL")} memory guard {c.Name} ({sw.ElapsedMilliseconds} ms, {(loaded ? "running" : "stopped")}){(ok ? "" : ": " + (err ?? lastLine))}");
+            if (ok && c.MustStop) Console.WriteLine("     " + console.Split('\n').First(l => l.Contains(c.Said, StringComparison.Ordinal)).Trim());
+            try { plugin.StopScript(c.Name); } catch { }
+            runtime.Shutdown();
+            GC.Collect();
+            allOk &= ok;
+        }
+        return allOk;
     }
 
     private static void Tick(RynthLuaPlugin plugin)

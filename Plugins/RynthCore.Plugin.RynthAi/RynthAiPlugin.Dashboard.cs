@@ -41,6 +41,10 @@ public sealed partial class RynthAiPlugin
     private volatile bool _classicLook;                                 // the engine's look is Classic (its file)
     private long _classicAskedMs;                                       // "Classic look" clicked: the window steps aside now
     private volatile FightTarget? _dashFight;                           // tick writes, render reads
+    private volatile int _dashStance = CombatMode.Melee;                // the Combat key's stance (tick writes, render reads)
+    private volatile NavTrail.Kind _dashNav;                            // the Navigation key's shape (tick writes, render reads)
+    private volatile bool _dashMetaLoaded;                              // the Meta key: a meta with rules is loaded (tick writes, render reads)
+    private volatile bool _dashSortMoving;                              // the auto-sort key: RynthSort is moving items (tick writes, render reads)
     private int _dashFailures;                                          // draws in a row that threw
 
     /// <summary>The monster RynthAi is fighting, for the target bar: its name, health (0..1, -1 unknown) and vitals.</summary>
@@ -104,13 +108,18 @@ public sealed partial class RynthAiPlugin
             _nextDashVitalsMs = now + 100;
             _dashboard?.RefreshDashboardVitals();
             _dashFight = ReadFightTarget(_dashFight);
+            _dashStance = ReadStance(_dashStance);
+            _dashNav = ReadNavKind();
+            _dashMetaLoaded = ReadMetaLoaded();
         }
         if (now >= _nextDashSortMs)
         {
             // Twice a second for the dashboard's key; every 2 s otherwise, for Auto Cram (AutoSortOn).
             _nextDashSortMs = now + (shown ? 500 : 2000);
-            _dashSort = ReadAutoSort();
+            _dashSort = ReadAutoSort(out bool sortMoving);
+            _dashSortMoving = sortMoving;
             if (_dashboard?.Settings is { } sortSettings) sortSettings.AutoSortOn = _dashSort == 1;
+            if (shown) RefreshDashProfileState();   // the Loaded files drawer's unsaved mark (RynthAiPlugin.ProfileFiles.cs)
         }
         if (now >= _nextDashClassicMs)
         {
@@ -156,9 +165,58 @@ public sealed partial class RynthAiPlugin
         return new FightTarget(uid, name, health, st, maxSt, mn, maxMn);
     }
 
-    /// <summary>The readout with the target bar on the monster RynthAi is fighting, when it is fighting one. Render thread.</summary>
+    /// <summary>
+    /// The stance the Combat key draws: the client's combat mode when it is Melee, Missile or Magic;
+    /// in peace (or with no engine call) the last one, so a resting mage keeps the wands. Plugin tick.
+    /// </summary>
+    private int ReadStance(int last)
+    {
+        int mode = Host.HasGetCurrentCombatMode ? Host.GetCurrentCombatMode() : CombatMode.NonCombat;
+        return mode is CombatMode.Melee or CombatMode.Missile or CombatMode.Magic ? mode : last;
+    }
+
+    /// <summary>
+    /// What the Navigation key draws: the Outdoor Hunt while it runs, else a dungeon patrol's
+    /// route, else following (a fellow or a Follow route), else the loaded route's type; nothing
+    /// loaded is None. Plugin tick.
+    /// </summary>
+    private NavTrail.Kind ReadNavKind()
+    {
+        var settings = _dashboard?.Settings;
+        if (settings == null) return NavTrail.Kind.None;
+        if (HuntActive) return NavTrail.Kind.Hunt;
+        NavRouteParser? route = settings.CurrentRoute;
+        if (_dunPatrolActive && route != null && ReferenceEquals(route, _dunPatrolRoute)) return NavTrail.Kind.Patrol;
+        if (IsFollowActive(settings)) return NavTrail.Kind.Follow;
+        if (route == null || route.Points.Count == 0) return NavTrail.Kind.None;
+        return route.RouteType switch
+        {
+            NavRouteType.Circular => NavTrail.Kind.Circular,
+            NavRouteType.Linear => NavTrail.Kind.Linear,
+            NavRouteType.Once => NavTrail.Kind.Once,
+            NavRouteType.Follow => NavTrail.Kind.Follow,
+            _ => NavTrail.Kind.None,
+        };
+    }
+
+    /// <summary>
+    /// A meta with rules is loaded (the Meta key draws its states hollow otherwise). Read on the
+    /// tick, under the rules' lock, so the render thread never takes it. Plugin tick.
+    /// </summary>
+    private bool ReadMetaLoaded()
+    {
+        var settings = _dashboard?.Settings;
+        if (settings == null) return false;
+        lock (settings.MetaRulesLock) return settings.MetaRules is { Count: > 0 };
+    }
+
+    /// <summary>
+    /// The readout with the Combat key's stance, the Navigation key's shape and whether a meta is
+    /// loaded, and the target bar on the monster RynthAi is fighting when it is fighting one. Render thread.
+    /// </summary>
     internal DashboardReadout WithFightTarget(DashboardReadout r)
     {
+        r = r with { CombatStance = _dashStance, NavKind = _dashNav, MetaLoaded = _dashMetaLoaded };
         FightTarget? f = _dashFight;
         if (f == null) return r;
         return r with
@@ -178,16 +236,22 @@ public sealed partial class RynthAiPlugin
     /// <summary>RynthSort's auto-sort for the dashboard's key: -1 not loaded / not logged in / too old, 0 off, 1 on.</summary>
     internal int DashAutoSort => _dashSort;
 
+    /// <summary>RynthSort is moving items right now (the auto-sort key's sorting look); false when it can't say.</summary>
+    internal bool DashSortMoving => _dashSortMoving;
+
     /// <summary>
     /// RynthSort's auto-sort state, through the engine's JSON broker (RynthSort's
-    /// RynthPluginGetAutoSortJson, {"auto":-1|0|1}); -1 when RynthSort isn't loaded or predates
-    /// the export. Plugin tick.
+    /// RynthPluginGetAutoSortJson, {"auto":-1|0|1,"moving":0|1}); -1 when RynthSort isn't loaded or
+    /// predates the export. <paramref name="moving"/>: it is moving items (false from a RynthSort
+    /// older than the flag). Plugin tick.
     /// </summary>
-    private int ReadAutoSort()
+    private int ReadAutoSort(out bool moving)
     {
+        moving = false;
         if (!Host.HasGetPluginExportJson) return -1;
         string? json = Host.GetPluginExportJson("RynthSort", "RynthPluginGetAutoSortJson");
         if (json == null) return -1;
+        moving = json.Contains("\"moving\":1", StringComparison.Ordinal);
         return json.Contains("\"auto\":1", StringComparison.Ordinal) ? 1
              : json.Contains("\"auto\":0", StringComparison.Ordinal) ? 0 : -1;
     }
@@ -255,6 +319,7 @@ internal sealed class DashboardBridge : IDashboardHost
     public void SelectProfile(int kind, int index) => Queue(() => _p.DashboardRenderer?.SelectProfileAtIndex(kind, index));
     public void SetLootMode(int mode) => Queue(() => _p.SetLootModeFromPanel(mode));
     public int AutoSort => _p.DashAutoSort;
+    public bool AutoSortMoving => _p.DashSortMoving;
     public bool FightSelectedTarget => _p.DashboardRenderer?.Settings.FightSelectedTarget == true;
     public void SetAutoSort(bool on) => Queue(() => _p.SetDashAutoSort(on));
     public void ToggleSortWindow() => Queue(() => _p.SendSortCommand(string.Empty));
@@ -262,7 +327,30 @@ internal sealed class DashboardBridge : IDashboardHost
     public void ToggleHunt() => Queue(_p.ToggleHunt);
     public bool HuntActive => _p.HuntActive;
     public void ToggleHuntPanel() => _p.ToggleHuntPanel();
+    public void ToggleDfHeightPanel() => _p.ToggleDfHeightPanel();
+    public bool DfHeightRotation => _p.DfHeightRotationOn;
     public void ToggleSpells() => _p.EnqueueRemoteCommand("spells", "toggle");
+    public void ToggleActiveGear() => Queue(_p.ToggleActiveGearWindow);
+    public void ToggleTimedCommands() => Queue(_p.ToggleTimedCommandsWindow);
     public void UseClassicLook() => _p.UseClassicLook();
+
+    public ProfileFileInfo ProfileInfo(int kind)
+    {
+        var k = (ProfileKind)kind;
+        ProfileFileInfo info = Renderer.ProfileInfo(k);
+        if (k == ProfileKind.Loot && _p.DashLootEditorDirty) info = info with { Unsaved = true };
+        else if (k == ProfileKind.Buffs && _p.DashSpellsDirty) info = info with { Unsaved = true };
+        return info;
+    }
+
+    public void ProfileAction(int kind, ProfileVerb verb, string name, bool replace, Action<ProfileResult> done) => Queue(() =>
+    {
+        ProfileResult r;
+        try { r = _p.RunProfileAction((ProfileKind)kind, verb, name, replace); }
+        catch (Exception ex) { r = ProfileResult.Failed($"{verb} failed: {ex.Message}"); }
+        // A Save As that would replace another file waits for the drawer's yes: nothing in chat yet.
+        if (!r.NeedsReplace) _p.DashHost.WriteToChat(r.Text, r.Ok ? CommandReply.OkColor : CommandReply.FailColor);
+        done(r);
+    });
     public bool DrawMiniRemote(out Vector2 want) => _p.DrawDashMiniRemote(out want);
 }

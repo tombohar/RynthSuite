@@ -527,6 +527,7 @@ public sealed partial class RynthLuaPlugin
 
         _recorder.Begin(hud, _maxOps, _maxBytes);
         string? error = null;
+        long alloc0 = LuaScriptHost.AllocationMark();
         try
         {
             DynValue co = s.CreateCoroutine(runner);
@@ -541,7 +542,19 @@ public sealed partial class RynthLuaPlugin
             }
         }
         catch (InterpreterException ex) { error = ex.DecoratedMessage ?? ex.Message; }
+        catch (OutOfMemoryException) { error = "the game ran out of memory"; }
         catch (Exception ex) { error = ex.Message; }
+
+        // The memory guard (LuaScriptHost.ChargeAllocation): a pass that used too much stops the script.
+        if (error == "the game ran out of memory")
+            hud.Ctx.Host.StopForMemory("the game ran out of memory during its hud pass", "the game ran out of memory in a hud pass");
+        else
+            hud.Ctx.Host.ChargeAllocation(LuaScriptHost.AllocationMark() - alloc0, $"hud pass ({hud.Name})");
+        if (!hud.Ctx.Host.Loaded)
+        {
+            _recorder.Abort();
+            return;
+        }
 
         if (error != null)
         {

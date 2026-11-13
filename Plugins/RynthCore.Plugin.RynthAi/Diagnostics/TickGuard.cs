@@ -28,6 +28,7 @@ internal enum TickStep
     RouteJobs,
     GiveQueue,
     ItemTool,
+    TimedCommands,
     Jumper,
     Dashboard,
     // In world.
@@ -118,6 +119,7 @@ internal sealed class TickGuard
         Add(TickStep.RouteJobs,         "dungeon route jobs",       LogCat.Navigation);
         Add(TickStep.GiveQueue,         "give queue",               LogCat.Inventory);
         Add(TickStep.ItemTool,          "item tool",                LogCat.Inventory);
+        Add(TickStep.TimedCommands,     "timed commands",           LogCat.Commands);
         Add(TickStep.Jumper,            "jumper",                   LogCat.Jumper, essential: true);
         Add(TickStep.Dashboard,         "dashboard window",         LogCat.UI);
 

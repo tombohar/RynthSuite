@@ -20,6 +20,7 @@ internal static partial class Program
         TestServerProfileBankLum();
         TestChatFallbackUntilBank();
         TestAelrynthAndRetailLum();
+        TestBankAndAelBankedCountOnce();
         TestLumLast5Min();
         TestKillsAndXpPerKill();
         TestDeaths();
@@ -157,6 +158,21 @@ internal static partial class Program
         Eq(retail.LumTotal, 280L, "retail: rises count, spending doesn't");
     }
 
+    // DreamWeave (2026-11-12): a bank reading AND Aelrynth's auto-banked total (9102), both rising with
+    // the same earned lum. Lum/hr read 1.62M, twice the real rate: the bank alone counts.
+    private static void TestBankAndAelBankedCountOnce()
+    {
+        var s = new SessionStats();
+        s.Reset(S0);
+        s.Sample(new SessionSample(1, 5_000, 70_000_000, 0, 0, null), S0);
+        s.Sample(new SessionSample(1, 5_000, 70_400_000, 400_000, 0, null), S0.AddSeconds(60));
+        Eq(s.LumTotal, 400_000L, "bank + 9102: the lum counts once");
+        s.Sample(new SessionSample(1, 25_000, 70_380_000, 400_000, 20_000, null), S0.AddSeconds(61));
+        Eq(s.LumTotal, 400_000L, "bank + 9103: a draw (bank down, character up) isn't income or a loss");
+        s.Sample(new SessionSample(1, 25_000, 70_680_000, 700_000, 20_000, null), S0.AddSeconds(120));
+        Eq(s.LumTotal, 700_000L, "bank + 9102: the next rise counts once too");
+        Check(Math.Abs(s.View(S0.AddSeconds(120)).LumPerHour - 700_000L * 30) < 1, "the rate is the bank's");
+    }
     private static void TestLumLast5Min()
     {
         var s = new SessionStats();

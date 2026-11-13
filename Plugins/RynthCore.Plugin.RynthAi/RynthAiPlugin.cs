@@ -306,6 +306,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         try { _dashboard?.SaveSettings(); } catch { }
         try { _sessionStats?.Shutdown(); } catch { }
         try { ShutdownMonsterStats(); } catch { }   // kept for the next copy, with the session
+        try { SaveTimedCommands(); } catch { }      // an edit made just before the unload
         try { GameInput.Shutdown(); } catch { }   // keys still held for /mt movement | jump | strafe
         // Release the Monster Editor process handle (if the toggle button
         // launched one) rather than leaking it on plugin unload/hot-reload.
@@ -364,6 +365,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         try { _dashboard?.SaveSettings(); } catch { }
         try { _sessionStats?.OnLogout(); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats logout"); }
         try { OnLogoutMonsterStats(); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "monster stats logout"); }
+        try { OnLogoutTimedCommands(); } catch (Exception ex) { RynthLog.Exception(LogCat.Commands, ex, "timed commands logout"); }
         Loot.T11ItemSupport.Reset();
         _boostNavNoticeSaid = false;   // the Boost Nav Priority notice: once per session
         // A real logout: the next OnLoginComplete is a fresh login, not a hot reload.
@@ -700,6 +702,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         {
             _dashboard.LoadSettings(charName);
             _patrolOnLoginPending = _dashboard.Settings.PatrolOnLogin;
+            _huntOnLoginPending = _dashboard.Settings.HuntOnLogin;
         }
 
         // Query own health to get the ratio → derive true MaxHealth immediately
@@ -1113,7 +1116,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "trace":
             case "logs":
             case "iteminfo":
-                // Settings panel buttons (Diagnostics tab, Item Info options); value carries the
+            case "buffitems":
+                // Settings panel buttons (Diagnostics tab, Item Info options, the Spells window's Buff Items tab); value carries the
                 // same arguments as "/ra trace|logs|iteminfo ...".
                 {
                     var args = new List<string> { "/ra", action.ToLowerInvariant() };
@@ -1124,6 +1128,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                         case "trace":    HandleTraceCommand(parts); break;
                         case "logs":     HandleLogsCommand(parts); break;
                         case "iteminfo": HandleItemInfoCommand(parts); break;
+                        case "buffitems": HandleBuffItemsCommand(parts); break;
                     }
                 }
                 break;
@@ -1156,7 +1161,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         ["TopOffHP"] = (0, 100), ["TopOffStam"] = (0, 100), ["TopOffMana"] = (0, 100),
         ["HealOthersAt"] = (0, 100), ["RestamOthersAt"] = (0, 100), ["InfuseOthersAt"] = (0, 100),
         ["MeleeAttackPower"] = (-1, 100), ["MissileAttackPower"] = (-1, 100),
-        ["MeleeAttackHeight"] = (0, 2), ["MissileAttackHeight"] = (0, 2),
+        ["MeleeAttackHeight"] = (0, 2), ["MissileAttackHeight"] = (0, 2), ["DfDefaultHeight"] = (-1, 2),
         ["VariablePowerMin"] = (0, 100), ["VariablePowerMax"] = (0, 100),
         ["MissileEnvironmentResponse"] = (0, 3), ["MagicEnvironmentResponse"] = (0, 3),
         ["EnvironmentImpactLimit"] = (1, 10), ["EnvironmentImpactWindowSec"] = (5, 120),
@@ -1640,6 +1645,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                         _damageStore?.SetCharacter(_dashboard.CharFolder);
                         SetXpTableCharacter(_dashboard.CharFolder);
                         _patrolOnLoginPending = _dashboard.Settings.PatrolOnLogin;
+                        _huntOnLoginPending = _dashboard.Settings.HuntOnLogin;
                         if (_miniRemote == null)
                         {
                             CreateMiniRemote();
@@ -1683,6 +1689,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             if (diag) Host.Log("[RynthAi] OnTick: after quest tracker");
             Guard(TickStep.GiveQueue, DrainGiveQueue);
             Guard(TickStep.ItemTool, TickItemTool);   // the Item Tool: chest looter + Quick give (RynthAiPlugin.ItemTool.cs)
+            Guard(TickStep.TimedCommands, TickTimedCommands);   // commands every N seconds (RynthAiPlugin.TimedCommands.cs)
             if (diag) Host.Log("[RynthAi] OnTick: after drain give queue");
             Guard(TickStep.Jumper, () => _jumper?.Tick());
             if (diag) Host.Log("[RynthAi] OnTick: after jumper tick");
@@ -1835,11 +1842,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
                 Guard(TickStep.PatrolReroute, () =>
                 {
-                    if (_patrolOnLoginPending && _raycast?.GeometryLoader?.CellDat?.IsLoaded == true)
-                    {
-                        _patrolOnLoginPending = false;
-                        HandleDungeonNavPatrol();
-                    }
+                    // Patrol On Login / Hunt On Login, once the dats are open (RynthAiPlugin.OutdoorHunt.cs).
+                    TickLoginAutoStart();
 
                     // Reroute the active dungeon patrol around any lava/acid hotspot sighted
                     // since the route was built — treats the hotspot as a wall instead of
@@ -2529,6 +2533,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _petManager?.OnChatWindowText(text);
         _combatManager?.TraceCastChat(text, chatType);
         _combatManager?.HandleChatForDebuffs(text);
+        try { _combatManager?.NoteDirtyFightingChat(text); } catch (Exception ex) { Host.Log($"[RynthAi] Dirty Fighting chat check failed: {ex.Message}"); }
         _combatManager?.HandleChatForDamage(text, chatType);
         _missileCraftingManager?.HandleChat(text);
         _scrollLearner?.OnChat(text);
@@ -4097,10 +4102,12 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "ii":           HandleItemInfoCommand(parts); break;
             case "spells":       HandleSpellsCommand(parts.Length > 2 ? parts[2] : string.Empty); break;
             case "buffprofile":  HandleBuffProfileCommand(parts); break;
+            case "buffitems":    HandleBuffItemsCommand(parts); break;
             case "groundloot":   HandleGroundLootCommand(parts); break;
             case "addnavpt":     HandleAddNavPointCommand(); break;
             case "lootname":     HandleLootNameCommand(parts); break;
             case "navheading":   HandleNavHeadingCommand(parts); break;
+            case "dfheight":     HandleDfHeightCommand(parts); break;
             case "nav":          HandleNavCommand(parts); break;
             case "meta":         HandleMetaCommand(parts); break;
             case "lua":          ForwardLuaCommand(parts); break;
@@ -4141,7 +4148,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "dumpinv":      HandleDumpInventoryCommand(); break;
             case "combat":       HandleCombatStateCommand(); break;
             case "mstats":       HandleMonsterStatsCommand(parts); break;   // RynthAiPlugin.MonsterStats.cs
+            case "gear":         HandleGearCommand(parts); break;           // RynthAiPlugin.ActiveGear.cs
+            case "timed":        HandleTimedCommand(parts); break;          // RynthAiPlugin.TimedCommands.cs
             case "aetheria":     HandleAetheriaCommand(parts); break;       // RynthAiPlugin.Aetheria.cs
+            case "autoconfirm":  HandleAutoConfirmCommand(parts); break;    // RynthAiPlugin.AutoConfirm.cs
             case "why":          HandleWhyCommand(); break;
             case "ghost":
             case "ghosts":       HandleGhostsCommand(cmd, parts); break;

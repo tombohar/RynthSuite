@@ -12,6 +12,9 @@ internal enum LootPickupResult
     Used,
     /// <summary>No pack of ours has a free slot.</summary>
     NoRoom,
+    /// <summary>The main pack is full and the item joins no stack you carry. Side packs may have room, but the
+    /// client takes nothing from a corpse straight into one, so this item can't be looted now; others still can.</summary>
+    MainPackFull,
     /// <summary>No move call, and a use could put the item on the character, so nothing was sent.</summary>
     Refused,
     /// <summary>The engine turned the call down.</summary>
@@ -38,10 +41,14 @@ internal static class LootPickup
         {
             if (playerId == 0) return LootPickupResult.Failed;
             int pid = unchecked((int)playerId);
-            int dest = cache == null
-                ? pid
-                : WorldObjectCache.FindLootDestination(cache.GetDirectInventory(forceRefresh: false), pid, host, skip);
-            if (dest == 0) return LootPickupResult.NoRoom;
+            int dest = pid;
+            if (cache != null)
+            {
+                var inv = cache.GetDirectInventory(forceRefresh: false);
+                dest = WorldObjectCache.FindLootDestination(inv, pid, host, skip, cache[unchecked((int)itemId)]);
+                if (dest == 0)
+                    return WorldObjectCache.SidePackHasRoom(inv, pid, host) ? LootPickupResult.MainPackFull : LootPickupResult.NoRoom;
+            }
             destination = unchecked((uint)dest);
             return host.MoveItemExternal(itemId, destination, 0) ? LootPickupResult.Moved : LootPickupResult.Failed;
         }

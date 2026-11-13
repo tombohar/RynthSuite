@@ -269,6 +269,8 @@ internal static unsafe class FakeHost
     public static bool PluginCommandCalls;
     /// <summary>What SendPluginCommand answers: true = delivered (the target plugin is loaded).</summary>
     public static bool PluginCommandDelivered = true;
+    /// <summary>When set, answers each SendPluginCommand (plugin, action, value) instead of <see cref="PluginCommandDelivered"/>.</summary>
+    public static Func<string, string, string, bool>? PluginCommandAnswer;
     /// <summary>Every SendPluginCommand (plugin, action, value), in order.</summary>
     public static readonly List<(string Plugin, string Action, string Value)> PluginCommands = new();
     /// <summary>For each <see cref="PluginCommands"/> entry, how many chat lines were written before it (call order).</summary>
@@ -342,7 +344,7 @@ internal static unsafe class FakeHost
         CloseContainerCalls = false; Closes.Clear(); GroundContainer = 0;
         SelectedItem = 0;
         UseOnCalls = false; UsesOn.Clear();
-        PluginCommandCalls = false; PluginCommandDelivered = true; PluginCommands.Clear(); PluginCommandChatCounts.Clear();
+        PluginCommandCalls = false; PluginCommandDelivered = true; PluginCommandAnswer = null; PluginCommands.Clear(); PluginCommandChatCounts.Clear();
         TradeVendorCalls = false; TradeActions.Clear(); VendorSells.Clear(); VendorBuys.Clear();
         CombatModeCalls = false; CombatModeRequests.Clear(); CombatModeRefuse = false; CombatModeRefusals = 0;
         BusyCalls = false; ForceResets = 0; BusyStateValue = 0;
@@ -648,7 +650,8 @@ internal static unsafe class FakeHost
     {
         PluginCommands.Add((Marshal.PtrToStringAnsi(plugin) ?? "", Marshal.PtrToStringAnsi(action) ?? "", Marshal.PtrToStringAnsi(value) ?? ""));
         PluginCommandChatCounts.Add(Chat.Count);
-        return PluginCommandDelivered ? 1 : 0;
+        var (p, a, v) = PluginCommands[^1];
+        return (PluginCommandAnswer?.Invoke(p, a, v) ?? PluginCommandDelivered) ? 1 : 0;
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]

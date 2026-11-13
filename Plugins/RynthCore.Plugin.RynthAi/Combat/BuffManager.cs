@@ -2664,55 +2664,7 @@ public partial class BuffManager : IDisposable
         return VitalNo("none in the Items list or the pack");
     }
 
-    // ── Buff items: unlimited gems that cast a buff when used ─────────────
-    // name -> the spell ids that mean its buff is already on (Benediction and the
-    // Lesser one give the same +10% max health, so either counts for both).
-    private static readonly (string Name, uint[] Spells)[] BuffItems =
-    {
-        ("Asheron's Benediction",        new uint[] { 3810, 4024 }),
-        ("Asheron's Lesser Benediction", new uint[] { 3810, 4024 }),
-        ("Blackmoor's Favor",            new uint[] { 3811 }),
-    };
-    private readonly Dictionary<string, DateTime> _buffItemUsedAt = new(StringComparer.OrdinalIgnoreCase);
-    private DateTime _lastBuffItemCheck = DateTime.MinValue;
-
-    /// <summary>
-    /// Uses a buff item whose buff isn't on the player (Asheron's Benediction, Blackmoor's
-    /// Favor). They were never used. One item per check, 3 s apart; 15 s before the same
-    /// item again so its buff can land. Off with UseBuffItems.
-    /// </summary>
-    private void TryUseBuffItems()
-    {
-        if (!_settings.UseBuffItems || _worldObjectCache == null || !_host.HasReadPlayerEnchantments) return;
-        if ((RynthClock.Now - _lastBuffItemCheck).TotalMilliseconds < 3000) return;
-        _lastBuffItemCheck = RynthClock.Now;
-        if (!_host.CanCastNow) return;
-
-        var active = new HashSet<uint>();
-        var sids = new uint[256];
-        var exp = new double[256];
-        int n = _host.ReadPlayerEnchantments(sids, exp, sids.Length);
-        for (int i = 0; i < n && i < sids.Length; i++) active.Add(sids[i]);
-
-        foreach (var wo in _worldObjectCache.GetDirectInventory(forceRefresh: false))
-        {
-            foreach (var (name, spells) in BuffItems)
-            {
-                if (!wo.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) continue;
-                bool on = false;
-                foreach (uint s in spells) if (active.Contains(s)) { on = true; break; }
-                if (on) break;
-                if (_buffItemUsedAt.TryGetValue(name, out DateTime at) && (RynthClock.Now - at).TotalSeconds < 15) break;
-                _buffItemUsedAt[name] = RynthClock.Now;
-                // The same buff from the other Benediction counts as done too.
-                foreach (var (other, os) in BuffItems) if (os == spells || os[0] == spells[0]) _buffItemUsedAt[other] = RynthClock.Now;
-                _host.Log($"[RynthAi] Buff item: using {wo.Name} (its buff isn't on).");
-                _host.UseFor(unchecked((uint)wo.Id), "Buff", $"buff item: the buff of {wo.Name} is not on");
-                _lastCastAttempt = RynthClock.Now;
-                return;
-            }
-        }
-    }
+    // Buff items (Asheron's Benediction, Blackmoor's Favor and the player's own): BuffManager.BuffItems.cs.
 
     // ── Field rations: Cooking Pot on (Infinite) Dried Rations, 25 at a time ──
     private DateTime _lastRationAttempt = DateTime.MinValue, _rationRestUntil = DateTime.MinValue;

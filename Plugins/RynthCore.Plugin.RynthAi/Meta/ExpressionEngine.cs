@@ -3672,6 +3672,8 @@ internal sealed partial class ExpressionEngine
             ["ItemInfoLootChatType"] = (() => I(s.ItemInfoSettings.LootChatType), v => { if (int.TryParse(v, out int i)) s.ItemInfoSettings.LootChatType = Math.Clamp(i, -1, 31); }),
             // Info text colour: "#RRGGBB" or a name ("allegiance"); "" / "default" = the chat type's own colour.
             ["ItemInfoTextColor"] = (() => s.ItemInfoSettings.TextColor, v => { if (RynthCore.Plugin.RynthAi.ItemInfo.MagItemInfoCatalog.ParseTextColor(v ?? string.Empty) is { } c) s.ItemInfoSettings.TextColor = c; }),
+            // One-line layout: each part in its own colour.
+            ["ItemInfoPartColors"] = (() => B(s.ItemInfoSettings.PartColors), v => s.ItemInfoSettings.PartColors = ToDouble(v) != 0),
             ["StopMacroWhenPackFull"] = (() => B(s.StopMacroWhenPackFull), v => s.StopMacroWhenPackFull = ToDouble(v) != 0),
             ["SummonPets"]          = (() => B(s.SummonPets),          v => s.SummonPets          = ToDouble(v) != 0),
             ["MineOnly"]            = (() => B(s.MineOnly),            v => s.MineOnly            = ToDouble(v) != 0),
@@ -3680,6 +3682,8 @@ internal sealed partial class ExpressionEngine
             ["AutoFellowMgmt"]      = (() => B(s.AutoFellowMgmt),      v => s.AutoFellowMgmt      = ToDouble(v) != 0),
             ["OpenFellowOnCreate"]  = (() => B(s.OpenFellowOnCreate),  v => s.OpenFellowOnCreate  = ToDouble(v) != 0),
             ["UseRecklessness"]     = (() => B(s.UseRecklessness),     v => s.UseRecklessness     = ToDouble(v) != 0),
+            // Dirty Fighting rotation (attack heights by the effects on the target).
+            ["DfHeightRotation"]    = (() => B(s.DfHeightRotation),    v => s.DfHeightRotation    = ToDouble(v) != 0),
             // The range a monster rule's Variable attack power picks from (percent of the bar).
             ["VariablePowerMin"]    = (() => I(s.VariablePowerMin),    v => { if (int.TryParse(v, out int i)) s.VariablePowerMin = Math.Clamp(i, 0, 100); }),
             ["VariablePowerMax"]    = (() => I(s.VariablePowerMax),    v => { if (int.TryParse(v, out int i)) s.VariablePowerMax = Math.Clamp(i, 0, 100); }),

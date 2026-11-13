@@ -27,6 +27,7 @@ public sealed partial class RynthAiPlugin
     private BuildingMap? _huntBuildings;
     private long _huntPortalsAt;
     private string _huntNoteLogged = "";
+    private bool _huntOnLoginPending;        // Hunt On Login: read at login, run once by TickLoginAutoStart
     private const int HuntMaxCorners = 128;
     private const int HuntPathFlags = RynthNavPathApiV1.PathAvoidPortals | RynthNavPathApiV1.PathWallClearance
                                     | RynthNavPathApiV1.PathAllowPartial | RynthNavPathApiV1.PathQuiet;
@@ -58,6 +59,9 @@ public sealed partial class RynthAiPlugin
             case "pick":
                 SetHuntPick(parts.Length > 3 ? string.Join(" ", parts, 3, parts.Length - 3) : "");
                 break;
+            case "login":
+                SetHuntOnLogin(parts.Length > 3 ? parts[3] : "");
+                break;
             case "panel":
             case "settings":
                 ToggleHuntPanel();
@@ -66,7 +70,7 @@ public sealed partial class RynthAiPlugin
                 if (_hunt.Active) StopHunt("stopped", say: true); else StartHunt();
                 break;
             default:
-                ChatLine("[RynthAi] /ra hunt [start|stop|status|panel] | /ra hunt range <yd> | /ra hunt radius <yd, 0 = anywhere> | " + HuntPickUsage);
+                ChatLine("[RynthAi] /ra hunt [start|stop|status|panel] | /ra hunt range <yd> | /ra hunt radius <yd, 0 = anywhere> | " + HuntPickUsage + " | " + HuntLoginUsage);
                 break;
         }
     }
@@ -188,6 +192,7 @@ public sealed partial class RynthAiPlugin
                 Wrapped(status, !on ? Ui.Mute : _hunt.TargetId != 0 || _hunt.WalkingOut ? Ui.Green : Ui.Highlight);
             string note = _hunt.Note;
             if (on && note.Length > 0) Wrapped(note, Ui.Text);
+            HuntOnLoginCheckbox(s);
             ImGui.Separator();
 
             float range = s.OutdoorHuntRange;
@@ -252,21 +257,27 @@ public sealed partial class RynthAiPlugin
         else StartHunt();
     }
 
-    internal void StartHunt()
+    internal const string HuntOnLoginRefusedPrefix = "[RynthAi] Hunt On Login: the hunt didn't start. ";
+
+    /// <summary>The Hunt button, /ra hunt and Hunt On Login (<paramref name="onLogin"/>: its lines say so).</summary>
+    internal void StartHunt(bool onLogin = false)
     {
         var s = _dashboard?.Settings;
-        if (s == null) { ChatLine("[RynthAi] Settings not ready."); return; }
-        if (!TryHuntPosition(out uint cell, out var me)) { ChatLine("[RynthAi] Outdoor hunt: no position yet."); return; }
-        if (InDungeon(cell)) { ChatLine("[RynthAi] Outdoor hunt is for outdoors; in a dungeon the Dungeon Patrol hunts (Patrol)."); return; }
+        uint cell = 0;
+        OutdoorHunt.Vec me = default;
+        bool hasPosition = s != null && TryHuntPosition(out cell, out me);
+        uint at = cell;
+        var from = me;
         // In a building: it can start when it knows the building's doors (and RynthNav plans from a doorstep).
-        if (OutdoorHunt.IsIndoorCell(cell) && !HuntKnowsBuilding(cell))
+        var block = OutdoorHunt.WhyNoStart(s != null, hasPosition,
+            inDungeon: () => InDungeon(at),
+            unknownBuilding: () => OutdoorHunt.IsIndoorCell(at) && !HuntKnowsBuilding(at),
+            noRynthNav: () => HuntPath(from, from).Status == OutdoorHunt.PathStatus.Unavailable);
+        if (block != OutdoorHunt.StartBlock.None || s == null)
         {
-            ChatLine("[RynthAi] Outdoor hunt: start it outdoors (it doesn't know this building's doors; it finds its own way out of a building it went into).");
-            return;
-        }
-        if (HuntPath(me, me).Status == OutdoorHunt.PathStatus.Unavailable)
-        {
-            ChatLine("[RynthAi] Outdoor hunt needs RynthNav 2026.10.23 or newer (its map shows the way round obstacles).");
+            string why = OutdoorHunt.StartBlockText(block);
+            if (onLogin) Host.Log("[RynthAi] Hunt On Login: not started (" + block + ").");
+            ChatLine((onLogin ? HuntOnLoginRefusedPrefix : "[RynthAi] ") + why);
             return;
         }
         if (!s.IsMacroRunning && RefuseMacroStartForVTank()) return;   // one bot per client (Decal bridge)
@@ -284,7 +295,74 @@ public sealed partial class RynthAiPlugin
             s.IsMacroRunning = true;
             _macroWasRunning = true;   // no macro-start "nearest waypoint" pick: the hunt plans its own walks
         }
-        ChatLine("[RynthAi] Outdoor hunt on: " + HuntSettingsText(s) + " /ra hunt range <yd> to change.");
+        ChatLine((onLogin ? "[RynthAi] Hunt On Login: outdoor hunt on: " : "[RynthAi] Outdoor hunt on: ")
+            + HuntSettingsText(s) + " /ra hunt range <yd> to change.");
+    }
+
+    /// <summary>
+    /// "/ra hunt login [on|off]": Hunt On Login, the box in the Outdoor Hunt window. No word: says it now.
+    /// On clears Patrol On Login (one or the other) and says so.
+    /// </summary>
+    private void SetHuntOnLogin(string value)
+    {
+        var s = _dashboard?.Settings;
+        if (s == null) { ReplyFail("[RynthAi] Settings not ready."); return; }
+        string v = value.Trim().ToLowerInvariant();
+        bool? on = v switch
+        {
+            "on" or "true" or "1" or "yes" => true,
+            "off" or "false" or "0" or "no" => false,
+            _ => null,
+        };
+        if (v.Length == 0)
+        {
+            ReplyOk($"[RynthAi] Hunt On Login: {(s.HuntOnLogin ? "on" : "off")}. {HuntLoginUsage} to change it.");
+            return;
+        }
+        if (on is not bool want)
+        {
+            ReplyFail($"[RynthAi] Hunt On Login: '{value.Trim()}' isn't on or off (it is {(s.HuntOnLogin ? "on" : "off")} now). Usage: {HuntLoginUsage}");
+            return;
+        }
+        bool patrolWas = s.PatrolOnLogin;
+        (s.PatrolOnLogin, s.HuntOnLogin) = LoginAutoStart.Exclusive(s.PatrolOnLogin, s.HuntOnLogin, s.PatrolOnLogin, want);
+        ReplyOk($"[RynthAi] Hunt On Login set: {(s.HuntOnLogin ? "on, the Outdoor Hunt starts once you're in the world" : "off")}."
+            + (patrolWas && !s.PatrolOnLogin ? " Patrol On Login is off now (one or the other)." : ""));
+    }
+
+    internal const string HuntLoginUsage = "/ra hunt login [on|off]";
+
+    /// <summary>The Hunt On Login box (the Outdoor Hunt window; render thread, as its sliders). On clears Patrol On Login.</summary>
+    private static void HuntOnLoginCheckbox(LegacyUiSettings s)
+    {
+        bool on = s.HuntOnLogin;
+        if (ImGui.Checkbox("Hunt On Login##huntonlogin", ref on))
+            (s.PatrolOnLogin, s.HuntOnLogin) = LoginAutoStart.Exclusive(s.PatrolOnLogin, s.HuntOnLogin, s.PatrolOnLogin, on);
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(LoginAutoStart.HuntOnLoginTip);
+    }
+
+    /// <summary>
+    /// Patrol On Login / Hunt On Login, once the character is in the world and the dats are open (the same
+    /// gate Patrol On Login always had): the Dungeon Patrol, the Outdoor Hunt, or (both on) the one that
+    /// fits where the character is. The flags are read at login and cleared here, so it runs once.
+    /// </summary>
+    private void TickLoginAutoStart()
+    {
+        if (!_patrolOnLoginPending && !_huntOnLoginPending) return;
+        if (_raycast?.GeometryLoader?.CellDat?.IsLoaded != true) return;
+        bool patrol = _patrolOnLoginPending, hunt = _huntOnLoginPending;
+        _patrolOnLoginPending = false;
+        _huntOnLoginPending = false;
+        bool inDungeon = patrol && hunt && TryHuntPosition(out uint cell, out _) && InDungeon(cell);
+        switch (LoginAutoStart.Choose(patrol, hunt, inDungeon))
+        {
+            case LoginAutoStart.Start.Patrol:
+                HandleDungeonNavPatrol();
+                break;
+            case LoginAutoStart.Start.Hunt:
+                if (!_hunt.Active) StartHunt(onLogin: true);
+                break;
+        }
     }
 
     private void StopHunt(string why, bool say = false)

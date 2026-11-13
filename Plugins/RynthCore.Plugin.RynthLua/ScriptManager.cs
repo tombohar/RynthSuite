@@ -98,6 +98,8 @@ public sealed partial class RynthLuaPlugin
         var host = new LuaScriptHost(s => Log(s), (s, h) => RegisterApi(s, h, ctx!))
         {
             MacroRunning = () => _ai.MacroRunning,
+            // The memory guard's stop is said in chat in the failure colour (it's in the log via Reply too).
+            MemoryStopped = msg => ChatFail(msg),
         };
         ctx = new ScriptContext(name, folder, entry, manifest, host) { Transient = transient };
         host.ResolveModule = (s, module) => ResolveModule(s, ctx, module);

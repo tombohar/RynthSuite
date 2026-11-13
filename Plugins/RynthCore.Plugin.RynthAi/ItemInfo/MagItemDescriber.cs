@@ -92,10 +92,16 @@ internal sealed class MagItemDescription
     /// <summary>The title's "(DamageType Mastery)" text without the brackets, or "".</summary>
     public string TypeMastery = string.Empty;
     public readonly List<(MagItemSection Section, string Text)> Segments = new();
+    /// <summary>What each of <see cref="Segments"/> is, for its colour (same index; 2026-11-11 per-part colours).</summary>
+    public readonly List<ItemInfoPart> SegmentParts = new();
 
-    public void Add(MagItemSection section, string text)
+    public void Add(MagItemSection section, string text) => Add(section, ItemInfoPart.None, text);
+
+    public void Add(MagItemSection section, ItemInfoPart part, string text)
     {
-        if (!string.IsNullOrEmpty(text)) Segments.Add((section, text));
+        if (string.IsNullOrEmpty(text)) return;
+        Segments.Add((section, text));
+        SegmentParts.Add(part);
     }
 
     /// <summary>Classic Mag one-liner: title, then every field comma-separated.</summary>
@@ -104,6 +110,21 @@ internal sealed class MagItemDescription
         var sb = new StringBuilder(Title, 256);
         foreach (var (_, text) in Segments) sb.Append(", ").Append(text);
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// <see cref="ToOneLine"/> as (part, text) pieces, the ", " between fields uncoloured: joined
+    /// they are exactly that line (<see cref="ItemInfoPartColors"/> colours them).
+    /// </summary>
+    public List<(ItemInfoPart Part, string Text)> ToOneLineParts()
+    {
+        var pieces = new List<(ItemInfoPart Part, string Text)>(Segments.Count * 2 + 1) { (ItemInfoPart.Name, Title) };
+        for (int i = 0; i < Segments.Count; i++)
+        {
+            pieces.Add((ItemInfoPart.None, ", "));
+            pieces.Add((i < SegmentParts.Count ? SegmentParts[i] : ItemInfoPart.None, Segments[i].Text));
+        }
+        return pieces;
     }
 
     /// <summary>
@@ -304,58 +325,58 @@ internal static class MagItemDescriber
         // ── Set ─────────────────────────────────────────────────────────────────
         int set = Int(IntEquipmentSet);
         if (set > 0 && Show(MagItemInfoField.Set))
-            d.Add(Id, MagItemInfoTables.EquipmentSets.TryGetValue(set, out string? setName) ? setName : $"Unknown set {set}");
+            d.Add(Id, ItemInfoPart.Set, MagItemInfoTables.EquipmentSets.TryGetValue(set, out string? setName) ? setName : $"Unknown set {set}");
 
         // ── T11 state: "T16, Gear B+ (4 lines), Props 3/5, Tainted" ───────────
         if (t11.IsT11 && Show(MagItemInfoField.T11))
         {
             // "~" marks a tier estimated from the wield gates (older server, or not yet IDed).
-            d.Add(Id, t11.TierIsExact ? "T" + I(t11.Tier) : "~T" + I(t11.Tier));
-            if (t11.WeaponQuality >= 0) d.Add(Id, "Quality " + I(t11.WeaponQuality));
+            d.Add(Id, ItemInfoPart.Tier, t11.TierIsExact ? "T" + I(t11.Tier) : "~T" + I(t11.Tier));
+            if (t11.WeaponQuality >= 0) d.Add(Id, ItemInfoPart.Tier, "Quality " + I(t11.WeaponQuality));
             if (t11.GearGradeRank > 0)
-                d.Add(Id, t11.GearGradeLines > 0 ? $"Gear {t11.GearGrade} ({I(t11.GearGradeLines)} lines)" : $"Gear {t11.GearGrade}");
+                d.Add(Id, ItemInfoPart.Tier, t11.GearGradeLines > 0 ? $"Gear {t11.GearGrade} ({I(t11.GearGradeLines)} lines)" : $"Gear {t11.GearGrade}");
             if (t11.PropertySlots >= 0)
-                d.Add(Id, t11.PropertySlotCap > 0 ? $"Props {I(t11.PropertySlots)}/{I(t11.PropertySlotCap)}" : $"Props {I(t11.PropertySlots)}");
-            if (t11.Tainted) d.Add(Id, "Tainted");
+                d.Add(Id, ItemInfoPart.Tier, t11.PropertySlotCap > 0 ? $"Props {I(t11.PropertySlots)}/{I(t11.PropertySlotCap)}" : $"Props {I(t11.PropertySlots)}");
+            if (t11.Tainted) d.Add(Id, ItemInfoPart.Tier, "Tainted");
         }
 
         // ── Armor level ─────────────────────────────────────────────────────────
         int al = Int(IntArmorLevel);
-        if (al > 0 && Show(MagItemInfoField.ArmorLevel)) d.Add(Id, "AL " + I(al));
+        if (al > 0 && Show(MagItemInfoField.ArmorLevel)) d.Add(Id, ItemInfoPart.Stats, "AL " + I(al));
 
         // ── Imbues (ImbuedEffect 179 plus ImbuedEffect2..5 = 303..306) ─────────
         if (Show(MagItemInfoField.Imbues))
-            d.Add(Cbt, ImbueLabels(Int(IntImbued) | Int(303) | Int(304) | Int(305) | Int(306), ImbueStrengths(longDesc)));
+            d.Add(Cbt, ItemInfoPart.Special, ImbueLabels(Int(IntImbued) | Int(303) | Int(304) | Int(305) | Int(306), ImbueStrengths(longDesc)));
 
         if (Has(Field.ArmorCleave) && Show(MagItemInfoField.ArmorCleave) && Dbl(FloatIgnoreArmor, 0) != 0)
-            d.Add(Cbt, "AC");
+            d.Add(Cbt, ItemInfoPart.Special, "AC");
 
         if (Has(Field.CritStats) && Show(MagItemInfoField.CritStats))
         {
             // A crit deals 1 + CriticalMultiplier; a stored 1.0 is a normal 2x crit, so ACE only
             // calls it Crushing Blow above 1.0.
             double critMult = Dbl(FloatCritMultiplier, 0);
-            if (critMult > 1) d.Add(Cbt, $"Crushing Blow {Fmt(critMult + 1)}x");
+            if (critMult > 1) d.Add(Cbt, ItemInfoPart.Special, $"Crushing Blow {Fmt(critMult + 1)}x");
             // Biting Strike replaces the base crit chance with this fraction.
             double critFreq = Dbl(FloatCritFrequency, 0);
-            if (critFreq > 0) d.Add(Cbt, $"Biting Strike {Math.Round(critFreq * 100).ToString(CultureInfo.InvariantCulture)}%");
+            if (critFreq > 0) d.Add(Cbt, ItemInfoPart.Special, $"Biting Strike {Math.Round(critFreq * 100).ToString(CultureInfo.InvariantCulture)}%");
         }
 
         // T11 Cast on Strike procs: "Proc Force Arc 13%".
         if (Show(MagItemInfoField.Imbues))
             foreach (var (procName, chance) in t11.Procs)
-                d.Add(Cbt, $"Proc {procName} {Fmt(chance)}%");
+                d.Add(Cbt, ItemInfoPart.Special, $"Proc {procName} {Fmt(chance)}%");
 
         if (Has(Field.Splits) && Show(MagItemInfoField.Splits))
         {
             int splits = Int(IntSplitArrows);
-            if (splits > 0) d.Add(Cbt, $"Splits ({I(splits)})");
+            if (splits > 0) d.Add(Cbt, ItemInfoPart.Special, $"Splits ({I(splits)})");
         }
 
         if (Has(Field.Range) && Show(MagItemInfoField.Range))
         {
             int yards = MissileRangeYards(Dbl(FloatMaxVelocity, 0));
-            if (yards > 0) d.Add(Cbt, $"Range {I(yards)}yd");
+            if (yards > 0) d.Add(Cbt, ItemInfoPart.Special, $"Range {I(yards)}yd");
         }
 
         if (Has(Field.Cleaves) && Show(MagItemInfoField.CleaveMultiStrike))
@@ -363,31 +384,31 @@ internal static class MagItemDescriber
             int attackType = Int(IntAttackType);
             int mastery = Int(IntWeaponType);
             bool cleaving = (attackType == 4 && mastery == 11) || (attackType == 1 && mastery != 11 && mastery != 0);
-            if (cleaving) d.Add(Cbt, "Cleaving");
-            else if (attackType is 160 or 166) d.Add(Cbt, "Multi-Strike");
-            else if (attackType == 486) d.Add(Cbt, "Multi-Strike (3)");
+            if (cleaving) d.Add(Cbt, ItemInfoPart.Special, "Cleaving");
+            else if (attackType is 160 or 166) d.Add(Cbt, ItemInfoPart.Special, "Multi-Strike");
+            else if (attackType == 486) d.Add(Cbt, ItemInfoPart.Special, "Multi-Strike (3)");
         }
 
         // ── Slayer ──────────────────────────────────────────────────────────────
         if (Has(Field.Slayer) && Show(MagItemInfoField.Slayer))
         {
             string? slayer = MagItemInfoTables.CreatureTypeName(Int(IntSlayerCreature));
-            if (slayer != null) d.Add(Cbt, slayer + " Slayer");
+            if (slayer != null) d.Add(Cbt, ItemInfoPart.Special, slayer + " Slayer");
         }
 
         // ── Tinks + applied materials (TinkerLog) ──────────────────────────────
         int tinks = Int(IntTinks);
-        if (tinks > 0 && Show(MagItemInfoField.Tinks)) d.Add(Id, "Tinks " + I(tinks));
+        if (tinks > 0 && Show(MagItemInfoField.Tinks)) d.Add(Id, ItemInfoPart.Craft, "Tinks " + I(tinks));
         if (Show(MagItemInfoField.Applied))
         {
             string applied = FormatTinkerLog(item.GetString(StringTinkerLog));
-            if (applied.Length > 0) d.Add(Id, "Applied: " + applied);
+            if (applied.Length > 0) d.Add(Id, ItemInfoPart.Craft, "Applied: " + applied);
         }
 
         // ── Damage ──────────────────────────────────────────────────────────────
         // T11 weapon grade sits with the identity fields: "Grade S (100%)".
         if (Has(Field.Damage) && Show(MagItemInfoField.Damage) && t11.GradeRank > 0)
-            d.Add(Id, t11.DamagePercent >= 0 ? $"Grade {t11.Grade} ({I(t11.DamagePercent)}%)" : $"Grade {t11.Grade}");
+            d.Add(Id, ItemInfoPart.Tier, t11.DamagePercent >= 0 ? $"Grade {t11.Grade} ({I(t11.DamagePercent)}%)" : $"Grade {t11.Grade}");
 
         if (Has(Field.Damage) && Show(MagItemInfoField.Damage))
             AddDamage(d, cls, Int(IntMaxDamage), Dbl(FloatVariance, 0), Int(IntElementalBonus),
@@ -402,7 +423,7 @@ internal static class MagItemDescriber
         if (Has(Field.ManaConversion) && Show(MagItemInfoField.ManaConversion))
         {
             double mc = Dbl(FloatManaConversion, 0);
-            if (mc != 0) d.Add(Cbt, Math.Round(mc * 100).ToString(CultureInfo.InvariantCulture) + "%mc");
+            if (mc != 0) d.Add(Cbt, ItemInfoPart.Bonus, Math.Round(mc * 100).ToString(CultureInfo.InvariantCulture) + "%mc");
         }
 
         // ── Spells ──────────────────────────────────────────────────────────────
@@ -417,27 +438,27 @@ internal static class MagItemDescriber
             AddWieldRequirement(d, Int(IntWieldReq2), Int(IntWieldSkill2), Int(IntWieldValue2));
             // T11 gates (item augs, Triune Weave, charms) only exist as "Wield requires:" text.
             foreach (T11WieldGate gate in t11.WieldGates)
-                d.Add(Req, $"Wield {gate.Amount.ToString("N0", CultureInfo.InvariantCulture)} {GateName(gate.Counter)}");
+                d.Add(Req, ItemInfoPart.Requirements, $"Wield {gate.Amount.ToString("N0", CultureInfo.InvariantCulture)} {GateName(gate.Counter)}");
         }
 
         if (Show(MagItemInfoField.Activation))
         {
             int useLevel = Int(IntUseRequiresLevel);
-            if (useLevel > 0) d.Add(Req, "Lvl " + I(useLevel));
+            if (useLevel > 0) d.Add(Req, ItemInfoPart.Requirements, "Lvl " + I(useLevel));
 
             // "Melee Defense 300 to Activate" — hidden when the wield requirement already covers it.
             int actSkill = Int(IntActivationSkill), actLevel = Int(IntActivationLevel);
             if (actLevel > 0 && (Int(IntWieldSkill) != actSkill || Int(IntWieldValue) < actLevel))
-                d.Add(Req, $"{SkillName(actSkill)} {I(actLevel)} to Activate");
+                d.Add(Req, ItemInfoPart.Requirements, $"{SkillName(actSkill)} {I(actLevel)} to Activate");
 
             // Summoning essences / gems.
             int useSkill = Int(IntUseRequiresSkill), useSkillLvl = Int(IntUseRequiresSkillLvl), useSpec = Int(IntUseRequiresSpec);
-            if (useSkill > 0 && useSkillLvl > 0) d.Add(Req, $"{SkillName(useSkill)} {I(useSkillLvl)}");
-            if (useSpec > 0 && useSkillLvl > 0) d.Add(Req, $"Spec {SkillName(useSpec)} {I(useSkillLvl)}");
+            if (useSkill > 0 && useSkillLvl > 0) d.Add(Req, ItemInfoPart.Requirements, $"{SkillName(useSkill)} {I(useSkillLvl)}");
+            if (useSpec > 0 && useSkillLvl > 0) d.Add(Req, ItemInfoPart.Requirements, $"Spec {SkillName(useSpec)} {I(useSkillLvl)}");
         }
 
         int diff = Int(IntItemDifficulty);
-        if (diff > 0 && Show(MagItemInfoField.Difficulty)) d.Add(Req, "Diff " + I(diff));
+        if (diff > 0 && Show(MagItemInfoField.Difficulty)) d.Add(Req, ItemInfoPart.Requirements, "Diff " + I(diff));
 
         // ── Workmanship ─────────────────────────────────────────────────────────
         int work = Show(MagItemInfoField.Craft) ? Int(IntWorkmanship) : 0;
@@ -447,12 +468,12 @@ internal static class MagItemDescriber
             if (work > 0)
             {
                 double avg = items > 0 ? (double)work / items : work;
-                d.Add(Id, "Work " + avg.ToString("N2", CultureInfo.InvariantCulture));
+                d.Add(Id, ItemInfoPart.Craft, "Work " + avg.ToString("N2", CultureInfo.InvariantCulture));
             }
         }
         else if (work > 0 && tinks != 10) // Mag: hide craft once fully tinked
         {
-            d.Add(Id, "Craft " + I(work));
+            d.Add(Id, ItemInfoPart.Craft, "Craft " + I(work));
         }
 
         // ── Unenchantable armor: base protections [S/P/B/C/F/A/L] ─────────────
@@ -464,21 +485,21 @@ internal static class MagItemDescriber
                 if (i > 0) prot.Append('/');
                 prot.Append(Dbl(FloatArmorVsSlash + i, 0).ToString("N1", CultureInfo.InvariantCulture));
             }
-            d.Add(Cbt, prot.Append(']').ToString());
+            d.Add(Cbt, ItemInfoPart.Stats, prot.Append(']').ToString());
         }
 
         if (options.ShowValueAndBurden)
         {
             int value = Int(IntValue);
-            if (value > 0) d.Add(Req, "Value " + value.ToString("N0", CultureInfo.InvariantCulture));
+            if (value > 0) d.Add(Req, ItemInfoPart.ValueBurden, "Value " + value.ToString("N0", CultureInfo.InvariantCulture));
             int burden = Int(IntBurden);
-            if (burden > 0) d.Add(Req, "BU " + I(burden));
+            if (burden > 0) d.Add(Req, ItemInfoPart.ValueBurden, "BU " + I(burden));
         }
 
         // ── Ratings ─────────────────────────────────────────────────────────────
         if (Show(MagItemInfoField.Ratings))
         {
-            d.Add(MagItemSection.Ratings, RatingsCluster(item, options.HiddenRatings));
+            d.Add(MagItemSection.Ratings, ItemInfoPart.Ratings, RatingsCluster(item, options.HiddenRatings));
             // T11 zone modifiers: the server drops a modifier's Gear* rating from the ratings it
             // sends, so the modifier lines are the only place those values appear.
             if (t11.Modifiers.Count > 0)
@@ -491,7 +512,7 @@ internal static class MagItemDescriber
                     if (m.Locked) mod += " (Locked)";
                     mods.Add(mod);
                 }
-                d.Add(MagItemSection.Ratings, "Mods: " + string.Join(", ", mods));
+                d.Add(MagItemSection.Ratings, ItemInfoPart.Ratings, "Mods: " + string.Join(", ", mods));
             }
         }
 
@@ -595,18 +616,18 @@ internal static class MagItemDescriber
             string max = maxDmg.ToString(CultureInfo.InvariantCulture);
             // The appraisal panel rounds the low end to a whole number (2069 * 0.865 → 1790).
             long min = (long)Math.Round(maxDmg * (1 - variance), MidpointRounding.AwayFromZero);
-            d.Add(Cbt, variance > 0 ? min.ToString(CultureInfo.InvariantCulture) + "-" + max : max);
+            d.Add(Cbt, ItemInfoPart.Stats, variance > 0 ? min.ToString(CultureInfo.InvariantCulture) + "-" + max : max);
         }
         // Three places: loot variances are often x.xx5 and two places would misreport them.
         if (variance > 0)
-            d.Add(Cbt, Math.Round(variance, 3).ToString("0.###", CultureInfo.InvariantCulture) + "v");
+            d.Add(Cbt, ItemInfoPart.Stats, Math.Round(variance, 3).ToString("0.###", CultureInfo.InvariantCulture) + "v");
         if (elemBonus != 0)
-            d.Add(Cbt, "+" + elemBonus.ToString(CultureInfo.InvariantCulture));
+            d.Add(Cbt, ItemInfoPart.Stats, "+" + elemBonus.ToString(CultureInfo.InvariantCulture));
         // A missing/zero multiplier means "no bonus" (0 would print as -100%).
         if (dmgMod > 0 && dmgMod != 1)
-            d.Add(Cbt, "+" + Math.Round((dmgMod - 1) * 100).ToString(CultureInfo.InvariantCulture) + "%");
+            d.Add(Cbt, ItemInfoPart.Stats, "+" + Math.Round((dmgMod - 1) * 100).ToString(CultureInfo.InvariantCulture) + "%");
         if (vsMonsters > 0 && vsMonsters != 1)
-            d.Add(Cbt, "+" + Math.Round((vsMonsters - 1) * 100).ToString(CultureInfo.InvariantCulture) + "% vs. Monsters");
+            d.Add(Cbt, ItemInfoPart.Stats, "+" + Math.Round((vsMonsters - 1) * 100).ToString(CultureInfo.InvariantCulture) + "% vs. Monsters");
     }
 
     /// <summary>Mag "+18%a" from a 1.0-based multiplier; skips missing (≤0) and neutral 1.0.</summary>
@@ -616,7 +637,7 @@ internal static class MagItemDescriber
         double pct = Math.Round((multiplier - 1) * 100, decimals);
         if (pct == 0) return; // rounds to nothing at this precision
         // Signed like the appraisal panel ("Bonus to Attack Skill +20%"); penalties keep their '-'.
-        d.Add(MagItemSection.Combat, (pct > 0 ? "+" : "") + pct.ToString(CultureInfo.InvariantCulture) + suffix);
+        d.Add(MagItemSection.Combat, ItemInfoPart.Bonus, (pct > 0 ? "+" : "") + pct.ToString(CultureInfo.InvariantCulture) + suffix);
     }
 
     /// <summary>"Wield Lvl 180" for a level requirement, else "Heavy Weapons 375".</summary>
@@ -625,7 +646,7 @@ internal static class MagItemDescriber
         // Int64 gates name a counter, not a skill; the T11 text supplies those.
         if (value <= 0 || reqType == WieldReqInt64Stat) return;
         string v = value.ToString(CultureInfo.InvariantCulture);
-        d.Add(MagItemSection.Requirements, reqType == 7 // WieldRequirement.Level
+        d.Add(MagItemSection.Requirements, ItemInfoPart.Requirements, reqType == 7 // WieldRequirement.Level
             ? "Wield Lvl " + v
             : SkillName(skillOrAttr) + " " + v);
     }
@@ -667,11 +688,11 @@ internal static class MagItemDescriber
             string name = SpellDatabase.GetSpellName(id);
             SpellDatabase.TryGetSpellMeta(id, out int family, out int difficulty);
             if (ShouldShowSpell(name, family, difficulty, unenchantable))
-                d.Add(MagItemSection.Spells, name);
+                d.Add(MagItemSection.Spells, ItemInfoPart.Spells, name);
         }
         if (verboseList == null || verboseList.Length == 0) return;
         if (skippedVerbose > 0) verboseList.Append("; (+").Append(skippedVerbose).Append(" more spells)");
-        d.Add(MagItemSection.Spells, verboseList.ToString());
+        d.Add(MagItemSection.Spells, ItemInfoPart.Spells, verboseList.ToString());
     }
 
     private static bool ShouldShowSpell(string name, int family, int difficulty, bool unenchantable)

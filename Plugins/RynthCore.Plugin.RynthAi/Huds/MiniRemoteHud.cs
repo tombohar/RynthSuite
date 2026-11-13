@@ -9,7 +9,7 @@
 // Right-click on the remote: "Character" (Spells, Pets, Crafting, RynthOracle's Character, Quests,
 // Quest Timers and Fellowship, Skills, Inventory, Item Count, Inventory HUDs: windows every server
 // has), then "Server: <name>", i.e. the installed server plugins' windows for the world you're on,
-// which RynthCore sends (ServerMenuModel), or a link to RynthCore's Options > Diagnostics (where a
+// which RynthCore sends (ServerMenuModel), or a link to RynthCore's Settings > Game Client (where a
 // server is forced) when none matches. The Options button opens RynthAi Settings (/rc ui open
 // Settings); the small gear next to it, or a right-click on Options, holds the Mini Remote's own
 // settings (sections, layout, slot size), and so does a click on Options when there is no chat parser.
@@ -985,11 +985,11 @@ internal sealed class MiniRemoteHud
 
         ImGui.Separator();
         ImGui.TextDisabled("Server: no installed server plugin matches this world");
-        // Forcing a server lives in one place since 2026-10-13: RynthCore's Options > Diagnostics.
-        if (_hud.Host.HasInvokeChatParser && ImGui.MenuItem("Force a server... (Options > Diagnostics)##mrforce", MovedTabs.Diagnostics))
+        // Forcing a server lives in one place since 2026-10-13: RynthCore's Settings > Game Client (Diagnostics until 2026-11-11).
+        if (_hud.Host.HasInvokeChatParser && ImGui.MenuItem("Force a server... (Settings > Game Client)##mrforce", MovedTabs.Diagnostics))
             _hud.RunEngineCommand(MovedTabs.Diagnostics);
         if (ImGui.IsItemHovered())
-            SafeImGui.SetTooltip("RynthCore's server selection (Options > Diagnostics) shows a server's windows here anyway.\n"
+            SafeImGui.SetTooltip("RynthCore's server selection (Settings > Game Client) shows a server's windows here anyway.\n"
                                  + "It only says which world this is: the server still decides which features exist.");
     }
 

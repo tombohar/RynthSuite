@@ -1704,18 +1704,37 @@ public class WorldObjectCache
     }
 
     /// <summary>
-    /// Where a looted item goes: the main pack while it has a free slot, else the side pack
-    /// with the most room, 0 when nothing has room. The pickup used to be a UseObject, which
-    /// let the client pick the spot, but a use on a wearable item lying in a corpse is a
-    /// get-and-wield: jewellery for an empty slot went straight onto the character
-    /// (2026-10-02). A move needs an explicit target, and the engine refuses a move into a
-    /// full pack of ours, so this finds one with room.
+    /// Where a looted item goes: the main pack (the player) or 0. The pickup used to be a
+    /// UseObject, which let the client pick the spot, but a use on a wearable item lying in a
+    /// corpse is a get-and-wield: jewellery for an empty slot went straight onto the character
+    /// (2026-10-02). So it is a move, and a move from a corpse or chest can only go to the main
+    /// pack: the client refuses one straight into a side pack ("You must first pick up the X",
+    /// and nothing is sent), so the side-pack fallback this used to return when the main pack
+    /// was full never worked (2026-11-12: 75 such pickups in a week of logs, none landed; the
+    /// looter waited out 3 + 3 tries on each and left them).
+    /// <list type="bullet">
+    /// <item>The main pack has a free slot: the main pack.</item>
+    /// <item>It is full, and <paramref name="item"/> joins a stack you carry: the main pack anyway.
+    /// The client puts a stack onto a same-name stack with room wherever that is (the pea stacks
+    /// live in a side pack), so no slot is needed.</item>
+    /// <item>Otherwise 0: nothing can take it from the corpse (<see cref="SidePackHasRoom"/> tells
+    /// a full main pack from no room at all).</item>
+    /// </list>
     /// </summary>
-    /// <remarks><paramref name="skip"/>: packs (or the player id, for the main pack) the server refused lately.</remarks>
+    /// <remarks><paramref name="skip"/>: packs (or the player id, for the main pack) the server refused lately;
+    /// a stack join needs no slot, so it goes whatever the main pack's mark.</remarks>
     public static int FindLootDestination(IReadOnlyList<WorldObject> inv, int playerId, RynthCoreHost? host = null,
-                                          Func<int, bool>? skip = null)
+                                          Func<int, bool>? skip = null, WorldObject? item = null)
     {
         if (inv == null || playerId == 0) return 0;
+        if (item != null && JoinsCarriedStack(inv, playerId, item)) return playerId;
+        if (MainPackFreeSlots(inv, playerId, host) > 0 && !(skip != null && skip(playerId))) return playerId;
+        return 0;
+    }
+
+    /// <summary>The main pack's free item slots (102 less the loose items in it; packs, foci and worn items don't count).</summary>
+    public static int MainPackFreeSlots(IReadOnlyList<WorldObject> inv, int playerId, RynthCoreHost? host = null)
+    {
         int mainUsed = 0; // same tally as FindPackFor
         foreach (var p in inv)
         {
@@ -1725,8 +1744,35 @@ public class WorldObjectCache
             if (host.HasValue && IsWieldable(p) && IsWieldedByPlayer(host.Value, p)) continue;
             mainUsed++;
         }
-        if (102 - mainUsed > 0 && !(skip != null && skip(playerId))) return playerId;
-        return FindPackFor(inv, playerId, includeMainPack: false, requireFree: 1, host, skip);
+        return 102 - mainUsed;
+    }
+
+    /// <summary>A side pack has a free slot (so a loot pickup that found no destination met a full main pack, not full packs).</summary>
+    public static bool SidePackHasRoom(IReadOnlyList<WorldObject> inv, int playerId, RynthCoreHost? host = null)
+        => inv != null && playerId != 0 && FindPackFor(inv, playerId, includeMainPack: false, requireFree: 1, host) != 0;
+
+    /// <summary>
+    /// <paramref name="item"/> stacks and a stack of the same kind you carry (main pack or a side
+    /// pack) still has room for one more: a pickup aimed at the main pack joins it.
+    /// </summary>
+    internal static bool JoinsCarriedStack(IReadOnlyList<WorldObject> inv, int playerId, WorldObject item)
+    {
+        int max = RynthCore.Plugin.RynthAi.Loot.InventoryManager.GetMaxStackSize(item);
+        if (max <= 1 || string.IsNullOrEmpty(item.Name)) return false;
+        int wcid = item.Values(unchecked((int)DecalTypeKey), 0);
+        var packs = new HashSet<int>();
+        foreach (var p in inv)
+            if (p.Container == playerId && p.ObjectClass == AcObjectClass.Container) packs.Add(p.Id);
+        foreach (var s in inv)
+        {
+            if (s.Id == item.Id || s.ObjectClass == AcObjectClass.Container) continue;
+            if (s.Container != playerId && !packs.Contains(s.Container)) continue;
+            int sw = s.Values(unchecked((int)DecalTypeKey), 0);
+            bool same = wcid != 0 && sw != 0 ? sw == wcid : string.Equals(s.Name, item.Name, StringComparison.Ordinal);
+            if (!same) continue;
+            if (Math.Max(1, s.Values(LongValueKey.StackCount, 1)) < max) return true;
+        }
+        return false;
     }
 
     /// <summary>

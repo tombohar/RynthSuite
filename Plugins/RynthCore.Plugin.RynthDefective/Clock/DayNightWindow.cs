@@ -9,7 +9,7 @@
 //
 //    anywhere   drag to move; Ctrl+wheel: bigger or smaller (30-250%);
 //               right-click: hide it (/rdef daynight, the bar button, or
-//               Settings > UI > Toolbar show it again).
+//               Settings > Interface > In The Retail Toolbar's Place show it again).
 //
 //  AC's render thread; reads the view the tick built (DayNightView) and counts
 //  the seconds down from when it was read, so the seconds move every frame.

@@ -46,7 +46,7 @@ internal sealed partial class OracleView
                 w.TextDisabled($"{st.ProfilePlugin} ({RynthCore.Plugin.Shared.RynthServerProfileApiV1.InterfaceName}): {prof.Summary()}");
             else if (es.ActivePlugin.Length > 0)
                 w.TextDisabled($"{es.ActivePlugin} hasn't sent its server settings (an older plugin?).");
-            w.TextDisabled("Change the server: RynthCore Options > Diagnostics > Server, or /rc server pick <id>|auto.");
+            w.TextDisabled("Change the server: RynthCore Settings > Game Client > Server, or /rc server pick <id>|auto.");
         }
         else if (_c.Host.Version > 0 && _c.Host.Version < 86)
             w.TextDisabled($"This engine is API v{_c.Host.Version}; server quest packs need v86 (RynthCore's server list).");

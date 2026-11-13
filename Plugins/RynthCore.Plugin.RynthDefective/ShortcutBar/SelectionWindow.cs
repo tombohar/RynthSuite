@@ -11,7 +11,7 @@
 //    the name row  drag to move; Ctrl+wheel: bigger or smaller (30-250%);
 //                  right-click: a menu (2026-10-31): "Why this loot rule?" for
 //                  an item (RynthAi's /ra loot why, in its window) and hide it
-//                  (Settings > UI > Toolbar, /rdef selection show it again).
+//                  (Settings > Interface > In The Retail Toolbar's Place, /rdef selection show it again).
 //    the quantity  under a stack or a vendor's item (2026-10-30): how many, and
 //                  Split / Give / Buy that many (SelectionWindow.Quantity.cs).
 //
@@ -230,7 +230,7 @@ internal sealed partial class SelectionWindow
                     : "Select an item (on a corpse, the ground or in a pack) first.");
             }
             if (ImGui.MenuItem("Hide the Selection window")) _host.SetPanelOpen(Title, RynthPanelOpen.Close);
-            SafeImGui.SetItemTooltip("/rdef selection, or Settings > UI > Toolbar > Selection, shows it again.");
+            SafeImGui.SetItemTooltip("/rdef selection, or Settings > Interface > In The Retail Toolbar's Place > Selection, shows it again.");
         }
         finally { ImGui.EndPopup(); }
     }

@@ -193,7 +193,7 @@ internal sealed unsafe class ServerHubClient
 
     /// <summary>
     /// This character forces the plugin's server (its own override; set there or in
-    /// RynthCore's Options > Diagnostics, never by RynthAi). Any thread.
+    /// RynthCore's Settings > Game Client, never by RynthAi). Any thread.
     /// </summary>
     public bool ServerForced
     {

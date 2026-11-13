@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using RynthCore.Plugin.RynthAi.LegacyUi;
+using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthAi;
 
@@ -103,6 +105,8 @@ public sealed partial class RynthAiPlugin
     /// <summary>OnViewObjectContents for a non-corpse container: remember it as a chest to look at.</summary>
     private void NoteContainerOpened(int id)
     {
+        if (id != 0 && id == _chestReopenId)
+            ClearChestReopen();   // it is open again (the looter's use, a meta's or the player's)
         if (id == 0 || unchecked((uint)id) == _playerId || IsChestLoot(id))
             return;
         _chestCandidateId = id;
@@ -302,18 +306,175 @@ public sealed partial class RynthAiPlugin
     /// <summary>OnStopViewingObjectContents / DeleteObject for a chest. True when it was the chest being looted.</summary>
     private bool OnChestGone(int id, string how)
     {
-        if (_chestCandidateId == id)
+        bool wasCandidate = _chestCandidateId == id;
+        if (wasCandidate)
             _chestCandidateId = 0;
         if (!IsChestLoot(id))
+        {
+            // Open and eligible, but closed before the looter took it (it was on a corpse, or in a fight).
+            if (wasCandidate && how == ChestClosedHow)
+                ConsiderChestReopen(id, taken: false);
             return false;
+        }
         bool active = _openedContainerId == id || _targetCorpseId == id;
         if (!active)
         {
             _lootChestId = 0;
             return true;
         }
-        LootDiag($"[RynthAi] Chest loot: chest 0x{(uint)id:X8} {how} before looting finished; not reopening it (open it again to loot the rest).");
+        // Not a chest the player opened with the macro off: that one is the player's to close.
+        bool reopens = how == ChestClosedHow && id != _manualChestLootId && ConsiderChestReopen(id, taken: true);
+        if (!reopens)
+            LootDiag($"[RynthAi] Chest loot: chest 0x{(uint)id:X8} {how} before looting finished; not reopening it (open it again to loot the rest).");
         FinishChestLoot(id, how, close: false, sayNothingMatched: false);
+        return true;
+    }
+
+    // ── A chest that closes before the looter is done is opened again (2026-11-12) ──────────────
+    // 8 of 134 chest loots in a week of logs ended "was closed before looting finished", with
+    // items still to take. What closes it is the client: while its loot window shows a container it
+    // checks once a second that the character stands within that container's use radius, and when
+    // it doesn't it hides the window, which uses the container - and a use of a container you are
+    // viewing closes it on the server (read from acclient.exe; RynthCore's LootWindowProbe logs
+    // each one). A jump-loot hop, the server's walk back for the next pickup, a step toward a
+    // monster or an open that needed a walk-up is enough. Opening a corpse closes an open chest
+    // too (the server shows one container at a time).
+    //
+    // A corpse the looter was on is opened again (OnStopViewingObjectContents); a chest was not,
+    // so the rest stayed in it until someone opened it again. Now the looter uses the chest again,
+    // at most ChestReopenMax times a minute per chest: a chest that keeps closing (locked again,
+    // a player closing it on purpose) is left after that. Only with the macro and Looting on, and
+    // never for a chest the player opened with the macro off.
+
+    /// <summary>OnChestGone's "how" for the server's close (the other is "left range": the object is gone).</summary>
+    internal const string ChestClosedHow = "was closed";
+    internal const int ChestReopenMax = 2;
+    internal const long ChestReopenWindowMs = 60_000;
+    /// <summary>After the close, before the use: the close settles (the client's window, the server's viewer).</summary>
+    internal const long ChestReopenDelayMs = 600;
+    /// <summary>The use is answered within this (a walk back included) or the chest is left.</summary>
+    internal const long ChestReopenAnswerMs = 5_000;
+    /// <summary>A reopen that got no turn in this long (a fight, the macro off) is dropped.</summary>
+    internal const long ChestReopenStaleMs = 30_000;
+
+    /// <summary>The chest to open again (0 = none).</summary>
+    private int _chestReopenId;
+    private long _chestReopenDueAt;
+    /// <summary>When the use went out (0 = not yet).</summary>
+    private long _chestReopenSentAt;
+    private readonly Dictionary<int, (long FirstAt, int Count)> _chestReopens = new();
+
+    private void ClearChestReopen()
+    {
+        _chestReopenId = 0;
+        _chestReopenDueAt = 0;
+        _chestReopenSentAt = 0;
+    }
+
+    /// <summary>
+    /// Chest <paramref name="id"/> was closed with loot work left: books a reopen and logs it. False
+    /// (nothing booked) with the macro or Looting off, for a container that isn't a chest to loot,
+    /// or once it has been reopened ChestReopenMax times in the last minute (logged).
+    /// <paramref name="taken"/>: the looter was on it; false: it was open but not taken yet.
+    /// </summary>
+    private bool ConsiderChestReopen(int id, bool taken)
+    {
+        var settings = _dashboard?.Settings;
+        if (settings == null || !settings.IsMacroRunning || !settings.EnableLooting)
+            return false;
+        if (_objectCache?[id] == null)
+            return false;
+        if (!taken && JudgeChest(id, out _) != ChestVerdict.Loot)
+            return false;
+
+        long now = CorpseNowMs;
+        int count = 0;
+        long firstAt = now;
+        if (_chestReopens.TryGetValue(id, out var seen) && now - seen.FirstAt < ChestReopenWindowMs)
+        {
+            count = seen.Count;
+            firstAt = seen.FirstAt;
+        }
+        string before = taken ? "before looting finished" : "before the looter got to it";
+        if (count >= ChestReopenMax)
+        {
+            LootDiag($"[RynthAi] Chest loot: chest 0x{(uint)id:X8} {ChestClosedHow} {before}, again: opened {count} times in the last minute already, so it is left (open it again to loot the rest).");
+            return false;
+        }
+        if (_chestReopens.Count > 32)
+            _chestReopens.Clear();
+        _chestReopens[id] = (firstAt, count + 1);
+        _chestReopenId = id;
+        _chestReopenDueAt = now + ChestReopenDelayMs;
+        _chestReopenSentAt = 0;
+        LootDiag($"[RynthAi] Chest loot: chest 0x{(uint)id:X8} {ChestClosedHow} {before}; opening it again ({count + 1} of {ChestReopenMax}).");
+        return true;
+    }
+
+    /// <summary>HasLootWork: a chest waits to be opened again (no state changed).</summary>
+    private bool HasChestReopenWork() =>
+        _chestReopenId != 0 && _targetCorpseId == 0 && _openedContainerId == 0;
+
+    /// <summary>
+    /// TickCorpseOpening, nothing claimed or open: uses the chest booked by ConsiderChestReopen once
+    /// its delay is over, then waits for it to open (OnViewObjectContents makes it the candidate and
+    /// TryTakeOpenChest takes it). True while this tick belongs to it, so no corpse is claimed and
+    /// opened meanwhile (that would close the chest again).
+    /// </summary>
+    private bool TryReopenChest(LegacyUiSettings settings, long now)
+    {
+        int id = _chestReopenId;
+        if (id == 0 || _targetCorpseId != 0 || _openedContainerId != 0)
+            return false;
+        if (_objectCache?[id] == null)
+        {
+            ClearChestReopen();
+            return false;
+        }
+
+        if (_chestReopenSentAt != 0)
+        {
+            if (now - _chestReopenSentAt < ChestReopenAnswerMs)
+                return true;
+            LootDiag($"[RynthAi] Chest loot: chest 0x{(uint)id:X8} didn't open again within {ChestReopenAnswerMs / 1000} s of the use; it is left (open it again to loot the rest).");
+            ClearChestReopen();
+            return false;
+        }
+        if (now - _chestReopenDueAt >= ChestReopenStaleMs)
+        {
+            LootDiag($"[RynthAi] Chest loot: the reopen of chest 0x{(uint)id:X8} got no turn in {ChestReopenStaleMs / 1000} s; dropped (open it again to loot the rest).");
+            ClearChestReopen();
+            return false;
+        }
+        if (now < _chestReopenDueAt || _activity != BotActivity.Looting)
+            return true;
+
+        if (IsLootingBlockedByPack(settings))
+        {
+            LootDiag($"[RynthAi] Chest loot: not reopening chest 0x{(uint)id:X8} - the pack is full (Stop Looting When Pack Full).");
+            ClearChestReopen();
+            return false;
+        }
+        double maxMeters = GetCorpseApproachRangeMaxMeters(settings);
+        double distance = _objectCache.Distance(unchecked((int)_playerId), id);
+        if (double.IsNaN(distance) || distance > Math.Max(maxMeters * 1.5, maxMeters + 2.0))
+        {
+            LootDiag($"[RynthAi] Chest loot: not reopening chest 0x{(uint)id:X8} - it is {distance:0.0} m away, past the loot range ({maxMeters:0.0} m).");
+            ClearChestReopen();
+            return false;
+        }
+
+        PauseNavigationForCorpse();
+        StopCorpseMovement();
+        bool sent = Host.UseFor(unchecked((uint)id), "Loot", "open the chest again: it closed before the looter was done");
+        if (!sent)
+        {
+            LootDiag($"[RynthAi] Chest loot: the use to reopen chest 0x{(uint)id:X8} wasn't taken; it is left (open it again to loot the rest).");
+            ClearChestReopen();
+            return false;
+        }
+        _chestReopenSentAt = now;
+        LootDiag($"[RynthAi] Chest loot: used chest 0x{(uint)id:X8} to open it again.");
         return true;
     }
 

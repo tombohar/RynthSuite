@@ -4048,6 +4048,13 @@ public partial class CombatManager : IDisposable
                     _tickWait = CombatLatencyTracker.Wait.Cast;
                     return true;
                 }
+                // The first cast after a wield waits for the stance to settle (WandSwapRules): nothing
+                // was sent, so the attack interval doesn't start; the next tick asks again.
+                if (_equipGateHeld)
+                {
+                    _tickWait = CombatLatencyTracker.Wait.Cast;
+                    return true;
+                }
 
                 // Waiting on a script's choice of spell (RynthAi.Combat): nothing was sent. The same
                 // as the wall hold: the attack interval doesn't start, the target and scan stay as they
@@ -5739,7 +5746,7 @@ public partial class CombatManager : IDisposable
     private void NoteRearmWield(int id, bool off, DateTime now)
     {
         if (off) { _offhandSentId = id; _lastEquipTime = now; EquippedState.Invalidate(); }
-        else MarkWieldSent(id, InHandWeaponId());
+        else MarkWieldSent(id, _handsSwapForFight && _handsSwapFrom != 0 ? _handsSwapFrom : InHandWeaponId());
     }
 
     /// <summary>
@@ -5758,7 +5765,7 @@ public partial class CombatManager : IDisposable
         bool onlyOurPeace = a == null || (a.Kind == PacedKind.CombatMode && a.ModeTarget == CombatMode.NonCombat && a.Who == "Combat");
         if (!_host.ChangeCombatModeFor(_rearmStanceWanted, "Combat", "weapons back: the fight's stance", force: onlyOurPeace))
             return false;
-        _host.Log($"[EquipDiag] {(_rearmStanceForFight ? "weapons for the fight" : "weapons back after heals")}: {(_rearmStanceWanted == CombatMode.Missile ? "Missile" : "Melee")} mode");
+        _host.Log($"[EquipDiag] {(_rearmStanceForFight ? "weapons for the fight" : "weapons back after heals")}: {CombatModeName(_rearmStanceWanted)} mode");
         if (_rearmStanceForFight)
         {
             // Combat's own stance request (the wielded branch) waits its retry delay behind this one.
@@ -5871,6 +5878,7 @@ public partial class CombatManager : IDisposable
         string what = HandsSwapLabel;
         _rearmSwap.Cancel();
         _handsSwapForFight = false;
+        _handsSwapFrom = 0;
         _weaponSwapGate?.Release(_handsGateBy, _rearmLastMoved);
         LastRearmSwapMs = ms;
         _host.Log(done
@@ -6492,8 +6500,10 @@ public partial class CombatManager : IDisposable
         // Fast Weapon Swap: a caster in hand and a melee weapon or launcher wanted (a monster came while
         // healing): peace, the wand out, the weapons on (one frame when the server is quiet), then the
         // fight's stance. The client's own use took 1.4-1.7 s and paid a forced stance change.
-        if (_settings.FastWeaponSwap && allowWield && desiredMode != CombatMode.Magic && inHand != 0 && inHand != targetWeaponId
-            && WeaponKind(inHand) == CombatMode.Magic && TryStartFightHandsSwap(target, rule, targetWeaponId, desiredMode))
+        // Another caster wanted (2026-11-11, WandSwapRules): the same, then Magic. The client's own use
+        // went Magic, peace, bare hands, peace, Magic.
+        if (WandSwapRules.UseHandsSwap(_settings.FastWeaponSwap, allowWield, inHand, targetWeaponId, WeaponKind(inHand))
+            && TryStartFightHandsSwap(target, rule, targetWeaponId, desiredMode))
         {
             LastCombatSkipReason = "hand-swap";
             return false;
@@ -7454,7 +7464,8 @@ public partial class CombatManager : IDisposable
                           (recklessTrained ? "" : " (Recklessness untrained: no reckless band)") + $", first attack at {power * 100:0}%");
             }
 
-            int uiHeight = isMissile ? _settings.MissileAttackHeight : _settings.MeleeAttackHeight;
+            // The fixed Attack Height, or the Dirty Fighting rotation's pick (CombatManager.DirtyFighting.cs).
+            int uiHeight = AttackHeightForTarget(isMissile);
             int acHeight = uiHeight switch { 0 => 3, 2 => 1, _ => 2 }; // Low=3, Med=2, High=1
 
             // Native attack: select target, Start fills power bar, End fires the attack.
@@ -7624,6 +7635,7 @@ public partial class CombatManager : IDisposable
         _wallFaceHeld = false;
         _manaCastHeld = false;
         _scriptHeld = false;
+        _equipGateHeld = false;
         if (_spellManager == null || target == null) return;
 
         // Hard safety veto: never cast offensive magic at something AC's combat
@@ -7648,14 +7660,13 @@ public partial class CombatManager : IDisposable
         // didn't execute, which is what collapsed war to Force Bolt I and
         // re-poisoned bufftimers.txt every few seconds.
 
-        // Don't cast while a weapon equip is in progress — the wand may not be registered
-        // as wielded yet. _lastEquipTime is set whenever UseObject is called for a wand swap.
-        if ((RynthClock.Now - _lastEquipTime).TotalMilliseconds < 3000)
-        {
-            _host.Log($"[CombatCast] equip-gate: wand equip in progress ({(RynthClock.Now - _lastEquipTime).TotalMilliseconds:0}ms < 3000ms), skipping cast");
-            LastCombatSkipReason = "equip-gate"; // D4 record-only
+        // Don't cast while a weapon equip is still settling. _lastEquipTime is set by every wield.
+        // This was a flat 3 s, and each held tick counted as an attack (the next try a whole attack
+        // interval later); now the cast goes once the stance has settled after the wield, at most
+        // the old 3 s (WandSwapRules.EquipCastHoldMs). Combat only gets here with the chosen wand in
+        // hand and the client reading Magic.
+        if (EquipCastHoldsNow())
             return;
-        }
         // Cadence is set in Think before this is called: the previous cast must have resolved
         // (UseDone, IsAwaitingCastResolution), its gesture must be over (CanCastNow), and the
         // Attack Spell Delay must have passed since the last cast at this same target (the first

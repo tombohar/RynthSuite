@@ -47,7 +47,11 @@ internal static class ChestLootTests
         r.Add("chest loot: a salvage-only item is left when no UST is carried, as on corpses", SalvageWithoutUstLeft);
         r.Add("chest loot: opened mid-fight it waits for combat, then is looted if still open", ChestWaitsForCombat);
         r.Add("chest loot: an open chest is looted before a fight further than 5 yd off (a chest closes when you walk away)", OpenChestBeforeDistantFight);
-        r.Add("chest loot: closed by the player mid-loot -> session ends, chest not reopened", ClosedMidLootNotReopened);
+        r.Add("chest loot: closed mid-loot -> the looter opens it again and takes the rest", ClosedMidLootReopened);
+        r.Add("chest loot: a chest that keeps closing is opened again twice in a minute, then left", ReopenIsBounded);
+        r.Add("chest loot: a chest the player opened with the macro off is not reopened when it closes", ManualChestNotReopened);
+        r.Add("chest loot: an open chest that closes before the looter gets to it (a fight had the tick) is opened again", ClosedBeforeTakenReopened);
+        r.Add("chest loot: no jump-loot from a chest (a hop can take the character out of its use radius)", NoJumpLootFromChest);
         r.Add("chest loot: a chest gets 2 minutes (not the 12 s corpse timeout), restarted by each pickup", ChestTimeoutLongAndRestarted);
     }
 
@@ -533,7 +537,13 @@ internal static class ChestLootTests
         Check.False((bool)close.Call("IsOpenChestTurn", true, true)!, "a monster at the chest is fought first");
     }
 
-    private static void ClosedMidLootNotReopened()
+    private static int ChestUses() => FakeHost.Uses.Count(u => u == Chest);
+
+    // 2026-11-12: the client closes a container once the character is outside its use radius at its
+    // once-a-second check (a jump-loot hop, the walk back for the next item, a step toward a monster).
+    // 8 of 134 chest loots in a week of logs ended that way with items left; a corpse was reopened,
+    // a chest was not.
+    private static void ClosedMidLootReopened()
     {
         BaseWorld();
         var host = FakeHost.Create(Player);
@@ -543,14 +553,138 @@ internal static class ChestLootTests
         bot.TickUntil(() => bot.Moved(Gem));
         Check.True(bot.Moved(Gem), "the gem's move is sent");
 
-        // The player closes it before the gem arrives.
+        // The chest closes before the gem arrives.
         bot.ServerCloses(Chest);
         Check.Eq(bot.Get<int>("_openedContainerId"), 0, "the session ends");
-        bot.TickFor(300);
-        Check.False(FakeHost.Uses.Contains(Chest), "the chest is never reopened by the looter");
+        Check.Eq(bot.Get<uint>("_lastChestLootedId"), 0u, "a chest closed mid-loot doesn't count as looted");
         Check.Eq(FakeHost.Closes.Count, 0, "nothing to close: it is closed already");
-        Check.False(bot.Marked(Chest), "and not marked: opening it again loots it");
-        Check.Eq(bot.Get<uint>("_lastChestLootedId"), 0u, "a chest closed mid-loot doesn't count as looted (a meta opens it again)");
-        Check.True(FakeHost.Logs.Any(l => l.Contains("Chest loot:") && l.Contains("before looting finished")), "logged");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("Chest loot:") && l.Contains("before looting finished; opening it again (1 of 2)")), "logged");
+        Check.True(bot.HasLootWork(), "the chest to open again is loot work: Looting keeps the tick");
+        bot.Tick();
+        Check.Eq(ChestUses(), 0, "not at once: the close settles first");
+
+        bot.TickUntil(() => ChestUses() > 0);
+        Check.Eq(ChestUses(), 1, "then the looter uses the chest to open it again");
+        bot.TickFor(200);
+        Check.Eq(ChestUses(), 1, "one use, not one a tick, while it waits for the chest to open");
+        Check.Eq(bot.Get<int>("_targetCorpseId"), 0, "and nothing else is claimed meanwhile");
+
+        // It opens: the gem is still in it and is taken, then the chest is closed as usual.
+        int movesBefore = FakeHost.ExternalMoves.Count;
+        bot.ServerOpens(Chest);
+        bot.TickUntil(() => FakeHost.ExternalMoves.Count > movesBefore);
+        Check.True(FakeHost.ExternalMoves.Count > movesBefore, "the gem's move is sent again");
+        FakeHost.Containers[Gem] = Player;
+        bot.TickUntil(() => FakeHost.Closes.Count > 0);
+        Check.Eq(FakeHost.Closes.Count, 1, "closed when done");
+        Check.Eq(bot.Get<uint>("_lastChestLootedId"), Chest, "now it counts as looted to the end");
+        Check.False(bot.Moved(Spoon), "the spoon is still left");
+        Check.False(bot.Marked(Chest), "and the chest is still never marked");
+        Check.Eq(ChestUses(), 1, "no further use");
+    }
+
+    private static void ReopenIsBounded()
+    {
+        BaseWorld();
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        bot.Create(Chest, Gem, Spoon);
+        bot.ServerOpens(Chest);
+        bot.TickUntil(() => bot.Moved(Gem));
+
+        // It closes mid-loot, is opened again, and closes again: twice.
+        for (int round = 1; round <= RynthAiPlugin.ChestReopenMax; round++)
+        {
+            bot.ServerCloses(Chest);
+            bot.TickUntil(() => ChestUses() >= round);
+            Check.Eq(ChestUses(), round, $"close {round}: the looter opens it again");
+            bot.ServerOpens(Chest);
+            bot.TickUntil(() => bot.Get<int>("_openedContainerId") != 0);
+            Check.Eq(bot.Get<int>("_openedContainerId"), unchecked((int)Chest), $"close {round}: and takes it again");
+        }
+
+        // The third close in a minute: left alone.
+        bot.ServerCloses(Chest);
+        bot.TickFor((int)RynthAiPlugin.ChestReopenDelayMs + 400);
+        Check.Eq(ChestUses(), RynthAiPlugin.ChestReopenMax, "no third use");
+        Check.False(bot.HasLootWork(), "and nothing left to do");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("Chest loot:") && l.Contains("so it is left")), "logged");
+    }
+
+    private static void ManualChestNotReopened()
+    {
+        BaseWorld();
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        bot.S.IsMacroRunning = false;   // Pickup with macro off takes the chest the player opened
+        bot.Create(Chest, Gem, Spoon);
+        bot.ServerOpens(Chest);
+        bot.TickUntil(() => bot.Moved(Gem));
+        Check.True(bot.Moved(Gem), "the gem's move is sent");
+
+        bot.ServerCloses(Chest);   // the player closes it
+        bot.TickFor((int)RynthAiPlugin.ChestReopenDelayMs + 400);
+        Check.Eq(ChestUses(), 0, "the player's chest is the player's to close: never reopened");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("Chest loot:") && l.Contains("not reopening it")), "logged as before");
+    }
+
+    // The 2026-11-11 20:02 case: a meta opened a cache while the looter was on a corpse; the corpse's
+    // open closed the cache untouched. Here a fight holds the tick instead: same thing, never taken.
+    private static void ClosedBeforeTakenReopened()
+    {
+        BaseWorld();
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        bot.Create(Chest, Gem, Spoon);
+        bot.ServerOpens(Chest);
+        bot.TickFor(150, BotActivity.Combat);
+        Check.Eq(bot.Get<int>("_openedContainerId"), 0, "open, but the looter hasn't taken it");
+
+        bot.ServerCloses(Chest);
+        Check.True(FakeHost.Logs.Any(l => l.Contains("Chest loot:") && l.Contains("before the looter got to it; opening it again (1 of 2)")), "booked and logged");
+        bot.TickFor((int)RynthAiPlugin.ChestReopenDelayMs + 200, BotActivity.Combat);
+        Check.Eq(ChestUses(), 0, "no use while the fight has the tick");
+
+        bot.TickUntil(() => ChestUses() > 0);
+        Check.Eq(ChestUses(), 1, "used once Looting has the tick");
+        bot.ServerOpens(Chest);
+        LootGemAndFinish(bot, Gem);
+        Check.Eq(FakeHost.Closes.Count, 1, "looted and closed");
+        Check.Eq(bot.Get<uint>("_lastChestLootedId"), Chest, "and counts as looted to the end");
+
+        // Looting off: a chest that closes books nothing.
+        BaseWorld();
+        var bot2 = new Bot(FakeHost.Create(Player));
+        bot2.S.LootChestsMacroOff = false;
+        bot2.S.EnableLooting = false;
+        bot2.Create(Chest, Gem, Spoon);
+        bot2.ServerOpens(Chest);
+        bot2.TickFor(100);
+        bot2.ServerCloses(Chest);
+        bot2.S.EnableLooting = true;
+        bot2.TickFor((int)RynthAiPlugin.ChestReopenDelayMs + 300);
+        Check.Eq(ChestUses(), 0, "Looting was off when it closed: not reopened");
+    }
+
+    private static void NoJumpLootFromChest()
+    {
+        BaseWorld();
+        FakeHost.TapJumpCalls = true;
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        bot.S.LootJumpEnabled = true;
+        bot.Set("_vitals", new PlayerVitalsCache { MaxHealth = 100, CurrentHealth = 100, MaxStamina = 100, CurrentStamina = 100, MaxMana = 100, CurrentMana = 100 });
+        bot.Create(Chest, Gem, Spoon);
+        bot.ServerOpens(Chest);
+        bot.TickUntil(() => bot.Get<int>("_openedContainerId") != 0);
+
+        Check.False((bool)bot.Call("ShouldJumpLoot", bot.S)!, "no jump-loot while the open container is a chest");
+        bot.Set("_lootChestId", 0);
+        Check.True((bool)bot.Call("ShouldJumpLoot", bot.S)!, "control: the same state with a corpse open jumps");
+        bot.Set("_lootChestId", unchecked((int)Chest));
+
+        LootGemAndFinish(bot, Gem);
+        Check.True(bot.Moved(Gem), "the gem is taken");
+        Check.Eq(FakeHost.TapJumps, 0, "and no jump was sent for it");
     }
 }

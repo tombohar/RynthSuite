@@ -183,7 +183,7 @@ public sealed partial class RynthAiPlugin
     {
         if (_dashboard == null || _itemInfoUi != null) return;
         _itemInfoUi = new LegacyItemInfoUi(_dashboard.Settings);
-        _itemInfoUi.SetHooks(DescribeSelectedItemForPreview, PrintSelectedItemInfo, TestItemInfoChatType);
+        _itemInfoUi.SetHooks(DescribeSelectedItemForPreview, PrintSelectedItemInfo, TestItemInfoChatType, TestItemInfoPartColors);
     }
 
     /// <summary>Pump-thread work for the ported features. Safe before login (each call is null-checked).</summary>
@@ -195,6 +195,8 @@ public sealed partial class RynthAiPlugin
         catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats tick"); }
         try { TickMonsterStats(); }   // after the session's tick: follows its start (RynthAiPlugin.MonsterStats.cs)
         catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "monster stats tick"); }
+        try { TickActiveGear(); }   // RynthAiPlugin.ActiveGear.cs
+        catch (Exception ex) { RynthLog.Exception(LogCat.UI, ex, "active gear tick"); }
         try { _serverHub?.Tick(); }
         catch (Exception ex) { RynthLog.Exception(LogCat.UI, ex, "server plugin hub lookup"); }
         try { _miniRemote?.Tick(); }
@@ -229,6 +231,7 @@ public sealed partial class RynthAiPlugin
         Huds.ServerCommandModel.Clear();
         _itemInfoUi = null;
         _spellsUi = null;
+        ResetActiveGear();
         ResetGroundLoot(clearCaches: true);
         Loot.T11ItemSupport.Reset();
         if (!disposeTranslator) return;
@@ -280,6 +283,7 @@ public sealed partial class RynthAiPlugin
             RenderTranslateWindow();
             RenderLootWhyWindow();
             RenderHuntPanel();
+            RenderDfHeightPanel();
         }
         catch (Exception ex)
         {
@@ -329,6 +333,7 @@ public sealed partial class RynthAiPlugin
             _spellsUi?.Render();
             RenderLootWhyWindow();
             RenderHuntPanel();
+            RenderDfHeightPanel();
         }
         catch (Exception ex)
         {
@@ -488,7 +493,8 @@ public sealed partial class RynthAiPlugin
     {
         if (!_initialized || !_loginComplete) return null;
         return Huds.SectionsManifest.Build(Huds.SectionsManifest.Views(), Huds.SectionsManifest.OwnSections,
-            dashboard: DashboardWindowWanted, monsterStats: MonsterStatsWindowWanted);
+            dashboard: DashboardWindowWanted, monsterStats: MonsterStatsWindowWanted, timedCommands: TimedCommandsWindowWanted,
+            activeGear: ActiveGearWindowWanted);
     }
     /// <summary>Chat Translate window in the dashboard colours (no-op while hidden).</summary>
     private void RenderTranslateWindow()

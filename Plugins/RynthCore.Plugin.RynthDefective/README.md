@@ -121,7 +121,7 @@ number (the game gets no keys while the box has the keyboard) or pick 1, 10, 100
 
 ## The Day/Night timer
 
-A one-row window (its RynthCore bar button is the sun; `/rdef daynight [show|hide]`; Settings > UI > Toolbar >
+A one-row window (its RynthCore bar button is the sun; `/rdef daynight [show|hide]`; Settings > Interface > In The Retail Toolbar's Place >
 *Day/Night timer*): a sun by day, a moon at night, and the **real** time until the next change, "Night in 23m",
 "Day in 4m 10s" (seconds from 10 minutes down), with the Dereth hour's name when there is room. A Dereth day is
 16 hours of 476.25 s, 2 h 7 min of real time: day (Dawnsong to Warmtide-and-Half) and night (Evensong to

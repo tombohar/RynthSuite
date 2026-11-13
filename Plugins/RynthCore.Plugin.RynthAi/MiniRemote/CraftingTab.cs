@@ -10,6 +10,8 @@
 //     Infinite Leaftide), then the player's own rows for this world (CraftingTabState.CustomByWorld).
 //     With none defined it says so.
 // One TinkerRunner works one tab's scan at a time.
+// Above the benches: "Auto-confirm crafting" (CraftAutoConfirm), Yes to the server's chance prompt
+// at the chosen percent for crafts the player starts by hand.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -26,6 +28,9 @@ internal sealed class CraftingTab
 
     public TinkerRunner Runner { get; }
 
+    /// <summary>Auto-confirm crafting (the sticky engine answer for hand-made crafts).</summary>
+    public CraftAutoConfirm AutoConfirm { get; }
+
     // Custom-row editor (render thread only)
     private int _newMaterial = TinkerCatalog.Steel;
     private int _newKind;
@@ -39,6 +44,7 @@ internal sealed class CraftingTab
     {
         _ctx = ctx;
         Runner = new TinkerRunner(ctx, RowsFor, SettingsFor);
+        AutoConfirm = new CraftAutoConfirm(() => ctx.Host, () => ctx.Settings, ctx.Chat);
     }
 
     private CraftingTabState C => _ctx.State.Crafting;
@@ -78,16 +84,25 @@ internal sealed class CraftingTab
 
     // ── Lifecycle (MiniRemoteController) ─────────────────────────────────────────────────────────
 
-    public void Tick(long nowMs) => Runner.Tick(nowMs);
+    public void Tick(long nowMs)
+    {
+        Runner.Tick(nowMs);
+        AutoConfirm.Tick(nowMs);
+    }
 
     public void OnChat(string text) => Runner.OnChat(text);
 
-    public void OnLogout() => Runner.OnLogout();
+    public void OnLogout()
+    {
+        Runner.OnLogout();
+        AutoConfirm.Release();
+    }
 
     // ── UI (render thread) ──────────────────────────────────────────────────
 
     public void Render()
     {
+        RenderAutoConfirm();
         if (!ImGui.BeginTabBar("##crafting")) return;
         if (ImGui.BeginTabItem("Armor")) { RenderBench(TinkerBench.Armor); ImGui.EndTabItem(); }
         if (ImGui.BeginTabItem("Weapons"))
@@ -105,6 +120,48 @@ internal sealed class CraftingTab
         if (ImGui.BeginTabItem("Trinkets")) { RenderBench(TinkerBench.Trinkets); ImGui.EndTabItem(); }
         if (ImGui.BeginTabItem("Items")) { RenderBench(TinkerBench.Items); ImGui.EndTabItem(); }
         ImGui.EndTabBar();
+    }
+
+    /// <summary>Auto-confirm crafting: the checkbox, the percent and what it has done.</summary>
+    private void RenderAutoConfirm()
+    {
+        var settings = _ctx.Settings;
+        if (settings == null) return;
+        bool supported = AutoConfirm.Supported;
+        bool on = settings.AutoConfirmCraft && supported;
+        ImGui.BeginDisabled(!supported);
+        if (ImGui.Checkbox("Auto-confirm crafting##autoconfirm", ref on))
+        {
+            bool value = on;
+            _ctx.Post(() => { settings.AutoConfirmCraft = value; _ctx.SaveCombatSettings?.Invoke(); });
+        }
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            SafeImGui.SetTooltip(supported
+                ? "When you combine items yourself (salvage on an item, a crafting recipe), click Yes on the\n"
+                  + "server's \"N percent chance to succeed\" prompt when the chance is at least the percent here.\n"
+                  + "A lower chance shows AC's dialog as usual. It never says No. Also /ra autoconfirm."
+                : "Auto-confirm crafting " + CraftAutoConfirm.NeedsEngineText + ".");
+        ImGui.SameLine();
+        ImGui.BeginDisabled(!supported || !settings.AutoConfirmCraft);
+        int percent = CraftAutoConfirm.ClampPercent(settings.AutoConfirmCraftPercent);
+        ImGui.SetNextItemWidth(90);
+        if (ImGui.InputInt("% or better##autoconfirmpct", ref percent, 5))
+        {
+            int value = CraftAutoConfirm.ClampPercent(percent);
+            _ctx.Post(() => { settings.AutoConfirmCraftPercent = value; _ctx.SaveCombatSettings?.Invoke(); });
+        }
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ImGui.SetTooltip($"The lowest chance to say Yes to ({CraftAutoConfirm.MinThreshold}-{CraftAutoConfirm.MaxThreshold}). Below it AC's dialog shows.");
+        ImGui.SameLine();
+        if (!supported)
+            SafeImGui.TextDisabled("needs a RynthCore update");
+        else if (settings.AutoConfirmCraft && AutoConfirm.AcceptedCount > 0)
+            SafeImGui.TextDisabled($"{AutoConfirm.AcceptedCount} confirmed this session");
+        else
+            SafeImGui.TextDisabled(settings.AutoConfirmCraft ? AutoConfirm.Status : "");
+        ImGui.Separator();
     }
 
     private void RenderBench(TinkerBench bench)

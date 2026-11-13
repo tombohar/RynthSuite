@@ -265,7 +265,7 @@ internal sealed partial class LegacyDashboardRenderer
         _navigationUi = new LegacyNavigationUi(_settings, host);
         _weaponsUi = new LegacyWeaponsUi(_settings, host);
         _metaSaver = new MetaSaver(_settings, line => _host.Log(line));
-        _metaUi = new LegacyMetaUi(_settings, _navFiles) { Saver = _metaSaver };
+        _metaUi = new LegacyMetaUi(_settings, _navFiles) { Saver = _metaSaver, Log = line => _host.Log(line) };
         _dungeonMapUi = new DungeonMapUi();
         _rynthRadarUi = new RynthRadarUi(host, _settings);
         _rynthRadarUi.SetMapData(_dungeonMapUi);
@@ -586,6 +586,7 @@ internal sealed partial class LegacyDashboardRenderer
                 _settings.MetaRulesStructuralVersion++;
                 _host.Log($"[RynthAi] Meta ({when}): {path} differs from the copy kept with these settings ({mine} rules); running the file's {loaded.Rules.Count} rules.");
             }
+            _metaUi.NoteCallStates(path, loaded.Rules);   // CallState rules that call nothing: say so
         }
         catch (Exception ex)
         {
@@ -593,21 +594,27 @@ internal sealed partial class LegacyDashboardRenderer
         }
     }
 
-    public void SaveSettings()
+    public void SaveSettings() => SaveSettingsNow(out _);
+
+    /// <summary>
+    /// <see cref="SaveSettings"/>, saying whether it was written and why not (the Loaded files
+    /// drawer's Save, /ra settings save). <paramref name="callerShows"/>: the caller reports a failure.
+    /// </summary>
+    internal bool SaveSettingsNow(out string reason, bool callerShows = false)
     {
-        if (string.IsNullOrEmpty(_settingsFilePath)) return;
+        reason = string.Empty;
+        if (string.IsNullOrEmpty(_settingsFilePath)) { reason = "not logged in"; return false; }
         string json;
         try
         {
             CaptureTransientUiState();
             json = JsonSerializer.Serialize(_settings, RynthAiJsonContext.Default.LegacyUiSettings);
         }
-        catch { return; }
-        if (WriteSettingsFile(_settingsFilePath, json))
-        {
-            _lastSavedJson = json;
-            WriteActiveProfile(_settings.SelectedProfile);
-        }
+        catch (Exception ex) { reason = ex.Message; return false; }
+        if (!WriteSettingsFile(_settingsFilePath, json, out reason, callerShows)) return false;
+        _lastSavedJson = json;
+        WriteActiveProfile(_settings.SelectedProfile);
+        return true;
     }
 
     /// <summary>
@@ -1279,6 +1286,7 @@ internal sealed partial class LegacyDashboardRenderer
                 RearmAfterVitals           = s.RearmAfterVitals,
                 StartMacroOnLogin          = s.StartMacroOnLogin,
                 PatrolOnLogin              = s.PatrolOnLogin,
+                HuntOnLogin                = s.HuntOnLogin,
                 ResumeMetaOnReload         = s.ResumeMetaOnReload,
                 YieldToVTank               = s.YieldToVTank,
                 EnableRaycasting           = s.EnableRaycasting,
@@ -1336,6 +1344,9 @@ internal sealed partial class LegacyDashboardRenderer
                 PetMinMonsters             = s.PetMinMonsters,
                 VariablePowerMin           = s.VariablePowerMin,
                 VariablePowerMax           = s.VariablePowerMax,
+                DfHeightRotation           = s.DfHeightRotation,
+                DfHeightOrder              = s.DfHeightOrder,
+                DfDefaultHeight            = s.DfDefaultHeight,
                 MissileEnvironmentResponse = s.MissileEnvironmentResponse,
                 MagicEnvironmentResponse   = s.MagicEnvironmentResponse,
                 EnvironmentImpactLimit     = s.EnvironmentImpactLimit,
@@ -1432,6 +1443,8 @@ internal sealed partial class LegacyDashboardRenderer
                 CastBuffsOverItemBuffs     = s.CastBuffsOverItemBuffs,
                 SkipUnusableBuffs          = s.SkipUnusableBuffs,
                 DisabledBuffs              = new List<string>(s.DisabledBuffs),
+                BlockedBuffItems           = new List<string>(s.BlockedBuffItems),
+                CustomBuffItems            = s.CustomBuffItems.ConvertAll(c => c.Copy()),
                 BuffMinSkillLevelTier1     = s.BuffMinSkillLevelTier1,
                 BuffMinSkillLevelTier2     = s.BuffMinSkillLevelTier2,
                 BuffMinSkillLevelTier3     = s.BuffMinSkillLevelTier3,
@@ -1463,6 +1476,8 @@ internal sealed partial class LegacyDashboardRenderer
                 EnableAutostack            = s.EnableAutostack,
                 ReadUnknownScrolls         = s.ReadUnknownScrolls,
                 UnboxAetheriaWhenIdle      = s.UnboxAetheriaWhenIdle,
+                AutoConfirmCraft           = s.AutoConfirmCraft,
+                AutoConfirmCraftPercent    = s.AutoConfirmCraftPercent,
                 EnableCombineSalvage       = s.EnableCombineSalvage,
                 CombineBagsDuringSalvage   = s.CombineBagsDuringSalvage,
                 SalvageWithoutPanel        = s.SalvageWithoutPanel,
@@ -1555,7 +1570,10 @@ internal sealed partial class LegacyDashboardRenderer
             s.PeaceModeWhenIdle          = p.PeaceModeWhenIdle;
             if (p.RearmAfterVitals is bool rav) s.RearmAfterVitals = rav;
             s.StartMacroOnLogin          = p.StartMacroOnLogin;
-            s.PatrolOnLogin              = p.PatrolOnLogin;
+            // Patrol On Login and Hunt On Login are one choice: the one just turned on clears the other
+            // (an engine without Hunt On Login sends no HuntOnLogin: unchanged, unless Patrol was turned on).
+            (s.PatrolOnLogin, s.HuntOnLogin) = LoginAutoStart.Exclusive(s.PatrolOnLogin, s.HuntOnLogin,
+                p.PatrolOnLogin, p.HuntOnLogin ?? s.HuntOnLogin);
             if (p.ResumeMetaOnReload is bool resumeMeta) s.ResumeMetaOnReload = resumeMeta;   // absent = unchanged
             s.YieldToVTank               = p.YieldToVTank;
             s.EnableRaycasting           = p.EnableRaycasting;
@@ -1617,6 +1635,9 @@ internal sealed partial class LegacyDashboardRenderer
             // Absent (an engine without these controls) = unchanged.
             if (p.VariablePowerMin is int vpMin)              s.VariablePowerMin = vpMin;
             if (p.VariablePowerMax is int vpMax)              s.VariablePowerMax = vpMax;
+            if (p.DfHeightRotation is bool dfRot)             s.DfHeightRotation = dfRot;
+            if (p.DfHeightOrder is string dfOrder)            s.DfHeightOrder = DirtyFightingHeights.NormalizeOrder(dfOrder);
+            if (p.DfDefaultHeight is int dfDef)               s.DfDefaultHeight = Math.Clamp(dfDef, -1, 2);
             if (p.MissileEnvironmentResponse is int envMis)   s.MissileEnvironmentResponse = envMis;
             if (p.MagicEnvironmentResponse is int envMag)     s.MagicEnvironmentResponse = envMag;
             if (p.EnvironmentImpactLimit is int envLimit)     s.EnvironmentImpactLimit = envLimit;
@@ -1717,6 +1738,8 @@ internal sealed partial class LegacyDashboardRenderer
             if (p.CastBuffsOverItemBuffs is bool castOverItems) s.CastBuffsOverItemBuffs = castOverItems;   // absent = unchanged
             if (p.SkipUnusableBuffs is bool skipUnusable) s.SkipUnusableBuffs = skipUnusable;   // absent = unchanged
             if (p.DisabledBuffs is { } disabledBuffs) s.DisabledBuffs = new List<string>(disabledBuffs);  // absent = unchanged
+            if (p.BlockedBuffItems is { } blockedItems) s.BlockedBuffItems = new List<string>(blockedItems);   // absent = unchanged
+            if (p.CustomBuffItems is { } customItems) s.CustomBuffItems = customItems.FindAll(c => c != null);   // absent = unchanged
             s.BuffMinSkillLevelTier1     = p.BuffMinSkillLevelTier1;
             s.BuffMinSkillLevelTier2     = p.BuffMinSkillLevelTier2;
             s.BuffMinSkillLevelTier3     = p.BuffMinSkillLevelTier3;
@@ -1745,6 +1768,9 @@ internal sealed partial class LegacyDashboardRenderer
             s.EnableAutostack            = p.EnableAutostack;
             s.ReadUnknownScrolls         = p.ReadUnknownScrolls;
             if (p.UnboxAetheriaWhenIdle is bool unboxAetheria) s.UnboxAetheriaWhenIdle = unboxAetheria;   // absent = unchanged
+            if (p.AutoConfirmCraft is bool autoConfirm) s.AutoConfirmCraft = autoConfirm;                  // absent = unchanged
+            if (p.AutoConfirmCraftPercent is int autoConfirmPct)                                           // absent = unchanged
+                s.AutoConfirmCraftPercent = MiniRemote.Crafting.CraftAutoConfirm.ClampPercent(autoConfirmPct);
             s.EnableCombineSalvage       = p.EnableCombineSalvage;
             s.CombineBagsDuringSalvage   = p.CombineBagsDuringSalvage;
             if (p.SalvageWithoutPanel is bool salvNoPanel) s.SalvageWithoutPanel = salvNoPanel; // absent = unchanged
@@ -2105,6 +2131,8 @@ internal sealed partial class LegacyDashboardRenderer
         dst.EnableAutocram           = tmp.EnableAutocram;
         dst.ReadUnknownScrolls       = tmp.ReadUnknownScrolls;
         dst.UnboxAetheriaWhenIdle    = tmp.UnboxAetheriaWhenIdle;
+        dst.AutoConfirmCraft         = tmp.AutoConfirmCraft;
+        dst.AutoConfirmCraftPercent  = tmp.AutoConfirmCraftPercent;
         dst.EnableCombineSalvage     = tmp.EnableCombineSalvage;
         dst.CombineBagsDuringSalvage = tmp.CombineBagsDuringSalvage;
         dst.SalvageWithoutPanel      = tmp.SalvageWithoutPanel;
@@ -2227,6 +2255,8 @@ internal sealed partial class LegacyDashboardRenderer
         dst.FastBuffChain            = tmp.FastBuffChain;
         dst.SkipUnusableBuffs        = tmp.SkipUnusableBuffs;
         dst.DisabledBuffs            = tmp.DisabledBuffs;
+        dst.BlockedBuffItems         = tmp.BlockedBuffItems;
+        dst.CustomBuffItems          = tmp.CustomBuffItems.FindAll(c => c != null && !string.IsNullOrWhiteSpace(c.Name));
         dst.BuffShield               = tmp.BuffShield;
         dst.BlacklistAttempts           = tmp.BlacklistAttempts;
         dst.BlacklistTimeoutSec           = tmp.BlacklistTimeoutSec;
@@ -2257,6 +2287,9 @@ internal sealed partial class LegacyDashboardRenderer
         dst.PreferDualWield          = tmp.PreferDualWield;
         dst.MeleeAttackHeight        = tmp.MeleeAttackHeight;
         dst.MissileAttackHeight      = tmp.MissileAttackHeight;
+        dst.DfHeightRotation         = tmp.DfHeightRotation;
+        dst.DfHeightOrder            = DirtyFightingHeights.NormalizeOrder(tmp.DfHeightOrder);
+        dst.DfDefaultHeight          = Math.Clamp(tmp.DfDefaultHeight, -1, 2);
         dst.UseArcs                  = tmp.UseArcs;
         dst.BowArcVelocity           = tmp.BowArcVelocity;
         dst.CrossbowArcVelocity      = tmp.CrossbowArcVelocity;
@@ -2339,6 +2372,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.AllowMetaKeystrokes      = tmp.AllowMetaKeystrokes;
         dst.StartMacroOnLogin        = tmp.StartMacroOnLogin;
         dst.PatrolOnLogin            = tmp.PatrolOnLogin;
+        dst.HuntOnLogin              = tmp.HuntOnLogin;
         dst.ResumeMetaOnReload       = tmp.ResumeMetaOnReload;
         dst.YieldToVTank             = tmp.YieldToVTank;
         dst.FeatureServerNames       = tmp.FeatureServerNames;
@@ -2826,6 +2860,25 @@ internal sealed partial class LegacyDashboardRenderer
         return $"[RynthAi] Loaded meta '{want}': {rules} rules, {navs} navs"
             + (warnings.Count > 0 ? $" — {warnings.Count} warning(s): {warnings[0]}" : "");
     }
+
+    /// <summary>
+    /// /ra meta repair (and the Macro Rules window's Repair from .met): fills the loaded .af's CallState
+    /// rules that lost their target from the .met of the same name (CallStateRepair). Returns the chat line.
+    /// </summary>
+    public string RepairMetaFromMet()
+    {
+        bool ok = _metaUi.RepairFromMet(out string reply);
+        if (ok)
+        {
+            _metaUi.RefreshFileListIfShown();
+            RefreshMetaFiles();   // MetaProfileIdx follows the loaded file
+            SaveSettings();
+        }
+        return reply;
+    }
+
+    /// <summary>Posts the meta load warnings waiting for chat (plugin tick, in game).</summary>
+    public void DrainMetaNotices(Func<string, bool> write) => _metaUi.DrainNotices(write);
 
     /// <summary>/ra meta list: the metas in MetaFiles (file names, with extension).</summary>
     public List<string> MetaFileNames()
@@ -3751,19 +3804,8 @@ internal sealed partial class LegacyDashboardRenderer
                         _metaSaver.Refuse("Not saved: no file name was given.", "save_file");
                         break;
                     }
-                    {
-                        string savePath = cmd.Path;
-                        if (_metaSaver.SaveTo(savePath, "Save As", callerShows: true))
-                        {
-                            _settings.CurrentMetaPath = savePath;
-                            RefreshMetaFiles();   // the picker lists (and selects) the new file
-                            SaveSettings();
-                        }
-                        else
-                        {
-                            ReportMetaApply(false, "Meta " + _metaSaver.LastText);
-                        }
-                    }
+                    if (!SaveMetaAs(cmd.Path))
+                        ReportMetaApply(false, "Meta " + _metaSaver.LastText);
                     break;
 
                 case "set_source":

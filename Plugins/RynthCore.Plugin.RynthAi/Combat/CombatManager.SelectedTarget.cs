@@ -1,6 +1,6 @@
 // ============================================================================
 //  RynthSuite - Combat/CombatManager.SelectedTarget.cs
-//  "Fight the monster I select" (Settings > Ranges > Combat Targeting, off by default;
+//  "Fight the monster I select" (Settings > Combat > Targeting, off by default;
 //  /ra fightselected [on|off]; the FightSelectedTarget setting key): the automatic form of
 //  the target lock (CombatManager.TargetLock.cs). When the PLAYER selects an attackable monster
 //  in game, it becomes the forced target: fought ahead of the Targeting setting and the

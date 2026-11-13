@@ -29,7 +29,8 @@ namespace RynthCore.Plugin.RynthAi;
 ///   /ra iteminfo loot on|off          describe what the looter takes in its "Looted" line
 ///   /ra iteminfo loot salvage on|off  salvage too (material and workmanship only)
 ///   /ra iteminfo color &lt;name&gt;|#RRGGBB the lines' colour in RynthCore's chat, whatever their chat type ("default": the type's)
-///   /ra iteminfo reset                restore defaults
+///   /ra iteminfo parts on|off         one-line layout: each part (name, set, spells, ...) in its own colour
+///   /ra iteminfo reset               restore defaults
 /// Every option is also editable in the "RynthAi Item Info" window (LegacyItemInfoUi).
 /// </summary>
 public sealed partial class RynthAiPlugin
@@ -183,6 +184,15 @@ public sealed partial class RynthAiPlugin
                     : $"[RynthAi] Item info text colour: {MagItemInfoCatalog.TextColorLabel(s.TextColor)} in RynthCore's chat (same tab; AC's chat window shows the chat type's colour)");
                 return;
 
+            case "parts":
+            case "partcolors":
+            case "partcolours":
+                if (ParseOnOff(arg3) is bool partsOn) s.PartColors = partsOn;
+                else if (arg3.Length > 0) { ReplyFail("[RynthAi] Usage: /ra iteminfo parts on|off"); return; }
+                ReplyOk($"[RynthAi] Item info colour per part: {OnOff(s.PartColors)}"
+                    + (s.PartColors && s.Layout != MagItemInfoSettings.LayoutOneLine ? " (the one-line layout only: /ra iteminfo layout line)" : ""));
+                return;
+
             case "reset":
                 s.ResetToDefaults();
                 ReplyOk("[RynthAi] Item info settings reset to defaults.");
@@ -203,7 +213,7 @@ public sealed partial class RynthAiPlugin
             if (found != 0) { QueueItemInfo(unchecked((int)found), requestId: true); return; }
             ReplyFail($"[RynthAi] Item info: no \"{name}\" in your inventory.");
         }
-        ReplyFail("[RynthAi] Usage: /ra iteminfo [<item name>|me|on|off|settings|fields|field <name> on|off|rating <tag> on|off|value on|off|verbose on|off|click left|right|off|layout pet|line|loot on|off|color <name>|#RRGGBB|reset]");
+        ReplyFail("[RynthAi] Usage: /ra iteminfo [<item name>|me|on|off|settings|fields|field <name> on|off|rating <tag> on|off|value on|off|verbose on|off|click left|right|off|layout pet|line|loot on|off|color <name>|#RRGGBB|parts on|off|reset]");
     }
 
     /// <summary>"default|allegiance|...|#RRGGBB": what /ra iteminfo color takes.</summary>
@@ -443,18 +453,26 @@ public sealed partial class RynthAiPlugin
     /// Builds the output lines (no prefix / indent) in the configured layout, or returns null
     /// with <paramref name="error"/> set. The one-line layout returns a single line.
     /// </summary>
-    private List<string>? BuildItemInfoLines(int itemId, out string? error)
+    private List<string>? BuildItemInfoLines(int itemId, out string? error) => BuildItemInfoLines(itemId, out error, out _);
+
+    /// <summary>
+    /// As above; for the one-line layout <paramref name="oneLineParts"/> is that line as (part, text)
+    /// pieces (joined, exactly the line) for the per-part colours; null for the pet-style layout.
+    /// </summary>
+    private List<string>? BuildItemInfoLines(int itemId, out string? error, out List<(ItemInfoPart Part, string Text)>? oneLineParts)
     {
         error = null;
+        oneLineParts = null;
         WorldObject? wo = _objectCache?[itemId];
         if (wo == null) { error = $"Item 0x{(uint)itemId:X8} is not in the object cache."; return null; }
         try
         {
             var s = ItemInfoSettings;
             MagItemDescription d = MagItemDescriber.Build(new CacheItemPropertySource(Host, wo), MagItemInfoOptions.From(s));
-            return (s?.Layout ?? MagItemInfoSettings.LayoutPetLines) == MagItemInfoSettings.LayoutOneLine
-                ? new List<string> { d.ToOneLine() }
-                : d.ToPetLines();
+            if ((s?.Layout ?? MagItemInfoSettings.LayoutPetLines) != MagItemInfoSettings.LayoutOneLine)
+                return d.ToPetLines();
+            oneLineParts = d.ToOneLineParts();
+            return new List<string> { d.ToOneLine() };
         }
         catch (Exception ex)
         {
@@ -470,7 +488,7 @@ public sealed partial class RynthAiPlugin
     /// </summary>
     private void PrintItemInfo(int itemId, bool identified)
     {
-        List<string>? lines = BuildItemInfoLines(itemId, out string? error);
+        List<string>? lines = BuildItemInfoLines(itemId, out string? error, out var oneLineParts);
         if (lines == null || lines.Count == 0)
         {
             ItemInfoLog($"0x{(uint)itemId:X8}: not printed: {error}");
@@ -486,7 +504,13 @@ public sealed partial class RynthAiPlugin
         int headerType = s?.ChatType ?? 1;
         int detailType = s == null || s.DetailChatType == MagItemInfoSettings.SameAsHeader ? headerType : s.DetailChatType;
 
-        WriteItemInfoLine(prefix + lines[0], headerType);
+        // One-line layout, colour per part: the parts' ranges, after the prefix (the tails added
+        // above come after every part and keep the line's colour).
+        string first = prefix + lines[0];
+        string? spans = s is { PartColors: true } && oneLineParts != null
+            ? ItemInfoPartColors.Payload(ItemInfoPartColors.Ranges(oneLineParts, prefix.Length), first.Length)
+            : null;
+        WriteItemInfoLine(first, headerType, spans);
         for (int i = 1; i < lines.Count; i++)
             WriteItemInfoLine(prefix + "  " + lines[i], detailType);
     }
@@ -504,7 +528,18 @@ public sealed partial class RynthAiPlugin
     /// is asked to draw the next line in that colour just before it is written: RynthCore's chat
     /// shows it so, in the same tab. Unset, or an older engine: the plain WriteToChat, as before.
     /// </summary>
-    internal void WriteItemInfoLine(string text, int chatType)
+    internal void WriteItemInfoLine(string text, int chatType) => WriteItemInfoLine(text, chatType, null);
+
+    // An engine from before 2026-11-11 has line colours but no colour runs: it refuses "nextspans"
+    // and its "none" alike. The lines then keep one colour, without asking again.
+    private bool _partColorsUnsupported;
+
+    /// <summary>
+    /// As above; <paramref name="spans"/> (ItemInfoPartColors.Payload, "start:length:RRGGBB;...")
+    /// asks for those characters in their own colours too (engine ChatOwnColors "nextspans"). The
+    /// whole-line colour goes first, so an engine without colour runs still draws the line in it.
+    /// </summary>
+    internal void WriteItemInfoLine(string text, int chatType, string? spans)
     {
         string color = ItemInfoSettings?.TextColor ?? string.Empty;
         if (color.Length > 0 && text.Length > 0 && !_infoColorUnsupported && Host.HasWriteToChat && Host.HasSendPluginCommand
@@ -512,6 +547,19 @@ public sealed partial class RynthAiPlugin
         {
             _infoColorUnsupported = true;
             ItemInfoLog("the engine has no line colours (before 2026-11-05): item info keeps its chat type's colour");
+        }
+        if (!string.IsNullOrEmpty(spans) && text.Length > 0 && !_partColorsUnsupported && !_infoColorUnsupported
+            && Host.HasWriteToChat && Host.HasSendPluginCommand
+            && !Host.SendPluginCommand(ChatColorTarget, ItemInfoPartColors.NextSpansAction, spans))
+        {
+            // "none" tells a refused payload (logged, kept on) from an engine without runs.
+            if (Host.SendPluginCommand(ChatColorTarget, ItemInfoPartColors.NextSpansAction, "none"))
+                ItemInfoLog($"the engine refused the part colours '{spans}' for '{text}': this line keeps one colour");
+            else
+            {
+                _partColorsUnsupported = true;
+                ItemInfoLog("the engine has no part colours (before 2026-11-11): item info lines keep one colour");
+            }
         }
         Host.WriteToChat(text, chatType);
     }
@@ -571,5 +619,18 @@ public sealed partial class RynthAiPlugin
         string prefix = ItemInfoSettings?.Prefix ?? "[RynthAi Item] ";
         string color = ItemInfoSettings?.TextColor ?? string.Empty;
         WriteItemInfoLine($"{prefix}Item info chat test (type {chatType}{(color.Length > 0 ? ", colour " + color : "")})", chatType);
+    }
+
+    /// <summary>
+    /// Item Info window "Colour each part" Test: a one-line sample naming every part, each in its
+    /// colour, in the Item Info chat type (as a real one-line item info line is written).
+    /// </summary>
+    private void TestItemInfoPartColors()
+    {
+        string prefix = ItemInfoSettings?.Prefix ?? "[RynthAi Item] ";
+        var pieces = ItemInfoPartColors.SamplePieces();
+        string text = prefix + ItemInfoPartColors.Join(pieces);
+        WriteItemInfoLine(text, ItemInfoSettings?.ChatType ?? 1,
+            ItemInfoPartColors.Payload(ItemInfoPartColors.Ranges(pieces, prefix.Length), text.Length));
     }
 }

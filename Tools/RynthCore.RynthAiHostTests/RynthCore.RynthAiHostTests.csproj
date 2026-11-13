@@ -67,6 +67,9 @@
          RynthAi exactly what the engine sends (engine 2026-10-13). -->
     <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\Compatibility\PropertyWire.cs" Link="Engine\PropertyWire.cs" />
     <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\Compatibility\ObjectPropertyRecord.cs" Link="Engine\ObjectPropertyRecord.cs" />
+    <!-- The engine's confirmation arms (v85 one-shot, v97 sticky; pure), so the auto-confirm tests'
+         fake engine answers prompts by the engine's own rules (engine 2026-11-11). -->
+    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\Compatibility\ConfirmationArmPolicy.cs" Link="Engine\ConfirmationArmPolicy.cs" />
   </ItemGroup>
 
   <ItemGroup>

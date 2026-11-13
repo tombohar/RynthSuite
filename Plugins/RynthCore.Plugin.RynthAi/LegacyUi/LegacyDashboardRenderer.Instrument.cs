@@ -3,13 +3,20 @@
 // read directly, plus the vitals refresh that the engine's snapshot poll used to drive.
 using System;
 using System.IO;
+using RynthCore.Plugin.RynthAi.Dashboard;
 
 namespace RynthCore.Plugin.RynthAi.LegacyUi;
 
 /// <summary>
 /// One frame of the dashboard: the macro, the subsystems, the bot's activity, the target and the vitals.
 /// The target is the selection, or the monster RynthAi is fighting (TargetIsFight: combat doesn't
-/// select it). TargetHealth is 0..1, or -1 while the server hasn't said.
+/// select it). TargetHealth is 0..1, or -1 while the server hasn't said. CombatStance is the
+/// client's combat mode for the Combat key's icon (Melee, Missile or Magic; in peace, the last one).
+/// NavKind is what the Navigation key's icon shows (the route's type, follow, patrol or hunt).
+/// BoostLoot: Boost Loot Priority is on where it applies (the Looting key's chest turns gold).
+/// NavPriority: Boost Nav Priority is on and the route isn't a finished Once route (the
+/// Navigation key's trail turns green over a lane, for a route, follow or patrol).
+/// MetaLoaded: a meta with rules is loaded (the Meta key's states are hollow otherwise).
 /// </summary>
 internal readonly record struct DashboardReadout(
     bool MacroRunning,
@@ -23,7 +30,12 @@ internal readonly record struct DashboardReadout(
     string LootPath,
     bool TargetIsFight = false,
     int LootMode = 0,
-    bool BoostNav = false);
+    bool BoostNav = false,
+    int CombatStance = CombatMode.Melee,
+    NavTrail.Kind NavKind = NavTrail.Kind.None,
+    bool BoostLoot = false,
+    bool NavPriority = false,
+    bool MetaLoaded = false);
 
 /// <summary>The loaded-files pickers: each list, and the entry in use.</summary>
 internal sealed record DashboardFiles(
@@ -52,7 +64,13 @@ internal sealed partial class LegacyDashboardRenderer
             _isLocked, _bgOpacity,
             !string.IsNullOrEmpty(_vendorProfilePath?.Invoke()) ? _vendorProfilePath!.Invoke() : _settings.CurrentLootPath ?? string.Empty,
             LootMode: Loot.LootModes.Clamp(_settings.LootMode),
-            BoostNav: BoostNavRule.Active(_settings));   // the flag counts only while a nav route runs
+            BoostNav: BoostNavRule.Active(_settings),   // the flag counts only while a nav route runs
+            // Boost Loot Priority waits for no corpse when only rares are looted (the looter's own rule,
+            // CorpseOpenController.BoostLootCanRun), so the chest isn't gilded then.
+            BoostLoot: _settings.BoostLootPriority && !_settings.LootOnlyRareCorpses && !Loot.LootModes.IsRares(_settings.LootMode),
+            // Shown before RUN too (BoostNav above is only while the route runs); a Once route that
+            // has walked off its end hunts instead (BoostNavRule), so it isn't shown then.
+            NavPriority: _settings.BoostNavPriority && !_settings.NavRouteFinished());
     }
 
     /// <summary>The five pickers' lists (copied under the lists' lock) and the entry in use. Any thread.</summary>

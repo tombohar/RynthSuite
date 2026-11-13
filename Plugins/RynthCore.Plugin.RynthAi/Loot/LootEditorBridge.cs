@@ -139,6 +139,30 @@ internal sealed class LootEditorBridge
         if (saved != null) _onSaved(saved);
     }
 
+    /// <summary>
+    /// The Loaded files drawer's New (2026-11-11): the editor on <paramref name="path"/>, the same
+    /// open as its own file picker (a .utl that isn't there yet opens empty, and its Save creates
+    /// it). False, with the editor's reason, when it has unsaved edits in another profile.
+    /// </summary>
+    public bool OpenFile(string path, out string message)
+    {
+        lock (_sync)
+        {
+            var cmd = new LootEditCommand { Op = "open", Path = path };
+            bool opened = _session.Apply(cmd) == LootEditSession.Outcome.Opened;
+            if (opened) _followInUse = LootEditSession.SamePath(path, InUse);
+            message = _session.Message;
+            return opened;
+        }
+    }
+
+    /// <summary>The editor has unsaved edits in <paramref name="path"/> (the drawer's * and its rename/move guard).</summary>
+    public bool IsDirtyFor(string path)
+    {
+        lock (_sync)
+            return _session.IsDirty && path.Length > 0 && LootEditSession.SamePath(path, _session.Path);
+    }
+
     // =====================================================================
     //  Add to loot profile (a clicked item)
     // =====================================================================

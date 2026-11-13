@@ -18,9 +18,22 @@
 //               the meta's state.
 //    controls   RUN / STOP, the five subsystem keys (lit LED = on; right-click:
 //               their settings), then RynthSort's auto-sort key (when it's loaded;
-//               right-click: its window) and Force rebuff.
+//               right-click: its window) and Force rebuff. The Buffing key's icon
+//               is the Halo (BuffHalo.cs): off, on, or running while it casts. The
+//               Combat key's is Crossed (CombatCrossed.cs): swords, arrows or wands
+//               for the stance, off, on, or moving while it fights. The Navigation
+//               key's is Trail (NavTrail.cs): a shape for the route type, follow,
+//               dungeon patrol or Outdoor Hunt, its marker running while it walks;
+//               green over a green lane with Boost Nav Priority.
+//               The Looting key's is the Chest (LootChest.cs): off, on, gold with
+//               Boost Loot Priority, its lid popping while it loots. The Meta key's is
+//               States (MetaStates.cs): the current state ringed, a token hopping
+//               while the macro runs, the ring moving on with a burst when the
+//               state changes. The auto-sort key's is the Grid (SortGrid.cs): a
+//               pack's slots, an item arcing to its place while RynthSort moves items.
 //    launchers  a tray of window buttons (lit while open), labels when wide.
 //    footer     FPS (coloured by rate), RynthAi's version, bot and client uptime.
+//    report     a full-width "Report a problem" key: RynthCore's panel (/rc report).
 //    bars       the vitals and the target (15 segments, coloured by health).
 //  Minimized keeps the header, the activity line, the controls and the bars.
 //  Drawers on the edges, docked or popped out: Ranges, Loaded files, Patrol and the Mini
@@ -73,6 +86,8 @@ internal interface IDashboardHost
     void SetLootMode(int mode);
     /// <summary>RynthSort's auto-sort: -1 RynthSort not loaded (or not logged in, or too old to say), 0 off, 1 on.</summary>
     int AutoSort { get; }
+    /// <summary>RynthSort is moving items right now (the auto-sort key's sorting look).</summary>
+    bool AutoSortMoving { get; }
     /// <summary>Fight the monster I select (combat setting), for the options menu's toggle.</summary>
     bool FightSelectedTarget { get; }
     void SetAutoSort(bool on);
@@ -84,11 +99,22 @@ internal interface IDashboardHost
     bool HuntActive { get; }
     /// <summary>The small Outdoor Hunt window (its two distances) open or closed.</summary>
     void ToggleHuntPanel();
+    /// <summary>The Dirty Fighting window (the rotation's settings) open or closed, and whether the rotation is on.</summary>
+    void ToggleDfHeightPanel();
+    bool DfHeightRotation { get; }
     void ToggleSpells();
+    /// <summary>The Active Gear window (worn items' magic, mana and time left) open or closed.</summary>
+    void ToggleActiveGear();
+    /// <summary>The Timed Commands window (commands sent every N seconds) open or closed.</summary>
+    void ToggleTimedCommands();
     /// <summary>The Classic (retail) look: RynthCore's own face comes back for it.</summary>
     void UseClassicLook();
     /// <summary>The Mini Remote, drawn into the current window; the size it wants.</summary>
     bool DrawMiniRemote(out Vector2 want);
+    /// <summary>A Loaded files row's file (kind: SelectProfile's numbers): its name, path and unsaved changes. Any thread.</summary>
+    ProfileFileInfo ProfileInfo(int kind);
+    /// <summary>A profile button (Save, Save As, New, ...), run on the tick; its line goes to chat and to <paramref name="done"/>.</summary>
+    void ProfileAction(int kind, ProfileVerb verb, string name, bool replace, Action<ProfileResult> done);
 }
 
 internal sealed unsafe class InstrumentDashboard
@@ -110,7 +136,7 @@ internal sealed unsafe class InstrumentDashboard
     private const float TrayH = 24, FootH = 12;
     private const float Chip = 18, ChipGap = 1;
     private const float VitalH = 12, VitalGap = 3, VitalLabelW = 16, VitalNumW = 62, VitalColGap = 7, BarH = 6;
-    private const float TabW = 19, TabH = 22, TabGap = 2, TabsTop = 30, DrawerW = 216;
+    private const float TabW = 19, TabH = 22, TabGap = 2, TabsTop = 30, DrawerW = 216, FilesDrawerW = 240;
 
     // ── Colours (ABGR), read once a frame ────────────────────────────────
 
@@ -159,6 +185,7 @@ internal sealed unsafe class InstrumentDashboard
         _popped = popped;
         _k = Math.Max(0.5f, Font(RynthUiFont.Ui10).FontSize / 10f);
         _r = _d.Read();
+        NoteMetaState();
         ReadColors();
         DashboardPrefs prefs = _d.Prefs;
 
@@ -179,15 +206,26 @@ internal sealed unsafe class InstrumentDashboard
             float y = origin.Y + Px(PadTop);
             y = Header(dl, prefs, x0, y, w);
             y += Px(Gap);
-            y = Readout(dl, x0, y, w);
-            y += Px(Gap);
+            if (prefs.ShowActivity)
+            {
+                y = Readout(dl, x0, y, w);
+                y += Px(Gap);
+            }
             y = Controls(dl, x0, y, w);
             if (!prefs.Minimized)
             {
                 y += Px(Gap);
                 y = Launchers(dl, prefs, x0, y, w);
-                y += Px(Gap);
-                y = Footer(dl, x0, y, w);
+                if (prefs.ShowFooter)
+                {
+                    y += Px(Gap);
+                    y = Footer(dl, x0, y, w);
+                }
+                if (prefs.ShowReport)
+                {
+                    y += Px(Gap);
+                    y = ReportKey(dl, x0, y, w);
+                }
             }
             if (prefs.ShowVitals || prefs.ShowTarget)
                 y = Bars(dl, prefs, origin.X, width, x0, y, w);
@@ -355,7 +393,18 @@ internal sealed unsafe class InstrumentDashboard
         dl.PushClipRect(min + new Vector2(Px(3), 0), max - new Vector2(Px(3), 0), true);
         if (icon.Length > 0)
         {
-            DrawIcon(dl, icon, new Vector2(tx, y), new Vector2(Px(11), h), Px(11), color);
+            // Buffing, Combat, Navigating and Looting: their keys' drawn icons, moving, in the line's colour.
+            Vector2 ic = new(tx + Px(11) * 0.5f, y + h * 0.5f);
+            if (activity == BuffManager.LabelBuffing)
+                BuffHalo.Draw(dl, ic, Px(11), color, BuffHalo.Look.Casting, glow: false);
+            else if (activity == CombatActivity)
+                CombatCrossed.Draw(dl, ic, Px(11), color, CombatCrossed.Look.Fighting, _r.CombatStance, glow: false);
+            else if (activity == NavActivity)
+                NavTrail.Draw(dl, ic, Px(11), color, NavTrail.Look.Moving, _r.NavKind, _r.NavPriority, glow: false);
+            else if (activity == LootActivity)
+                LootChest.Draw(dl, ic, Px(11), color, LootChest.Look.Looting, _r.BoostLoot, _inset, glow: false);
+            else
+                DrawIcon(dl, icon, new Vector2(tx, y), new Vector2(Px(11), h), Px(11), color);
             tx += Px(11) + Px(5);
         }
         Tracked(dl, mono, mono.FontSize, new Vector2(tx, ty), color, _actCaps, 0.06f * mono.FontSize);
@@ -401,6 +450,39 @@ internal sealed unsafe class InstrumentDashboard
     }
 
     // ── Controls: RUN / STOP, the subsystem keys, Force rebuff ──────────
+
+    // The subsystem keys draw their own icons (CombatCrossed, BuffHalo, NavTrail, LootChest,
+    // MetaStates), not their glyphs.
+    private const int CombatKey = 0, BuffingKey = 1, NavKey = 2, LootKey = 3, MetaKey = 4;
+    private const string CombatActivity = "Combat", NavActivity = "Navigating", LootActivity = "Looting";   // the activities (ActivityStyle)
+    private enum KeyArt { Glyph, Halo, Crossed, Trail, Chest, States, Grid }
+
+    // The Meta key's ring goes one state round each time the meta's state changes, with a burst
+    // this long. The first state seen (the dashboard opening) moves nothing.
+    private const float MetaFlashSeconds = 0.8f;
+    private string? _metaStateSeen;
+    private int _metaNode;
+    private float _metaFlashAt = -100f;
+
+    /// <summary>Moves the Meta key's ring on when the META readout's state changes. Render thread, each frame.</summary>
+    private void NoteMetaState()
+    {
+        string state = _r.MetaState;
+        if (string.Equals(state, _metaStateSeen, StringComparison.Ordinal)) return;
+        if (_metaStateSeen != null)
+        {
+            _metaNode = (_metaNode + 1) % MetaStates.Nodes;
+            _metaFlashAt = IconKit.Clock();
+        }
+        _metaStateSeen = state;
+    }
+
+    /// <summary>How far the Meta key's burst has gone (0..1), or -1 when there's none.</summary>
+    private float MetaFlash()
+    {
+        float f = (IconKit.Clock() - _metaFlashAt) / MetaFlashSeconds;
+        return f is >= 0f and < 1f ? f : -1f;
+    }
 
     private static readonly (string Icon, string Name, string Right)[] Subsystems =
     {
@@ -502,10 +584,15 @@ internal sealed unsafe class InstrumentDashboard
                        && ImGui.IsMouseReleased(ImGuiMouseButton.Left);
         bool right = ImGui.IsItemClicked(ImGuiMouseButton.Right);
         bool hot = ImGui.IsItemHovered();
-        string mode = i == 3 && Loot.LootModes.IsRares(_r.LootMode)
+        string mode = i == LootKey && Loot.LootModes.IsRares(_r.LootMode)
             ? "\nLoot Mode: rares and needed mana stones only (the loot profile is not used)." : "";
+        if (i == LootKey && _r.BoostLoot) mode += "\nBoost Loot Priority (the gold chest): RynthAi loots each kill before it starts the next fight.";
+        if (i == NavKey && _r.NavPriority && NavTrail.IsRoute(_r.NavKind))
+            mode += "\nBoost Nav Priority (the green trail): while the route runs, RynthAi only follows it (no hunting, no looting).";
+        if (i == MetaKey) mode += _r.MetaLoaded ? "\nMeta state: " + _r.MetaState + " (the ringed state moves on, with a flash, when it changes)." : "\nNo meta is loaded.";
         SafeImGui.SetItemTooltip((on ? s.Name + " on. Click to turn it off." : s.Name + " off. Click to turn it on.") + mode + "\nRight-click: " + s.Right + ".");
-        KeyFace(dl, s.Icon, on, hot, pos, size);
+        KeyArt art = i switch { BuffingKey => KeyArt.Halo, CombatKey => KeyArt.Crossed, NavKey => KeyArt.Trail, LootKey => KeyArt.Chest, MetaKey => KeyArt.States, _ => KeyArt.Glyph };
+        KeyFace(dl, s.Icon, on, hot, pos, size, art);
         if (clicked) _d.SetSubsystem(i, !on);
         if (right) SubsystemSettings(i);
     }
@@ -518,15 +605,18 @@ internal sealed unsafe class InstrumentDashboard
                        && ImGui.IsMouseReleased(ImGuiMouseButton.Left);
         bool right = ImGui.IsItemClicked(ImGuiMouseButton.Right);
         bool hot = ImGui.IsItemHovered();
-        SafeImGui.SetItemTooltip(on ? "Auto-sort (RynthSort) on. Click to turn it off.\nRight-click: RynthSort's window."
-                                    : "Auto-sort (RynthSort) off. Click to turn it on.\nRight-click: RynthSort's window.");
-        KeyFace(dl, RynthIcons.SortAscending, on, hot, pos, size);
+        SafeImGui.SetItemTooltip((on ? "Auto-sort (RynthSort) on. Click to turn it off." : "Auto-sort (RynthSort) off. Click to turn it on.")
+            + (_d.AutoSortMoving ? "\nMoving items now." : "") + "\nRight-click: RynthSort's window.");
+        KeyFace(dl, RynthIcons.SortAscending, on, hot, pos, size, KeyArt.Grid);
         if (clicked) _d.SetAutoSort(!on);
         if (right) _d.ToggleSortWindow();
     }
 
-    /// <summary>A key's face: raised with its LED lit when on, flat and dim when off.</summary>
-    private void KeyFace(ImDrawListPtr dl, string icon, bool on, bool hot, Vector2 pos, Vector2 size)
+    /// <summary>
+    /// A key's face: raised with its LED lit when on, flat and dim when off. <paramref name="art"/>
+    /// Halo, Crossed, Trail, Chest, States or Grid draws that icon (off, on, or moving with the activity) instead of the glyph.
+    /// </summary>
+    private void KeyFace(ImDrawListPtr dl, string icon, bool on, bool hot, Vector2 pos, Vector2 size, KeyArt art = KeyArt.Glyph)
     {
         float r = Px(3);
         if (on)
@@ -539,7 +629,38 @@ internal sealed unsafe class InstrumentDashboard
         {
             dl.AddRect(pos, pos + size, Mix(_bg, _line, 0.55f), r);
         }
-        DrawIcon(dl, icon, pos, size, Px(15), on || hot ? _text : _faint);
+        uint fg = on || hot ? _text : _faint;
+        Vector2 centre = pos + size * 0.5f;
+        switch (art)
+        {
+            case KeyArt.Halo:
+                BuffHalo.Draw(dl, centre, Px(15), fg, !on ? BuffHalo.Look.Off
+                    : _r.Activity == BuffManager.LabelBuffing ? BuffHalo.Look.Casting : BuffHalo.Look.On);
+                break;
+            case KeyArt.Crossed:
+                CombatCrossed.Draw(dl, centre, Px(15), fg, !on ? CombatCrossed.Look.Off
+                    : _r.Activity == CombatActivity ? CombatCrossed.Look.Fighting : CombatCrossed.Look.On, _r.CombatStance);
+                break;
+            case KeyArt.Trail:
+                NavTrail.Draw(dl, centre, Px(15), fg, !on ? NavTrail.Look.Off
+                    : _r.Activity == NavActivity ? NavTrail.Look.Moving : NavTrail.Look.On, _r.NavKind, _r.NavPriority);
+                break;
+            case KeyArt.Chest:
+                LootChest.Draw(dl, centre, Px(15), fg, !on ? LootChest.Look.Off
+                    : _r.Activity == LootActivity ? LootChest.Look.Looting : LootChest.Look.On, _r.BoostLoot, _key);
+                break;
+            case KeyArt.States:
+                MetaStates.Draw(dl, centre, Px(15), fg, !on ? MetaStates.Look.Off : !_r.MetaLoaded ? MetaStates.Look.Empty
+                    : _r.MacroRunning ? MetaStates.Look.Running : MetaStates.Look.On, _metaNode, MetaFlash(), _key);
+                break;
+            case KeyArt.Grid:
+                // Sorting plays while RynthSort moves items, auto-sort or a job asked for (the key may be off).
+                SortGrid.Draw(dl, centre, Px(15), fg, _d.AutoSortMoving ? SortGrid.Look.Sorting : on ? SortGrid.Look.On : SortGrid.Look.Off);
+                break;
+            default:
+                DrawIcon(dl, icon, pos, size, Px(15), fg);
+                break;
+        }
         // The LED, top right: lit in the accent with a glow, or dark.
         Vector2 led = new(pos.X + size.X - Px(6), pos.Y + Px(6));
         if (on)
@@ -750,6 +871,49 @@ internal sealed unsafe class InstrumentDashboard
         return y + Px(FootH);
     }
 
+    // ── Report a problem: one labelled key under the footer ─────────────
+
+    /// <summary>RynthCore's "Report a problem" panel (Report/ProblemReport.cs): alone, the command opens it.</summary>
+    internal const string ReportCommand = "/rc report";
+    /// <summary>The engine panel's title (ProblemReport.PanelTitle), for the key's lit state.</summary>
+    private const string ReportPanel = "Report a problem";
+    private const string ReportTip =
+        "Something went wrong, or an idea for a feature? Tell the staff.\n" +
+        "Opens RynthCore's Report a problem panel (/rc report): say what happened or what you'd\n" +
+        "like, and your recent RynthCore log can go with it (View shows exactly what is sent).";
+    private const float ReportH = 20;
+
+    private float ReportKey(ImDrawListPtr dl, float x0, float y, float w)
+    {
+        Vector2 p = new(x0, y), s = new(w, Px(ReportH));
+        float r = Px(3);
+        ImGui.SetCursorScreenPos(p);
+        bool clicked = ImGui.InvisibleButton("##dash_report", s);
+        bool hot = ImGui.IsItemHovered();
+        SafeImGui.SetItemTooltip(ReportTip);
+        bool lit = _d.Host.SetPanelOpen(ReportPanel, RynthPanelOpen.Ask) == 1;
+        dl.AddRectFilled(p, p + s, hot || lit ? _key : A(_key, 0.55f), r);
+        dl.AddRect(p, p + s, hot ? A(Gold, 0.8f) : _line, r);
+
+        ImFontPtr f = Font(RynthUiFont.Narrow10);
+        // The short label only when the full one wouldn't fit a narrow dashboard.
+        string label = "REPORT A PROBLEM OR FEATURE";
+        float track = 0.14f * f.FontSize, iconBox = Px(14), gap = Px(5);
+        float lw = TrackedWidth(f, f.FontSize, label, track);
+        if (iconBox + gap + lw > w - Px(8))
+        {
+            label = "PROBLEM OR FEATURE";
+            lw = TrackedWidth(f, f.FontSize, label, track);
+        }
+        float cx = MathF.Round(x0 + (w - (iconBox + gap + lw)) * 0.5f);
+        DrawIcon(dl, RynthIcons.Warning, new Vector2(cx, y), new Vector2(iconBox, s.Y), Px(12), Gold);
+        Tracked(dl, f, f.FontSize, new Vector2(cx + iconBox + gap, MathF.Round(y + (s.Y - f.FontSize) * 0.5f)),
+            hot || lit ? _text : _dim, label, track);
+
+        if (clicked) _d.Command(ReportCommand);
+        return y + s.Y;
+    }
+
     // ── Bars: the vitals, then the target ───────────────────────────────
 
     private readonly NumberText _hpText = new(), _stText = new(), _mnText = new(), _tStText = new(), _tMnText = new();
@@ -958,7 +1122,7 @@ internal sealed unsafe class InstrumentDashboard
                 ImGui.CloseCurrentPopup();
                 _d.Command("/ra why");
             }
-            // Fight the monster I select (also Settings > Ranges > Combat Targeting): a toggle, the
+            // Fight the monster I select (also Settings > Combat > Targeting): a toggle, the
             // command's reply says the new state.
             bool fightSelected = _d.FightSelectedTarget;
             if (MenuItem(dl, ref p, w, "##m_fightsel", RynthIcons.Crosshair,
@@ -969,12 +1133,60 @@ internal sealed unsafe class InstrumentDashboard
                 ImGui.CloseCurrentPopup();
                 _d.Command("/ra fightselected");
             }
+            // Which worn items have their magic on (RynthAiPlugin.ActiveGear.cs): its own window, no bar button.
+            if (MenuItem(dl, ref p, w, "##m_gear", RynthIcons.BatteryCharging, "Active gear", "/ra gear",
+                    "Which worn items have their magic on, their mana and how long it lasts (the Active Gear window)."))
+            {
+                ImGui.CloseCurrentPopup();
+                _d.ToggleActiveGear();
+            }
+            // Commands sent every N seconds (RynthAiPlugin.TimedCommands.cs): its own window, no bar button.
+            if (MenuItem(dl, ref p, w, "##m_timed", RynthIcons.HourglassMedium, "Timed commands", "/ra timed",
+                    "Chat commands sent every so many seconds, per character, server or all characters,\n" +
+                    "like MagTools' periodic commands (the Timed Commands window)."))
+            {
+                ImGui.CloseCurrentPopup();
+                _d.ToggleTimedCommands();
+            }
+            // Dirty Fighting rotation: opens its window (the checkbox, order and default height are there).
+            if (MenuItem(dl, ref p, w, "##m_dfheight", RynthIcons.Knife,
+                    "Dirty Fighting heights", _d.DfHeightRotation ? "ON" : "OFF",
+                    "Opens the Dirty Fighting window: attack at the height of the next Dirty Fighting\n" +
+                    "effect the target is missing (High, Medium, Low), then a height of your choice\n" +
+                    "(/ra dfheight). Needs Dirty Fighting trained."))
+            {
+                ImGui.CloseCurrentPopup();
+                _d.ToggleDfHeightPanel();
+            }
             if (MenuItem(dl, ref p, w, "##m_busy", RynthIcons.Hourglass, "Clear busy", "/ra clearbusy",
                     "The game thinks the character is still busy (the hourglass stays, nothing can be used): clear it."))
             {
                 ImGui.CloseCurrentPopup();
                 _d.Command("/ra clearbusy");
             }
+            if (MenuItem(dl, ref p, w, "##m_report", RynthIcons.Warning, "Report a Problem or Feature", ReportCommand,
+                    "Something went wrong, or an idea for a feature? Tell the staff: RynthCore's Report a problem panel.\n" +
+                    "Your recent RynthCore log can go with it (View shows exactly what is sent)."))
+            {
+                ImGui.CloseCurrentPopup();
+                _d.Command(ReportCommand);
+            }
+            // What the dashboard shows: each a switch, the menu stays open to flip several.
+            p.Y += Px(4);
+            dl.AddLine(new Vector2(p.X, p.Y + 0.5f), new Vector2(p.X + w, p.Y + 0.5f), _line);
+            p.Y += Px(5);
+            if (MenuItem(dl, ref p, w, "##m_showact", RynthIcons.Info, "Show bot activity", prefs.ShowActivity ? "ON" : "OFF",
+                    "The line under the header with what the bot is doing and the meta's state. Click to " +
+                    (prefs.ShowActivity ? "hide it." : "show it.")))
+                prefs.SetShowActivity(!prefs.ShowActivity);
+            if (MenuItem(dl, ref p, w, "##m_showfoot", RynthIcons.Hourglass, "Show FPS and timers", prefs.ShowFooter ? "ON" : "OFF",
+                    "The footer with the frame rate and the bot's timers. Click to " +
+                    (prefs.ShowFooter ? "hide it." : "show it.")))
+                prefs.SetShowFooter(!prefs.ShowFooter);
+            if (MenuItem(dl, ref p, w, "##m_showrep", RynthIcons.Warning, "Show Report button", prefs.ShowReport ? "ON" : "OFF",
+                    "The Report a Problem or Feature button under the footer. Hidden, the entry above still opens it.\nClick to " +
+                    (prefs.ShowReport ? "hide it." : "show it.")))
+                prefs.SetShowReport(!prefs.ShowReport);
             if (_popped)
             {
                 // Popped out the pickers are here as well (an older RynthCore's pop-out lets clicks
@@ -1334,6 +1546,7 @@ internal sealed unsafe class InstrumentDashboard
         DashboardPrefs.PatrolDrawer => Px(290),
         DashboardPrefs.RangesDrawer => Px(250),
         DashboardPrefs.PinnedDrawer => Px(300),
+        DashboardPrefs.FilesDrawer => Px(FilesDrawerW),
         _ => Px(DrawerW),
     };
 
@@ -1468,10 +1681,18 @@ internal sealed unsafe class InstrumentDashboard
         return y + h;
     }
 
-    // The Loaded files drawer: label, picker, and the Loot Editor and Spells buttons.
+    // The Loaded files drawer: label, picker, the Loot Editor and Spells buttons, and each row's
+    // "..." key: that file's buttons (Save, Save As, New, Rename, Move to Deleted, Open folder).
     private float FilesHeight() => 5 * Px(22) + 4 * Px(4);
 
     private float FilesBody(ImDrawListPtr dl, float x0, float y, float w)
+    {
+        y = FilesRows(dl, x0, y, w);
+        FilesMenu();
+        return y;
+    }
+
+    private float FilesRows(ImDrawListPtr dl, float x0, float y, float w)
     {
         DashboardFiles f = _d.ReadFiles();
         y = PickerRow(dl, x0, y, w, "PROFILE", f.ProfileName, f.Profiles, f.ProfileIdx, 3, null, null, null) + Px(4);
@@ -1491,7 +1712,8 @@ internal sealed unsafe class InstrumentDashboard
         ImFontPtr lf = Font(RynthUiFont.Narrow9);
         Tracked(dl, lf, lf.FontSize, new Vector2(x0, MathF.Round(y + (h - lf.FontSize) * 0.5f)), _faint, label, 0.14f * lf.FontSize);
         // The LOOT row also has a one-click Loot Mode key (a star, lit in rares mode) left of its button.
-        float fx = x0 + labelW, fw = w - labelW - (button != null ? h + Px(4) : 0) - (lootMode >= 0 ? h + Px(4) : 0);
+        // Every row ends with its file menu key ("...").
+        float fx = x0 + labelW, fw = w - labelW - (button != null ? h + Px(4) : 0) - (lootMode >= 0 ? h + Px(4) : 0) - (h + Px(4));
         Vector2 p = new(fx, y), s = new(fw, h);
         string popup = Id("##pick", kind);
         ImGui.SetCursorScreenPos(p);
@@ -1540,9 +1762,301 @@ internal sealed unsafe class InstrumentDashboard
             dl.AddRectFilled(bp, bp + bs, _key, r);
             dl.AddRect(bp, bp + bs, _line, r);
             DrawIcon(dl, buttonIcon, bp, bs, Px(12), bhot ? _text : _dim);
+            bx += h + Px(4);
+        }
+        {
+            Vector2 mp = new(bx, y), ms = new(h, h);
+            bool open = _filesKind == kind && ImGui.IsPopupOpen(FilesMenuId);
+            ImGui.SetCursorScreenPos(mp);
+            if (ImGui.InvisibleButton(Id("##fmenu", kind), ms)) OpenFilesMenu(kind, new Vector2(x0, y + h + Px(2)));
+            bool mhot = ImGui.IsItemHovered();
+            SafeImGui.SetItemTooltip(FilesMenuTip(kind));
+            dl.AddRectFilled(mp, mp + ms, open ? Mix(_bg, _accent, 0.16f) : _key, r);
+            dl.AddRect(mp, mp + ms, open ? _accent : _line, r);
+            DrawIcon(dl, RynthIcons.DotsThree, mp, ms, Px(12), open ? _accent : mhot ? _text : _dim);
         }
         PickerPopup(popup, items, selected, kind, lootMode);
         return y + h;
+    }
+
+    // ── A row's file menu (the "..." key): Save, Save As, New, Rename, Move to Deleted, Open folder ──
+    //
+    // The buttons run on the plugin tick (RynthAiPlugin.ProfileFiles.cs, the same as the /ra verbs)
+    // and say what they did in chat and on the menu's last line. Save As onto another file asks
+    // first (its old copy is kept in Deleted); Move to Deleted asks first too. Nothing is deleted.
+
+    private const string FilesMenuId = "##files_menu";
+    private int _filesKind = -1;
+    private Vector2 _filesAnchor;
+    private string _filesName = string.Empty;
+
+    private enum FilesAsk { None, Replace, Delete }
+    private FilesAsk _filesAsk;
+    private string _filesAskName = string.Empty;          // the name Replace was asked for
+    private string _filesStatus = string.Empty;
+    private bool _filesStatusOk = true;
+    private bool _filesBusy;                              // a button's action is queued
+
+    /// <summary>The last result from the tick (a new object each time), applied on the next frame.</summary>
+    private sealed record FilesOutcome(int Kind, ProfileVerb Verb, string Name, ProfileResult Result);
+    private volatile FilesOutcome? _filesOutcome;
+
+    private static string FilesMenuTip(int kind) => kind switch
+    {
+        3 => "Settings profile: Save, Save As, Rename, Move to Deleted, Open folder.",
+        0 => "Nav: Save, Save As, New, Rename, Move to Deleted, Open folder.",
+        2 => "Meta: Save, Save As, New, Rename, Move to Deleted, Open folder.",
+        1 => "Loot profile: Loot Editor, Save As (a copy), New, Rename, Move to Deleted, Open folder.",
+        _ => "Buff profiles: the Spells window, Open folder.",
+    };
+
+    private static string KindTitle(int kind) => kind switch
+    {
+        3 => "SETTINGS PROFILE", 0 => "NAV", 2 => "META", 1 => "LOOT PROFILE", _ => "BUFF PROFILE",
+    };
+
+    private void OpenFilesMenu(int kind, Vector2 anchor)
+    {
+        if (_filesKind != kind)
+        {
+            _filesName = string.Empty;
+            _filesStatus = string.Empty;
+            _filesStatusOk = true;
+        }
+        _filesKind = kind;
+        _filesAnchor = anchor;
+        _filesAsk = FilesAsk.None;
+        _filesBusy = false;   // an action whose answer never came (a full queue) doesn't hold the buttons
+        ImGui.OpenPopup(FilesMenuId);
+    }
+
+    private void RunFiles(ProfileVerb verb, string name, bool replace = false)
+    {
+        int kind = _filesKind;
+        _filesBusy = true;
+        _filesAsk = FilesAsk.None;
+        _d.ProfileAction(kind, verb, name, replace, r => _filesOutcome = new FilesOutcome(kind, verb, name, r));
+    }
+
+    /// <summary>A result from the tick: the status line, the Replace question, the name box cleared after a success.</summary>
+    private void TakeFilesOutcome()
+    {
+        FilesOutcome? o = _filesOutcome;
+        if (o == null) return;
+        _filesOutcome = null;
+        _filesBusy = false;
+        if (o.Kind != _filesKind) return;
+        string text = o.Result.Text.StartsWith("[RynthAi] ", StringComparison.Ordinal) ? o.Result.Text[10..] : o.Result.Text;
+        _filesStatus = text;
+        _filesStatusOk = o.Result.Ok;
+        if (o.Result.NeedsReplace)
+        {
+            _filesAsk = FilesAsk.Replace;
+            _filesAskName = o.Name;
+        }
+        else if (o.Result.Ok && o.Verb is ProfileVerb.SaveAs or ProfileVerb.New or ProfileVerb.Rename)
+        {
+            _filesName = string.Empty;
+        }
+    }
+
+    private void FilesMenu()
+    {
+        TakeFilesOutcome();
+        if (_filesKind < 0 || !ImGui.IsPopupOpen(FilesMenuId)) return;
+        ImGui.SetNextWindowPos(_filesAnchor, ImGuiCond.Appearing);
+        PushPopupStyle();
+        bool open = ImGui.BeginPopup(FilesMenuId);
+        PopPopupStyle();
+        if (!open) return;
+        try
+        {
+            KeepPopupOnScreen();
+            int kind = _filesKind;
+            ProfileFileInfo info = _d.ProfileInfo(kind);
+            ImDrawListPtr dl = ImGui.GetWindowDrawList();
+            Vector2 p = ImGui.GetCursorScreenPos();
+            float w = Px(250), h = Px(22), gap = Px(4);
+
+            // Title and the file in use ("*": changes not saved yet).
+            ImFontPtr tf = Font(RynthUiFont.Narrow9), nf = Font(RynthUiFont.Narrow11);
+            Tracked(dl, tf, tf.FontSize, new Vector2(p.X + Px(2), p.Y), _faint, KindTitle(kind), 0.14f * tf.FontSize);
+            p.Y += tf.FontSize + Px(3);
+            string shown = info.Name + (info.Unsaved ? " *" : string.Empty);
+            ImGui.SetCursorScreenPos(p);
+            ImGui.InvisibleButton("##files_cur", new Vector2(w, nf.FontSize + Px(2)));
+            SafeImGui.SetItemTooltip(info.Path.Length > 0 ? info.Path : info.Folder);
+            dl.PushClipRect(p, p + new Vector2(w, nf.FontSize + Px(2)), true);
+            dl.AddText(nf, nf.FontSize, new Vector2(p.X + Px(2), p.Y), info.Unsaved ? _accent : _text, shown);
+            dl.PopClipRect();
+            p.Y += nf.FontSize + Px(2);
+            string note = FilesNote(kind, info);
+            if (note.Length > 0)
+            {
+                dl.AddText(tf, tf.FontSize, new Vector2(p.X + Px(2), p.Y), _faint, note);
+                p.Y += tf.FontSize + Px(2);
+            }
+            p.Y += Px(4);
+
+            bool settings = kind == 3, nav = kind == 0, loot = kind == 1, buffs = kind == 4;
+            bool isDefault = settings && string.Equals(info.Name, "Default", StringComparison.OrdinalIgnoreCase);
+            bool idle = !_filesBusy;
+
+            // First row: what acts on the file in use.
+            float x = p.X;
+            if (buffs)
+            {
+                if (FilesKey(dl, ref x, p.Y, h, "Spells window", "##f_spells", true,
+                        "Buff profiles are made, saved, copied and removed in the Spells window."))
+                {
+                    ImGui.CloseCurrentPopup();
+                    _d.ToggleSpells();
+                }
+            }
+            else if (loot)
+            {
+                if (FilesKey(dl, ref x, p.Y, h, "Loot Editor", "##f_edit", true,
+                        "Edit the loot profile in use (rules are saved with the editor's Save)."))
+                {
+                    ImGui.CloseCurrentPopup();
+                    _d.Host.SetPanelOpen("Loot Editor", RynthPanelOpen.Open);
+                }
+            }
+            else
+            {
+                bool canSave = idle && (settings || (nav ? info.Name != "None" : info.HasFile));   // a nav: a file, a meta's nav or an unsaved route
+                string saveTip = settings ? "Save the settings profile now (it also saves every change on its own)."
+                    : nav ? (info.HasFile ? "Save the route to its file now." : "Save the route (an unsaved route gets a new file, Route N).")
+                    : info.HasFile ? "Save the meta to its file now." : "This meta has no file yet: type a name below and use Save As.";
+                if (FilesKey(dl, ref x, p.Y, h, "Save", "##f_save", canSave, saveTip)) RunFiles(ProfileVerb.Save, string.Empty);
+            }
+            if (!buffs)
+            {
+                bool canDelete = idle && info.HasFile && !isDefault;
+                string delTip = isDefault ? "The Default profile stays (every character falls back to it)."
+                    : info.HasFile ? $"Move {System.IO.Path.GetFileName(info.Path)} to the Deleted folder beside it. Nothing is deleted; move it back to restore it."
+                    : "No file in use.";
+                if (FilesKey(dl, ref x, p.Y, h, "Delete...", "##f_del", canDelete, delTip))
+                    _filesAsk = FilesAsk.Delete;
+            }
+            if (FilesKey(dl, ref x, p.Y, h, "Open folder", "##f_folder", idle, "Open " + info.Folder + " in Explorer."))
+                RunFiles(ProfileVerb.Folder, string.Empty);
+            p.Y += h + gap;
+
+            if (buffs)
+            {
+                p = FilesText(p, w, "Buff profiles are made, saved and removed in the Spells window.", _faint);
+            }
+            else
+            {
+                // The name box, and what can be done with the name.
+                ImGui.SetCursorScreenPos(p);
+                ImGui.PushStyleColor(ImGuiCol.FrameBg, _inset);
+                ImGui.PushStyleColor(ImGuiCol.Border, _line);
+                ImGui.PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1f);
+                ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, Px(3));
+                ImGui.SetNextItemWidth(w);
+                bool enter = ImGui.InputTextWithHint("##files_name", NameHint(kind), ref _filesName, 120, ImGuiInputTextFlags.EnterReturnsTrue);
+                ImGui.PopStyleVar(2);
+                ImGui.PopStyleColor(2);
+                p.Y += ImGui.GetItemRectSize().Y + gap;
+
+                string name = _filesName.Trim();
+                bool named = idle && name.Length > 0;
+                x = p.X;
+                string asTip = loot ? "Copy the loot profile in use to this name; RynthAi loots with the copy."
+                    : settings ? "Save these settings as a profile with this name; it becomes the one in use."
+                    : $"Save the {(nav ? "route" : "meta")} under this name; it becomes the one in use.";
+                bool saveAs = FilesKey(dl, ref x, p.Y, h, "Save As", "##f_saveas", named && (!loot || info.HasFile), asTip);
+                if (saveAs || (enter && named && (!loot || info.HasFile))) RunFiles(ProfileVerb.SaveAs, name);
+                if (!settings)
+                {
+                    string newTip = loot ? "A new, empty loot profile with this name, opened in the Loot Editor (its Save creates the file)."
+                        : nav ? "A new, empty route with this name (Circular), loaded." : "A new meta with this name (one state, Default), loaded.";
+                    if (FilesKey(dl, ref x, p.Y, h, "New", "##f_new", named, newTip)) RunFiles(ProfileVerb.New, name);
+                }
+                if (FilesKey(dl, ref x, p.Y, h, "Rename", "##f_rename", named && info.HasFile && !isDefault,
+                        isDefault ? "The Default profile keeps its name." : "Rename the file in use to this name."))
+                    RunFiles(ProfileVerb.Rename, name);
+                p.Y += h + gap;
+            }
+
+            // A question, when one is open.
+            if (_filesAsk == FilesAsk.Replace)
+            {
+                p = FilesText(p, w, $"Replace '{_filesAskName}'? Its old copy is kept in the Deleted folder.", _accent);
+                x = p.X;
+                if (FilesKey(dl, ref x, p.Y, h, "Replace", "##f_yes", idle, "Save over it (its old copy goes to Deleted first).")) RunFiles(ProfileVerb.SaveAs, _filesAskName, replace: true);
+                if (FilesKey(dl, ref x, p.Y, h, "Cancel", "##f_no", true, "Leave it as it is.")) { _filesAsk = FilesAsk.None; _filesStatus = "Not saved."; _filesStatusOk = true; }
+                p.Y += h + gap;
+            }
+            else if (_filesAsk == FilesAsk.Delete)
+            {
+                string file = info.Path.Length > 0 ? System.IO.Path.GetFileName(info.Path) : info.Name;
+                p = FilesText(p, w, $"Move {file} to the Deleted folder? It stops being used{(settings ? " (the settings go back to Default)" : string.Empty)}.", _accent);
+                x = p.X;
+                if (FilesKey(dl, ref x, p.Y, h, "Move", "##f_yes", idle, "Move it to Deleted (nothing is deleted).")) RunFiles(ProfileVerb.Delete, string.Empty);
+                if (FilesKey(dl, ref x, p.Y, h, "Cancel", "##f_no", true, "Keep it.")) _filesAsk = FilesAsk.None;
+                p.Y += h + gap;
+            }
+
+            if (_filesBusy) p = FilesText(p, w, "Working...", _dim);
+            else if (_filesStatus.Length > 0) p = FilesText(p, w, _filesStatus, _filesStatusOk ? _dim : HpText);
+
+            ImGui.SetCursorScreenPos(p);
+            ImGui.Dummy(new Vector2(w, 0));
+        }
+        finally
+        {
+            ImGui.EndPopup();
+        }
+    }
+
+    private static string NameHint(int kind) => kind switch
+    {
+        3 => "Profile name...", 0 => "Nav name...", 2 => "Meta name...", _ => "Loot profile name...",
+    };
+
+    /// <summary>The faint line under the name: where it lives, and how it is saved.</summary>
+    private static string FilesNote(int kind, ProfileFileInfo info) => kind switch
+    {
+        3 => "This character's profile; every change saves on its own.",
+        0 => info.Unsaved ? "Not saved to a file yet." : info.HasFile ? "NavProfiles; edits save on their own." : string.Empty,
+        2 => info.Unsaved ? "Not saved to a file yet (Save As names one)." : info.HasFile ? "MetaFiles; every change saves on its own." : string.Empty,
+        1 => info.Unsaved ? "The Loot Editor has changes not saved yet." : info.HasFile ? "LootProfiles" : string.Empty,
+        _ => info.Unsaved ? "The Spells window has changes not saved yet." : string.Empty,
+    };
+
+    /// <summary>Wrapped text at <paramref name="p"/>; returns the position under it.</summary>
+    private static Vector2 FilesText(Vector2 p, float w, string text, uint color)
+    {
+        ImGui.SetCursorScreenPos(p);
+        ImGui.PushStyleColor(ImGuiCol.Text, color);
+        ImGui.PushTextWrapPos(p.X + w);
+        ImGui.TextUnformatted(text);
+        ImGui.PopTextWrapPos();
+        ImGui.PopStyleColor();
+        Vector2 next = ImGui.GetCursorScreenPos();
+        return new Vector2(p.X, next.Y + 2);
+    }
+
+    /// <summary>A text key in the file menu at (<paramref name="x"/>, <paramref name="y"/>), x moved past it. True when clicked (and enabled).</summary>
+    private bool FilesKey(ImDrawListPtr dl, ref float x, float y, float h, string label, string id, bool enabled, string tip)
+    {
+        ImFontPtr f = Font(RynthUiFont.Narrow11);
+        float tw = f.CalcTextSizeA(f.FontSize, float.MaxValue, 0f, label).X;
+        Vector2 pos = new(x, y), size = new(MathF.Ceiling(tw + Px(14)), h);
+        ImGui.SetCursorScreenPos(pos);
+        bool clicked = ImGui.InvisibleButton(id, size);
+        bool hot = ImGui.IsItemHovered();
+        SafeImGui.SetItemTooltip(tip);
+        float r = Px(3);
+        dl.AddRectFilled(pos, pos + size, hot && enabled ? Mix(_key, _accent, 0.12f) : _key, r);
+        dl.AddRect(pos, pos + size, hot && enabled ? Mix(_line, _accent, 0.45f) : _line, r);
+        dl.AddText(f, f.FontSize, new Vector2(MathF.Round(pos.X + Px(7)), MathF.Round(pos.Y + (h - f.FontSize) * 0.5f)),
+            enabled ? _text : _faint, label);
+        x += size.X + Px(4);
+        return clicked && enabled;
     }
 
     private Vector2 _pickAnchor;

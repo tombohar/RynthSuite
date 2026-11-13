@@ -152,11 +152,11 @@ public sealed partial class RynthAiPlugin
 
             // ── RynthCore's window placement ────────────────────────────────────
             // The engine has no chat command for it ("/rc window save" never existed and went nowhere):
-            // its Settings > Display saves the game window for each character and puts it back at login.
+            // its Settings > Game Client saves the game window for each character and puts it back at login.
             case "window":
                 UbNoEquivalent(cmd + (sub.Length > 0 ? " " + sub : ""), null,
-                    $"[RynthAi] /ub window{(sub.Length > 0 ? " " + sub : "")}: RynthCore keeps the game window itself - Settings > Display, "
-                    + "'Remember Game Window Position' (saved for each character, put back after login), or 'Save Layout Now' there.");
+                    $"[RynthAi] /ub window{(sub.Length > 0 ? " " + sub : "")}: RynthCore keeps the game window itself - Settings > Game Client, "
+                    + "'Remember Game Window Position' (saved for each character, put back after login), or 'Save Layout Now' (Settings > Interface).");
                 return true;
 
             // ── RynthAi's Mini Remote ───────────────────────────────────────────

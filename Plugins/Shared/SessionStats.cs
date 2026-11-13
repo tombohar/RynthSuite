@@ -19,6 +19,9 @@
 //                 rises are ignored. "Deposited N luminance" and "Received N
 //                 luminance from X" move lum into the bank without earning it:
 //                 they are taken out of the next bank rises.
+//    Both         a server that sends a bank AND Aelrynth's 9102/9103
+//                 (DreamWeave): the bank alone counts; 9102's auto-banked lum
+//                 is the same lum as the bank's rise (it counted twice).
 //    Server bank  a server that banks earned luminance out of the client's
 //                 sight: its server plugin reads the bank (a chat command once
 //                 a minute) and publishes it in its profile ("bankLuminance");
@@ -354,8 +357,11 @@ internal sealed class SessionStats
             long up = _lumRise.Take(lum);
             if (!BankTracked) charUp += up;
         }
-        if (s.AelDrawn is long drawn) charUp -= _drawnRise.Take(drawn);
-        if (s.AelBanked is long banked) charUp += _bankedRise.Take(banked);
+        // With a bank read, its rises already hold what was auto-banked (and a draw is a bank drop):
+        // DreamWeave sends both the bank and 9102, and counting both doubled Lum/hr (2026-11-12).
+        // The baselines still move, so a bank that stops being read doesn't count the gap.
+        if (s.AelDrawn is long drawn) { long d = _drawnRise.Take(drawn); if (!BankTracked) charUp -= d; }
+        if (s.AelBanked is long banked) { long b = _bankedRise.Take(banked); if (!BankTracked) charUp += b; }
         if (charUp > 0) lumUp += charUp;
         if (lumUp > 0) AddLum(lumUp, now);
 

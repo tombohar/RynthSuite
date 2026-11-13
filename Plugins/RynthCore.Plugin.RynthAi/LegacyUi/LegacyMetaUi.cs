@@ -69,6 +69,20 @@ internal sealed class LegacyMetaUi
     /// <summary>Writes the meta file and keeps the result (the dashboard passes its own, which logs).</summary>
     internal MetaSaver Saver { get; set; }
 
+    /// <summary>The plugin log (the dashboard sets it). Null: nothing is logged.</summary>
+    internal Action<string>? Log { get; set; }
+
+    // ── CallState rules without a target (CallStateRepair) ───────────────
+    // Chat lines wait here and go out on the plugin tick (DrainNotices), after the reply of the
+    // command that loaded the meta: two lines in a row off the main thread lose the second.
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _pendingChat = new();
+    private int _pendingTries;
+    private const int MaxPendingChat = 8, MaxChatTries = 90;
+    // The .met found for the loaded .af (looked up on load, not every frame).
+    private string _callCheckPath = string.Empty;
+    private string? _callCheckMet;
+    private string? _repairFailText;   // the status line of a refused repair (shown in red)
+
     public void Render()
     {
         if (!DashWindows.ShowMacroRules) return;
@@ -1048,6 +1062,11 @@ internal sealed class LegacyMetaUi
         if (_macroFiles.Count == 0)
             RefreshMacroFileList();
 
+        // CallState rules that call nothing (an .af saved by an older RynthAi): a Repair button
+        // when the .met it came from is there, and a line saying so either way.
+        int emptyCalls = EmptyCallStatesNow(out string? repairMet);
+        bool showRepair = emptyCalls > 0 && repairMet != null;
+
         // Combo label: show selected file, or the currently loaded file if selection is stale
         string comboLabel = (_selectedFileIdx >= 0 && _selectedFileIdx < _macroFiles.Count)
             ? _macroFiles[_selectedFileIdx].Display
@@ -1055,7 +1074,7 @@ internal sealed class LegacyMetaUi
                 ? Path.GetFileName(_settings.CurrentMetaPath)
                 : "-- None --");
 
-        ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - 210);
+        ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - (showRepair ? 345 : 210));
         if (ImGui.BeginCombo("##MacroFileCombo", comboLabel))
         {
             for (int i = 0; i < _macroFiles.Count; i++)
@@ -1081,9 +1100,31 @@ internal sealed class LegacyMetaUi
         if (ImGui.Button("Save", new Vector2(55, 0)))
             _openSavePopup = true;
 
+        if (showRepair)
+        {
+            ImGui.SameLine();
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.55f, 0.35f, 0.05f, 1f));
+            if (ImGui.Button("Repair from .met", new Vector2(127, 0)))
+            {
+                bool repaired = RepairFromMet(out string reply);
+                _statusMessage = reply;
+                _repairFailText = repaired ? null : reply;
+                _statusTime = RynthClock.Now;
+            }
+            ImGui.PopStyleColor();
+            if (ImGui.IsItemHovered())
+                SafeImGui.SetTooltip($"Fills the {emptyCalls} CallState target(s) from {Path.GetFileName(repairMet)}, in order, state by state.\n" +
+                                 "A backup copy of the .af is kept next to it first. Refused if the two files don't match.");
+        }
+        if (emptyCalls > 0)
+            SafeImGui.TextColored(new Vector4(1f, 0.55f, 0.2f, 1f), repairMet != null
+                ? $"{emptyCalls} CallState rule(s) call no state (saved by an older RynthAi). Repair from .met fills them."
+                : $"{emptyCalls} CallState rule(s) call no state (saved by an older RynthAi). No .met of the same name to repair from.");
+
         // Status message
         // A save that failed (or an edit that wasn't written) stays up, in red, until the next result.
-        bool unsaved = !Saver.LastOk && Saver.Seq > 0 && ReferenceEquals(_statusMessage, Saver.LastText);
+        bool unsaved = (!Saver.LastOk && Saver.Seq > 0 && ReferenceEquals(_statusMessage, Saver.LastText))
+                       || (_repairFailText != null && ReferenceEquals(_statusMessage, _repairFailText));   // a refused repair stays up too
         if (unsaved)
             SafeImGui.TextColored(new Vector4(1, 0.35f, 0.35f, 1), _statusMessage);
         else if (!string.IsNullOrEmpty(_statusMessage) && (RynthClock.Now - _statusTime).TotalSeconds < 5)
@@ -1220,6 +1261,7 @@ internal sealed class LegacyMetaUi
                 ? $"Loaded {loaded.Rules.Count} rules / {stateCount} states / {loaded.EmbeddedNavs.Count} navs from {name}"
                 : $"Loaded {loaded.Rules.Count} rules / {stateCount} states from {name} — {loaded.Warnings.Count} warning(s): {loaded.Warnings[0]}";
             _statusTime = RynthClock.Now;
+            NoteCallStates(filePath, loaded.Rules);
             return true;
         }
         catch (Exception ex)
@@ -1240,6 +1282,154 @@ internal sealed class LegacyMetaUi
     internal void RefreshFileListIfShown()
     {
         if (_macroFiles.Count > 0) RefreshMacroFileList();
+    }
+
+    // ── CallState rules without a target ─────────────────────────────────
+
+    /// <summary>
+    /// A meta just loaded (or read again at login): when it is an .af with CallState rules that
+    /// call nothing, one chat line says so (queued, see <see cref="DrainNotices"/>) and the log names
+    /// each state. Remembers the .met to repair from, for the Repair button.
+    /// </summary>
+    internal void NoteCallStates(string path, IReadOnlyList<MetaRule> rules)
+    {
+        _callCheckPath = path ?? string.Empty;
+        _callCheckMet = null;
+        if (!Path.GetExtension(_callCheckPath).Equals(".af", StringComparison.OrdinalIgnoreCase)) return;
+        var empty = CallStateRepair.EmptyTargets(rules);
+        if (empty.Count == 0) return;
+        _callCheckMet = CallStateRepair.FindSourceMet(_callCheckPath);
+        int count = 0;
+        foreach (var (_, n) in empty) count += n;
+        string name = Path.GetFileName(_callCheckPath);
+        string line = CallStateRepair.WarningLine(name, count, _callCheckMet);
+        if (_pendingChat.Count < MaxPendingChat) _pendingChat.Enqueue(line);
+        WriteLog(line);
+        foreach (var (state, n) in empty)
+            WriteLog($"[RynthAi] {name}: state '{state}' has {n} CallState rule{(n == 1 ? "" : "s")} with no state to call.");
+    }
+
+    /// <summary>
+    /// Posts the queued chat lines (plugin tick). <paramref name="write"/> is Host.WriteToChat: a line
+    /// it refuses waits for the next tick (about 1.5 s at most, then it is only in the log).
+    /// </summary>
+    internal void DrainNotices(Func<string, bool> write)
+    {
+        while (_pendingChat.TryPeek(out string? line))
+        {
+            bool ok;
+            try { ok = write(line); } catch { ok = false; }
+            if (!ok && ++_pendingTries < MaxChatTries) return;
+            _pendingChat.TryDequeue(out _);
+            _pendingTries = 0;
+        }
+    }
+
+    /// <summary>Chat lines waiting to be posted (tests).</summary>
+    internal int PendingNotices => _pendingChat.Count;
+
+    /// <summary>
+    /// The loaded meta's CallState rules without a target, now (edits included), and the .met to
+    /// repair from (null: none). 0 for a .met or no meta.
+    /// </summary>
+    internal int EmptyCallStatesNow(out string? repairMet)
+    {
+        repairMet = null;
+        string path = _settings.CurrentMetaPath ?? string.Empty;
+        if (!Path.GetExtension(path).Equals(".af", StringComparison.OrdinalIgnoreCase)) return 0;
+        int n;
+        lock (_settings.MetaRulesLock) n = CallStateRepair.CountEmpty(_settings.MetaRules);
+        if (n == 0) return 0;
+        if (!path.Equals(_callCheckPath, StringComparison.OrdinalIgnoreCase))
+        {
+            // The meta's file changed without a load here (a .met saved as its .af, a login): look once.
+            _callCheckPath = path;
+            _callCheckMet = CallStateRepair.FindSourceMet(path);
+        }
+        repairMet = _callCheckMet;
+        return n;
+    }
+
+    /// <summary>
+    /// Repair from .met (the Macro Rules button, /ra meta repair): fills the loaded .af's empty
+    /// CallState targets and return states from the .met of the same name, in order, state by state;
+    /// keeps a backup copy ("&lt;name&gt;.af.bak-yyyyMMdd-HHmmss"), writes the .af and loads it again.
+    /// Refused, with nothing changed, when the two files don't match. <paramref name="reply"/> is the
+    /// chat line either way.
+    /// </summary>
+    internal bool RepairFromMet(out string reply)
+    {
+        (bool ok, string text) = RepairFromMetCore();
+        reply = text;
+        return ok;
+    }
+
+    private (bool Ok, string Reply) RepairFromMetCore()
+    {
+        string path = _settings.CurrentMetaPath ?? string.Empty;
+        string name = Path.GetFileName(path);
+        (bool, string) Refuse(string why)
+        {
+            WriteLog($"[RynthAi] Meta repair of {(path.Length > 0 ? path : "(no meta)")} refused: {why}");
+            return (false, $"[RynthAi] Can't repair {(name.Length > 0 ? name : "the meta")}: {why}");
+        }
+
+        if (path.Length == 0) return Refuse("no meta is loaded. Load the .af first.");
+        if (!Path.GetExtension(path).Equals(".af", StringComparison.OrdinalIgnoreCase))
+            return Refuse("only an .af can be repaired (a .met already has its CallState targets).");
+        if (!File.Exists(path)) return Refuse("the file isn't there any more.");
+        if (_settings.MetaUnsaved)
+            return Refuse("your last change to it isn't saved to the file yet. Save it first, then repair.");
+
+        string? met = CallStateRepair.FindSourceMet(path);
+        if (met == null)
+            return Refuse($"there is no {Path.GetFileNameWithoutExtension(path)}.met next to it. Load the original .met if you have it, or set each CallState's target in the editor.");
+        string metName = Path.GetFileName(met);
+
+        LoadedMeta af;
+        LoadedMeta source;
+        try
+        {
+            af = AfFileParser.Load(path);
+            source = MetFileParser.Load(met);
+        }
+        catch (Exception ex) { return Refuse($"reading the files failed ({ex.Message})."); }
+        if (af.Rules.Count == 0)
+            return Refuse($"it didn't read ({(af.Warnings.Count > 0 ? af.Warnings[0] : "no rules")}).");
+        if (CallStateRepair.CountEmpty(af.Rules) == 0)
+        {
+            string none = $"[RynthAi] No CallState rule in {name} is missing its target; nothing to repair.";
+            WriteLog(none);
+            return (false, none);
+        }
+        if (source.Rules.Count == 0)
+            return Refuse($"{metName} didn't read ({(source.Warnings.Count > 0 ? source.Warnings[0] : "no rules")}).");
+
+        CallStateRepair.Result r = CallStateRepair.Repair(af.Rules, source.Rules);
+        if (!r.Ok) return Refuse($"{r.Why}.");
+
+        string backup = CallStateRepair.BackupPath(path, RynthClock.Now);
+        try { File.Copy(path, backup, overwrite: false); }
+        catch (Exception ex) { return Refuse($"couldn't keep a backup copy ({ex.Message}); nothing was changed."); }
+
+        if (!DataWriteGuard.TrySave("the meta", path,
+                () => AfFileWriter.Save(path, af.Rules, af.EmbeddedNavs), out string why, callerShows: true))
+            return Refuse($"couldn't write it: {why} The backup {Path.GetFileName(backup)} is kept.");
+
+        WriteLog($"[RynthAi] Meta repaired: {path} from {met}: {r.Filled} CallState rule(s) in {r.States} state(s); backup {backup}");
+        foreach (string d in r.Details) WriteLog($"[RynthAi]   {d}");
+
+        if (!LoadMacroFile(path))
+            return (false, $"[RynthAi] Couldn't load {name} again after repairing it ({LastLoadStatus}). The repaired file is written; the backup is {Path.GetFileName(backup)}.");
+        string done = $"[RynthAi] Repaired {name}: {r.Filled} CallState rule{(r.Filled == 1 ? "" : "s")} in {r.States} state{(r.States == 1 ? "" : "s")} filled from {metName}, and loaded it again (it starts over in {_settings.CurrentState}). Backup: {Path.GetFileName(backup)}.";
+        _statusMessage = done;
+        _statusTime = RynthClock.Now;
+        return (true, done);
+    }
+
+    private void WriteLog(string line)
+    {
+        try { Log?.Invoke(line); } catch { }
     }
 
 

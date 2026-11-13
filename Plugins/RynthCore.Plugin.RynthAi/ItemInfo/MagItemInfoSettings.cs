@@ -106,6 +106,13 @@ public sealed class MagItemInfoSettings
     /// </summary>
     public string TextColor = string.Empty;
     /// <summary>
+    /// "Colour each part" (2026-11-11): the one-line layout's name, set, armour / damage, spells,
+    /// ratings, requirements, workmanship, value / burden ... each in its own colour in RynthCore's
+    /// chat (ItemInfoPartColors); the rest of the line keeps <see cref="TextColor"/>, else the chat
+    /// type's colour. Off by default and in every profile before it: one colour, as before.
+    /// </summary>
+    public bool PartColors;
+    /// <summary>
     /// Text put in front of every line. RynthChat files lines starting "[RynthAi Item] " under
     /// its Items tab (ChatClassifier.IsItemInfo).
     /// </summary>
@@ -156,7 +163,7 @@ public sealed class MagItemInfoSettings
         HiddenFields = d.HiddenFields; HiddenRatings = d.HiddenRatings;
         ShowValueAndBurden = d.ShowValueAndBurden;
         SpellMode = d.SpellMode; MaxListedSpells = d.MaxListedSpells;
-        ChatType = d.ChatType; Prefix = d.Prefix; TextColor = d.TextColor;
+        ChatType = d.ChatType; Prefix = d.Prefix; TextColor = d.TextColor; PartColors = d.PartColors;
     }
 }
 

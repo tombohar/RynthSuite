@@ -166,10 +166,22 @@ public static unsafe class PluginExports
                 int drawn = plugin.RenderDashboard(popped, out want);
                 if (drawn != 1) return drawn;
             }
+            else if (name.SequenceEqual("window:timedcommands"u8))
+            {
+                // The Timed Commands window (RynthAiPlugin.TimedCommands.cs): 1 drawn, 0 not ready, -2 failed.
+                int drawn = plugin.RenderTimedCommands(popped, out want);
+                if (drawn != 1) return drawn;
+            }
             else if (name.SequenceEqual("window:monsterstats"u8))
             {
                 // The Monster Stats window (RynthAiPlugin.MonsterStats.cs): 1 drawn, 0 not ready, -2 failed.
                 int drawn = plugin.RenderMonsterStats(popped, out want);
+                if (drawn != 1) return drawn;
+            }
+            else if (name.SequenceEqual("window:activegear"u8))
+            {
+                // The Active Gear window (RynthAiPlugin.ActiveGear.cs): 1 drawn, 0 not ready, -2 failed.
+                int drawn = plugin.RenderActiveGear(popped, out want);
                 if (drawn != 1) return drawn;
             }
             else if (name.StartsWith("section:"u8))

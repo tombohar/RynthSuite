@@ -102,8 +102,8 @@ internal sealed class ShortcutBarWindow
     private float Fs(ImFontPtr f) => f.FontSize * _r;
 
     /// <summary>
-    /// The layout's scale and the text's against the baked font: the window's own size (Settings > UI >
-    /// Toolbar, Ctrl+wheel: 30-250%, PanelScale) or, unset, the text size the engine baked for it.
+    /// The layout's scale and the text's against the baked font: the window's own size (Settings > Interface >
+    /// In The Retail Toolbar's Place, Ctrl+wheel: 30-250%, PanelScale) or, unset, the text size the engine baked for it.
     /// </summary>
     private void Scale()
     {

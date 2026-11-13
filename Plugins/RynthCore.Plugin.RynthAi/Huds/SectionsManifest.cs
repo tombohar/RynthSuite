@@ -85,17 +85,35 @@ internal static class SectionsManifest
     public const string MonsterStatsTitle = RynthAiPlugin.MonsterStatsTitle, MonsterStatsSurface = RynthAiPlugin.MonsterStatsSurface;
 
     /// <summary>
-    /// The manifest JSON for <paramref name="views"/> (UTF-8 text, schema version 1), with the dashboard
-    /// window when <paramref name="dashboard"/> and the Monster Stats window when <paramref name="monsterStats"/>.
+    /// The Timed Commands window (RynthAiPlugin.TimedCommands.cs, 2026-11-03): commands sent every N
+    /// seconds, per character, server and for all, drawn by RynthAi (plugin API v89). No bar button
+    /// and no bar menu: the dashboard's options menu (Timed commands) and /ra timed show open it.
     /// </summary>
-    public static string Build(IReadOnlyList<View> views, IReadOnlyList<Section> sections, bool dashboard = false, bool monsterStats = false)
+    public const string TimedCommandsTitle = RynthAiPlugin.TimedCommandsTitle, TimedCommandsSurface = RynthAiPlugin.TimedCommandsSurface;
+
+    /// <summary>
+    /// The Active Gear window (RynthAiPlugin.ActiveGear.cs, 2026-11-11): which worn items have their magic
+    /// on, their mana and time left, drawn by RynthAi in the engine's frame (plugin API v89). No bar button
+    /// and no bar menu: the dashboard's options menu (Active gear) and /ra gear open it.
+    /// </summary>
+    public const string ActiveGearTitle = RynthAiPlugin.ActiveGearTitle, ActiveGearSurface = RynthAiPlugin.ActiveGearSurface;
+
+    /// <summary>
+    /// The manifest JSON for <paramref name="views"/> (UTF-8 text, schema version 1), with the dashboard
+    /// window when <paramref name="dashboard"/>, the Monster Stats window when <paramref name="monsterStats"/>,
+    /// the Timed Commands window when <paramref name="timedCommands"/> and the Active Gear window when
+    /// <paramref name="activeGear"/>.
+    /// </summary>
+    public static string Build(IReadOnlyList<View> views, IReadOnlyList<Section> sections, bool dashboard = false, bool monsterStats = false,
+        bool timedCommands = false, bool activeGear = false)
     {
         using var stream = new MemoryStream(4096);
         using (var w = new Utf8JsonWriter(stream))
         {
             w.WriteStartObject();
             w.WriteNumber("version", 1);
-            if (dashboard || monsterStats)
+            bool windows = dashboard || monsterStats || timedCommands || activeGear;
+            if (windows)
                 w.WriteStartArray("windows");
             if (dashboard)
             {
@@ -130,7 +148,37 @@ internal static class SectionsManifest
                 w.WriteBoolean("edgeToEdge", true);
                 w.WriteEndObject();
             }
-            if (dashboard || monsterStats)
+            if (timedCommands)
+            {
+                w.WriteStartObject();
+                w.WriteString("id", "timedcommands");
+                w.WriteString("title", TimedCommandsTitle);
+                w.WriteString("surface", TimedCommandsSurface);
+                w.WriteString("icon", RynthCore.Plugin.Shared.RynthUi.RynthIcons.Hourglass);
+                w.WriteNumber("width", 640);
+                w.WriteNumber("height", 300);
+                w.WriteNumber("minWidth", 480);
+                w.WriteNumber("minHeight", 160);
+                w.WriteBoolean("bar", false);
+                w.WriteBoolean("edgeToEdge", true);
+                w.WriteEndObject();
+            }
+            if (activeGear)
+            {
+                w.WriteStartObject();
+                w.WriteString("id", "activegear");
+                w.WriteString("title", ActiveGearTitle);
+                w.WriteString("surface", ActiveGearSurface);
+                w.WriteString("icon", RynthCore.Plugin.Shared.RynthUi.RynthIcons.BatteryCharging);
+                w.WriteNumber("width", 640);
+                w.WriteNumber("height", 320);
+                w.WriteNumber("minWidth", 420);
+                w.WriteNumber("minHeight", 140);
+                w.WriteBoolean("bar", false);
+                w.WriteBoolean("edgeToEdge", true);
+                w.WriteEndObject();
+            }
+            if (windows)
                 w.WriteEndArray();
             w.WriteStartArray("sections");
             foreach (Section s in sections)

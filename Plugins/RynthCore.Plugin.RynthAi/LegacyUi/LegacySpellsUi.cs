@@ -4,6 +4,7 @@
 // sortable columns (click a header; Shift+click adds a second sort key).
 // Right: the buff profile editor. A saved profile chosen here ("Use for buffing") or under
 // Loaded Files → Buffs replaces buffing's built-in list.
+// Right, second tab: Buff Items (LegacySpellsUi.BuffItems.cs), the items buffing may use.
 //
 // Render thread only. The plugin hands in pump-thread data: the known-spell copy, the built-in
 // buff list, and applies the chosen profile path.
@@ -17,7 +18,7 @@ using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthAi.LegacyUi;
 
-internal sealed unsafe class LegacySpellsUi
+internal sealed unsafe partial class LegacySpellsUi
 {
     private const string WindowTitle = "RynthAi Spells##RynthAiSpells";
     private const string ConfirmPopupId = "Confirm##rynthaispells";
@@ -168,7 +169,7 @@ internal sealed unsafe class LegacySpellsUi
 
             ImGui.SameLine();
             if (ImGui.BeginChild("##spprofile", Vector2.Zero, ImGuiChildFlags.Borders))
-                RenderProfileEditor();
+                RenderRightTabs();
             ImGui.EndChild();
         }
 
@@ -445,6 +446,9 @@ internal sealed unsafe class LegacySpellsUi
 
     // ── Profile editor ──────────────────────────────────────────────────────
 
+    /// <summary>The profile open here has edits not saved yet (the Loaded files drawer's BUFFS row shows a *).</summary>
+    internal bool Dirty => _dirty;
+
     private void RenderProfileEditor()
     {
         string active = _settings.CurrentBuffProfilePath ?? "";
@@ -483,9 +487,13 @@ internal sealed unsafe class LegacySpellsUi
         ImGui.SameLine();
         ImGui.BeginDisabled(_editPath == null);
         if (ImGui.Button("Delete##spdel")) ConfirmDelete();
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Moves the profile to BuffProfiles\\Deleted (nothing is deleted; move it back to restore it).");
         ImGui.EndDisabled();
         ImGui.SameLine();
         if (ImGui.Button("Refresh##sprefresh")) RefreshFiles();
+        ImGui.SameLine();
+        if (ImGui.Button("Open folder##spfolder")) OpenFolder();
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Opens RynthAi\\BuffProfiles in Explorer.");
 
         string name = _edit.Name;
         ImGui.SetNextItemWidth(-1);
@@ -761,11 +769,11 @@ internal sealed unsafe class LegacySpellsUi
     {
         string? path = _editPath;
         if (path == null) return;
-        Confirm($"Delete the profile '{Path.GetFileNameWithoutExtension(path)}'?", () =>
+        Confirm($"Move the profile '{Path.GetFileNameWithoutExtension(path)}' to BuffProfiles\\{ProfileFileOps.DeletedFolderName}?", () =>
         {
             if (!BuffProfileStore.Delete(path))
             {
-                SetStatus("Delete failed (file missing or in use).", warning: true);
+                SetStatus("Not moved (file missing or in use).", warning: true);
                 return;
             }
             if ((_settings.CurrentBuffProfilePath ?? "").Equals(path, StringComparison.OrdinalIgnoreCase))
@@ -773,8 +781,25 @@ internal sealed unsafe class LegacySpellsUi
             RefreshFiles();
             _refreshProfileList?.Invoke();
             StartNewProfile();
-            SetStatus($"Deleted {Path.GetFileNameWithoutExtension(path)}.");
+            SetStatus($"Moved {Path.GetFileNameWithoutExtension(path)} to BuffProfiles\\{ProfileFileOps.DeletedFolderName}.");
         });
+    }
+
+    /// <summary>Explorer on RynthAi\BuffProfiles, the open profile selected.</summary>
+    private void OpenFolder()
+    {
+        try
+        {
+            string folder = BuffProfileStore.Folder;
+            Directory.CreateDirectory(folder);
+            string args = _editPath != null && File.Exists(_editPath) ? $"/select,\"{_editPath}\"" : $"\"{folder}\"";
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", args) { UseShellExecute = true });
+            SetStatus("Opened " + folder);
+        }
+        catch (Exception ex)
+        {
+            SetStatus("Couldn't open the folder: " + ex.Message, warning: true);
+        }
     }
 
     private void RefreshFiles() => _files = BuffProfileStore.ListFileNames();

@@ -360,9 +360,14 @@ internal sealed class LegacyAdvancedSettingsUi
                 ImGui.Checkbox("Start Macro On Login", ref _settings.StartMacroOnLogin);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Automatically starts the macro when RynthAi loads.");
-                ImGui.Checkbox("Patrol On Login", ref _settings.PatrolOnLogin);
+                if (ImGui.Checkbox("Patrol On Login", ref _settings.PatrolOnLogin) && _settings.PatrolOnLogin)
+                    _settings.HuntOnLogin = false;   // one or the other (LoginAutoStart)
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Automatically starts dungeon patrol when RynthAi loads.");
+                if (ImGui.Checkbox("Hunt On Login", ref _settings.HuntOnLogin) && _settings.HuntOnLogin)
+                    _settings.PatrolOnLogin = false;
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(LoginAutoStart.HuntOnLoginTip);
                 ImGui.Checkbox("Resume Meta After Reload", ref _settings.ResumeMetaOnReload);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("After a hot reload the meta carries on in the same state, with its variables,\nfired rules and route. A real login still starts in Default.");

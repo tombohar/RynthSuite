@@ -41,8 +41,9 @@ internal static class LootRetryTimingTests
     public static void Register(Runner r)
     {
         r.Add("loot retry (R-20261029-122319-321f): with 1.7 s answers no move is resent while one is out, no pack is marked full, every item lands", SlowServerNoFalseFull);
-        r.Add("loot retry (R-20261029-122319-321f): a full main pack's refusals after the pickup count as tries (no free resends) and mark it full; the items go to the side pack", FullMainPackRefusals);
-        r.Add("loot retry (R-20261029-122319-321f): unanswered moves are retried only after the answer wait; their pack marks end with the item, the next item starts fresh", UnansweredMovesDontPoison);
+        r.Add("loot retry (R-20261029-122319-321f): a full main pack's refusals after the pickup count as tries (no free resends); a second item refused there keeps it marked full; nothing goes to a side pack", FullMainPackRefusals);
+        r.Add("loot retry (R-20261029-122319-321f): unanswered moves are retried only after the answer wait, three tries, then given up (no side-pack round); their pack marks end with the item, the next item starts fresh", UnansweredMovesDontPoison);
+        r.Add("loot pickup, main pack full (2026-11-12 'You must first pick up the Silver Pea'): a pea joins the stack you carry, a gem is left at once with one chat line, nothing is aimed at a side pack, the corpse completes", FullMainPackPeaJoinsGemLeft);
         r.Add("loot retry (R-20261029-122319-321f): an item that lands late, after its pack was given up on, un-marks that pack", LateLandingUnmarks);
         r.Add("loot retry (R-20261029-122319-321f): a refusal on arrival is 'too busy' (free resend), one after the pickup is the pack's answer", RefusalTiming);
         r.Add("loot retry (R-20261029-122319-321f): the answer wait grows with the server's measured answers, within 4-8 s", AnswerWaitAdapts);
@@ -390,17 +391,22 @@ internal static class LootRetryTimingTests
 
         Run(bot, () => bot.Completed, 60_000);
 
+        // The real client takes nothing from a corpse straight into a side pack ("You must first pick
+        // up the X", nothing sent, 2026-11-12), so the main pack is the only place to try.
         var mapMoves = FakeHost.ExternalMoves.Where(m => m.Id == Map).ToList();
         Check.Eq(mapMoves.Count(m => m.Target == Player), 3, "three tries into the main pack (each refused after the pickup ran), no free resends");
         Check.False(Logged("as too busy"), "a refusal after the pickup is not taken for 'too busy'");
         Check.True(Logged("the main pack took none of 3 tries") && Logged("the server refused 3 after the pickup ran") && Logged("treating it as full"),
             "the main pack is judged full on the server's refusals");
-        Check.True(mapMoves.Last().Target == SidePack && sim.Landed.Any(l => l.Id == Map && l.Pack == SidePack), "then the map goes into the side pack and lands");
-        Check.True(FakeHost.ExternalMoves.Where(m => m.Id == G2).All(m => m.Target == SidePack), "the next item goes straight to the side pack");
-        Check.True(sim.Landed.Any(l => l.Id == G2), "and lands");
-        Check.True(bot.Refusals.IsConfirmed(unchecked((int)Player), _now), "the main pack stays marked (confirmed by the server)");
-        Check.False(bot.Refusals.IsRefused(unchecked((int)SidePack), _now), "the side pack is not marked");
+        Check.True(Logged("pickup failed for 0x80263111"), "then the map is given up: there is nowhere else to put it");
+        Check.True(Logged("the only place loot can go") && Logged("no longer treated as full (unless another item is refused there too)"),
+            "one item's refusals alone could be the item's, not the pack's: its mark goes with it");
+        Check.Eq(FakeHost.ExternalMoves.Count(m => m.Id == G2 && m.Target == Player), 3, "the next item tries the main pack too, and is refused three times");
+        Check.True(bot.Refusals.IsConfirmed(unchecked((int)Player), _now), "a second item refused there: the main pack stays marked (it is the pack)");
+        Check.True(FakeHost.ExternalMoves.All(m => m.Target != SidePack), "no move ever goes to the side pack");
+        Check.False(sim.Landed.Any(), "nothing lands: the server's main pack is full");
         Check.Eq(sim.LocalRefused, 0, "no move sent while another was unanswered");
+        Check.True(bot.Completed, "the corpse completes");
     });
 
     // ── 3. Moves the server never answers ─────────────────────────────────────
@@ -415,13 +421,14 @@ internal static class LootRetryTimingTests
         var sends = Run(bot, () => bot.Completed, 90_000).Where(s => s.Id == Lost).ToList();
 
         var lostMoves = FakeHost.ExternalMoves.Where(m => m.Id == Lost).ToList();
-        Check.Eq(lostMoves.Count, 6, "three tries into the main pack, three into the side pack");
+        Check.Eq(lostMoves.Count, 3, "three tries into the main pack, and no round into the side pack (the client refuses that from a corpse)");
+        Check.True(lostMoves.All(m => m.Target == Player), "all of them into the main pack");
         var gaps = sends.Zip(sends.Skip(1), (a, b) => b.At - a.At).ToList();
         Check.True(gaps.Count > 0 && gaps.All(g => g >= RynthAiPlugin.PickupAnswerWaitMinMs - TickMs),
             $"each retry only after the answer wait ({string.Join(", ", gaps)} ms)");
-        Check.True(Logged("trying another pack for this item only"), "the main pack is left out for this item only");
+        Check.False(Logged("trying another pack"), "no other pack to try");
         Check.False(Logged("treating it as full"), "no pack is judged full on unanswered tries");
-        Check.True(Logged("pickup failed for 0x80263121"), "the item is given up after the second round");
+        Check.True(Logged("pickup failed for 0x80263121"), "the item is given up after its three tries");
         Check.False(bot.Refusals.IsRefused(unchecked((int)Player), _now), "the main pack's mark ended with the item");
         Check.False(bot.Refusals.IsRefused(unchecked((int)SidePack), _now), "so did the side pack's");
         Check.True(FakeHost.ExternalMoves.Where(m => m.Id == Next).All(m => m.Target == Player), "the next item goes into the main pack again");
@@ -430,24 +437,72 @@ internal static class LootRetryTimingTests
         Check.False(Logged("no pack has a free slot"), "looting does not stop for want of a pack");
     });
 
+    // ── 3b. The main pack is full by the client's own count ───────────────────
+    // 2026-11-12, Drakkon on DreamWeave (and R-20261112-110130-5d71): the main pack filled at 07:35,
+    // the looter aimed every pickup at a side pack, the client refused each one ("You must first
+    // pick up the Silver Pea", nothing sent), and each item waited out 3 + 3 unanswered tries and
+    // was left: 48 peas and maps in two hours, the bot stuck on one corpse after another.
+
+    private static void FullMainPackPeaJoinsGemLeft() => Clocked(() =>
+    {
+        const uint Gem = 0x80263171, Pea = 0x80263172, PeaStack = 0x80263173, JunkBase = 0x80264000;
+        World(sidePack: true, Gem, Pea);
+        FakeHost.Names[Pea] = "Silver Pea";
+        FakeHost.Ints[(Pea, 11)] = 100;          // MaxStackSize
+        FakeHost.Ints[(Pea, 12)] = 1;            // StackCount
+        FakeHost.Names[PeaStack] = "Silver Pea"; // the stack you carry, in the side pack
+        FakeHost.ItemTypes[PeaStack] = ItemTypeGem;
+        FakeHost.Ints[(PeaStack, 11)] = 100;
+        FakeHost.Ints[(PeaStack, 12)] = 40;
+        FakeHost.Containers[PeaStack] = SidePack;
+        var ids = new List<uint> { Gem, Pea, PeaStack };
+        for (uint i = 0; i < 102; i++)          // a full main pack
+        {
+            uint j = JunkBase + i;
+            FakeHost.Names[j] = $"Junk {i}";
+            FakeHost.ItemTypes[j] = 0x80;
+            FakeHost.Containers[j] = Player;
+            ids.Add(j);
+        }
+        var sim = new SlowAce();
+        var bot = Open(sim, sidePack: true, ids.ToArray());
+
+        long started = _now;
+        Run(bot, () => bot.Completed, 60_000);
+
+        Check.True(FakeHost.ExternalMoves.All(m => m.Target != SidePack), "no pickup is aimed at the side pack (the client would refuse it)");
+        Check.Eq(FakeHost.ExternalMoves.Count(m => m.Id == Gem), 0, "the gem is not sent at all: the main pack has no slot and it joins no stack");
+        Check.True(Logged("leaving 'Gem 113' 0x80263171") && Logged("the main pack is full"), "the gem is left, and the log says why");
+        Check.Eq(FakeHost.ExternalMoves.Count(m => m.Id == Pea), 1, "the pea is sent once");
+        Check.True(FakeHost.ExternalMoves.Where(m => m.Id == Pea).All(m => m.Target == Player), "aimed at the main pack: the client joins it to your stack");
+        Check.True(sim.Landed.Any(l => l.Id == Pea), "and it lands");
+        Check.Eq(FakeHost.Chat.Count(c => c.Contains("Main pack full")), 1, "one chat line says the main pack is full and loot is left");
+        Check.False(Logged("pickup failed"), "nothing is waited out and given up");
+        Check.False(Logged("no pack has a free slot"), "and looting doesn't stop: the side pack has room");
+        Check.True(bot.Completed, "the corpse completes");
+        Check.True(_now - started < 10_000, $"quickly ({_now - started} ms), not after 3 + 3 tries per item");
+    });
+
     // ── 4. A late landing ─────────────────────────────────────────────────────
 
     private static void LateLandingUnmarks() => Clocked(() =>
     {
-        const uint Slow = 0x80263131, Next = 0x80263132;
-        World(sidePack: true, Slow, Next);
+        // One item: with no side-pack round (the client takes nothing from a corpse straight into one)
+        // it is given up at its third unanswered try, before the late answer; a second item would be
+        // the server's next pickup then and the late one would be refused as too busy.
+        const uint Slow = 0x80263131;
+        World(sidePack: true, Slow);
         var sim = new SlowAce();
         sim.Lag[Slow] = 12_500;   // a lag spike: the server takes up the first move 12.5 s late
-        var bot = Open(sim, sidePack: true, Slow, Next);
+        var bot = Open(sim, sidePack: true, Slow);
 
-        Run(bot, () => bot.Completed, 90_000);
+        Run(bot, () => bot.Completed && sim.Landed.Any(l => l.Id == Slow), 90_000);
+        Run(bot, () => Logged("after it was given up"), 3_000);
 
         Check.True(sim.Landed.Any(l => l.Id == Slow && l.Pack == Player), "the first move lands in the main pack, late");
-        Check.True(Logged("trying another pack for this item only"), "after three unanswered tries the main pack was left out for the item");
-        Check.True(Logged("0x80263131 landed in the main pack; it has room after all and is no longer treated as full"), "the late landing un-marks the main pack");
+        Check.True(Logged("pickup failed for 0x80263131"), "after three unanswered tries the item was given up (no side-pack round)");
+        Check.True(Logged("0x80263131 landed in the main pack") && Logged("after it was given up"), "the late landing is seen and logged");
         Check.False(bot.Refusals.IsRefused(unchecked((int)Player), _now), "the main pack is not marked");
-        Check.True(sim.Landed.Any(l => l.Id == Next), "the next item lands too");
-        Check.False(Logged("pickup failed for 0x80263132"), "the next item is not given up on");
         Check.False(Logged("no pack has a free slot"), "looting does not stop");
         Check.Eq((long)bot.Call("PickupAnswerWaitMs")!, RynthAiPlugin.PickupAnswerWaitMinMs,
             "the lag spike's late answer (to an earlier, timed-out send) does not stretch the answer wait");
@@ -661,10 +716,10 @@ internal static class LootRetryTimingTests
 
         var mapMoves = FakeHost.ExternalMoves.Where(m => m.Id == QuestMap).ToList();
         Check.Eq(mapMoves.Count(m => m.Target == Player), 3, "three tries into the main pack");
-        Check.Eq(mapMoves.Count(m => m.Target == SidePack), 3, "three into the side pack");
+        Check.Eq(mapMoves.Count(m => m.Target == SidePack), 0, "none into the side pack (the client refuses that from a corpse)");
         Check.True(Logged("pickup failed for 0x80263151"), "then the map is given up");
-        Check.True(Logged("it is refusing the item, not the packs") && Logged("the main pack and pack 0x80263001 are no longer treated as full"),
-            "both marks go with the map");
+        Check.True(Logged("the only place loot can go") && Logged("the main pack is no longer treated as full"),
+            "the main pack is the only place it could go, and its mark goes with the map");
         Check.False(bot.Refusals.IsRefused(unchecked((int)Player), _now) || bot.Refusals.IsRefused(unchecked((int)SidePack), _now), "no pack marked");
         Check.True(FakeHost.ExternalMoves.Any(m => m.Id == G2) && FakeHost.ExternalMoves.Where(m => m.Id == G2).All(m => m.Target == Player), "the next item goes into the main pack");
         Check.True(sim.Landed.Any(l => l.Id == G2 && l.Pack == Player), "and lands");

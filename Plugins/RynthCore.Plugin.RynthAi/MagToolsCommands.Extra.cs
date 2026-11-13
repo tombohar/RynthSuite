@@ -502,7 +502,7 @@ public sealed partial class RynthAiPlugin
         return true;
     }
 
-    /// <summary>/mt client minimize|restore (ub-IT's frame apply|restore points to Settings > Display).</summary>
+    /// <summary>/mt client minimize|restore (ub-IT's frame apply|restore points to Settings > Game Client).</summary>
     private bool HandleMtClient(string[] parts)
     {
         string sub = parts.Length >= 3 ? parts[2].ToLowerInvariant() : "";
@@ -511,7 +511,7 @@ public sealed partial class RynthAiPlugin
             case "minimize": if (KeystrokesAllowed("/mt client")) { GameInput.Minimize(); ReplyOk("[RynthAi] Game window minimized."); } return true;
             case "restore":  if (KeystrokesAllowed("/mt client")) { GameInput.Restore(); ReplyOk("[RynthAi] Game window restored."); } return true;
             case "frame":
-                ChatLine("[RynthAi] The window frame is RynthCore's: Settings > Display, Borderless Windowed (there is no chat command for it).");
+                ChatLine("[RynthAi] The window frame is RynthCore's: Settings > Game Client, Borderless Windowed (there is no chat command for it).");
                 return true;
             default:
                 ReplyFail("[RynthAi] Usage: /mt client minimize | restore");

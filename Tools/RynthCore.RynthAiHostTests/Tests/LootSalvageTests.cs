@@ -4,6 +4,7 @@ using System.Linq;
 using RynthCore.Plugin.RynthAi;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.Plugin.RynthAi.Loot;
+using RynthCore.PluginSdk;
 using RynthCore.RynthAiHostTests.Fakes;
 using RynthCore.RynthAiTests.Harness;
 
@@ -34,7 +35,7 @@ internal static class LootSalvageTests
     public static void Register(Runner r)
     {
         r.Add("loot pickup: a corpse item is moved into the main pack, never used (no get-and-wield)", PickupMovesNeverUses);
-        r.Add("loot pickup: a full main pack sends the item to a side pack with room", PickupFullMainPackGoesToSidePack);
+        r.Add("loot pickup: a full main pack never sends an item to a side pack (the client refuses that from a corpse); a stack you carry is still joined, anything else is left", PickupFullMainPackNeverSidePack);
         r.Add("loot pickup: no move call -> wearables are left, other items are used", PickupWithoutMoveCall);
         r.Add("salvage: a worn item is left alone and never taken off", SalvageLeavesWornItem);
         r.Add("salvage: a corpse's items go in one batch and all are salvaged", SalvageOneBatch);
@@ -82,7 +83,12 @@ internal static class LootSalvageTests
         Check.Eq(FakeHost.Wields.Count, 0, "no WieldItem");
     }
 
-    private static void PickupFullMainPackGoesToSidePack()
+    // 2026-11-12: with the main pack full the looter aimed pickups at a side pack, and the client
+    // refused every one ("You must first pick up the Silver Pea", nothing sent): 75 in a week of
+    // logs, none landed, each item waited out 3 + 3 tries and was left.
+    private const uint PeaInPack = 0x80262E01, Pea = 0x80262E02, SpareMain = 0x80262E03;
+
+    private static (RynthCoreHost Host, WorldObjectCache Cache) FullMainPack(bool sideRoom, bool peaStack)
     {
         FakeHost.Reset();
         FakeHost.SalvageCalls = true;
@@ -97,20 +103,60 @@ internal static class LootSalvageTests
         }
         FakeHost.Names[SidePack] = "Backpack";
         FakeHost.ItemTypes[SidePack] = ItemTypeContainer;
-        FakeHost.Ints[(SidePack, 6)] = 24; // ItemsCapacity
+        FakeHost.Ints[(SidePack, 6)] = sideRoom ? 24 : 1; // ItemsCapacity
         FakeHost.Containers[SidePack] = Player;
         ids.Add(SidePack);
+        if (peaStack)
+        {
+            // The pea stack lives in the side pack (RynthSort's "Pea" rule), with room for more.
+            FakeHost.Names[PeaInPack] = "Silver Pea";
+            FakeHost.ItemTypes[PeaInPack] = 0x1000;   // spell component
+            FakeHost.Ints[(PeaInPack, 11)] = 100;     // MaxStackSize
+            FakeHost.Ints[(PeaInPack, 12)] = 40;      // StackCount
+            FakeHost.Containers[PeaInPack] = SidePack;
+            ids.Add(PeaInPack);
+        }
+        else if (!sideRoom)
+        {
+            FakeHost.Names[SpareMain] = "Junk side";
+            FakeHost.ItemTypes[SpareMain] = ItemTypeGem;
+            FakeHost.Containers[SpareMain] = SidePack;   // the one slot taken
+            ids.Add(SpareMain);
+        }
         FakeHost.Names[Ring] = "Gold Ring";
         FakeHost.ItemTypes[Ring] = ItemTypeJewelry;
         ids.Add(Ring);
+        FakeHost.Names[Pea] = "Silver Pea";
+        FakeHost.ItemTypes[Pea] = 0x1000;
+        FakeHost.Ints[(Pea, 11)] = 100;
+        FakeHost.Ints[(Pea, 12)] = 1;
+        ids.Add(Pea);
         var host = FakeHost.Create(Player);
-        var cache = FakeHost.MakeCache(host, Player, ids);
+        return (host, FakeHost.MakeCache(host, Player, ids));
+    }
 
-        var result = LootPickup.Send(host, cache, Ring, Player, out uint dest);
+    private static void PickupFullMainPackNeverSidePack()
+    {
+        var (host, cache) = FullMainPack(sideRoom: true, peaStack: true);
 
-        Check.Eq(result, LootPickupResult.Moved, "a move was sent");
-        Check.Eq(dest, SidePack, "the main pack is full: the side pack");
+        Check.Eq(LootPickup.Send(host, cache, Ring, Player, out uint dest), LootPickupResult.MainPackFull,
+            "a ring with the main pack full and room in a side pack: left (MainPackFull)");
+        Check.Eq(dest, 0u, "no destination");
+        Check.Eq(FakeHost.ExternalMoves.Count, 0, "and no move sent, least of all into the side pack");
+
+        Check.Eq(LootPickup.Send(host, cache, Pea, Player, out dest), LootPickupResult.Moved,
+            "a Silver Pea joins the stack you carry: sent");
+        Check.Eq(dest, Player, "aimed at the main pack: the client joins it to the stack in the side pack");
+        Check.True(FakeHost.ExternalMoves.All(m => m.Target != SidePack), "never aimed at the side pack");
         Check.Eq(FakeHost.Uses.Count, 0, "no UseObject");
+
+        var (host2, cache2) = FullMainPack(sideRoom: true, peaStack: false);
+        Check.Eq(LootPickup.Send(host2, cache2, Pea, Player, out _), LootPickupResult.MainPackFull,
+            "a pea with no stack to join, main pack full: left too");
+
+        var (host3, cache3) = FullMainPack(sideRoom: false, peaStack: false);
+        Check.Eq(LootPickup.Send(host3, cache3, Ring, Player, out _), LootPickupResult.NoRoom,
+            "no room in any pack: NoRoom, as before");
     }
 
     private static void PickupWithoutMoveCall()

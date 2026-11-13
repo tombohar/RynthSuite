@@ -17,10 +17,14 @@ internal static class Program
         NavRouteParserTests.Register(runner);
         NavFormatTests.Register(runner);
         CombatStallWatchdogTests.Register(runner);
+        DirtyFightingHeightTests.Register(runner);
         CreatureWeaknessTests.Register(runner);
         MonsterDamageTierTests.Register(runner);
         LootBaselineTests.Register(runner);
         ChatClassifierTests.Register(runner);
+        BuffItemPickerTests.Register(runner);
+        GearActivationTests.Register(runner);
+        ItemInfoPartColorsTests.Register(runner);
         return runner.Run("RynthAi tests", args.Length > 0 ? args[0] : null);
     }
 }

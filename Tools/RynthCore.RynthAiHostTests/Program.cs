@@ -70,6 +70,7 @@ internal static class Program
         LootRaresModeTests.Register(runner);
         LootChatLineTests.Register(runner);
         ItemInfoTextColorTests.Register(runner);
+        ItemInfoPartColorTests.Register(runner);
         LootSurveyTests.Register(runner);
         PropertyDumpTests.Register(runner);
         T11LootTests.Register(runner);
@@ -88,6 +89,7 @@ internal static class Program
         PatrolPortalTests.Register(runner);
         DunRouteTests.Register(runner);
         BuffTests.Register(runner);
+        BuffItemsTests.Register(runner);
         SpellCatalogTests.Register(runner);
         CombatMathTests.Register(runner);
         WeaponTests.Register(runner);
@@ -98,6 +100,7 @@ internal static class Program
         OffhandTests.Register(runner);
         HandSwapTests.Register(runner);
         OutdoorHuntTests.Register(runner);
+        HuntOnLoginTests.Register(runner);
         HuntBuildingTests.Register(runner);
         FloodPerfTests.Register(runner);
         LootSalvageTests.Register(runner);
@@ -109,6 +112,7 @@ internal static class Program
         LootNothingLineTests.Register(runner);
         ChestLootTests.Register(runner);
         ItemToolTests.Register(runner);
+        TimedCommandsTests.Register(runner);
         VanishedItemTests.Register(runner);
         KitUsedUpTests.Register(runner);
         VitalWandGateTests.Register(runner);
@@ -199,10 +203,13 @@ internal static class Program
         SaveFailureTests.Register(runner);
         EnvironmentImpactTests.Register(runner);
         SkCombatAddonTests.Register(runner);
+        DirtyFightingRotationTests.Register(runner);
         DoorTests.Register(runner);
         ServerPolicyTests.Register(runner);
         PatrolModeTests.Register(runner);
         BlankLoadTests.Register(runner);
+        CallStateRepairTests.Register(runner);
+        ProfileButtonTests.Register(runner);
         GiveProfileTests.Register(runner);
         TinkerTests.Register(runner);
         LauncherSwapTests.Register(runner);
@@ -214,12 +221,14 @@ internal static class Program
         TickIsolationTests.Register(runner);
         ChoresInFightTests.Register(runner);
         AetheriaUnboxTests.Register(runner);
+        AutoConfirmCraftTests.Register(runner);
         CommandReplyTests.Register(runner);
         MonsterStatsTests.Register(runner);
         MetaSaveTests.Register(runner);
         MetaResumeTests.Register(runner);
         FellowOpenTests.Register(runner);
         WieldBanTests.Register(runner);
+        ActiveGearTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

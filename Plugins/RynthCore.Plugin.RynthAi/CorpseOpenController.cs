@@ -854,6 +854,11 @@ public sealed partial class RynthAiPlugin
         if (_targetCorpseId == 0 && _chestCandidateId != 0 && TryTakeOpenChest(settings, CorpseNowMs))
             return;
 
+        // A chest that closed before the looter was done is opened again, before any corpse is
+        // claimed (opening a corpse would close it once more; RynthAiPlugin.ChestLoot.cs).
+        if (_targetCorpseId == 0 && _chestReopenId != 0 && TryReopenChest(settings, CorpseNowMs))
+            return;
+
         // A named object (Loot by name) when no corpse is claimed and nothing is open.
         if (_targetCorpseId == 0 && _lootNameTargetId != 0 && TryLootByName(settings, CorpseNowMs))
             return;
@@ -1936,7 +1941,7 @@ public sealed partial class RynthAiPlugin
                 LootDiag($"[RynthAi] {LootTag}: queuing 0x{(uint)firstMatchId:X8} '{matchItemName}' behind 0x{(uint)_settlingLootItemId:X8}'s Return.");
             }
             LootPickupResult pickup = SendLootPickup(firstMatchId, matchItemName, corpseId);
-            if (pickup == LootPickupResult.NoRoom || pickup == LootPickupResult.Refused)
+            if (pickup is LootPickupResult.NoRoom or LootPickupResult.Refused or LootPickupResult.MainPackFull)
                 return;
             bool moved = pickup == LootPickupResult.Moved || pickup == LootPickupResult.Used;
 
@@ -2354,13 +2359,19 @@ public sealed partial class RynthAiPlugin
     private string LootPackName(int packId) =>
         packId == unchecked((int)_playerId) ? "the main pack" : $"pack 0x{(uint)packId:X8}";
 
-    /// <summary>A pack other than the ones left out could take the item (the client's own counts).</summary>
+    /// <summary>
+    /// Somewhere other than the pack just tried could take the item (the client's own counts).
+    /// The only loot destination is the main pack (FindLootDestination), so after it this is a
+    /// stack join, and one already tried is not a new place to try.
+    /// </summary>
     private bool HasOtherLootDestination()
     {
         if (_objectCache == null || _playerId == 0) return false;
         long now = CorpseNowMs;
-        return WorldObjectCache.FindLootDestination(_objectCache.GetDirectInventory(forceRefresh: false),
-                   unchecked((int)_playerId), Host, id => _packRefusals.IsRefused(id, now)) != 0;
+        int dest = WorldObjectCache.FindLootDestination(_objectCache.GetDirectInventory(forceRefresh: false),
+                       unchecked((int)_playerId), Host, id => _packRefusals.IsRefused(id, now),
+                       _objectCache[_currentLootItemId]);
+        return dest != 0 && dest != _currentLootItemDest;
     }
 
     /// <summary>The current item is done without its landing seen: watch for one that comes late.</summary>
@@ -2469,9 +2480,13 @@ public sealed partial class RynthAiPlugin
     internal const long PickupHoldMaxGapMs = 500;
 
     /// <summary>Jump-loot for this pickup: the setting, the keyboard jump and the move call, stamina for
-    /// the jump, and no fight or heal it could delay (<see cref="JumpLootWouldDelayFight"/>).</summary>
+    /// the jump, and no fight or heal it could delay (<see cref="JumpLootWouldDelayFight"/>).
+    /// Never from a chest: the client closes a container once the character is outside its use
+    /// radius at its once-a-second check, and a hop (with the server's walk back for the next item)
+    /// can be that. A corpse is opened again for nothing; a chest costs a reopen, or its loot.</summary>
     private bool ShouldJumpLoot(LegacyUiSettings settings) =>
         settings.LootJumpEnabled
+        && !IsChestLoot(_openedContainerId)
         && Host.HasTapJump
         && Host.HasMoveItemExternal
         && _vitals.CurrentStamina > 5
@@ -2802,11 +2817,17 @@ public sealed partial class RynthAiPlugin
             {
                 _packRefusals.Refuse(dest, now, confirmed, _currentLootItemId);
                 if (confirmed && !_currentLootItemFullPacks.Contains(dest)) _currentLootItemFullPacks.Add(dest);
-                if (!_currentLootItemPackRetried && (confirmed || HasOtherLootDestination()))
+                // Another round only where there is somewhere else to go. Loot goes only to the main
+                // pack (FindLootDestination), so after it there is at most a stack join: an item
+                // refused there for room is given up below, not sent round again into nothing.
+                bool another = !_currentLootItemPackRetried && HasOtherLootDestination();
+                LootDiag(confirmed
+                    ? $"[RynthAi] {LootTag}: {LootPackName(dest)} took none of {_currentLootItemMoveAttempts} tries for 0x{(uint)_currentLootItemId:X8} (the server refused {_currentLootItemDestRefusals} after the pickup ran); treating it as full for {RynthCore.Plugin.RynthAi.Loot.PackRefusals.HoldMs / 60_000} min" +
+                      (another ? " and trying another pack." : "; there is nowhere else to put it.")
+                    : $"[RynthAi] {LootTag}: {LootPackName(dest)} took none of {_currentLootItemMoveAttempts} tries for 0x{(uint)_currentLootItemId:X8} ({_currentLootItemDestTimeouts} unanswered in {answerWaitMs} ms, {_currentLootItemDestRefusals} refused)" +
+                      (another ? "; trying another pack for this item only (not known to be full)." : "; there is nowhere else to try it."));
+                if (another)
                 {
-                    LootDiag(confirmed
-                        ? $"[RynthAi] {LootTag}: {LootPackName(dest)} took none of {_currentLootItemMoveAttempts} tries for 0x{(uint)_currentLootItemId:X8} (the server refused {_currentLootItemDestRefusals} after the pickup ran); treating it as full for {RynthCore.Plugin.RynthAi.Loot.PackRefusals.HoldMs / 60_000} min and trying another pack."
-                        : $"[RynthAi] {LootTag}: {LootPackName(dest)} took none of {_currentLootItemMoveAttempts} tries for 0x{(uint)_currentLootItemId:X8} ({_currentLootItemDestTimeouts} unanswered in {answerWaitMs} ms, {_currentLootItemDestRefusals} refused); trying another pack for this item only (not known to be full).");
                     _currentLootItemPackRetried = true;
                     _currentLootItemMoveAttempts = 0;
                     _currentLootItemDestRefusals = 0;
@@ -2818,16 +2839,21 @@ public sealed partial class RynthAiPlugin
             }
             LootDiag($"[RynthAi] {LootTag}: pickup failed for 0x{(uint)_currentLootItemId:X8}; container remained 0x{(uint)_openedContainerId:X8} after {_currentLootItemMoveAttempts} attempt(s)" +
                      (lastTry.Length > 0 ? $" (last: {lastTry})." : "."));
-            // Refused for room in every pack it tried (two or more), and in none of them for
-            // another item: the server is refusing this item, not the packs (a pickup timer that
-            // says no more than a full pack does, 2026-11-01). Its marks go with it, or the next
-            // item finds no pack and is selected and never picked up.
-            if (_currentLootItemFullPacks.Count >= 2)
+            // Refused for room in every place it could go, and in none of them for another item:
+            // the server is refusing this item, not the packs (a pickup timer that says no more
+            // than a full pack does, 2026-11-01). Its marks go with it, or the next item finds
+            // nowhere to go and is left, corpse after corpse. Loot goes only to the main pack now
+            // (FindLootDestination), so that is the one place: a second item refused there as
+            // well keeps the mark (PackRefusals), and then it is the pack.
+            if (_currentLootItemFullPacks.Count >= 2 || (_currentLootItemFullPacks.Count == 1 && !HasOtherLootDestination()))
             {
                 List<int> back = _packRefusals.Withdraw(_currentLootItemId, now);
                 if (back.Count > 0)
-                    LootDiag($"[RynthAi] {LootTag}: the server refused 0x{(uint)_currentLootItemId:X8} in {_currentLootItemFullPacks.Count} packs the client counts room in: it is refusing the item, not the packs; " +
-                             $"{string.Join(" and ", back.Select(LootPackName))} {(back.Count == 1 ? "is" : "are")} no longer treated as full.");
+                    LootDiag(_currentLootItemFullPacks.Count >= 2
+                        ? $"[RynthAi] {LootTag}: the server refused 0x{(uint)_currentLootItemId:X8} in {_currentLootItemFullPacks.Count} packs the client counts room in: it is refusing the item, not the packs; " +
+                          $"{string.Join(" and ", back.Select(LootPackName))} {(back.Count == 1 ? "is" : "are")} no longer treated as full."
+                        : $"[RynthAi] {LootTag}: the server refused 0x{(uint)_currentLootItemId:X8} for room in {LootPackName(back[0])}, the only place loot can go, though the client counts room there: " +
+                          $"taken as refusing the item, not the pack, so {LootPackName(back[0])} is no longer treated as full (unless another item is refused there too).");
             }
             _processedCorpseItems.Add(_currentLootItemId);
             ResetCurrentLootItem();
@@ -2851,7 +2877,7 @@ public sealed partial class RynthAiPlugin
         long refusedAfter = refused ? _currentLootItemRefusedAt - _currentLootItemMoveRequestedAt : 0;
         uint refusal = _currentLootItemRefusalError;
         LootPickupResult retry = SendLootPickup(_currentLootItemId, _currentLootItemName, _openedContainerId);
-        if (retry == LootPickupResult.NoRoom || retry == LootPickupResult.Refused)
+        if (retry is LootPickupResult.NoRoom or LootPickupResult.Refused or LootPickupResult.MainPackFull)
             return; // SendLootPickup finished the item / corpse
         bool retried = retry == LootPickupResult.Moved || retry == LootPickupResult.Used;
         if (freeRetry)
@@ -2929,7 +2955,7 @@ public sealed partial class RynthAiPlugin
             _currentLootItemDest = to;
             if (!_currentLootItemDestsTried.Contains(to)) _currentLootItemDestsTried.Add(to);
         }
-        if (ownCorpse && r == LootPickupResult.NoRoom)
+        if (ownCorpse && r is LootPickupResult.NoRoom or LootPickupResult.MainPackFull)
         {
             PauseOwnCorpseNoRoom(corpseId, itemName);
             return r;
@@ -2950,8 +2976,27 @@ public sealed partial class RynthAiPlugin
                 _processedCorpseItems.Add(itemId);
                 ResetCurrentLootItem();
                 break;
+            case LootPickupResult.MainPackFull:
+                // This item only: a stack the next item joins still goes, and so does everything
+                // once the main pack has a slot again (RynthSort or cram moving things out of it).
+                LootDiag($"[RynthAi] {LootTag}: leaving '{itemName}' 0x{(uint)itemId:X8} on 0x{(uint)corpseId:X8} — the main pack is full, it joins no stack you carry, and the client takes nothing from a corpse or chest straight into a side pack.");
+                WarnMainPackFull(itemName);
+                _processedCorpseItems.Add(itemId);
+                ResetCurrentLootItem();
+                break;
         }
         return r;
+    }
+
+    private DateTime _mainPackFullWarnedAt = DateTime.MinValue;
+
+    /// <summary>Once per 5 minutes in chat: the main pack is full, so loot is being left (looting goes on).</summary>
+    private void WarnMainPackFull(string itemName)
+    {
+        if ((RynthClock.Now - _mainPackFullWarnedAt).TotalMinutes < 5) return;
+        _mainPackFullWarnedAt = RynthClock.Now;
+        ChatLine($"[RynthAi] Main pack full: '{itemName}' is left. AC loots only into the main pack (or onto a stack you already carry), " +
+                 "not straight into a side pack. Move items out of the main pack (RynthSort, cram) and looting takes everything again.");
     }
 
     /// <summary>
@@ -3159,6 +3204,13 @@ public sealed partial class RynthAiPlugin
         if (HasChestLootWork(settings))
         {
             _lootWorkWhy = "an open chest";
+            return true;
+        }
+
+        // A chest that closed before the looter was done, to be opened again.
+        if (HasChestReopenWork())
+        {
+            _lootWorkWhy = "a chest to open again";
             return true;
         }
 

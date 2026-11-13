@@ -30,6 +30,36 @@ internal sealed class OutdoorHunt
 {
     internal enum PathStatus { Ok, Partial, NoPath, NoMesh, Unavailable }
 
+    /// <summary>Why the hunt can't start here (None: it can). The Hunt button and Hunt On Login ask the same.</summary>
+    internal enum StartBlock { None, NoSettings, NoPosition, InDungeon, UnknownBuilding, NoRynthNav }
+
+    /// <summary>
+    /// The checks before a start, in order, each asked only when the ones before it passed (the later
+    /// ones read cell.dat and RynthNav): settings, a position, not in a dungeon, not in a building whose
+    /// doors it doesn't know, RynthNav's map there.
+    /// </summary>
+    internal static StartBlock WhyNoStart(bool hasSettings, bool hasPosition,
+        Func<bool> inDungeon, Func<bool> unknownBuilding, Func<bool> noRynthNav)
+    {
+        if (!hasSettings) return StartBlock.NoSettings;
+        if (!hasPosition) return StartBlock.NoPosition;
+        if (inDungeon()) return StartBlock.InDungeon;
+        if (unknownBuilding()) return StartBlock.UnknownBuilding;
+        if (noRynthNav()) return StartBlock.NoRynthNav;
+        return StartBlock.None;
+    }
+
+    /// <summary>What chat says for a <see cref="StartBlock"/> (after "[RynthAi] ").</summary>
+    internal static string StartBlockText(StartBlock b) => b switch
+    {
+        StartBlock.NoSettings => "Settings not ready.",
+        StartBlock.NoPosition => "Outdoor hunt: no position yet.",
+        StartBlock.InDungeon => "Outdoor hunt is for outdoors; in a dungeon the Dungeon Patrol hunts (Patrol).",
+        StartBlock.UnknownBuilding => "Outdoor hunt: start it outdoors (it doesn't know this building's doors; it finds its own way out of a building it went into).",
+        StartBlock.NoRynthNav => "Outdoor hunt needs RynthNav 2026.10.23 or newer (its map shows the way round obstacles).",
+        _ => "",
+    };
+
     /// <summary>A planned walk: the corners after the start (the last is the goal), its length, and for a
     /// partial path how far its end is from the goal.</summary>
     internal readonly record struct PathResult(PathStatus Status, IReadOnlyList<Vec> Corners, double Length, double Gap);

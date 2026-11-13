@@ -54,6 +54,6 @@ public sealed partial class RynthAiPlugin
             ChatLine($"[RynthAi] Mini Remote server tabs: connected{(id.Length > 0 ? " (server '" + id + "')" : string.Empty)}, "
                      + (hub.ServerActive ? "its server is this world." : "its server is not this world (nothing shown)."));
         }
-        ChatLine("[RynthAi] Change the server: RynthCore Options > Diagnostics > Server, or /rc server pick <id>|auto.");
+        ChatLine("[RynthAi] Change the server: RynthCore Settings > Game Client > Server, or /rc server pick <id>|auto.");
     }
 }

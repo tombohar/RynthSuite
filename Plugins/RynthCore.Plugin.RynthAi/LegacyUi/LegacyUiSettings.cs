@@ -128,6 +128,12 @@ public sealed class LegacyUiSettings
     // nothing to do, an Aetheria Mana Stone is used on each Coalesced Aetheria in the pack, one at a
     // time, to reveal its sigil (Loot/AetheriaUnboxer.cs). The stone isn't used up on ACE.
     public bool UnboxAetheriaWhenIdle = false;
+    // Auto-confirm crafting (a players' request, 2026-11-11; default off): when the server asks
+    // "You determine that you have a N percent chance to succeed." for a craft or tinker the player
+    // starts by hand, say Yes when N is at least AutoConfirmCraftPercent; anything lower shows AC's
+    // own dialog as usual, never a No (engine API v97; MiniRemote/Crafting/CraftAutoConfirm.cs).
+    public bool AutoConfirmCraft = false;
+    public int AutoConfirmCraftPercent = 100;
     public bool EnableCombineSalvage = true;
     public bool CombineBagsDuringSalvage = true;
     // Salvage (and combine bags) by sending the 0x027D salvage request straight to the server, no
@@ -203,6 +209,57 @@ public sealed class LegacyUiSettings
     public bool UsePotions = true;
     // Unlimited buff gems (Asheron's Benediction, Blackmoor's Favor) and field rations (2026-09-29).
     public bool UseBuffItems = true;
+    /// <summary>
+    /// Built-in buff items the player blocked in the Buff Items list (Spells window > Buff Items,
+    /// /ra buffitems block): never used. Empty = all three allowed, which is also what a profile
+    /// saved before this setting loads as. Replaced, not edited in place (BuffItemRules.SetAllowed),
+    /// so the buff tick holding the old list never sees it change under it.
+    /// </summary>
+    public List<string> BlockedBuffItems
+    {
+        get => _blockedBuffItems;
+        set => _blockedBuffItems = value ?? new List<string>();
+    }
+    private List<string> _blockedBuffItems = new();
+    /// <summary>
+    /// Buff items the player added (a server's own gems or potions), each with its Allowed tick and
+    /// the spells that mean its buff is on (or a repeat time when it casts none we can check).
+    /// Replaced, not edited in place, like <see cref="BlockedBuffItems"/>.
+    /// </summary>
+    public List<CustomBuffItem> CustomBuffItems
+    {
+        get => _customBuffItems;
+        set => _customBuffItems = value ?? new List<CustomBuffItem>();
+    }
+    private List<CustomBuffItem> _customBuffItems = new();
+
+    /// <summary>Allows or blocks a built-in or custom buff item by name; see BuffItemRules.SetAllowed.</summary>
+    internal BuffItemRules.EditResult SetBuffItemAllowed(string name, bool allowed, out string shownName)
+    {
+        var r = BuffItemRules.SetAllowed(_blockedBuffItems, _customBuffItems, name, allowed, out var blocked, out var customs, out shownName);
+        if (r == BuffItemRules.EditResult.Changed)
+        {
+            _blockedBuffItems = blocked;
+            _customBuffItems = customs;
+        }
+        return r;
+    }
+
+    /// <summary>Adds (or, with spells read from the item, refreshes) a custom buff item; see BuffItemRules.Add.</summary>
+    internal BuffItemRules.EditResult AddCustomBuffItem(string name, IReadOnlyList<uint>? spells, out CustomBuffItem? item)
+    {
+        var r = BuffItemRules.Add(_customBuffItems, name, spells, out var customs, out item);
+        if (r is BuffItemRules.EditResult.Added or BuffItemRules.EditResult.Updated) _customBuffItems = customs;
+        return r;
+    }
+
+    /// <summary>Removes a custom buff item; see BuffItemRules.Remove.</summary>
+    internal BuffItemRules.EditResult RemoveCustomBuffItem(string name, out string shownName)
+    {
+        var r = BuffItemRules.Remove(_customBuffItems, name, out var customs, out shownName);
+        if (r == BuffItemRules.EditResult.Removed) _customBuffItems = customs;
+        return r;
+    }
     public int MakeRationsBelow = 5;   // 0 = don't cook field rations
     public bool UseKitsInMagicMode = true;
     public bool PeaceModeForKits = false;
@@ -332,7 +389,7 @@ public sealed class LegacyUiSettings
     /// <summary>
     /// Obsolete since 2026-10-20 (kept so profiles still load and carry it): the Vaulted Dungeons
     /// keeper's master switch is RynthILT's own setting now, copied from here once. RynthAi only
-    /// mirrors RynthILT's value into the engine's Settings > Navigation row (ServerSettingGet / Set)
+    /// mirrors RynthILT's value into the engine's Settings > General row (ServerSettingGet / Set)
     /// and answers this old value through RynthAi.Hub VaultedDungeonsEnabled for an older RynthILT.
     /// </summary>
     public bool EnableVaultedDungeons;
@@ -484,6 +541,11 @@ public sealed class LegacyUiSettings
     public bool BuffShield = true;
     public bool StartMacroOnLogin;
     public bool PatrolOnLogin;
+    /// <summary>
+    /// Hunt On Login (2026-11-11): starts the Outdoor Hunt once the character is in the world, as Patrol
+    /// On Login starts the Dungeon Patrol. One or the other: ticking one clears the other (LoginAutoStart).
+    /// </summary>
+    public bool HuntOnLogin;
     /// <summary>
     /// Resume Meta After Reload (2026-11-07, Tom: "remembers which meta state you're in and restarts in
     /// that state so Drakkon doesn't recall back every time"). A hot reload carries the meta's whole
@@ -671,6 +733,17 @@ public sealed class LegacyUiSettings
     public int WeaponSwapMinGainPct = 20;
     public int MeleeAttackHeight = 1;
     public int MissileAttackHeight = 1;
+    /// <summary>
+    /// Dirty Fighting rotation (Combat/DirtyFightingHeights.cs): with Dirty Fighting trained,
+    /// melee and missile attacks aim at the height of the next effect missing from the target
+    /// (in DfHeightOrder), then at DfDefaultHeight once all three are on. Off by default; off
+    /// or untrained, the Melee/Missile Attack Height above is used as before.
+    /// </summary>
+    public bool DfHeightRotation;
+    /// <summary>The order the effects are put on: "HML" (High, Medium, Low) and the like.</summary>
+    public string DfHeightOrder = DirtyFightingHeights.DefaultOrder;
+    /// <summary>The height once all three are on: 0 Low, 1 Medium, 2 High, -1 the Attack Height setting.</summary>
+    public int DfDefaultHeight = DirtyFightingHeights.DefaultIsFixedHeight;
 
     // Projectile arc velocities for missile-weapon LoS checks.
     // Lower velocity = higher arc. Must approximate the AC client trajectory
@@ -1238,6 +1311,8 @@ public sealed class SettingsBridgePayload
     public bool? RearmAfterVitals { get; set; }
     public bool StartMacroOnLogin { get; set; }
     public bool PatrolOnLogin { get; set; }
+    // Hunt On Login. Nullable: an engine without the row doesn't send it (unchanged).
+    public bool? HuntOnLogin { get; set; }
     // Resume Meta After Reload. Nullable: an engine without the row doesn't send it (unchanged).
     public bool? ResumeMetaOnReload { get; set; }
     // Dungeon patrol. Nullable: an engine that predates them doesn't send them, and its save
@@ -1320,6 +1395,10 @@ public sealed class SettingsBridgePayload
     // engine without these controls, which leaves the plugin's own values alone.
     public int? VariablePowerMin { get; set; }
     public int? VariablePowerMax { get; set; }
+    // Dirty Fighting rotation (2026-11-11). Null = a sender without these controls: unchanged.
+    public bool? DfHeightRotation { get; set; }
+    public string? DfHeightOrder { get; set; }
+    public int? DfDefaultHeight { get; set; }
     public int? MissileEnvironmentResponse { get; set; }
     public int? MagicEnvironmentResponse { get; set; }
     public int? EnvironmentImpactLimit { get; set; }
@@ -1431,6 +1510,10 @@ public sealed class SettingsBridgePayload
     public bool? SkipUnusableBuffs { get; set; }
     // Null (absent) likewise leaves the unticked prots/banes alone; an empty list ticks them all.
     public List<string>? DisabledBuffs { get; set; }
+    // The Buff Items lists (RynthAi's Spells window draws them; the engine's face has no rows for
+    // them). Null (absent) leaves them alone, as DisabledBuffs.
+    public List<string>? BlockedBuffItems { get; set; }
+    public List<CustomBuffItem>? CustomBuffItems { get; set; }
     public int BuffMinSkillLevelTier1 { get; set; }
     public int BuffMinSkillLevelTier2 { get; set; }
     public int BuffMinSkillLevelTier3 { get; set; }
@@ -1467,6 +1550,8 @@ public sealed class SettingsBridgePayload
     public bool EnableAutostack { get; set; }
     public bool ReadUnknownScrolls { get; set; } = true;   // absent from an older engine: keep the default
     public bool? UnboxAetheriaWhenIdle { get; set; }        // absent from an older engine: unchanged
+    public bool? AutoConfirmCraft { get; set; }             // absent from an older engine: unchanged
+    public int? AutoConfirmCraftPercent { get; set; }       // absent from an older engine: unchanged
     public bool EnableCombineSalvage { get; set; }
     public bool CombineBagsDuringSalvage { get; set; }
     public bool? SalvageWithoutPanel { get; set; }   // absent from an older engine: unchanged

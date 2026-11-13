@@ -87,6 +87,7 @@ public sealed partial class RynthAiPlugin
             }
             _metaManager.RestoreRuntime(s);
             _patrolOnLoginPending = false;   // the meta's own route (or patrol) carries on instead
+            _huntOnLoginPending = false;     // and no Hunt On Login either
             Log($"RynthAi: hot reload - the meta carries on in state '{s.State}' (macro {(s.MacroRunning ? "on" : "off")}, " +
                 $"{s.Variables.Count} variable(s), {s.FiredRules.Count} rule(s) already fired, call depth {s.CallStack.Count}, " +
                 $"route {(s.RouteLines.Count > 0 ? $"at [{s.NavIndex}]" : "none")}).");

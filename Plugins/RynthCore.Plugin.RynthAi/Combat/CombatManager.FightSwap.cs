@@ -18,6 +18,10 @@ namespace RynthCore.Plugin.RynthAi;
 /// A weapons-back swap under way when the target comes goes on, pointed at the fight's weapons when they
 /// differ; a fight with the wand ends it. A failed fight swap leaves that weapon to the client's own swap
 /// for <see cref="FightSwapFallbackSec"/>. Setting off: none of this runs.
+///
+/// Caster to caster (2026-11-11, WandSwapRules): a fight that wants another caster than the one in hand
+/// swaps the same way (peace, the old caster out, the new one into the Held slot, then Magic) instead of
+/// the client's own use, which went Magic, peace, bare hands, peace, Magic.
 /// </summary>
 public partial class CombatManager
 {
@@ -33,6 +37,39 @@ public partial class CombatManager
     private const double FightSwapFallbackSec = 20;
 
     private string HandsSwapLabel => _handsSwapForFight ? "weapons for the fight" : "weapons back";
+
+    // A fight's hands swap away from one caster to another (2026-11-11, WandSwapRules): the caster it
+    // started from, so the swap tracker records the swap (its no-flip-flop and window cap) as it
+    // does for the client's own use. 0 for every other hands swap (as before).
+    private int _handsSwapFrom;
+
+    // The first cast after a wield waits for the stance (WandSwapRules.EquipCastHoldMs).
+    private bool _equipGateHeld;            // AttackWithMagic held its cast for it this tick
+    private DateTime _equipGateLoggedFor = DateTime.MinValue;   // the wield its line was logged for
+
+    /// <summary>
+    /// AttackWithMagic: true (and the cast held this tick, not counted as an attack) while the wield
+    /// before it is still settling. One log line per wield.
+    /// </summary>
+    private bool EquipCastHoldsNow()
+    {
+        if (_lastEquipTime == DateTime.MinValue) return false;
+        DateTime now = RynthClock.Now;
+        DateTime changed = _cmModeChangedAt;
+        try { if (LastModeChangeAt?.Invoke() is DateTime b && b > changed) changed = b; } catch { }
+        static double Since(DateTime now, DateTime at) => at == DateTime.MinValue ? -1 : (now - at).TotalMilliseconds;
+        double sinceEquip = Since(now, _lastEquipTime);
+        double hold = WandSwapRules.EquipCastHoldMs(sinceEquip, Since(now, changed), Since(now, lastStanceAttempt));
+        if (hold <= 0) return false;
+        _equipGateHeld = true;
+        LastCombatSkipReason = "equip-gate"; // D4 record-only
+        if (_equipGateLoggedFor != _lastEquipTime)
+        {
+            _equipGateLoggedFor = _lastEquipTime;
+            _host.Log($"[CombatCast] equip-gate: the first cast waits {hold:0} ms more for the stance to settle ({sinceEquip:0} ms after the wield)");
+        }
+        return true;
+    }
 
     /// <summary>
     /// The fight's main weapon and the off hand to go with it: the planned one, else what is in the off
@@ -79,7 +116,11 @@ public partial class CombatManager
         }
         if (_weaponSwapGate != null && !_weaponSwapGate.TryBeginSwap("combat-hands-swap")) return true;
 
-        StartHandsSwapForFight(now, FightWants(target, rule, mainId), desiredMode, target);
+        // A caster goes in alone: a Held-slot caster needs both hands empty (the off hand comes off too).
+        var wants = desiredMode == CombatMode.Magic
+            ? new List<(int Id, int Slot)> { (mainId, HandSwapSequence.HeldSlot) }
+            : FightWants(target, rule, mainId);
+        StartHandsSwapForFight(now, wants, desiredMode, target);
         RearmSwapAdvance(now);
         return true;
     }
@@ -88,6 +129,10 @@ public partial class CombatManager
     {
         int mode = CurrentCombatMode;
         _rearmWants = wants;
+        // A caster for a caster: record where it came from (the swap tracker). The wield step reads the
+        // hands after the old one went into the pack, so it would see empty hands.
+        int from = InHandWeaponId();
+        _handsSwapFrom = desiredMode == CombatMode.Magic && from != 0 && WeaponKind(from) == CombatMode.Magic ? from : 0;
         _rearmSwap.Start("weapons for the fight", now, wants, peaceFirst: mode != CombatMode.NonCombat);
         _handsSwapForFight = true;
         _handsSwapFightMode = desiredMode;
@@ -112,6 +157,17 @@ public partial class CombatManager
         bool wasFight = _handsSwapForFight;
         if (IsWandObject(mainObj))
         {
+            // The fight's own swap to a caster (from another one, WandSwapRules): it goes on for that
+            // caster, and a step on its way lands before anything else is decided. Once combat's own
+            // read has the caster in hand (the swap's read of the hands can lag), the swap is over and
+            // the wielded branch asks for Magic.
+            if (wasFight && _handsSwapFightMode == CombatMode.Magic && _rearmSwap.Wants.Count > 0 && _rearmSwap.Wants[0].Id == mainId)
+            {
+                if (InHandWeaponId(fresh: true) != mainId) return true;
+                FinishRearmSwap(now, done: true);
+                return false;
+            }
+            if (wasFight && _handsSwapFightMode == CombatMode.Magic && _rearmSwap.InFlight) return true;
             FinishRearmSwap(now, done: false, why: $"'{target.Name}' is fought with the wand");
             if (!wasFight) _rearmedFor = _rearmVital;
             return false;
@@ -150,7 +206,8 @@ public partial class CombatManager
         _offSlotReadAt = DateTime.MinValue;
         // A launcher: only with fitting ammo on; otherwise the wielded branch puts it on, then asks.
         bool ammoReady = mode != CombatMode.Missile || (HasWieldedAmmo() && !LauncherSwapHoldsStance(main));
-        _rearmStanceWanted = mode != 0 && mode != CombatMode.Magic && CurrentCombatMode != mode && ammoReady ? mode : 0;
+        // A caster (another caster's swap through peace): Magic at once, as for a melee weapon.
+        _rearmStanceWanted = mode != 0 && CurrentCombatMode != mode && ammoReady ? mode : 0;
         _rearmStanceSince = now;
         _rearmStanceForFight = true;
         FinishRearmSwap(now, done: true);

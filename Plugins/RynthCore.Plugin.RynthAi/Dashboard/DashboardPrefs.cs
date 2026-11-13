@@ -36,6 +36,8 @@ internal sealed class DashboardPrefs
     private static string EngineStatePath => Path.Combine(Folder, "rynthai_avalonia.cache");
 
     private volatile bool _minimized, _showTarget = true, _showVitals = true;
+    // The activity line, the FPS + timers footer and the Report key: shown unless turned off (options menu).
+    private volatile bool _showActivity = true, _showFooter = true, _showReport = true;
     private volatile string _left = string.Empty, _right = string.Empty;
     private volatile string[] _moved = Array.Empty<string>();
     private volatile bool _dirty;
@@ -47,6 +49,13 @@ internal sealed class DashboardPrefs
     public void SetMinimized(bool v) { _minimized = v; _dirty = true; }
     public void SetShowTarget(bool v) { _showTarget = v; _dirty = true; }
     public void SetShowVitals(bool v) { _showVitals = v; _dirty = true; }
+
+    public bool ShowActivity => _showActivity;
+    public bool ShowFooter => _showFooter;
+    public bool ShowReport => _showReport;
+    public void SetShowActivity(bool v) { _showActivity = v; _dirty = true; }
+    public void SetShowFooter(bool v) { _showFooter = v; _dirty = true; }
+    public void SetShowReport(bool v) { _showReport = v; _dirty = true; }
 
     /// <summary>The drawer is on the right edge now (its start side, or the other one when moved).</summary>
     public bool OnRight(string key) => StartsRight(key) != (Array.IndexOf(_moved, key) >= 0);
@@ -105,6 +114,9 @@ internal sealed class DashboardPrefs
                         case "minimized": p._minimized = on; break;
                         case "target": p._showTarget = on; break;
                         case "vitals": p._showVitals = on; break;
+                        case "activity": p._showActivity = on; break;
+                        case "footer": p._showFooter = on; break;
+                        case "report": p._showReport = on; break;
                         case "left": p._left = IsDrawer(value) ? value : string.Empty; break;
                         case "right": p._right = IsDrawer(value) ? value : string.Empty; break;
                         case "drawer": legacyDrawer = value; break;   // before 2026-10-21's two sides
@@ -152,6 +164,9 @@ internal sealed class DashboardPrefs
                 "minimized=" + (_minimized ? 1 : 0) + "\n" +
                 "target=" + (_showTarget ? 1 : 0) + "\n" +
                 "vitals=" + (_showVitals ? 1 : 0) + "\n" +
+                "activity=" + (_showActivity ? 1 : 0) + "\n" +
+                "footer=" + (_showFooter ? 1 : 0) + "\n" +
+                "report=" + (_showReport ? 1 : 0) + "\n" +
                 "left=" + _left + "\n" +
                 "right=" + _right + "\n" +
                 "moved=" + string.Join(",", _moved) + "\n");

@@ -103,16 +103,12 @@ internal static class BuffProfileStore
         File.Move(tmp, path, overwrite: true);
     }
 
-    public static bool Delete(string path)
-    {
-        try
-        {
-            if (!File.Exists(path)) return false;
-            File.Delete(path);
-            return true;
-        }
-        catch { return false; }
-    }
+    /// <summary>
+    /// The Spells window's Delete: the profile is moved to BuffProfiles\Deleted (never deleted;
+    /// LegacyUi/ProfileFileOps.cs), so it leaves the list and can be moved back.
+    /// </summary>
+    public static bool Delete(string path) =>
+        RynthCore.Plugin.RynthAi.LegacyUi.ProfileFileOps.MoveToDeleted(path, RynthClock.Now, out _, out _);
 
     /// <summary>An entry for a catalog spell, with its buffing key worked out.</summary>
     public static BuffProfileEntry EntryFor(SpellCatalogEntry e) => new()

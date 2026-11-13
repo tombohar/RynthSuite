@@ -44,6 +44,12 @@ internal static class HandSwapTests
         r.Add("a monster with the wand in hand: peace, the Sceptre out, both Hand Wraps on, then Melee (no client use)", FightFromWand);
         r.Add("a monster with the wand in hand, burst: the Sceptre out and both Hand Wraps on in one tick", FightFromWandBurst);
         r.Add("a monster with the wand in hand: a fight swap that fails leaves that weapon to the client's own swap", FightSwapFallsBack);
+        r.Add("wand to wand (hunt report 11-07): the next monster's caster goes in through peace, then Magic (no client use, no bare-hands stance)", WandToWandFromMagic);
+        r.Add("wand to wand from peace (Peace Mode When Idle between targets): the old caster out, the new one in, then Magic; no peace request", WandToWandFromPeace);
+        r.Add("wand to wand: the swap tracker records the swap (no swap straight back for the same fight)", WandToWandTracked);
+        r.Add("WandSwapRules.UseHandsSwap: a swap away from a caster goes through peace, a caster wanted too", UseHandsSwapRules);
+        r.Add("WandSwapRules.EquipCastHoldMs: the first cast waits for the stance after a wield, never past the old 3 s", EquipCastHoldRules);
+        r.Add("equip gate: held while the stance settles, then the cast goes; one log line per wield", EquipGateHolds);
         r.Add("weapons back burst: peace, the Sceptre out and both Hand Wraps on in one tick, then Melee", RearmBurst);
         r.Add("weapons back burst: the quiet check reads BuffManager's mode change, not combat's late one (Drakkon 23:06-23:21)", RearmBurstQuietFromBuff);
         r.Add("Fast Weapon Swap: on by default, an old saved off (the opt-in name) loads on, an untick since stays off", OnByDefault);
@@ -522,7 +528,7 @@ internal static class HandSwapTests
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
         public double SimMs;
 
-        public CombatRig(bool putCalls = false)
+        public CombatRig(bool putCalls = false, bool secondWand = false)
         {
             FakeHost.Reset();
             FakeHost.PutCalls = putCalls;
@@ -531,7 +537,7 @@ internal static class HandSwapTests
             FakeHost.EquippedCalls = true;
             FakeHost.CombatModeCalls = true;
             FakeHost.CombatModeValue = CombatMode.Magic;
-            foreach (var (id, name, type, slots) in new[] { (Acid, "Acid Hand Wraps", 0x1u, Melee), (Frost, "Frost Hand Wraps", 0x1u, Melee), (Sceptre, "Sceptre", 0x8000u, Held) })
+            foreach (var (id, name, type, slots) in new[] { (Acid, "Acid Hand Wraps", 0x1u, Melee), (Frost, "Frost Hand Wraps", 0x1u, Melee), (Sceptre, "Sceptre", 0x8000u, Held), (OtherWand, "Fire Wand", 0x8000u, Held) })
             {
                 FakeHost.Names[id] = name; FakeHost.ItemTypes[id] = type; FakeHost.Ints[(id, 9)] = slots;
             }
@@ -543,7 +549,8 @@ internal static class HandSwapTests
                 new() { Id = I(Frost), Name = "Frost Hand Wraps", Element = "", ElementSource = "", Action = "Weapon" },
                 new() { Id = I(Sceptre), Name = "Sceptre", Element = "", ElementSource = "", Action = "Weapon" },
             };
-            var cache = FakeHost.MakeCache(host, Player, new[] { Acid, Frost, Sceptre });
+            if (secondWand) S.ItemRules.Add(new() { Id = I(OtherWand), Name = "Fire Wand", Element = "Fire", ElementSource = "", Action = "Weapon" });
+            var cache = FakeHost.MakeCache(host, Player, secondWand ? new[] { Acid, Frost, Sceptre, OtherWand } : new[] { Acid, Frost, Sceptre });
             C = new CombatManager(host, S, cache);
             C.SetPlayerId(Player);
             C.OpenPackOverride = () => I(Player);
@@ -679,6 +686,139 @@ internal static class HandSwapTests
             Check.True(rig.Logged("weapons for the fight stopped"), "the swap stops: " + string.Join(" | ", FakeHost.Logs.Where(l => l.Contains("weapons for the fight"))));
             Check.True(rig.Logged("the client's own swap for 0x80000601") || rig.Logged("the client's own swap for 0x80000602"), "and leaves that weapon to the client's own swap for a while");
             Check.Eq(rig.Gate.HeldBy, "", "the gate is free");
+        }
+        finally { ActionPacer.Enabled = false; EquippedState.Clock = null; EquippedState.Invalidate(); }
+    }
+
+    // ── Caster to caster (2026-11-11, WandSwapRules) ──────────────────────────
+
+    /// <summary>A wand fight: the Sceptre in hand, the Default rule's weapon the Fire Wand, war magic usable.</summary>
+    private static CombatRig WandFightRig(bool fromPeace)
+    {
+        var rig = new CombatRig(secondWand: true);
+        rig.C.CanCastOverride = _ => true;
+        rig.S.MonsterRules = new List<MonsterRule> { new() { Name = "Default", WeaponId = I(OtherWand) } };
+        rig.C.LastVitalCastAt = () => DateTime.MinValue;          // no weapons back pending
+        rig.C.SwapBurstEnabled = () => false;
+        if (fromPeace) FakeHost.CombatModeValue = CombatMode.NonCombat;
+        rig.Fighting();
+        return rig;
+    }
+
+    private static string Trail() => string.Join(" | ", FakeHost.Logs.Where(l => l.Contains("[EquipDiag]")).TakeLast(20));
+
+    private static void WandToWandFromMagic()
+    {
+        try
+        {
+            var rig = WandFightRig(fromPeace: false);
+            double ready = rig.Fight(3000);
+            Check.True(ready > 0, "ready to cast within 3 s: " + Trail());
+            Check.False(FakeHost.Uses.Any(), "no use (the client's own use of a caster in Magic plays a forced change to bare hands): "
+                + string.Join(",", FakeHost.Uses.Select(u => $"{u:X8}")));
+            Check.Eq(string.Join(",", FakeHost.CombatModeRequests), "1,8", "peace, then Magic; nothing else");
+            Check.True(FakeHost.Moves.Count == 1 && FakeHost.Moves[0].Id == Sceptre, "the Sceptre into the pack");
+            Check.True(FakeHost.Wields.Count == 1 && FakeHost.Wields[0] == (OtherWand, (uint)Held),
+                "the Fire Wand into the Held slot: " + string.Join(", ", FakeHost.Wields.Select(w => $"{w.Id:X8}@{w.Mask:X}")));
+            Check.True(rig.Logged("weapons for the fight in hand"), "the swap's time and steps are logged: " + Trail());
+            Check.True(rig.Logged("weapons for the fight: Magic mode"), "the Magic request is logged: " + Trail());
+            Check.Eq(FakeHost.CombatModeValue, CombatMode.Magic, "in Magic mode");
+            Check.True(ready <= 1000, $"ready {ready:0} ms in (one peace leg and one Magic leg)");
+            Console.WriteLine($"          (simulated: caster to caster, ready to cast {ready:0} ms in)");
+            Check.Eq(rig.Gate.HeldBy, "", "the gate is free");
+        }
+        finally { ActionPacer.Enabled = false; EquippedState.Clock = null; EquippedState.Invalidate(); }
+    }
+
+    private static void WandToWandFromPeace()
+    {
+        try
+        {
+            var rig = WandFightRig(fromPeace: true);
+            double ready = rig.Fight(3000);
+            Check.True(ready > 0, "ready to cast within 3 s: " + Trail());
+            Check.False(FakeHost.Uses.Any(), "no use");
+            Check.Eq(string.Join(",", FakeHost.CombatModeRequests), "8", "Magic once the Fire Wand is in (no Magic beside the use, no peace)");
+            Check.True(FakeHost.Moves.Count == 1 && FakeHost.Moves[0].Id == Sceptre, "the Sceptre into the pack (answered at once in peace)");
+            Check.True(FakeHost.Wields.Count == 1 && FakeHost.Wields[0] == (OtherWand, (uint)Held), "the Fire Wand into the Held slot");
+            Check.True(ready <= 900, $"ready {ready:0} ms in");
+            Check.Eq(rig.Gate.HeldBy, "", "the gate is free");
+        }
+        finally { ActionPacer.Enabled = false; EquippedState.Clock = null; EquippedState.Invalidate(); }
+    }
+
+    private static void WandToWandTracked()
+    {
+        try
+        {
+            var rig = WandFightRig(fromPeace: false);
+            Check.True(rig.Fight(3000) > 0, "the swap finished: " + Trail());
+            var step = rig.C.SwapTracker.Next(I(Sceptre), I(OtherWand), RynthClock.Now, forKey: rig.Target.Id);
+            Check.Eq(step, WeaponSwapTracker.Step.Hold, "the Sceptre straight back for the same fight: held");
+            Check.Eq(rig.C.SwapTracker.HoldReason, "just swapped away from it", "as for the client's own use");
+        }
+        finally { ActionPacer.Enabled = false; EquippedState.Clock = null; EquippedState.Invalidate(); }
+    }
+
+    private static void UseHandsSwapRules()
+    {
+        const int MagicKind = CombatMode.Magic, MeleeKind = CombatMode.Melee;
+        Check.True(WandSwapRules.UseHandsSwap(true, true, 1, 2, MagicKind), "a caster in hand, another weapon wanted (a caster or not): through peace");
+        Check.False(WandSwapRules.UseHandsSwap(false, true, 1, 2, MagicKind), "Fast Weapon Swap off: the old route");
+        Check.False(WandSwapRules.UseHandsSwap(true, false, 1, 2, MagicKind), "the swap tracker held it: no swap");
+        Check.False(WandSwapRules.UseHandsSwap(true, true, 1, 1, MagicKind), "the wanted caster is in hand: no swap");
+        Check.False(WandSwapRules.UseHandsSwap(true, true, 0, 2, 0), "nothing in hand: combat's own wield");
+        Check.False(WandSwapRules.UseHandsSwap(true, true, 1, 2, MeleeKind), "a melee weapon in hand: combat's own swap, as before");
+        Check.False(WandSwapRules.UseHandsSwap(true, true, 1, 0, MagicKind), "nothing chosen");
+    }
+
+    private static void EquipCastHoldRules()
+    {
+        static double H(double equip, double change, double request) => WandSwapRules.EquipCastHoldMs(equip, change, request);
+        Check.Eq(H(-1, -1, -1), 0.0, "no wield seen: no wait");
+        Check.Eq(H(3000, -1, -1), 0.0, "the old 3 s are up: no wait");
+        Check.Eq(H(500, 4000, -1), 2500.0, "no stance change seen since the wield: the old wait (the client may not have caught up)");
+        Check.Eq(H(500, -1, -1), 2500.0, "never a stance change seen: the old wait");
+        Check.Eq(H(800, 100, -1), 200.0, "the server's own change to Magic 100 ms ago: 300 ms after it");
+        Check.Eq(H(800, 400, -1), 200.0, "Magic read for 400 ms, the wield 800 ms ago: 1 s after the wield");
+        Check.Eq(H(1100, 400, -1), 0.0, "1.1 s after the wield, Magic read for 400 ms: cast now");
+        Check.Eq(H(800, 400, 600), 400.0, "our own Magic request 600 ms ago: 1 s after it");
+        Check.Eq(H(1200, 400, 1100), 0.0, "request 1.1 s ago, Magic read for 400 ms: cast now");
+        Check.Eq(H(800, 400, 900), 200.0, "a stance request from before the wield doesn't count: 1 s after the wield");
+        Check.Eq(H(2900, 50, 60), 100.0, "never past the old 3 s");
+    }
+
+    private static void EquipGateHolds()
+    {
+        try
+        {
+            var rig = WandFightRig(fromPeace: false);
+            const System.Reflection.BindingFlags NP = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            var holds = typeof(CombatManager).GetMethod("EquipCastHoldsNow", NP)!;
+            void Set(string field, DateTime v) => typeof(CombatManager).GetField(field, NP)!.SetValue(rig.C, v);
+            bool Held() => (bool)typeof(CombatManager).GetField("_equipGateHeld", NP)!.GetValue(rig.C)!;
+            bool Holds() => (bool)holds.Invoke(rig.C, null)!;
+            int Lines() => FakeHost.Logs.Count(l => l.Contains("[CombatCast] equip-gate"));
+            DateTime now = RynthClock.Now;
+            Set("_lastEquipTime", now.AddMilliseconds(-700));
+            Set("_cmModeChangedAt", now.AddMilliseconds(-100));          // the client read Magic 100 ms ago
+            Set("lastStanceAttempt", now.AddMilliseconds(-600));         // our Magic request 600 ms ago
+            Check.True(Holds(), "held: the stance is still settling");
+            Check.True(Held(), "the tick is marked held (not an attack)");
+            Holds();
+            Check.Eq(Lines(), 1, "one line per wield");
+
+            Set("_lastEquipTime", now.AddMilliseconds(-1500));
+            Set("_cmModeChangedAt", now.AddMilliseconds(-400));
+            Set("lastStanceAttempt", now.AddMilliseconds(-1200));
+            Check.False(Holds(), "Magic read for 400 ms, 1.2 s after the request: the cast goes (the old gate: 1.5 s more)");
+
+            Set("_cmModeChangedAt", now.AddSeconds(-20));                 // combat's own read is old...
+            rig.C.LastModeChangeAt = () => now.AddMilliseconds(-400);      // ...BuffManager's every-heartbeat read is fresh
+            Check.False(Holds(), "the freshest mode-change read counts");
+            rig.C.LastModeChangeAt = null;
+            Check.True(Holds(), "no change seen since the wield: the old 3 s");
+            Check.Eq(Lines(), 2, "a new wield, a new line");
         }
         finally { ActionPacer.Enabled = false; EquippedState.Clock = null; EquippedState.Invalidate(); }
     }

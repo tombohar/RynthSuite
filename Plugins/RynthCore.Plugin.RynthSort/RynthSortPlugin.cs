@@ -56,9 +56,24 @@ public sealed class RynthSortPlugin : RynthPluginBase
     private bool _backupOnSave;
     private readonly List<string> _warnings = new();
     private volatile int _autoState = -1;
+    private volatile bool _moving;
+    private int _movedSeen;
+    private long _lastMoveMs;
+
+    /// <summary>
+    /// How long after a move lands RynthSort still counts as moving, so a run of moves (a gap of
+    /// up to a second or two between them) reads as one on RynthAi's dashboard key.
+    /// </summary>
+    private const long MovingHoldMs = 1500;
 
     /// <summary>For the engine's dashboard toggle (RynthSortAutoState): -1 not logged in yet, 0 auto-sort off, 1 on. Any thread.</summary>
     public int AutoState => _autoState;
+
+    /// <summary>
+    /// RynthSort is moving items: a move is out, or one landed in the last <see cref="MovingHoldMs"/>.
+    /// RynthAi's auto-sort key plays its sorting look while this is true. Any thread.
+    /// </summary>
+    public bool Moving => _moving;
 
     /// <summary>
     /// A command from another plugin (RynthPluginApplyRemoteCommand): the /rsort argument when
@@ -235,6 +250,9 @@ public sealed class RynthSortPlugin : RynthPluginBase
         }
         if (_saveDueMs != 0 && now >= _saveDueMs) SaveNow();
         _autoState = _inWorld && _identityKnown ? (_sort.Data.Settings.Auto ? 1 : 0) : -1;
+        if (_sort.Moved > _movedSeen) _lastMoveMs = now;   // a move landed (Moved goes back to 0 on Reset: not a move)
+        _movedSeen = _sort.Moved;
+        _moving = _inWorld && _identityKnown && (_sort.HasMoveOut || (_lastMoveMs != 0 && now - _lastMoveMs < MovingHoldMs));
 
         if (!Host.HasUi || _window == null || _panel == null) return;
         Record(_window, now);

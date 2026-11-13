@@ -46,6 +46,7 @@ internal static class ProfileLoadTests
         mutated = null;
         if (name == nameof(LegacyUiSettings.OffhandDefault)) { mutated = "Shield"; return true; }   // must parse as an OffhandMode
         if (name == nameof(LegacyUiSettings.NavLabelMode))   { mutated = 1; return true; }          // NavLabelModes.Clamp: 0..2
+        if (name == nameof(LegacyUiSettings.DfHeightOrder))  { mutated = "LMH"; return true; }      // must be one of the six orders
         if (type == typeof(bool))   { mutated = !(bool)value!; return true; }
         if (type == typeof(int))    { mutated = (int)value! + 3; return true; }   // +3: MovementMode 1/2 map back to 0
         if (type == typeof(long))   { mutated = (long)value! + 3; return true; }

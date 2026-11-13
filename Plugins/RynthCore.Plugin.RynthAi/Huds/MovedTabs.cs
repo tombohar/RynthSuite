@@ -3,7 +3,7 @@
 // RynthILT's Character tab left the Mini Remote: its character overview and session went to
 // RynthOracle's Character tab ("/ro character"), its ILT session rates to RynthCore's Mini Remote
 // "Session Stats" section (RynthILT's own "section:ilt-rates"), and the force-server override to
-// RynthCore Options > Diagnostics ("/rc diagnostics"). Infinite Leaftide's own screens stay
+// RynthCore Settings > Game Client ("/rc diagnostics", the server picker). Infinite Leaftide's own screens stay
 // RynthILT's: Charms and Banking are still Mini Remote ILT tabs (RynthILT's own manifest places
 // them on the rail since 2026-10-20), drawn by RynthILT.
 // Old saved tab ids, links and "/ra hub open|tab <name>" land on the new home through CommandFor.
@@ -18,7 +18,7 @@ internal static class MovedTabs
     /// <summary>RynthOracle's Character tab (the character overview and this session).</summary>
     public const string OracleCharacter = "/ro character";
 
-    /// <summary>RynthCore Options > Diagnostics (the server picker; RynthCore 2026.10.5.54+).</summary>
+    /// <summary>The server picker: RynthCore Settings > Game Client (on Diagnostics until 2026-11-11, hence the name; RynthCore 2026.10.5.54+).</summary>
     public const string Diagnostics = "/rc diagnostics";
 
     /// <summary>
@@ -41,7 +41,7 @@ internal static class MovedTabs
     public static string HomeOf(string command) => command switch
     {
         OracleCharacter => "RynthOracle's Character tab",
-        Diagnostics => "RynthCore Options > Diagnostics",
+        Diagnostics => "RynthCore Settings > Game Client",
         Settings => "RynthAi Settings (Advanced Settings)",
         _ => command,
     };

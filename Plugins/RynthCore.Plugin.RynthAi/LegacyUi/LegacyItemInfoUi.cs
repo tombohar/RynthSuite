@@ -20,6 +20,7 @@ internal sealed class LegacyItemInfoUi
     private Func<string?>? _describeSelected; // selected item's line (no prefix) or null when nothing is selected
     private Action? _printSelected;           // same path as /ra iteminfo (requests an ID when needed)
     private Action<int>? _testChatType;       // prints a sample line with the given chat type
+    private Action? _testPartColors;          // prints a sample one-line with every part in its colour
 
     // Preview is rebuilt on a timer or when an output option changes, not every frame.
     private const long PreviewRefreshMs = 500;
@@ -31,11 +32,12 @@ internal sealed class LegacyItemInfoUi
 
     public LegacyItemInfoUi(LegacyUiSettings settings) => _settings = settings;
 
-    public void SetHooks(Func<string?> describeSelected, Action printSelected, Action<int> testChatType)
+    public void SetHooks(Func<string?> describeSelected, Action printSelected, Action<int> testChatType, Action? testPartColors = null)
     {
         _describeSelected = describeSelected;
         _printSelected = printSelected;
         _testChatType = testChatType;
+        _testPartColors = testPartColors;
     }
 
     public void Render()
@@ -312,11 +314,58 @@ internal sealed class LegacyItemInfoUi
             ImGui.SetTooltip("Chat type of a described \"Looted\" line\n(\"Same as name line\": the chat type above).");
 
         RenderTextColor(s);
+        RenderPartColors(s);
 
         ImGui.SetNextItemWidth(220);
         ImGui.InputText("Line prefix##iiPrefix", ref s.Prefix, 32);
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Text put in front of every item info line (may be empty).");
+    }
+
+    private const string PartColorsTip =
+        "One-line layout: the name, set, armour / damage, spells, ratings, requirements,\n" +
+        "workmanship, value / burden ... each in its own colour in RynthCore's chat\n" +
+        "(the colours are listed below). The rest of the line (the prefix, the commas)\n" +
+        "keeps the Info text colour, else the chat type's. A RynthCore from before this\n" +
+        "shows the line in that one colour. AC's own chat window shows the chat type's colour.\n" +
+        "Also: /ra iteminfo parts on|off.";
+
+    /// <summary>
+    /// "Colour each part": the one-line layout's parts in their own colours (ItemInfoPartColors),
+    /// a Test line that shows every part, and the colours as a legend while it is on.
+    /// </summary>
+    private void RenderPartColors(MagItemInfoSettings s)
+    {
+        bool oneLine = s.Layout == MagItemInfoSettings.LayoutOneLine;
+        ImGui.BeginDisabled(!oneLine);
+        ImGui.Checkbox("Colour each part (one-line layout)##iiPartColors", ref s.PartColors);
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ImGui.SetTooltip(oneLine ? PartColorsTip : PartColorsTip + "\nSwitch the layout to the one-line Mag style to use it.");
+        ImGui.SameLine();
+        ImGui.BeginDisabled(!oneLine || !s.PartColors);
+        if (ImGui.Button("Test##iiPartColorsTest")) _testPartColors?.Invoke();
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ImGui.SetTooltip("Print a sample line with every part in its colour.");
+
+        if (!oneLine || !s.PartColors) return;
+        // The legend: each part's name in its colour, wrapped to the window.
+        ImGui.Indent();
+        float right = ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X;
+        bool firstItem = true;
+        foreach (var (_, label, color) in ItemInfoPartColors.Defaults)
+        {
+            float w = ImGui.CalcTextSize(label).X;
+            if (!firstItem)
+            {
+                ImGui.SameLine(0, 12);
+                if (ImGui.GetCursorPosX() + w > right) ImGui.NewLine();
+            }
+            firstItem = false;
+            SafeImGui.TextColored(new Vector4(MagItemInfoCatalog.TextColorRgb(color), 1f), label);
+        }
+        ImGui.Unindent();
     }
 
     private const string TextColorTip =

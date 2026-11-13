@@ -96,6 +96,9 @@ internal static class CommandReplyTests
         new("/ra cast 1234", "/ra cast banana", K.Act),
         new("/ra targetlock off", null, K.Act),
         new("/ra fightselected off", "/ra fightselected banana", K.Act),
+        new("/ra dfheight on", "/ra dfheight banana", K.Act),
+        new("/ra dfheight off", null, K.Act),
+        new("/ra dfheight window", null, K.Act),
         new("/ra meleelow", null, K.Act),
         new("/ra meleemid", null, K.Act),
         new("/ra meleehigh", null, K.Act),
@@ -165,11 +168,16 @@ internal static class CommandReplyTests
         new(null, "/ra mstats show", K.Act),                    // this rig's engine has no plugin windows: says so
         new("/ra aetheria off", "/ra aetheria banana", K.Act),
         new(null, "/ra aetheria unbox", K.Act),                 // nothing coalesced in this rig's pack: says so
+        new("/ra autoconfirm off", "/ra autoconfirm banana", K.Act),
+        new(null, "/ra autoconfirm 30", K.Act),                 // under 50: the range and the usage
+        new(null, "/ra autoconfirm on", K.Act),                 // this rig's engine has no confirmation answers: says why
         new(null, "/ra nosuchverb", K.Act),
         // ── /ra: output asked for ──
         new("/ra help", null, K.Query),
         new("/ra aetheria", null, K.Query),
         new("/ra aetheria status", null, K.Query),
+        new("/ra autoconfirm", null, K.Query),
+        new("/ra autoconfirm status", null, K.Query),
         new("/ra", null, K.Query),
         new("/ra version", null, K.Query),
         new("/ra server", null, K.Query),
@@ -198,6 +206,8 @@ internal static class CommandReplyTests
         new("/ra combat", null, K.Query),
         new("/ra mstats list", "/ra mstats Nobody Here At All", K.Query),
         new("/ra mstats help", null, K.Query),
+        new("/ra dfheight status", null, K.Query),
+        new("/ra dfheight", null, K.Query),
         new("/ra why", null, K.Query),
         new("/ra ghosts", null, K.Query),
         new("/ra ghost", null, K.Query),

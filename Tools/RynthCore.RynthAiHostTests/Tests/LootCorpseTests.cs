@@ -64,7 +64,7 @@ internal static class LootCorpseTests
         r.Add("corpse close: an abandoned open corpse is closed once", AbandonedCorpseClosed);
         r.Add("corpse close: stopping the macro mid-loot closes the open corpse, not marked completed", MacroStopClosesCorpse);
         r.Add("loot pacing: a pickup waits for the last bend-down, and no retry is timed while it plays", PickupWaitsForAnimation);
-        r.Add("loot: a pack that takes none of an item's tries is left out; the item tries another, else looting stops", RefusingPackIsLeftOut);
+        r.Add("loot: the main pack, the only place loot can go, takes none of an item's tries: judged full, the item given up, and one item's mark goes with it", RefusingPackIsLeftOut);
         r.Add("loot pacing: no pickup (first or retry) while the server owes an answer to a cast; it goes on the UseDone", PickupWaitsForCastAnswer);
         r.Add("corpse close: not while the last item is between the corpse and the pack - it closes once the item is in the inventory", CloseWaitsForInventory);
         r.Add("loot pacing: an item merged into a stack in the pack is confirmed without the 4 s arrival wait", MergedPickupConfirmedQuickly);
@@ -981,7 +981,7 @@ internal static class LootCorpseTests
         int seen = 0;
         var refuseAt = new List<long>();
         long end = Environment.TickCount64 + 6000;
-        while (Environment.TickCount64 < end && !FakeHost.Logs.Any(l => l.Contains("no pack has a free slot")))
+        while (Environment.TickCount64 < end && !FakeHost.Logs.Any(l => l.Contains("pickup failed")))
         {
             for (; seen < FakeHost.ExternalMoves.Count; seen++)
                 if (FakeHost.ExternalMoves[seen].Id == Gem) refuseAt.Add(Environment.TickCount64 + 800);
@@ -993,12 +993,19 @@ internal static class LootCorpseTests
             bot.Tick(BotActivity.Looting);
             Thread.Sleep(10);
         }
+        // 2026-11-12: loot goes only to the main pack (the client takes nothing from a corpse straight
+        // into a side pack), so one item refused there may be the server refusing the item (a pickup
+        // timer), not the pack: it is given up and its mark goes with it. A second item refused
+        // there keeps the mark (LootRetryTimingTests.FullMainPackRefusals).
         Check.Eq(FakeHost.ExternalMoves.Count(m => m.Id == Gem), 3, "three tries into the main pack, each after the last one's refusal");
         Check.True(FakeHost.ExternalMoves.Where(m => m.Id == Gem).All(m => m.Target == Player), "all into the main pack");
-        Check.True(FakeHost.Logs.Any(l => l.Contains("took none of 3 tries") && l.Contains("trying another pack")), "the refusing pack is left out, said once");
-        Check.True(FakeHost.Logs.Any(l => l.Contains("no pack has a free slot")), "no other pack: the corpse is left");
-        Check.True(FakeHost.Chat.Any(l => l.Contains("Pack full")), "and the player is told");
-        Check.False(FakeHost.Logs.Any(l => l.Contains("pickup failed")), "not three more wasted tries into the same pack");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("the main pack took none of 3 tries") && l.Contains("treating it as full") && l.Contains("nowhere else to put it")),
+            "the refusing pack is judged full, and there is nowhere else to go, said once");
+        Check.Eq(FakeHost.Logs.Count(l => l.Contains("took none of 3 tries")), 1, "said once");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("pickup failed for")), "the gem is given up after its three tries, not sent round again");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("the only place loot can go")), "one item's refusals: its mark goes with it");
+        Check.False(bot.Get<RynthCore.Plugin.RynthAi.Loot.PackRefusals>("_packRefusals").IsRefused(unchecked((int)Player), Environment.TickCount64),
+            "so the main pack is not left out for the next item");
     }
 
     // A pickup sent while Bloodstone Bolt VII was unanswered came back
