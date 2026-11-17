@@ -96,6 +96,7 @@ internal static partial class DungeonPathfinder
         _cachedLandblockKey = 0;
         _cachedGeometry     = null;
         _geoLandblock       = 0;
+        _ledgesClosedOn     = null;
     }
 
     // ── Graph construction ──────────────────────────────────────────────────
@@ -526,6 +527,44 @@ internal static partial class DungeonPathfinder
     /// <summary>Dead-end areas this small (all their cells, from where they leave the rest of the
     /// dungeon) are left out of the patrol by default (Settings: Skip Dead Ends Up To).</summary>
     internal const int PatrolMaxDeadEndCells = DungeonPatrolOptions.MaxDeadEndCellsDefault;
+
+    /// <summary>
+    /// The lava/acid floor cells (<paramref name="floorCells"/>, the floor textures) shut the patrol in:
+    /// it stands on one, or keeping out of <paramref name="hazards"/> leaves under half of the cells
+    /// the dungeon's openings join to where it is. DreamWeave Thread 0x0199 (2026-11-16): it arrived on
+    /// lava, 14 of its cells were reachable round 9 lava cells, the explore was "done" with 8 of 75
+    /// rooms in 6 s and stopped. <paramref name="reachable"/> / <paramref name="joined"/>: the counts.
+    /// </summary>
+    internal static bool HazardFloorsShutIn(Dictionary<uint, DungeonNavNode> graph, uint start, IReadOnlySet<uint>? hazards,
+                                            IReadOnlyCollection<uint>? floorCells, out int reachable, out int joined)
+    {
+        reachable = joined = 0;
+        if (floorCells == null || floorCells.Count == 0 || hazards == null || hazards.Count == 0 || !graph.ContainsKey(start)) return false;
+        joined = Reach(graph, start, null);
+        reachable = Reach(graph, start, hazards);
+        bool onOne = false;
+        foreach (uint c in floorCells) if (c == start) { onOne = true; break; }
+        return onOne || reachable * 2 < joined;
+    }
+
+    // Cells reached from start through the openings, not into a cell of `keepOut` (the start always counts).
+    private static int Reach(Dictionary<uint, DungeonNavNode> graph, uint start, IReadOnlySet<uint>? keepOut)
+    {
+        var seen = new HashSet<uint> { start };
+        var queue = new Queue<uint>();
+        queue.Enqueue(start);
+        while (queue.Count > 0)
+        {
+            uint c = queue.Dequeue();
+            if (!graph.TryGetValue(c, out var n)) continue;
+            foreach (uint nb in n.Neighbors)
+            {
+                if (!graph.ContainsKey(nb) || (keepOut != null && keepOut.Contains(nb)) || !seen.Add(nb)) continue;
+                queue.Enqueue(nb);
+            }
+        }
+        return seen.Count;
+    }
 
     /// <summary>
     /// The hazard cells the patrol keeps out of: <paramref name="all"/> (the live set: floor

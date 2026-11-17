@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.PluginSdk;
 using RynthCore.Plugin.Shared;
@@ -189,6 +190,11 @@ internal sealed class NavigationEngine
     private bool   RecoveryEnabled   => _settings.NavRecoveryEnabled;
     private double OffTrackYards     => Math.Max(OffTrackMinYards, _settings.NavOffTrackYards);
     private int    MaxDetourAttempts => Math.Clamp(_settings.NavMaxDetourAttempts, 1, 10);
+
+    /// <summary>Every detour for the current waypoint has been tried and the character is still stuck there
+    /// (only the escapes are left, for as long as it takes): the dungeon explore takes this as a way it can't
+    /// get through, something the map doesn't have standing in it (a spider web spawned in a doorway).</summary>
+    public bool DetoursUsedUpAndStuck => _detour == null && _detourAttempts >= MaxDetourAttempts && _stuckCount >= 2;
 
     private INavRecoveryPlanner? _planner;
     private Detour? _detour;
@@ -2387,6 +2393,85 @@ internal sealed class NavigationEngine
         _watchdogEw = ew;
     }
 
+    // ── Escapes and portals (2026-11-15) ────────────────────────────────────
+    // DreamWeave Thread 0x00B5: the character arrives on the Thread Exit; stuck on a bad first point
+    // beside it, the +75 degree burst ran it through the portal and out of the Thread, twice. A portal
+    // fires the moment the character touches it, so every burst heading is checked against the
+    // portals near before it is run.
+
+    /// <summary>The portals near the character (world x east, y north, z), for the stuck escapes; null or
+    /// empty: none known. RynthAiPlugin sets it (the landscape's portals within EscapePortalRangeMeters).</summary>
+    public Func<IReadOnlyList<(double X, double Y, double Z)>>? EscapePortals { get; set; }
+
+    /// <summary>Portals farther than this are left out of the escape check.</summary>
+    internal const double EscapePortalRangeMeters = 25.0;
+    /// <summary>How far a burst can carry the character (RecoveryBurstMs at a run, rounded well up).</summary>
+    internal const double EscapeBurstMeters = 7.0;
+    /// <summary>A burst keeps at least this far from a portal (DungeonPathfinder.PortalKeepOutDefault).</summary>
+    internal const double EscapePortalKeepMeters = DungeonPathfinder.PortalKeepOutDefault;
+    private const double EscapePortalLevelMeters = DungeonPathfinder.PortalLevelBand;
+    // Tried after the rung's own heading, in this order.
+    private static readonly double[] EscapeFallbackDeg = { +SideStepDeg, -SideStepDeg, BackOutDeg, -BackOutDeg, +120, -120, +40, -40, +100, -100, +20, -20 };
+
+    /// <summary>
+    /// Keeps the escape burst at heading curDeg + offset away from every portal near: true with
+    /// <paramref name="offset"/> left alone when it is clear (note null), or changed to the first
+    /// fallback that is (note says so); false when every heading runs at one (note: the portal).
+    /// A burst is clear when, over its EscapeBurstMeters, it never comes nearer a portal on its level
+    /// than EscapePortalKeepMeters, or (the character already that near) than it is now.
+    /// </summary>
+    internal bool PortalSafeEscapeOffset(double curDeg, ref double offset, out string? note)
+    {
+        note = null;
+        var near = EscapePortals?.Invoke();
+        if (near == null || near.Count == 0) return true;
+        if (!_host.TryGetPlayerPose(out uint cell, out float lx, out float ly, out float lz, out _, out _, out _, out _) || cell == 0) return true;
+        double px = ((cell >> 24) & 0xFF) * 192.0 + lx, py = ((cell >> 16) & 0xFF) * 192.0 + ly;
+        return EscapeOffsetClear(px, py, lz, curDeg, near, ref offset, out note);
+    }
+
+    /// <summary>The pure half of <see cref="PortalSafeEscapeOffset"/> (world position given).</summary>
+    internal static bool EscapeOffsetClear(double px, double py, double pz, double curDeg,
+                                           IReadOnlyList<(double X, double Y, double Z)> portals, ref double offset, out string? note)
+    {
+        note = null;
+        double first = offset;
+        string? worst = null;
+        foreach (double off in new[] { first }.Concat(EscapeFallbackDeg.Where(f => Math.Abs(f - first) > 0.01)))
+        {
+            double h = (curDeg + off) * Math.PI / 180.0;
+            double ex = px + Math.Sin(h) * EscapeBurstMeters, ey = py + Math.Cos(h) * EscapeBurstMeters;   // 0 = north, clockwise
+            bool clear = true;
+            foreach (var p in portals)
+            {
+                if (Math.Abs(p.Z - pz) > EscapePortalLevelMeters) continue;
+                double now = Math.Sqrt((p.X - px) * (p.X - px) + (p.Y - py) * (p.Y - py));
+                double keep = Math.Min(EscapePortalKeepMeters, now) - 0.05;
+                if (SegmentDistance(px, py, ex, ey, p.X, p.Y) < keep)
+                {
+                    clear = false;
+                    worst ??= $"portal at ({p.X:F1},{p.Y:F1}) {now:F1} m away";
+                    break;
+                }
+            }
+            if (!clear) continue;
+            if (Math.Abs(off - first) > 0.01)
+                note = $"escape burst turned {off:+0;-0}° instead of {first:+0;-0}° (that way runs at the {worst})";
+            offset = off;
+            return true;
+        }
+        note = worst;
+        return false;
+    }
+
+    private static double SegmentDistance(double ax, double ay, double bx, double by, double x, double y)
+    {
+        double dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+        double t = l2 < 1e-12 ? 0 : Math.Clamp(((x - ax) * dx + (y - ay) * dy) / l2, 0, 1);
+        double cx = ax + dx * t - x, cy = ay + dy * t - y;
+        return Math.Sqrt(cx * cx + cy * cy);
+    }
+
     private void BeginRecovery(NavRouteParser route)
     {
         // The waypoint is in another area: no detour or escape can reach it, and
@@ -2438,6 +2523,19 @@ internal sealed class NavigationEngine
             3 => -SideStepDeg,
             _ => BackOutDeg,
         };
+
+        // A burst must not run the character into a portal (it fires on touch): the rung's heading if
+        // it keeps away from every portal near, else the nearest one that does; none: the jump instead.
+        if (!PortalSafeEscapeOffset(curDeg, ref offset, out string? portalNote))
+        {
+            _host.Log($"Nav: stuck x{_stuckCount} — every escape heading runs at a portal ({portalNote}): jumping instead.");
+            _recoveryKind  = RecoveryKind.Jump;
+            _recoveryUntil = Now + (long)RecoveryMs;
+            _inRecovery    = true;
+            _host.JumpNonAutonomous(0.5f);
+            return;
+        }
+        if (portalNote != null) _host.Log($"Nav: stuck x{_stuckCount} — {portalNote}.");
 
         double escapeHeading = curDeg + offset;
         if (escapeHeading >= 360.0) escapeHeading -= 360.0; else if (escapeHeading < 0.0) escapeHeading += 360.0;

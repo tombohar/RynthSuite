@@ -847,6 +847,15 @@ function SpellBook.KnownSpellIds() end
 ---@return string?
 function SpellBook.Name(spellId) end
 
+---The last server yes/no prompt (game.Character.LastPrompt).
+---@class RynthLua.Prompt
+---@field Seq integer
+---@field Type ClientConfirmationType|integer
+---@field ContextId integer
+---@field Percent integer      -1 when its text has no "N percent chance".
+---@field Outcome "Shown"|"Accepted"|"Declined"|"SendFailed"|"AcceptedSticky"
+---@field AgeMs integer
+
 ---@class RynthLua.Character
 ---@field Id integer
 ---@field Name string
@@ -857,6 +866,7 @@ function SpellBook.Name(spellId) end
 ---@field InPortalSpace boolean
 ---@field Vitae number                     1.0 = no penalty, 0.95 = 5% vitae.
 ---@field Busy boolean                     Busy with a use or cast.
+---@field LastPrompt? RynthLua.Prompt       The last server yes/no prompt this session (nil: none).
 ---@field Health integer
 ---@field Stamina integer
 ---@field Mana integer
@@ -958,6 +968,17 @@ function Character.KnowsSpell(spellId) end
 ---Same as the Busy field.
 ---@return boolean
 function Character.IsBusy() end
+
+---The server's next yes/no prompt of `type` (default ClientConfirmationType.YESNO) that comes
+---within `timeoutMs` (default 5000, at most 30000; 0 disarms) is answered for the script without
+---the client's dialog: Yes when its "N percent chance" is at least `minPercent` (default 0:
+---always), else No. One-shot, one slot per client: arm it right before the action that brings the
+---prompt. False on an engine before API v85 or an unknown type.
+---@param type? ClientConfirmationType|integer
+---@param timeoutMs? integer
+---@param minPercent? integer
+---@return boolean armed
+function Character.AnswerNextPrompt(type, timeoutMs, minPercent) end
 
 ---How many you have, counting stack sizes.
 ---@param filter RynthLua.Filter

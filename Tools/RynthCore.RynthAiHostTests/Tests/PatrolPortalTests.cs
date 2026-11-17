@@ -39,6 +39,9 @@ internal static class PatrolPortalTests
         r.Add("patrol portals: a portal in a dead end (Tiny Hive's nook) is turned round before; it used to get a point on it", DeadEndTurnedRoundBefore);
         r.Add("patrol portals: without the map geometry (cell walk) the patrol keeps out too", CellWalkKeepsOut);
         r.Add("patrol portals: a start next to a portal walks straight away from it first, then round it", StartNextToPortalWalksAway);
+        r.Add("patrol portals: a start ON a portal walks out towards the room's doorway, never to a spot in the wall (Thread 0x00B5)", StartOnPortalWalksToDoorway);
+        r.Add("patrol portals: a start in a portal with no checked spot round it walks nowhere (no unchecked spot)", StartOnPortalNoSpot);
+        r.Add("nav escapes: a stuck escape burst turns away from a portal it would run into; boxed in: none", EscapeBurstKeepsOutOfPortals);
         r.Add("patrol portals: a portal across the start's corridor leaves the patrol the side the character is on", PortalSplitsStartCorridor);
         r.Add("patrol portals: a portal on another level changes nothing", OtherLevelIgnored);
         r.Add("patrol portals: Tiny Hive 0x0289 on the real dats keeps out of the Surface Portal (if the dats are here)", TinyHiveRealDats);
@@ -329,6 +332,80 @@ internal static class PatrolPortalTests
         var (_, leg) = Nearest(way, p.X, p.Y, closed: false);
         Check.True(leg >= p.Radius - 0.02, $"the way to the first point keeps out ({leg:F2} m): {Pts(way)}");
         Check.True(DungeonPathfinder.PortalLeadIn(d.Graph, geo, portals, At(3, 3), At(3, 17), 1.0).Count == 0, "a clear walk needs no corners");
+    }
+
+    private static void StartOnPortalWalksToDoorway()
+    {
+        // DreamWeave Thread 0x00B5 (2026-11-15): the character arrives ON the Thread Exit, in a one-cell
+        // room whose one way out is a doorway north. Here: a room x 0..4, y 0..8, the portal at (2, 2),
+        // a doorway north (y 8, x 0.5..3.5) into a corridor. The character stands 0.07 m from the
+        // portal's centre, so "away from it" is a random heading (south-east here). The old search
+        // (that heading +-90 degrees) found no spot and fell back to one off the floor, by the wall.
+        var d = new Dungeon();
+        uint room = d.Cell(0, 0, 4, 8);
+        uint corr = d.Cell(0.5, 8, 3.5, 20);
+        d.OpenY(room, corr, 8, 0.5, 3.5);
+        var geo = d.Geo();
+        var p = Portal(2, 2);
+        var portals = new[] { p };
+        double px = 2.05, py = 1.95;
+        var report = new List<PortalAvoidance> { new() { Portal = p } };
+
+        var walk = DungeonPathfinder.PortalWalkOut(geo, portals, px, py, 0, 1.0, report, d.Graph, room);
+        Check.NotNull(walk, "a spot to walk out to");
+        double wx = X(walk!), wy = Y(walk);
+        Check.True(geo.OnWalkableFloor(wx, wy, 0), $"on walkable floor: ({wx:F2}, {wy:F2})");
+        Check.True(wy > p.Y + 3.0, $"north, the doorway's side: ({wx:F2}, {wy:F2})");
+        Check.True(Math.Sqrt((wx - p.X) * (wx - p.X) + (wy - p.Y) * (wy - p.Y)) >= p.Radius, "outside the circle");
+        Check.True(geo.LegClearance(px, py, 0, wx, wy, 0, 1.0, 0.3, out _, out _, out _) >= 0.1, "walked to in a straight line through no wall");
+        Check.True(report[0].StartInside && !report[0].NoWalkOut, "the report: started inside, walked out");
+        Check.True(report[0].Describe().Contains("walked out first"), report[0].Describe());
+
+        // The patrol from there starts on the doorway's side too.
+        var route = DungeonPathfinder.BuildPatrolRoute(d.Graph, room, null, geo, null, portals, (wx, wy, 0));
+        KeptOut(route, p, "start on a portal");
+    }
+
+    private static void StartOnPortalNoSpot()
+    {
+        // A sealed 3 m room with the portal in its middle: no spot 3.9 m out is on any floor.
+        var d = new Dungeon();
+        uint room = d.Cell(0, 0, 3, 3);
+        var geo = d.Geo();
+        var p = Portal(1.5, 1.5);
+        var report = new List<PortalAvoidance> { new() { Portal = p } };
+        var walk = DungeonPathfinder.PortalWalkOut(geo, new[] { p }, 1.5, 1.6, 0, 1.0, report, d.Graph, room);
+        Check.Null(walk, "no checked spot: nowhere to walk (it used to be a spot off the floor)");
+        Check.True(report[0].StartInside && report[0].NoWalkOut, "the report says so");
+        Check.True(report[0].Describe().Contains("no clear spot to walk out to"), report[0].Describe());
+    }
+
+    private static void EscapeBurstKeepsOutOfPortals()
+    {
+        // Facing north at (0, 0); a portal 5 m east-north-east: the +75 degree side-step runs at it.
+        double off = 75;
+        var east = new[] { (5.0, 1.5, 0.0) };
+        Check.True(NavigationEngine.EscapeOffsetClear(0, 0, 0, 0, east, ref off, out string? note), "a clear way is found");
+        Check.Near(off, -75, 1e-9, "the other side-step instead");
+        Check.True(note != null && note.Contains("instead"), "said: " + note);
+
+        // Nothing near, or only on another level: the rung's own heading, nothing said.
+        off = 75;
+        Check.True(NavigationEngine.EscapeOffsetClear(0, 0, 0, 0, Array.Empty<(double, double, double)>(), ref off, out note) && off == 75 && note == null, "no portal: as it was");
+        off = 75;
+        Check.True(NavigationEngine.EscapeOffsetClear(0, 0, 0, 0, new[] { (5.0, 1.5, 10.0) }, ref off, out note) && off == 75 && note == null, "a portal 10 m up: as it was");
+
+        // Standing 1 m west of a portal: anything eastwards gets nearer it; the burst goes the other way.
+        off = 75;
+        Check.True(NavigationEngine.EscapeOffsetClear(0, 0, 0, 0, new[] { (1.0, 0.0, 0.0) }, ref off, out note), "a way away from it");
+        double h = off * Math.PI / 180.0;
+        Check.True(Math.Sin(h) < 0, $"westwards ({off:+0;-0} degrees)");
+
+        // Boxed in by portals all round: no burst (the jump instead).
+        var ring = Enumerable.Range(0, 12).Select(i => (4.0 * Math.Sin(i * Math.PI / 6), 4.0 * Math.Cos(i * Math.PI / 6), 0.0)).ToArray();
+        off = 75;
+        Check.False(NavigationEngine.EscapeOffsetClear(0, 0, 0, 0, ring, ref off, out note), "every heading runs at one");
+        Check.True(note != null && note.Contains("portal"), "names the portal: " + note);
     }
 
     private static void PortalSplitsStartCorridor()

@@ -84,6 +84,12 @@ public partial class BuffManager
                 // Health and he died (2026-11-07).
                 allowed = $"health {_vitals.HealthPct}% at or under Emergency Heal At {_settings.EmergencyHealAt}%";
             }
+            else if (what == "Stamina to Health Self" && StaminaToHealthAllowed(_settings, _vitals.HealthPct, _vitals.StaminaPct))
+            {
+                // Its own line asks for the spell (2026-11-13): Stamina To Health At set over Emergency Heal At
+                // means "this is my emergency heal", kit or no kit.
+                allowed = $"health {_vitals.HealthPct}% at or under Stamina To Health At {_settings.StaminaToHealthAt}%";
+            }
             else
             {
                 bool stamina = label == LabelStamina;
@@ -187,7 +193,17 @@ public partial class BuffManager
     }
 
     /// <summary>A stamina kit AttemptStaminaKitUse could pick.</summary>
-    private bool HasUsableStaminaKit() => _host.HasUseObjectOn && HasPackKit("Stamina Kit");
+    // Only one Stamina Kit Min Success % lets through (2026-11-13): a kit under it is never used, so it
+    // must not refuse Revitalize's swap either (that left a melee character with no stamina source, and
+    // the old last resort then used the kit anyway).
+    private bool HasUsableStaminaKit()
+    {
+        if (!_host.HasUseObjectOn || !HasPackKit("Stamina Kit")) return false;
+        if (BestPackStaminaKit() is not WorldObject kit) return true;
+        uint missing = _vitals.MaxStamina > _vitals.CurrentStamina ? _vitals.MaxStamina - _vitals.CurrentStamina : 0;
+        return KitChanceOk(kit.Id, kit.Name ?? "", missing, _settings.PeaceModeForKits && !_vitalsNoPeaceSwitch,
+                           _settings.StaminaKitMinSuccessPct, log: false);
+    }
 
     /// <summary>A kit named "... <paramref name="suffix"/>" in the pack the gate still counts (BestPack*Kit's match).</summary>
     private bool HasPackKit(string suffix)
@@ -222,19 +238,13 @@ public partial class BuffManager
     /// </summary>
     private bool AttemptStaminaRestore(bool listedPotionFirst = false, bool allowCast = true)
     {
-        if (AttemptStaminaKit(false, out bool underMinSuccess)
+        // No last resort under Stamina Kit Min Success % (2026-11-13, Tom: it has to respect the %): a kit
+        // under it is never used; 0 = always use the kit. Instead the wand comes out and Revitalize goes,
+        // the between-fights top-off too (allowCast false only spares a swap a good kit makes needless).
+        return AttemptStaminaKit(false, out bool underMinSuccess)
             || (listedPotionFirst && AttemptPotion(true, "StaminaPotion", "Stamina"))
-            || (allowCast && AttemptVitalCast("Revitalize Self"))
-            || AttemptPotion("StaminaPotion", "Stamina"))
-            return true;
-        // Last resort, as the heal chain's: the stamina kit Stamina Kit Min Success % skipped. With
-        // Revitalize refused by the wand gate (or not cast) and no potion, nothing else restores stamina.
-        if (underMinSuccess && AttemptStaminaKit(true, out _))
-        {
-            _host.Log("[RynthAi] Vitals: no spell or potion could restore stamina; using the stamina kit despite Stamina Kit Min Success %.");
-            return true;
-        }
-        return false;
+            || ((allowCast || underMinSuccess) && AttemptVitalCast("Revitalize Self"))
+            || AttemptPotion("StaminaPotion", "Stamina");
     }
 
     /// <summary>

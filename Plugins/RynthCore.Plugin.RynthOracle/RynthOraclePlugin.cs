@@ -27,6 +27,15 @@ public sealed class RynthOraclePlugin : RynthPluginBase
     // The Character tab's session (RynthAi): read only while that tab is on screen.
     private const long CharacterExtrasReadMs = 2000;
     private const long BookWorldWaitMs = 15_000;  // how long the quest book waits for the world name
+    // Re-reading /myquests during a session (2026-11-13, R-20261110-155059-e947): at most one of
+    // RynthOracle's own re-reads a minute (the throttling servers' limit, and a long list is a big
+    // chat burst), and a timer alert holds this long for the fresh reading before printing anyway.
+    private const long AutoReadGapMs = 60_000;
+    private const long AlertConfirmWaitMs = 120_000;
+    // A timer alert from flags read longer ago than this is checked against a fresh read first.
+    private static readonly TimeSpan AlertConfirmAge = TimeSpan.FromMinutes(2);
+    // How far the server's "again in" wait may sit from a held flag's timer and still be that quest.
+    private static readonly TimeSpan ServerWaitTolerance = TimeSpan.FromMinutes(2);
 
     private readonly OracleContext _c = new();
     private readonly UiHost _ui = new();
@@ -51,6 +60,14 @@ public sealed class RynthOraclePlugin : RynthPluginBase
     private int _seenPackRevision = -1;   // the active server plugin's quest pack (ServerQuestPackClient.Revision)
     private int _titleCount = -2;
     private uint _titleCurrent;
+    private long _nextAutoReadMs;
+    private DateTime _seenReadUtc = DateTime.MinValue;
+    // The server's "again in" wait not yet checked against a read made after it (the log line).
+    private (TimeSpan Left, DateTime AtUtc)? _uncheckedServerWait;
+    // Timer alerts held for a fresh read (flags read too long ago to trust a "ready").
+    private readonly System.Collections.Generic.List<Quest> _heldAlerts = new();
+    private long _heldAlertsSinceMs;
+    private DateTime _heldAlertsReadUtc;
 
     public override int Initialize()
     {
@@ -146,7 +163,16 @@ public sealed class RynthOraclePlugin : RynthPluginBase
         // The quest book loads once the character's name (and world) are known (TickData).
         _c.Book.Clear();
         _c.Timers.Reset();
+        ResetRereads();
         if (_timers != null) { _timers.Visible = _c.Settings.QuestTimersOpen; _timers.NeedsPass = true; }
+    }
+
+    private void ResetRereads()
+    {
+        _nextAutoReadMs = 0;
+        _seenReadUtc = DateTime.MinValue;
+        _uncheckedServerWait = null;
+        _heldAlerts.Clear();
     }
 
     public override void OnLogout()
@@ -161,6 +187,7 @@ public sealed class RynthOraclePlugin : RynthPluginBase
         _ui.SubmitEmpty(Host);
         _c.Book.Clear();   // saved as it changed
         _c.Timers.Reset();
+        ResetRereads();
         _c.Flags.Clear();
         _c.Void.Clear();
         _c.Server.Reset();
@@ -253,7 +280,17 @@ public sealed class RynthOraclePlugin : RynthPluginBase
         long now = Environment.TickCount64;
         string line = text.TrimEnd('\r', '\n');
 
-        MyQuestsLine kind = _c.Flags.OnChatLine(line, now);
+        MyQuestsLine kind = _c.Flags.OnChatLine(line, now, DateTime.UtcNow);
+        if (kind == MyQuestsLine.TooRecent)
+        {
+            // Shown as the server sent it; the store now wants a fresh read (TickData sends it).
+            if (_c.Flags.LastServerWait is { } wait && wait.AtUtc != _uncheckedServerWait?.AtUtc)
+            {
+                _uncheckedServerWait = wait;
+                Host.Log("[RynthOracle] The server turned a quest down: " + DescribeServerWait(wait, "the flags held"));
+            }
+            return;
+        }
         if (kind != MyQuestsLine.None)
         {
             // Only the reply to RynthOracle's own request, and only when the setting says so.
@@ -382,6 +419,81 @@ public sealed class RynthOraclePlugin : RynthPluginBase
         return sent;
     }
 
+    // ── Keeping the flags current (2026-11-13, R-20261110-155059-e947) ──────
+    // The report: every daily quest showed "ready" hours early, and the server turned one down with
+    // "again in 2h 50m 42s". /myquests was read once at login (34 hours before, in that log), so a
+    // quest done since kept the stamp from before it and its old timer had long run out. Nothing in
+    // the log said when the flags were read, so reads, re-reads and the server's turn-downs log now.
+
+    /// <summary>
+    /// RynthOracle may send /myquests on its own during a session: only with the login read on and
+    /// its replies hidden (a re-read must never print the whole list into chat).
+    /// </summary>
+    private bool AutoRereads() => _c.Settings.ReadQuestsAtLogin && _c.Settings.HideOwnQuestReplies;
+
+    /// <summary>Something on screen shows quest timers: a quest page of the Oracle window, or the Quest Timers window.</summary>
+    private bool TimersOnScreen()
+    {
+        if (_timers?.Visible == true) return true;
+        if (_main?.Visible != true || _mainView == null) return false;
+        string tab = _mainView.Tab;
+        return tab == OracleView.TabQuests || tab == OracleView.TabAugs || tab == OracleView.TabSociety;
+    }
+
+    /// <summary>Re-reads /myquests when the flags are known stale, or old and on screen; at most once a minute.</summary>
+    private void RereadIfStale(long now)
+    {
+        if (now < _nextAutoReadMs || !AutoRereads()) return;
+        bool wanted = _c.Flags.RereadWanted;
+        if (!_c.Flags.NeedsReread(_c.UtcNow, TimersOnScreen())) return;
+        _nextAutoReadMs = now + AutoReadGapMs;
+        string why = wanted
+            ? "the server turned a quest down, or a timer alert wants a fresh reading"
+            : $"the quest timers are on screen and the flags were read {TimeText.Friendly(_c.UtcNow - _c.Flags.LastReadUtc)} ago";
+        if (RequestQuests()) Host.Log($"[RynthOracle] Re-reading /myquests: {why}.");
+    }
+
+    /// <summary>Logs each /myquests reply that landed (whoever asked) and checks the server's last "again in" against it.</summary>
+    private void NoteRead()
+    {
+        DateTime read = _c.Flags.LastReadUtc;
+        if (read == _seenReadUtc || read == DateTime.MinValue) return;
+        DateTime previous = _seenReadUtc;
+        _seenReadUtc = read;
+        Host.Log($"[RynthOracle] Read {_c.Flags.Flags.Count} quest flags"
+                 + (previous == DateTime.MinValue ? " (the first read since login)." : $" (the read before was {TimeText.Friendly(read - previous)} earlier)."));
+        if (_uncheckedServerWait is { } w && read > w.AtUtc)
+        {
+            _uncheckedServerWait = null;
+            Host.Log("[RynthOracle] After the server turned a quest down: " + DescribeServerWait(w, "the flags just read"));
+        }
+    }
+
+    /// <summary>
+    /// "again in 2h 50m 42s; the flags held (read 07:12:05 UTC, 2h 33m before it) have aaaflag at 2h 50m",
+    /// or that none has about that long to go: which quest it was, and whether Oracle's timer agrees.
+    /// </summary>
+    private string DescribeServerWait((TimeSpan Left, DateTime AtUtc) w, string which)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("again in ").Append(TimeText.Friendly(w.Left)).Append("; ").Append(which);
+        if (_c.Flags.LastReadUtc == DateTime.MinValue) return sb.Append(" (none read yet)").ToString();
+        TimeSpan gap = w.AtUtc - _c.Flags.LastReadUtc;
+        sb.Append($" (read {_c.Flags.LastReadUtc:HH:mm:ss} UTC, ")
+          .Append(gap >= TimeSpan.Zero ? TimeText.Friendly(gap) + " before it)" : TimeText.Friendly(-gap) + " after it)");
+        var near = _c.Flags.WaitingAbout(w.Left, w.AtUtc, ServerWaitTolerance);
+        if (near.Count == 0)
+            return sb.Append(" have no quest with about that long to go: out of date, or the server's timer isn't the one /myquests gives.").ToString();
+        sb.Append(" have ");
+        for (int i = 0; i < near.Count && i < 3; i++)
+        {
+            if (i > 0) sb.Append(", ");
+            TimeSpan held = near[i].Flag.NextAvailableTime(w.AtUtc);
+            sb.Append(near[i].Flag.Key).Append(" at ").Append(TimeText.Friendly(held));
+        }
+        return sb.Append('.').ToString();
+    }
+
     // ── The Oracle window's Refresh buttons (the data side; Views\RefreshBar.cs has the rest) ──
 
     /// <summary>Reads the character's stats, buffs and (on the Character tab) RynthAi's session now, not at the next timer.</summary>
@@ -469,6 +581,7 @@ public sealed class RynthOraclePlugin : RynthPluginBase
             _c.Flags.LastPartialReply = null;
             Host.Log($"[RynthOracle] /myquests reply looked cut short ({partial.Got} lines, {partial.Had} flags held): merged it instead of replacing the list.");
         }
+        NoteRead();
         if (_c.Flags.Revision != _seenFlagRevision)
         {
             _seenFlagRevision = _c.Flags.Revision;
@@ -530,6 +643,7 @@ public sealed class RynthOraclePlugin : RynthPluginBase
             // Another plugin (RynthAi's meta manager) or the player may already have asked.
             if (_c.Flags.LastReadUtc == DateTime.MinValue && !_c.Flags.Loading) RequestQuests();
         }
+        RereadIfStale(now);
 
         if (!_dailyCheckStarted && _c.Settings.CheckQuestListDaily
             && _c.UtcNow - _c.Settings.LastQuestListCheckUtc >= QuestCatalogUpdater.Interval)
@@ -572,10 +686,41 @@ public sealed class RynthOraclePlugin : RynthPluginBase
     /// <summary>Says in chat which watched quest timers came up: tracked quests, or every held quest if so set.</summary>
     private void AnnounceTimers()
     {
-        if (!_c.Settings.AlertTimers || !_c.Book.Loaded) { _c.Timers.Reset(); return; }
+        if (!_c.Settings.AlertTimers || !_c.Book.Loaded) { _c.Timers.Reset(); _heldAlerts.Clear(); return; }
+        long now = _c.NowMs;
         var ready = _c.Timers.Check(_c.Flags, _c.Catalog, _c.Settings.AlertAllTimers ? null : _c.Book.Tracked, _c.UtcNow);
+        // A timer that ran out on flags read a while ago may be a quest done again since (R-20261110-155059-e947):
+        // hold the alert for a fresh read rather than call it ready (2026-11-13).
+        bool confirm = ready.Count > 0 && AutoRereads() && !_c.Flags.ServerDisabled
+                       && _c.UtcNow - _c.Flags.LastReadUtc > AlertConfirmAge;
         foreach (Quest q in ready)
-            _c.Print($"Quest ready again: {q.Label}");
+        {
+            if (!confirm) { _c.Print($"Quest ready again: {q.Label}"); continue; }
+            if (_heldAlerts.Count == 0) { _heldAlertsSinceMs = now; _heldAlertsReadUtc = _c.Flags.LastReadUtc; }
+            if (!_heldAlerts.Exists(h => string.Equals(h.Flag, q.Flag, StringComparison.OrdinalIgnoreCase))) _heldAlerts.Add(q);
+        }
+        if (confirm) _c.Flags.WantReread();
+        ReleaseHeldAlerts(now);
+    }
+
+    /// <summary>
+    /// Held timer alerts once a fresh read is in: still ready, they print; on a timer again (the quest
+    /// was done since the old read) they're dropped and the watcher alerts when that timer ends. With
+    /// no read in <see cref="AlertConfirmWaitMs"/> (throttled, no reply) they print as before.
+    /// </summary>
+    private void ReleaseHeldAlerts(long now)
+    {
+        if (_heldAlerts.Count == 0) return;
+        bool fresh = _c.Flags.LastReadUtc > _heldAlertsReadUtc;
+        if (!fresh && now - _heldAlertsSinceMs < AlertConfirmWaitMs) return;
+        foreach (Quest q in _heldAlerts)
+        {
+            if (!fresh || QuestTimer.State(q, _c.Flags, _c.UtcNow, out _) == QuestTimerState.Ready)
+                _c.Print($"Quest ready again: {q.Label}");
+            else
+                Host.Log($"[RynthOracle] No \"ready again\" for {q.Flag}: the fresh read has it on a timer (done again since the last read).");
+        }
+        _heldAlerts.Clear();
     }
 
     /// <summary>

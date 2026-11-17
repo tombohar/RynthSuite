@@ -15,6 +15,11 @@ namespace RynthCore.Plugin.RynthAi;
 ///
 ///   [CombatLatency] lock->attack 180 ms (stance 0, face 60, busy 0, cast 120, interval 0, other 0) Magic 'Olthoi Nymph', kill->attack 210 ms
 ///
+/// Time combat didn't tick at all because the arbiter gave the tick to something else (a heal in
+/// the Buffing slot) is <see cref="OnHeld"/>'s, and the line names it: ", held 3281 ms by Buffing".
+/// It was charged to "other" when combat next ticked (2026-11-15, R-20261115-165857-1de7: "other
+/// 3281" was a healing kit the arbiter ran ahead of the attack, readable only from the lines around).
+///
 /// Pure: the caller passes the clock. Pump thread only.
 /// </summary>
 internal sealed class CombatLatencyTracker
@@ -46,6 +51,8 @@ internal sealed class CombatLatencyTracker
     private double _killAtMs = double.NaN;
     private double _lastLineAtMs = double.NegativeInfinity;
     private int _suppressed;
+    private double _heldMs;            // OnHeld: combat didn't tick, the arbiter ran something else
+    private string _heldBy = "";
 
     /// <summary>True between a lock and its first attack.</summary>
     public bool Pending => !double.IsNaN(_lockAtMs);
@@ -59,6 +66,8 @@ internal sealed class CombatLatencyTracker
         _lastTickMs = nowMs;
         _killAtMs = killAtMs;
         Array.Clear(_waits);
+        _heldMs = 0;
+        _heldBy = "";
     }
 
     /// <summary>The lock was dropped before any attack went out.</summary>
@@ -77,6 +86,19 @@ internal sealed class CombatLatencyTracker
         double dt = nowMs - _lastTickMs;
         if (dt > 0) _waits[(int)wait] += dt;
         _lastTickMs = nowMs;
+    }
+
+    /// <summary>A tick combat didn't run (the arbiter gave it to <paramref name="holder"/>, its BotAction):
+    /// the time since the previous tick is charged to the hold, not to the next combat tick's wait.</summary>
+    public void OnHeld(int targetId, double nowMs, string? holder)
+    {
+        if (!Pending) return;
+        if (targetId != _targetId) { OnDrop(); return; }
+        double dt = nowMs - _lastTickMs;
+        if (dt > 0) _heldMs += dt;
+        _lastTickMs = nowMs;
+        if (!string.IsNullOrEmpty(holder) && !_heldBy.Contains(holder, StringComparison.Ordinal))
+            _heldBy = _heldBy.Length == 0 ? holder : _heldBy + "/" + holder;
     }
 
     /// <summary>The first attack or cast went out. Returns the log line, or null when nothing was
@@ -107,13 +129,17 @@ internal sealed class CombatLatencyTracker
           .Append(", busy ").Append(Ms(_waits[(int)Wait.Busy]))
           .Append(", cast ").Append(Ms(_waits[(int)Wait.Cast]))
           .Append(", interval ").Append(Ms(_waits[(int)Wait.Interval]))
-          .Append(", other ").Append(Ms(_waits[(int)Wait.Other]))
-          .Append(") ").Append(mode);
+          .Append(", other ").Append(Ms(_waits[(int)Wait.Other]));
+        if (_heldMs >= 1) sb.Append(", held ").Append(Ms(_heldMs)).Append(" ms by ").Append(_heldBy.Length > 0 ? _heldBy : "another activity");
+        sb.Append(") ").Append(mode);
         if (!string.IsNullOrEmpty(targetName)) sb.Append(" '").Append(targetName).Append('\'');
         if (!double.IsNaN(killToAttack)) sb.Append(", kill->attack ").Append(Ms(killToAttack)).Append(" ms");
         if (_suppressed > 0) { sb.Append(" (+").Append(_suppressed).Append(" engagements not logged)"); _suppressed = 0; }
         return sb.ToString();
     }
+
+    /// <summary>The time combat was held by another activity so far (tests and diagnostics).</summary>
+    public double Held => _heldMs;
 
     /// <summary>The time charged to one wait so far (tests and diagnostics).</summary>
     public double Waited(Wait wait) => _waits[(int)wait];

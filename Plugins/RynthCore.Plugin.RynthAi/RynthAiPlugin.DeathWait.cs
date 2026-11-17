@@ -12,13 +12,21 @@
 //
 // The wait: with the macro and Looting on, our kill starts a wait of the monster's learned death (or
 // DeathWaitDefaultMs while it isn't learned) plus DeathWaitExtraMs. While it runs, looting counts as
-// work, the arbiter gives Looting the tick over combat (ArbiterInputs.DeathWait, as Boost Loot does)
-// and combat locks no new target (CombatManager.HoldNewTarget), so neither a fight's walk, nor nav,
-// nor the Outdoor Hunt takes the character away. A monster within CloseAttackYards is still fought
-// (HoldNewTarget and CombatEngaged both let it through). It ends when the corpse is looted, when no
+// work and the arbiter gives Looting the tick (ArbiterInputs.DeathWait, as Boost Loot does), so
+// neither nav nor the Outdoor Hunt takes the character away. The next fight is not held (2026-11-15,
+// below): a monster combat can lock is fought at once. It ends when the corpse is looted, when no
 // corpse came in the time, or DeathWaitDecideMs after a corpse came that the looter hasn't claimed
 // (the loot rules don't take it, or the looter leaves it for the fight: then the fight goes on and the
 // looter comes back for it; holding combat there stood the character still, both waiting on the other).
+//
+// No hold on combat's next target (2026-11-15, R-20261115-165857-1de7): the same stand-off, before the
+// corpse came. The wait held the next target (a Marae Ursuin in range, beyond 5 yd) for the 3 s death
+// and 1 s more, but the looter claims no corpse while combat has targets in range (Boost Loot and a
+// starved corpse aside, which have their own rules): "Looting has held the tick 3.0 s with nothing
+// claimed", 3.6 s standing until the monster walked within 5 yd and hit. Combat has a candidate only
+// when it has targets, so the hold could only ever wait on a looter that waits for the fight. The corpse
+// is looted after the fight, as every corpse is with Boost Loot off; the wait still keeps nav and the
+// hunt from walking off when no fight is left (the owner's case: running off from the last kill).
 // Pump thread throughout.
 using System;
 using RynthCore.Plugin.RynthAi.LegacyUi;
@@ -174,17 +182,12 @@ public sealed partial class RynthAiPlugin
         return Math.Sqrt(dx * dx + dy * dy) <= DeathCorpseNearYd;
     }
 
-    /// <summary>CombatManager.HoldNewTarget: Boost Loot Priority's hold, or the death wait's.</summary>
-    private bool LootHoldsNewTarget()
-    {
-        if (BoostLootHoldsNewTarget()) return true;
-        var s = _dashboard?.Settings;
-        return s != null && DeathWaitHolds(s);
-    }
+    /// <summary>
+    /// CombatManager.HoldNewTarget: Boost Loot Priority's hold. The death wait no longer holds the next
+    /// target (2026-11-15, header): with a target to lock, the looter leaves the corpse for the fight.
+    /// </summary>
+    private bool LootHoldsNewTarget() => BoostLootHoldsNewTarget();
 
     /// <summary>CombatManager.HoldNewTargetWhy: the words for its one log line.</summary>
-    private string LootHoldWhy()
-        => _deathWaitAt != 0 && !BoostLootHoldsNewTarget()
-            ? "the kill's corpse comes first (its death animation, then the loot)"
-            : "Boost Loot Priority loots the kill first";
+    private string LootHoldWhy() => "Boost Loot Priority loots the kill first";
 }

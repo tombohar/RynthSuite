@@ -32,8 +32,11 @@ internal sealed class QuestFlag
     }
 }
 
-/// <summary>What one chat line is, as far as /myquests goes.</summary>
-internal enum MyQuestsLine { None, Quest, Empty, Disabled, Throttled }
+/// <summary>
+/// What one chat line is, as far as /myquests goes. TooRecent: the server turned a quest down
+/// ("You have solved this quest too recently!" and its "You may complete this quest again in ...").
+/// </summary>
+internal enum MyQuestsLine { None, Quest, Empty, Disabled, Throttled, TooRecent }
 
 /// <summary>
 /// The character's quest flags, read from the server's /myquests reply (ACE: one Broadcast line
@@ -57,6 +60,23 @@ internal sealed class QuestFlagStore
     public const string DisabledText = "The command \"myquests\" is not currently enabled on this server.";
     /// <summary>ACECustom's per-session throttle reply ("... may only be run once every 60 seconds.").</summary>
     public const string ThrottledText = "[MyQuests] This command may only be run once every";
+    /// <summary>ACE's QuestManager when a quest is turned down on its timer; the next line says how long.</summary>
+    public const string TooRecentText = "You have solved this quest too recently!";
+    public const string AgainInText = "You may complete this quest again in ";
+
+    // A chat timestamp the client may put first (as LineRegex allows), then the server's line.
+    private static readonly Regex AgainInRegex = new(
+        @"^\s*(?:\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?\s+)?You may complete this quest again in (?<left>[^.]+)\.?\s*$",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private static readonly Regex WaitPartRegex = new(@"(?<n>\d+)\s*(?<u>d|h|m|s)[a-z]*",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// How old the flags may get while a page or alert uses their timers before they are read again
+    /// (2026-11-13, R-20261110-155059-e947). /myquests was read once at login, so a quest done after
+    /// that kept the stamp from before it and showed "ready" for the rest of a long session.
+    /// </summary>
+    public static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(10);
 
     private const int QuietMs = 1500;          // a reply is complete once no line came for this long
     private const int RequestTimeoutMs = 10_000;
@@ -88,6 +108,17 @@ internal sealed class QuestFlagStore
     public (int Got, int Had)? LastPartialReply { get; set; }
     /// <summary>Bumps whenever the flags change (views rebuild their caches on it).</summary>
     public int Revision { get; private set; }
+
+    /// <summary>
+    /// The flags held are known to be out of date (the server turned a quest down on its timer, or a
+    /// timer alert wants the fresh reading first): read again as soon as the server allows. Cleared
+    /// when a reply lands. 2026-11-13, R-20261110-155059-e947.
+    /// </summary>
+    public bool RereadWanted { get; private set; }
+    /// <summary>The server's last "You may complete this quest again in ..." (the wait, and when it was said).</summary>
+    public (TimeSpan Left, DateTime AtUtc)? LastServerWait { get; private set; }
+
+    public void WantReread() => RereadWanted = true;
 
     // Our own request: its reply may be hidden from chat.
     public bool AwaitingOurs { get; private set; }
@@ -127,7 +158,9 @@ internal sealed class QuestFlagStore
     }
 
     /// <summary>Classifies a chat line and takes in its flag.</summary>
-    public MyQuestsLine OnChatLine(string? text, long nowMs)
+    public MyQuestsLine OnChatLine(string? text, long nowMs) => OnChatLine(text, nowMs, DateTime.UtcNow);
+
+    public MyQuestsLine OnChatLine(string? text, long nowMs, DateTime utcNow)
     {
         if (string.IsNullOrEmpty(text)) return MyQuestsLine.None;
         string line = text.Trim();
@@ -155,6 +188,22 @@ internal sealed class QuestFlagStore
             AwaitingOurs = false;
             Revision++;
             return MyQuestsLine.Throttled;
+        }
+        // The server turned a quest down on its timer: what is held for it is out of date (the
+        // report above: Oracle said "ready", the server said 2h 50m). The lines don't name the quest,
+        // so the fix is a fresh /myquests; the wait is kept so the plugin can log which flag it was.
+        // Only a whole line counts: a player quoting it in a tell gets at most one extra read.
+        if (line.EndsWith(TooRecentText, StringComparison.Ordinal) && line.Length - TooRecentText.Length <= 12)
+        {
+            RereadWanted = true;
+            return MyQuestsLine.TooRecent;
+        }
+        if (line.Contains(AgainInText, StringComparison.Ordinal))
+        {
+            if (!TryParseAgainIn(line, out TimeSpan left)) return MyQuestsLine.None;
+            LastServerWait = (left, utcNow);
+            RereadWanted = true;
+            return MyQuestsLine.TooRecent;
         }
         if (line.IndexOf(" solves (", StringComparison.Ordinal) < 0) return MyQuestsLine.None;
 
@@ -193,6 +242,7 @@ internal sealed class QuestFlagStore
                 Flags = reply;
             }
             LastReadUtc = DateTime.UtcNow;
+            RereadWanted = false;
             // On a throttling server any reply (ours, the player's, RynthAi's poll) starts its minute.
             if (_serverThrottles)
                 ThrottledUntilMs = nowMs + ServerThrottleMs - QuietMs;
@@ -215,7 +265,62 @@ internal sealed class QuestFlagStore
         ThrottledUntilMs = long.MinValue / 2;
         _serverThrottles = false;
         LastPartialReply = null;
+        RereadWanted = false;
+        LastServerWait = null;
         Revision++;
+    }
+
+    /// <summary>
+    /// Whether the held flags should be read again now (the plugin also checks its own settings and
+    /// spacing): the server said they are out of date, or something uses their timers
+    /// (<paramref name="timersInUse"/>: a quest page or the Quest Timers window showing, timer alerts
+    /// on) and they are older than <see cref="StaleAfter"/>. Never before the first read (the login
+    /// read does that), while a reply is coming in, or on a server without /myquests.
+    /// 2026-11-13, R-20261110-155059-e947.
+    /// </summary>
+    public bool NeedsReread(DateTime utcNow, bool timersInUse)
+    {
+        if (LastReadUtc == DateTime.MinValue || Loading || ServerDisabled) return false;
+        return RereadWanted || timersInUse && utcNow - LastReadUtc >= StaleAfter;
+    }
+
+    /// <summary>"You may complete this quest again in 2h 50m 42s." -> 2:50:42 (ACE's friendly time: d, h, m, s parts).</summary>
+    internal static bool TryParseAgainIn(string line, out TimeSpan left)
+    {
+        left = TimeSpan.Zero;
+        Match m = AgainInRegex.Match(line);
+        if (!m.Success) return false;
+        bool any = false;
+        foreach (Match p in WaitPartRegex.Matches(m.Groups["left"].Value))
+        {
+            if (!long.TryParse(p.Groups["n"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out long n) || n > 100_000) return false;
+            left += char.ToLowerInvariant(p.Groups["u"].Value[0]) switch
+            {
+                'd' => TimeSpan.FromDays(n),
+                'h' => TimeSpan.FromHours(n),
+                'm' => TimeSpan.FromMinutes(n),
+                _ => TimeSpan.FromSeconds(n),
+            };
+            any = true;
+        }
+        return any;
+    }
+
+    /// <summary>
+    /// The held flags whose timers have about <paramref name="left"/> to go at <paramref name="atUtc"/>
+    /// (the server's "again in" wait), closest first: which quest the server turned down, for the log.
+    /// </summary>
+    public List<(QuestFlag Flag, TimeSpan Off)> WaitingAbout(TimeSpan left, DateTime atUtc, TimeSpan tolerance)
+    {
+        var found = new List<(QuestFlag, TimeSpan)>();
+        foreach (QuestFlag f in Flags.Values)
+        {
+            if (f.RepeatTime <= TimeSpan.Zero) continue;
+            TimeSpan off = f.NextAvailableTime(atUtc) - left;
+            if (off.Duration() <= tolerance) found.Add((f, off));
+        }
+        found.Sort((a, b) => a.Item2.Duration().CompareTo(b.Item2.Duration()));
+        return found;
     }
 
     public bool TryGet(string flag, out QuestFlag q) => Flags.TryGetValue(flag, out q!);

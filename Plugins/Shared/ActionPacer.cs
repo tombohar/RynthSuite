@@ -271,6 +271,7 @@ internal static class ActionPacer
             OnSelf = onSelf && kind == PacedKind.ItemUse,
         };
         if (kind == PacedKind.ItemUse) a.WieldedAtSend = IsWieldedByPlayer(host, id);
+        SpendTryAfterBusy(host, who);   // the try after a 'too busy' answer, if one is open
         string? over = null;
         lock (Gate)
         {
@@ -497,15 +498,38 @@ internal static class ActionPacer
         // above left it for the next asker. A Conquest report (10-25): after a corpse pickup and a cast went
         // out together, the buff step took all three tries and sent nothing (still animating), combat never
         // got one, and the fight stood for the latch's 15 s.
-        if (tryAfterBusy) SpendTryAfterBusy(host, who);
+        // And only by a send (Begin), not by passing here (2026-11-15, R-20261115-172110-9e6a): the buff
+        // step passed MayStart, found nothing to cast and sent nothing, three times (05.4, 08.4, 14.4 s
+        // into the latch), while combat, asking after it every tick, was held, with eleven monsters in
+        // range, until the latch ran out. The try stays open for the next asker until a send spends it,
+        // or TryOpenMs passes (then it counts as spent, so passes that send nothing can't keep it open).
+        if (tryAfterBusy) GrantTryAfterBusy(who);
         return true;
     }
 
+    /// <summary>A try after 'too busy' let through but not used by a send is taken as spent after this.</summary>
+    public const long TryOpenMs = 1000;
+    private static long _tryGrantedAt;          // when the open try was first let through (0 = none open)
+    private static string _tryGrantedTo = "";   // the first start it was let through for (the lapse line)
+
+    private static void GrantTryAfterBusy(string who)
+    {
+        lock (Gate)
+        {
+            if (_tryGrantedAt != 0) return;
+            _tryGrantedAt = NowMs();
+            _tryGrantedTo = who;
+        }
+    }
+
+    /// <summary>Begin: a send while a try is open spends it (logged).</summary>
     private static void SpendTryAfterBusy(RynthCoreHost host, string who)
     {
         int n;
         lock (Gate)
         {
+            if (_tryGrantedAt == 0 || _busySince == 0) { _tryGrantedAt = 0; return; }
+            _tryGrantedAt = 0;
             _probes++;
             _lastProbeAt = NowMs();
             n = _probes;
@@ -819,6 +843,7 @@ internal static class ActionPacer
         _busyRefusals = 0;
         _probes = 0;
         _lastProbeAt = 0;
+        _tryGrantedAt = 0;
         _stage = BreakStage.None;
         _stageAt = 0;
         _stageFor = null;
@@ -904,7 +929,7 @@ internal static class ActionPacer
         PacedAction? stuck;
         bool probe = false;
         long age = 0;
-        string? staleLine = null;
+        string? staleLine = null, lapseLine = null;
         lock (Gate)
         {
             if (_shadow != null && _hung == null && now - _shadow.SentMs >= CastMaxMs) { _hung = _shadow; _shadow = null; }
@@ -938,6 +963,15 @@ internal static class ActionPacer
             // use would send first every time and the heal would see the next slot, up to BusyProbeMaxMs later).
             if (heal == HealNeed.Heal && _busySince != 0) _healWaitAt = now;
             bool healWaiting = heal != HealNeed.Heal && _healWaitAt != 0 && now - _healWaitAt < HealWaitFreshMs;
+            // A try let through TryOpenMs ago that no send used: spent now, from when it opened.
+            if (_tryGrantedAt != 0 && now - _tryGrantedAt >= TryOpenMs)
+            {
+                _probes++;
+                _lastProbeAt = _tryGrantedAt;
+                lapseLine = $"[Pace] the try after the server's 'too busy' answer (#{_probes}) went unused for {now - _tryGrantedAt} ms " +
+                            $"(first let through for {_tryGrantedTo}, nothing was sent)";
+                _tryGrantedAt = 0;
+            }
             // A waiting heal's probe comes at least every HealGraceMs (the doubling would reach BusyProbeMaxMs).
             long probeWait = Math.Min(BusyProbeMs << Math.Min(_probes, 8), BusyProbeMaxMs);
             if (heal == HealNeed.Heal) probeWait = Math.Min(probeWait, HealGraceMs);
@@ -949,6 +983,7 @@ internal static class ActionPacer
         }
 
         if (staleLine != null) Log(host, staleLine);
+        if (lapseLine != null) Log(host, lapseLine);
         if (stuck != null && !IsPortaling(host)) StepBreaker(host, stuck, age, now);
         if (AirborneHolds(host, now, out why)) return true;
 

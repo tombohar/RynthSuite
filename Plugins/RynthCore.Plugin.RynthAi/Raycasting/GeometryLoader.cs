@@ -1554,6 +1554,59 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         }
 
         /// <summary>
+        /// The physics polygons of every static object a dungeon's cells place (the EnvCells' stabs: a spider
+        /// web across a doorway, a pillar), in world metres, one TriangleMesh each. A stab's frame is in the
+        /// landblock's space (its z is the floor's: DreamWeave Thread 0x5456's webs stand at z -24 on a -24
+        /// floor). Objects with no physics polygons (nothing to walk into) are left out.
+        /// </summary>
+        public List<(uint SetupId, uint CellId, BoundingVolume Mesh)> GetDungeonStaticMeshes(uint landblockKey)
+        {
+            var list = new List<(uint, uint, BoundingVolume)>();
+            if (_cellDat == null) return list;
+            float gx = ((landblockKey >> 8) & 0xFF) * 192.0f, gy = (landblockKey & 0xFF) * 192.0f;
+            foreach (uint cellId in _cellDat.GetLandblockCellIds(landblockKey))
+            {
+                byte[] data = _cellDat.GetFileData(cellId);
+                if (data == null || data.Length < 20) continue;
+                try
+                {
+                    using var ms = new MemoryStream(data);
+                    using var reader = new BinaryReader(ms);
+                    reader.ReadUInt32();
+                    uint flags = reader.ReadUInt32();
+                    reader.ReadUInt32();
+                    byte numSurfaces = reader.ReadByte();
+                    byte numPortals = reader.ReadByte();
+                    ushort numVisibleCells = reader.ReadUInt16();
+                    for (int i = 0; i < numSurfaces; i++) reader.ReadUInt16();
+                    reader.ReadUInt16(); reader.ReadUInt16();            // environment, cell structure
+                    for (int i = 0; i < 7; i++) reader.ReadSingle();     // the cell's frame
+                    for (int i = 0; i < numPortals; i++) reader.ReadUInt64();
+                    for (int i = 0; i < numVisibleCells; i++) reader.ReadUInt16();
+                    if ((flags & 0x02) == 0 || ms.Position + 4 > ms.Length) continue;
+                    uint numStabs = Math.Min(reader.ReadUInt32(), 500u);
+                    for (uint i = 0; i < numStabs && ms.Position + 32 <= ms.Length; i++)
+                    {
+                        uint setupId = reader.ReadUInt32();
+                        var frame = new Frame
+                        {
+                            OriginX = reader.ReadSingle(), OriginY = reader.ReadSingle(), OriginZ = reader.ReadSingle(),
+                            RotW = reader.ReadSingle(), RotX = reader.ReadSingle(), RotY = reader.ReadSingle(), RotZ = reader.ReadSingle()
+                        };
+                        foreach (var vol in GetBuildingCompositeVolumes(setupId))
+                        {
+                            if (vol.Type != BoundingVolume.VolumeType.TriangleMesh) continue;
+                            var placed = TransformVolume(vol, frame, gx, gy);
+                            if (placed != null) list.Add((setupId, cellId, placed));
+                        }
+                    }
+                }
+                catch (Exception) { }
+            }
+            return list;
+        }
+
+        /// <summary>
         /// Transforms a local-space bounding volume by a placement frame,
         /// producing a world-space AABB for raycasting.
         /// </summary>

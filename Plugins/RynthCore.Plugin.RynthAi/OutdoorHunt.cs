@@ -266,11 +266,17 @@ internal sealed class OutdoorHunt
         _path = path;
         _buildings = buildings;
         _now = now;
+        _meNow = me;
         _meBuilding = 0;
         if (IsIndoorCell(meCell))
         {
             int inB = buildings?.BuildingOf(meCell) ?? 0;
             if (inB == 0 || buildings!.Doors(inB).Count == 0) return Indoors(now, me, routeDone);
+            // No door of it can be walked to from where the character stands (2026-11-16, a Thread: in
+            // building 1747#1 after a kill, every monster outside was "left out for 120 s: no door of
+            // building 1747#1 it can walk to" and the hunt stood 2 min). That is the spot, not the
+            // monsters: back out the way in, as in a building with no door known, and none left out.
+            if (!AnyDoorOut(me, meCell, inB)) return Indoors(now, me, routeDone);
             _meBuilding = inB;
             WalkingOut = false;   // the doors take it out from here
         }
@@ -281,7 +287,21 @@ internal sealed class OutdoorHunt
             Candidate? t = null;
             foreach (var c in candidates)
                 if (c.Id == TargetId) { t = c; break; }
-            if (t is Candidate target && InArea(target.Pos) && !IsSkipped(target.Id, now) && Plannable(target))
+            // The walk is over, it stands where the walk went (under where the monster was), and the monster is
+            // still a floor apart: this walk can't get there (2026-11-16 17:11, a Thread: the walk "through its
+            // rooms" to one on the floor above went to the spot under it; it moved about up there, so each walk
+            // planned again ended a yard or two off, and it was walked again every half second for 20 s; nav's
+            // points count as reached by the flat distance).
+            bool floorApart = t is Candidate under && routeDone && !IsSkipped(under.Id, now)
+                              && me.FlatDistanceTo(_plannedTo) <= ReachYd && Math.Abs(under.Pos.Z - me.Z) > ReachRiseYd;
+            if (floorApart)
+            {
+                var u = t!.Value;
+                Skip(u.Id, now);
+                Note = $"'{u.Name}': the walk to it ended {Math.Abs(u.Pos.Z - me.Z):0} yd {(u.Pos.Z > me.Z ? "below" : "above")} it "
+                     + $"(another floor, no way there found): left out for {SkipSec:0} s";
+            }
+            else if (t is Candidate target && InArea(target.Pos) && !IsSkipped(target.Id, now) && Plannable(target))
             {
                 double since = (now - _lastPlan).TotalSeconds;
                 bool moved = target.Pos.DistanceTo(_plannedTo) > ReplanMovedYd && since >= ReplanMinSec;
@@ -293,7 +313,7 @@ internal sealed class OutdoorHunt
                 {
                     _plannedTo = target.Pos;
                     _lastPlan = now;
-                    if (p.Length > ArrivedYd)
+                    if (p.Length > ArrivedYd && !EndsHere(p, me))
                     {
                         _arrivedSince = DateTime.MinValue;
                         return new Decision(Act.Walk, p.Corners, target.Id, $"to '{target.Name}' again ({p.Length:0} yd)");
@@ -320,9 +340,9 @@ internal sealed class OutdoorHunt
         if ((now - _lastPick).TotalSeconds < PickEverySec)
             return new Decision(Act.Idle);
         _lastPick = now;
-        if (Pick != PickMode.Nearest) return PickPack(now, me, meCell, candidates);
+        if (Pick != PickMode.Nearest) return PickPack(now, me, meCell, candidates, routeDone);
         _viable.Clear();
-        int asked = 0;
+        int asked = 0, mySide = 0;
         foreach (var c in candidates)
         {
             if (asked >= PickCandidates) break;
@@ -333,12 +353,14 @@ internal sealed class OutdoorHunt
             var p = w.P;
             if (p.Status == PathStatus.Unavailable) return new Decision(Act.Idle, Why: "no pathfinder");
             if (Reaches(p, c.Pos)) _viable.Add((c, w));
+            else if (FailsOnMySide(w)) mySide++;
             else
             {
                 Skip(c.Id, now);
                 Note = $"'{c.Name}' left out for {SkipSec:0} s: {Describe(p, w.Why, c.Pos)}";
             }
         }
+        if (_viable.Count == 0 && mySide > 0) return Indoors(now, me, routeDone);
         if (_viable.Count > 0)
         {
             var best = _viable[0];
@@ -359,7 +381,7 @@ internal sealed class OutdoorHunt
         _plannedTo = c.Pos;
         _lastPlan = now;
         Note = NextNote(c, w, pack);
-        if (w.P.Length > ArrivedYd)
+        if (w.P.Length > ArrivedYd && !EndsHere(w.P, _meNow))
         {
             _arrivedSince = DateTime.MinValue;
             return new Decision(Act.Walk, w.P.Corners, c.Id, Note);
@@ -387,7 +409,7 @@ internal sealed class OutdoorHunt
 
     private readonly List<Candidate> _eligible = new();
 
-    private Decision PickPack(DateTime now, Vec me, uint meCell, IReadOnlyList<Candidate> candidates)
+    private Decision PickPack(DateTime now, Vec me, uint meCell, IReadOnlyList<Candidate> candidates, bool routeDone = true)
     {
         _eligible.Clear();
         foreach (var c in candidates)
@@ -450,7 +472,7 @@ internal sealed class OutdoorHunt
         });
 
         var walks = new Dictionary<int, HuntWalk>();   // eligible index -> its walk (the ones that reach it)
-        int asked = 0;
+        int asked = 0, mySide = 0;
         foreach (int i in order)
         {
             if (asked >= PickCandidates) break;
@@ -459,12 +481,14 @@ internal sealed class OutdoorHunt
             var w = PlanWalk(me, meCell, c.Pos, c.Cell);
             if (w.P.Status == PathStatus.Unavailable) return new Decision(Act.Idle, Why: "no pathfinder");
             if (Reaches(w.P, c.Pos)) walks[i] = w;
+            else if (FailsOnMySide(w)) mySide++;
             else
             {
                 Skip(c.Id, now);
                 Note = $"'{c.Name}' left out for {SkipSec:0} s: {Describe(w.P, w.Why, c.Pos)}";
             }
         }
+        if (walks.Count == 0 && mySide > 0) return Indoors(now, me, routeDone);
         if (walks.Count == 0) return Waiting();
 
         // Scored again by the real walk.
@@ -599,6 +623,13 @@ internal sealed class OutdoorHunt
 
     private bool InArea(Vec p) => RadiusYd <= 0 || p.FlatDistanceTo(Anchor) <= RadiusYd;
 
+    /// <summary>
+    /// The walk ends where the character stands already (within ArrivedYd, across): nothing to walk, whatever
+    /// its corners do round it. Under a monster on the floor above (2026-11-16, a Thread) the walk was two
+    /// corners a yard or so either side, planned again every half second: the character turned in circles.
+    /// </summary>
+    private bool EndsHere(PathResult p, Vec me) => p.Corners.Count > 0 && p.Corners[^1].FlatDistanceTo(me) <= ArrivedYd;
+
     private bool Reaches(PathResult p, Vec goal) =>
         p.Corners.Count > 0 && (p.Status == PathStatus.Ok || (p.Status == PathStatus.Partial && p.Gap <= ReachYd))
         && p.Length <= RangeYd * MaxWalkFactor && Math.Abs(EndRise(p, goal)) <= ReachRiseYd;
@@ -658,6 +689,7 @@ internal sealed class OutdoorHunt
     public double DoorstepKeepSec { get; set; } = 60;
     private readonly Dictionary<(uint, long, long), (bool Ok, DateTime Until)> _doorsteps = new();
     private DateTime _now;
+    private Vec _meNow;   // where the character is this tick
 
     /// <summary>
     /// The door's step out is on RynthNav's ground: the map's nearest point to it (a path from it to
@@ -709,7 +741,7 @@ internal sealed class OutdoorHunt
             foreach (var d in b!.Doors(from))
             {
                 var p = b.Inside(meCell, me, d.Cell, d.Inner);
-                if (p.Status != PathStatus.Ok || !OnGround(d)) continue;
+                if (!DoorWalkOk(p) || !OnGround(d)) continue;
                 outs.Add((d, p, p.Length + d.Inner.DistanceTo(d.At) + d.At.DistanceTo(d.Outside)));
             }
         if (to == 0) ins.Add((null, none, 0));
@@ -777,6 +809,26 @@ internal sealed class OutdoorHunt
             why = to != 0 ? $"no way to a door of {b!.Name(to)}" : $"no way to it from a door of {b!.Name(from)}";
         return new HuntWalk(new PathResult(PathStatus.NoPath, Array.Empty<Vec>(), 0, 0), From: from, To: to, Why: why);
     }
+
+
+    /// <summary>A walk through a building's rooms to a door's inner point that gets there (or within ReachYd).</summary>
+    private bool DoorWalkOk(PathResult p)
+        => p.Status == PathStatus.Ok || (p.Status == PathStatus.Partial && p.Corners.Count > 0 && p.Gap <= ReachYd);
+
+    /// <summary>Some door of the character's building can be walked to from where it stands, its step out on the ground.</summary>
+    private bool AnyDoorOut(Vec me, uint meCell, int building)
+    {
+        foreach (var d in _buildings!.Doors(building))
+            if (DoorWalkOk(_buildings.Inside(meCell, me, d.Cell, d.Inner)) && OnGround(d)) return true;
+        return false;
+    }
+
+    /// <summary>The walk fails getting the character out of its own building (no door it can walk to, or
+    /// no way on from any of them), not reaching the monster: none is left out for it.</summary>
+    private bool FailsOnMySide(HuntWalk w)
+        => _meBuilding != 0 && w.From == _meBuilding && w.To != _meBuilding
+           && (w.Why.StartsWith("no door of ", StringComparison.Ordinal) && w.Why.EndsWith(" it can walk to", StringComparison.Ordinal)
+               || w.Why.StartsWith("no way to it from a door of ", StringComparison.Ordinal));
 
     /// <summary>Corners closer than this to the one before are one (RynthNav's way to a doorstep ends on it).</summary>
     private const double SameCornerYd = 0.3;

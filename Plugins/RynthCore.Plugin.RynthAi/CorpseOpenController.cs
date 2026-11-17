@@ -526,6 +526,7 @@ public sealed partial class RynthAiPlugin
             NoteContainerOpened(sid);
             NoteChestKeyOpened(sid);   // the Item Tool's chest looter waits for this
             NoteManualChestOpened(sid); // Pickup with macro off (RynthAiPlugin.ChestLoot.cs)
+            NoteNearbyChestOpened(sid); // Loot Nearby Chests waits for this (RynthAiPlugin.NearbyChests.cs)
             return;
         }
 
@@ -773,9 +774,12 @@ public sealed partial class RynthAiPlugin
             _lootSkipWhy = !settings.IsMacroRunning ? "the macro is off"
                 : !settings.EnableLooting ? "looting is off" : "Boost Nav Priority is on and a nav route runs (RynthAi only follows it)";
             ResetCorpseTarget();
+            StandDownNearbyChests(_lootSkipWhy);   // Loot Nearby Chests (RynthAiPlugin.NearbyChests.cs)
             return;
         }
         NoteLootSettings(settings);
+        // Loot Nearby Chests reads its answers every tick, a fight's included (RynthAiPlugin.NearbyChests.cs).
+        TickNearbyChests(settings);
 
         // Wedge halt: AC's item-action state is locked (consecutive open
         // timeouts). Stop firing opens into a dead client until the halt window
@@ -863,6 +867,14 @@ public sealed partial class RynthAiPlugin
         if (_targetCorpseId == 0 && _lootNameTargetId != 0 && TryLootByName(settings, CorpseNowMs))
             return;
 
+        // Loot Nearby Chests is unlocking or opening a chest: no corpse is claimed meanwhile (its open
+        // would close the chest; RynthAiPlugin.NearbyChests.cs).
+        if (_targetCorpseId == 0 && NearbyChestHoldsTick())
+        {
+            _lootSkipWhy = "Loot Nearby Chests is on a chest";
+            return;
+        }
+
         double maxMeters = GetCorpseApproachRangeMaxMeters(settings);
         double minMeters = GetCorpseApproachRangeMinMeters(settings, maxMeters);
         if (maxMeters <= 0.25)
@@ -897,6 +909,9 @@ public sealed partial class RynthAiPlugin
                 // No corpses in range. Loose ground items that match the loot profile
                 // get their turn here; HasLootWork keeps Looting while any remain.
                 TickGroundLoot(settings, maxMeters);
+                // Then a chest in loot range (Loot Nearby Chests, RynthAiPlugin.NearbyChests.cs).
+                if (_groundTargetId == 0)
+                    TryStartNearbyChest(settings);
                 return;
             }
 
@@ -1003,6 +1018,28 @@ public sealed partial class RynthAiPlugin
             }
             return;
         }
+        // A starved turn's open waits for combat's first attack at a target it has just locked
+        // (2026-11-15, R-20261115-165857-1de7). A monster came into range 0.4 s after the claim,
+        // the starved turn kept Looting (none within 5 yd), and the open went out 0.3 s after the
+        // lock, ahead of combat's first cast. The server didn't answer that use for 5 s (likely a monster's
+        // hit or swing stopping the server's turn to the corpse, see AttemptOpenCorpse), and the pacer
+        // rightly held every action behind it: 5.5 s standing with "Combat" showing and the monster
+        // walking in. The fight's first attack goes out first now; the open follows between casts,
+        // as starvation always meant. At most StarvedOpenYieldsMs, so a lock that can't attack
+        // (out of reach, no stance) doesn't stop looting again.
+        if (_lootStarveTurn && _combatManager?.FirstAttackPendingMs is double attackPending
+            && attackPending >= 0 && attackPending < StarvedOpenYieldsMs)
+        {
+            FreezeCorpseTimeout(now);
+            if (_openHeldForAttackLoggedFor != _targetCorpseId)
+            {
+                _openHeldForAttackLoggedFor = _targetCorpseId;
+                LootDiag($"[RynthAi] Corpse loot: open of 0x{(uint)_targetCorpseId:X8} waits for combat's first attack at " +
+                         $"0x{(uint)_combatManager.activeTargetId:X8} '{_objectCache[_combatManager.activeTargetId]?.Name}' " +
+                         $"(locked {attackPending:0} ms ago; at most {StarvedOpenYieldsMs / 1000.0:0.0} s).");
+            }
+            return;
+        }
         _openHeldBySalvageLogged = false;
         _corpseHoldFrozenAge = -1;
 
@@ -1071,6 +1108,11 @@ public sealed partial class RynthAiPlugin
 
     private long _corpseOpenBusyWaitSince;
     private bool _openHeldBySalvageLogged;
+    private int _openHeldForAttackLoggedFor;   // the corpse whose open waited for combat's first attack (logged once)
+
+    /// <summary>A starved turn's open waits this long at most for combat's first attack at a fresh lock
+    /// (the slowest healthy lock->attack in R-20261115-165857-1de7 was 2.6 s, a cast's recoil).</summary>
+    internal const long StarvedOpenYieldsMs = 3000;
 
     // Peace before the open: one request per claimed corpse, only with no monster within
     // LootStarveCloseYards (the same test that gives looting its turn while combat still has a
@@ -3221,6 +3263,13 @@ public sealed partial class RynthAiPlugin
             return true;
         }
 
+        // Loot Nearby Chests is unlocking or opening a chest (RynthAiPlugin.NearbyChests.cs).
+        if (NearbyChestBusy(settings))
+        {
+            _lootWorkWhy = "Loot Nearby Chests is on a chest";
+            return true;
+        }
+
         // Loot grace: combat just ended and the corpse CreateObject has not
         // arrived yet. Hold Looting across that gap so nav doesn't walk away
         // from a body that is about to exist.
@@ -3267,6 +3316,12 @@ public sealed partial class RynthAiPlugin
         if (HasGroundLootWork(settings))
         {
             _lootWorkWhy = "ground loot";
+            return true;
+        }
+        // A chest in loot range (Loot Nearby Chests), after corpses; never while fighting.
+        if (HasNearbyChestWork(settings))
+        {
+            _lootWorkWhy = "a chest in loot range (Loot Nearby Chests)";
             return true;
         }
         return false;
@@ -4281,7 +4336,13 @@ public sealed partial class RynthAiPlugin
             _useRefusals.OnOpenSent(corpseId, now, seqBefore);
         // An open on a no-bend-down call: its answer says whether the server was free (DistrustJumpNoMotion).
         _openInAirWindowSeq = watch && sent && JumpPickupInAir(now) ? seqBefore : -1;
-        LootDiag($"[RynthAi] Corpse loot: attempting open for 0x{(uint)corpseId:X8}.");
+        // The distance says whether the server has to walk the character there or only turn it
+        // (an unanswered open's two cases; 2026-11-15, R-20261115-165857-1de7).
+        double openDist = _objectCache?.Distance(unchecked((int)_playerId), corpseId) ?? double.MaxValue;
+        LootDiag($"[RynthAi] Corpse loot: attempting open for 0x{(uint)corpseId:X8}"
+                 + (openDist < 1000 ? $" (d={openDist:0.0} m)" : "")
+                 + (_combatManager?.activeTargetId is int fight && fight != 0 ? $", combat locked on 0x{(uint)fight:X8}" : "")
+                 + ".");
         // The finished corpse held open (MarkCorpseCompleted): this use closes it on the server.
         if (sent && _closeDeferredFor != 0 && _closeDeferredFor != corpseId)
         {

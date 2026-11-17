@@ -1466,6 +1466,7 @@ internal sealed partial class LegacyDashboardRenderer
                 LootJumpEnabled            = s.LootJumpEnabled,
                 LootChestsMacroOff         = s.LootChestsMacroOff,
                 LootChestsMacroOffLeaveOpen = s.LootChestsMacroOffLeaveOpen,
+                LootNearbyChests           = s.LootNearbyChests,
                 ChestRelockWaitSec         = s.ChestRelockWaitSec,
                 LootJumpHeight             = s.LootJumpHeight,
                 LootOwnership              = s.LootOwnership,
@@ -1759,6 +1760,7 @@ internal sealed partial class LegacyDashboardRenderer
             s.LootJumpEnabled            = p.LootJumpEnabled;
             s.LootChestsMacroOff         = p.LootChestsMacroOff;
             s.LootChestsMacroOffLeaveOpen = p.LootChestsMacroOffLeaveOpen;
+            if (p.LootNearbyChests is bool nearbyChests) s.LootNearbyChests = nearbyChests;   // absent = unchanged
             if (p.ChestRelockWaitSec is int relockSec) s.ChestRelockWaitSec = ItemTool.ChestKeyLooter.ClampRelockWaitSec(relockSec);   // absent = unchanged
             s.LootJumpHeight             = p.LootJumpHeight;
             s.LootOwnership              = p.LootOwnership;
@@ -2158,6 +2160,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.LootJumpEnabled          = tmp.LootJumpEnabled;
         dst.LootChestsMacroOff       = tmp.LootChestsMacroOff;
         dst.LootChestsMacroOffLeaveOpen = tmp.LootChestsMacroOffLeaveOpen;
+        dst.LootNearbyChests         = tmp.LootNearbyChests;
         dst.ChestRelockWaitSec       = ItemTool.ChestKeyLooter.ClampRelockWaitSec(tmp.ChestRelockWaitSec);
         dst.LootJumpHeight           = tmp.LootJumpHeight;
         dst.SalvageOpenDelayFirstMs  = tmp.SalvageOpenDelayFirstMs;

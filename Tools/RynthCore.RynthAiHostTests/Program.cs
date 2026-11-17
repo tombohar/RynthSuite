@@ -87,7 +87,15 @@ internal static class Program
         PatrolSettingsTests.Register(runner);
         PatrolPocketTests.Register(runner);
         PatrolPortalTests.Register(runner);
+        LedgeTests.Register(runner);
+        DunNavToTests.Register(runner);
+        StraightenTests.Register(runner);
+        HoleTests.Register(runner);
+        StuckOpeningTests.Register(runner);
+        BlockedDoorwayTests.Register(runner);
+        StackedStepTests.Register(runner);
         DunRouteTests.Register(runner);
+        DunExploreTests.Register(runner);
         BuffTests.Register(runner);
         BuffItemsTests.Register(runner);
         SpellCatalogTests.Register(runner);
@@ -159,6 +167,7 @@ internal static class Program
         WorldCacheTypedTests.Register(runner);
         VendorFlagTests.Register(runner);
         LootByNameTests.Register(runner);
+        NearbyChestTests.Register(runner);
         NavOverlayTests.Register(runner);
         ActionPacingTests.Register(runner);
         HazardEscapeTests.Register(runner);

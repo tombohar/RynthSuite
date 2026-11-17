@@ -62,12 +62,12 @@ internal static class DunRouteTests
 
     // ── The sample dungeon ───────────────────────────────────────────────────
 
-    private const uint Lb = 0x7E7E;
-    private const double Ox = 0x7E * 192.0, Oy = 0x7E * 192.0;
-    private const uint SurfaceId = 0x7E7E9001, DepthsId = 0x7E7E9002;
+    internal const uint Lb = 0x7E7E;
+    internal const double Ox = 0x7E * 192.0, Oy = 0x7E * 192.0;
+    internal const uint SurfaceId = 0x7E7E9001, DepthsId = 0x7E7E9002;
 
     /// <summary>A hand-built dungeon in landblock 0x7E7E; positions are landblock-local metres.</summary>
-    private sealed class Sample
+    internal sealed class Sample
     {
         public readonly Dictionary<uint, DungeonNavNode> Graph = new();
         public readonly List<(uint, V3[])> Portals = new(), Floors = new(), Walls = new();
@@ -409,7 +409,7 @@ internal static class DunRouteTests
 
     // ── Files ────────────────────────────────────────────────────────────────
 
-    private static string Fresh(string sub)
+    internal static string Fresh(string sub)
     {
         string dir = Path.Combine(Program.TempRoot, sub);
         if (Directory.Exists(dir)) Directory.Delete(dir, true);
@@ -769,9 +769,9 @@ internal static class DunRouteTests
     // ── The plugin ───────────────────────────────────────────────────────────
 
     private const BindingFlags Any = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-    private const uint Player = 0x50000E01;
+    internal const uint Player = 0x50000E01;
 
-    private sealed class Rig
+    internal sealed class Rig
     {
         public readonly RynthAiPlugin P = new();
         public readonly LegacyUiSettings S = new();
@@ -779,7 +779,7 @@ internal static class DunRouteTests
         public readonly DungeonGeometry Geo;
         public readonly WorldObjectCache Cache;
 
-        public Rig(string folder, string world = "", double lx = 15, double ly = 15, bool namedExit = true)
+        public Rig(string folder, string world = "", double lx = 15, double ly = 15, bool namedExit = true, Action? beforeCreate = null)
         {
             FakeHost.Reset();
             ServerPolicy.Forget();
@@ -794,6 +794,7 @@ internal static class DunRouteTests
             FakeHost.Names[DepthsId] = "Portal to the Depths";
             FakeHost.ItemTypes[DepthsId] = 0x00010000;
             FakeHost.Positions[DepthsId] = (D.Side, 45f, 5f, 0f);
+            beforeCreate?.Invoke();   // FakeHost options read when the host is made (WeaponCalls: UseObject)
             var host = FakeHost.Create(Player);
             typeof(RynthPluginBase).GetMethod("Attach", Any)!.Invoke(P, new object[] { FakeHost.LastApi });
             var dash = (LegacyDashboardRenderer)RuntimeHelpers.GetUninitializedObject(typeof(LegacyDashboardRenderer));
@@ -1301,7 +1302,7 @@ internal static class DunRouteTests
 
     // ── Tiny Hive on the real dats ───────────────────────────────────────────
 
-    private const string AcDir = @"C:\Turbine\Asheron's Call";
+    internal const string AcDir = @"C:\Turbine\Asheron's Call";
 
     private static void TinyHiveRealDats()
     {

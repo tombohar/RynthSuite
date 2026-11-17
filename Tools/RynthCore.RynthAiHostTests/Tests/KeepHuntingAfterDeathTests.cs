@@ -22,6 +22,7 @@ internal static class KeepHuntingAfterDeathTests
         r.Add("keep hunting (11-13): a meta's route loaded after the death, or the macro stopped: not started again, said in chat", Dropped);
         r.Add("keep hunting (11-13): /ra hunt death answers, sets it, says why not with the usage", Command);
         r.Add("keep hunting (11-13): KeepHuntingAfterDeath is off by default and round-trips (saved, copied)", Setting);
+        r.Add("hunt (2026-11-16): a walk that ran out leaves nav on with no walk left, not off until the next walk", NavStaysOn);
     }
 
     private static void Decide()
@@ -85,6 +86,33 @@ internal static class KeepHuntingAfterDeathTests
 
         public bool Pending => (bool)Get("_huntAfterDeath")!;
         public string All => string.Join(" | ", FakeHost.Chat);
+    }
+
+    private static void NavStaysOn()
+    {
+        var g = new Rig();
+        g.Hunting();
+        var walk = (NavRouteParser)g.Get("_huntRoute")!;
+        walk.Points.Add(new NavPoint { Type = NavPointType.Point, NS = 1, EW = 1 });
+        g.S.ActiveNavIndex = 1;          // walked off its end
+        g.S.EnableNavigation = false;    // what the nav engine does then (CompleteOnceRoute)
+        Check.True(g.S.NavRouteFinished(), "the walk is a finished Once route");
+        g.Call("TickOutdoorHunt");
+        Check.True(g.S.EnableNavigation, "nav on again at once");
+        Check.True(ReferenceEquals(g.S.CurrentRoute, g.Get("_huntRoute")) && g.S.CurrentRoute.Points.Count == 0,
+            "with an empty walk: nothing for the arbiter to hold Navigating for");
+        Check.True(g.P.HuntActive, "and the hunt still on");
+
+        // The player turning nav off mid-walk is left alone (a walk still to go: not finished).
+        var h = new Rig();
+        h.Hunting();
+        var w2 = (NavRouteParser)h.Get("_huntRoute")!;
+        w2.Points.Add(new NavPoint { Type = NavPointType.Point, NS = 1, EW = 1 });
+        w2.Points.Add(new NavPoint { Type = NavPointType.Point, NS = 2, EW = 2 });
+        h.S.ActiveNavIndex = 1;
+        h.S.EnableNavigation = false;
+        h.Call("TickOutdoorHunt");
+        Check.False(h.S.EnableNavigation, "nav off mid-walk: left off");
     }
 
     private static void PauseAndRestart()

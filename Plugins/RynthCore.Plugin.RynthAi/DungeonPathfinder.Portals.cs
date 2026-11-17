@@ -64,6 +64,8 @@ internal sealed class PortalAvoidance
     public int Moved, Dropped, Bent;
     /// <summary>The character stood inside the circle when the patrol was built (led out first).</summary>
     public bool StartInside;
+    /// <summary>It stood inside, and no checked spot was found to walk out to (built from where it stood).</summary>
+    public bool NoWalkOut;
     /// <summary>The finished route's nearest point or leg on the portal's level (metres; +infinity: none).</summary>
     public double Nearest = double.PositiveInfinity;
     /// <summary>How many times the patrol was laid (1 + the rounds with cells cut off), and how long the
@@ -83,7 +85,7 @@ internal sealed class PortalAvoidance
         return string.Format(inv,
             "portal 0x{0:X8} '{1}' ({2:F1},{3:F1},{4:F1}) cell {5:X8}, kept {6:F1} m out: openings closed {7}{8}; points moved {9}, dropped {10}; legs bent {11}{12}; nearest {13}{14}",
             p.Id, p.Name, p.X, p.Y, p.Z, p.Cell, p.Radius, closed, cut, Moved, Dropped, Bent,
-            StartInside ? "; start inside it: walked out first" : "", near, Clear ? "" : " (STILL INSIDE: no way round found)")
+            StartInside ? (NoWalkOut ? "; start inside it: no clear spot to walk out to" : "; start inside it: walked out first") : "", near, Clear ? "" : " (STILL INSIDE: no way round found)")
             + string.Format(inv, " [patrol laid {0}x, {1:F0} ms, of it {2:F0} ms splitting rooms]", Laid, BuildMs, SplitMs);
     }
 }
@@ -130,6 +132,18 @@ internal static partial class DungeonPathfinder
         Dictionary<uint, DungeonNavNode> graph, uint startCell, IReadOnlySet<uint>? hazardCells,
         DungeonGeometry? geo, DungeonPatrolOptions o, IReadOnlyList<PatrolPortal> portals,
         (double X, double Y, double Z)? startAt)
+        => LayAroundPortals(graph, startCell, hazardCells, geo, portals, startAt, o.WallClearance, loop: true,
+                            g => BuildPatrolRoute(g, startCell, hazardCells, geo, o));
+
+    /// <summary>
+    /// Steps 1-3 above for any walk <paramref name="lay"/> puts on a graph: the patrol (a loop) and the
+    /// explore (DungeonPathfinder.Explore.cs, a walk that ends). <paramref name="lay"/> is called on the
+    /// graph without the closed openings, again for each round that cuts more off.
+    /// </summary>
+    internal static NavRouteParser LayAroundPortals(
+        Dictionary<uint, DungeonNavNode> graph, uint startCell, IReadOnlySet<uint>? hazardCells,
+        DungeonGeometry? geo, IReadOnlyList<PatrolPortal> portals, (double X, double Y, double Z)? startAt,
+        double wall, bool loop, Func<Dictionary<uint, DungeonNavNode>, NavRouteParser> lay)
     {
         foreach (var p in portals)
         {
@@ -147,10 +161,10 @@ internal static partial class DungeonPathfinder
         for (int round = 0; ; round++)
         {
             g = WithoutOpenings(graph, closed, startCell);
-            route = BuildPatrolRoute(g, startCell, hazardCells, geo, o);
+            route = lay(g);
             laid++;
             foreach (var r in reports) r.Moved = r.Dropped = r.Bent = 0;   // the last laying's
-            var unresolved = KeepOutOfPortals(route.Points, closed: true, g, geo, portals, reports, o.WallClearance);
+            var unresolved = KeepOutOfPortals(route.Points, closed: loop, g, geo, portals, reports, wall);
             if (unresolved.Count == 0 || round >= PortalMaxRounds) break;
 
             // Legs no bend gets round: cut off the cell there (never the start), and lay it again.
@@ -169,7 +183,7 @@ internal static partial class DungeonPathfinder
         }
         foreach (var r in reports)
         {
-            r.Nearest = NearestApproach(route.Points, closed: true, r.Portal);
+            r.Nearest = NearestApproach(route.Points, closed: loop, r.Portal);
             r.Laid = laid;
             r.BuildMs = clock.Elapsed.TotalMilliseconds;
             r.SplitMs = splitMs;
@@ -550,14 +564,24 @@ internal static partial class DungeonPathfinder
     }
 
     /// <summary>
-    /// Where the character at (px, py, pz) walks first when it stands inside a portal's circle:
-    /// straight away from the portal (else turned up to 90 degrees either way) to just past the
-    /// circle's edge, on walkable floor with some clearance, out of every circle. Null when it
-    /// stands in none. BuildDunPatrol builds the patrol from there (its cell, its part of a room the
+    /// Where the character at (px, py, pz) walks first when it stands inside a portal's circle: to just
+    /// past the circle's edge, on walkable floor with some clearance, reached in a straight walk through
+    /// no wall, out of every circle. Null when it stands in none, or when no such spot is found (the
+    /// patrol is then built from where it stands, and its points and legs keep out as usual).
+    /// The way out is looked for all round (every <see cref="WalkOutStepDeg"/> degrees, three distances),
+    /// nearest the preferred heading first: straight away from the portal; for a character standing on
+    /// the portal itself (within <see cref="WalkOutOnTopMeters"/> of its centre, where "away" is just
+    /// noise) towards the doorways of <paramref name="startCell"/> (from <paramref name="graph"/>), else
+    /// away. A second pass takes less clearance from the walls. 2026-11-15, DreamWeave Thread 0x00B5:
+    /// the character arrives on top of the Thread Exit in a one-cell room whose only way out is a
+    /// doorway north; the old ±90 degree search round a random heading found nothing and fell back to
+    /// an UNCHECKED spot in the wall, the character stuck on it and the stuck escape ran it through
+    /// the portal. BuildDunPatrol builds the patrol from the spot (its cell, its part of a room the
     /// portal splits). Tagged "portal-lead".
     /// </summary>
     internal static NavPoint? PortalWalkOut(DungeonGeometry? geo, IReadOnlyList<PatrolPortal> portals, double px, double py, double pz,
-                                            double wall, List<PortalAvoidance>? reports = null)
+                                            double wall, List<PortalAvoidance>? reports = null,
+                                            Dictionary<uint, DungeonNavNode>? graph = null, uint startCell = 0)
     {
         var here = WorldPoint(px, py, pz, false);
         NavPoint? result = null;
@@ -568,29 +592,70 @@ internal static partial class DungeonPathfinder
             if (k < 0) break;
             if (reports != null && k < reports.Count) reports[k].StartInside = true;
             var p = portals[k];
-            double hx = X(here), hy = Y(here), hz = here.Z * 240.0, d = Dist(hx, hy, p.X, p.Y);
-            double ux = d > 0.05 ? (hx - p.X) / d : 1, uy = d > 0.05 ? (hy - p.Y) / d : 0;
-            double want = p.Radius + PortalPointOut;
-            double ox = p.X + ux * want, oy = p.Y + uy * want, oz = hz;
-            foreach (double deg in new[] { 0.0, 20, -20, 40, -40, 60, -60, 90, -90 })
+            double hx = X(here), hy = Y(here), hz = here.Z * 240.0;
+            var spot = WalkOutSpot(geo, portals, p, hx, hy, hz, wall, graph, pass == 0 ? startCell : 0);
+            if (spot is not { } s)
             {
-                double a = deg * Math.PI / 180.0, c = Math.Cos(a), s = Math.Sin(a);
-                double cx = p.X + (ux * c - uy * s) * want, cy = p.Y + (ux * s + uy * c) * want, cz = hz;
-                if (geo != null)
-                {
-                    if (geo.TryFloorHeight(cx, cy, hz, 1.5, out double h)) cz = h;
-                    if (!geo.OnWalkableFloor(cx, cy, cz) || geo.ClearanceMemo(cx, cy, cz, wall + 0.5) < Math.Min(wall, PortalCornerClearMin)) continue;
-                    if (geo.LegClearance(hx, hy, hz, cx, cy, cz, 1.0, 0.3, out _, out _, out _) < 0.1) continue;   // through a wall
-                }
-                if (InsideAny(portals, cx, cy, cz)) continue;
-                ox = cx; oy = cy; oz = cz;
+                // No checked spot: build from here rather than walk into a wall.
+                if (reports != null && k < reports.Count) reports[k].NoWalkOut = true;
                 break;
             }
-            here = Tag(WorldPoint(ox, oy, oz, false), "portal-lead");
+            here = Tag(WorldPoint(s.X, s.Y, s.Z, false), "portal-lead");
             NotePortal(here, "out-of-portal");
             result = here;
         }
         return result;
+    }
+
+    /// <summary>Walk-out headings are tried this many degrees apart, all round.</summary>
+    internal const double WalkOutStepDeg = 15.0;
+    /// <summary>A character this close to a portal's centre stands on it: "away from it" says nothing.</summary>
+    internal const double WalkOutOnTopMeters = 0.75;
+    // Past the circle's edge by PortalPointOut, then this much further (a doorway's mouth may be tight).
+    private static readonly double[] WalkOutExtra = { 0.0, 0.6, 1.2 };
+
+    // The spot PortalWalkOut walks to out of portal p, or null (see there).
+    private static (double X, double Y, double Z)? WalkOutSpot(DungeonGeometry? geo, IReadOnlyList<PatrolPortal> portals, PatrolPortal p,
+                                                             double hx, double hy, double hz, double wall,
+                                                             Dictionary<uint, DungeonNavNode>? graph, uint startCell)
+    {
+        double d = Dist(hx, hy, p.X, p.Y);
+        double away = d > 0.05 ? Math.Atan2(hy - p.Y, hx - p.X) : 0.0;
+        // The headings that matter, best first: away from the portal, or (standing on it) the start's doorways.
+        var prefer = new List<double>();
+        if (d < WalkOutOnTopMeters && geo != null && graph != null && startCell != 0 && graph.TryGetValue(startCell, out var node))
+            foreach (uint nb in node.Neighbors)
+                if (geo.TryGetDoorway(startCell, nb, out var door) && SameLevel(p, door.Z) && Dist(door.X, door.Y, p.X, p.Y) > 0.05)
+                    prefer.Add(Math.Atan2(door.Y - p.Y, door.X - p.X));
+        if (prefer.Count == 0) prefer.Add(away);
+
+        int steps = (int)Math.Round(360.0 / WalkOutStepDeg);
+        var headings = new List<(double Ang, double Off)>(steps);
+        for (int i = 0; i < steps; i++)
+        {
+            double ang = i * WalkOutStepDeg * Math.PI / 180.0, off = double.MaxValue;
+            foreach (double pr in prefer) off = Math.Min(off, Math.Abs(Math.IEEERemainder(ang - pr, 2 * Math.PI)));
+            headings.Add((ang, off));
+        }
+        foreach (double pr in prefer) headings.Add((pr, 0));   // each preferred heading exactly, too
+        headings.Sort((a, b) => a.Off.CompareTo(b.Off));
+
+        foreach (double clearMin in new[] { Math.Min(wall, PortalCornerClearMin), PortalLegWalkMin })
+            foreach (var (ang, _) in headings)
+                foreach (double extra in WalkOutExtra)
+                {
+                    double want = p.Radius + PortalPointOut + extra;
+                    double cx = p.X + Math.Cos(ang) * want, cy = p.Y + Math.Sin(ang) * want, cz = hz;
+                    if (geo != null)
+                    {
+                        if (geo.TryFloorHeight(cx, cy, hz, 1.5, out double h)) cz = h;
+                        if (!geo.OnWalkableFloor(cx, cy, cz) || geo.ClearanceMemo(cx, cy, cz, wall + 0.5) < clearMin) continue;
+                        if (geo.LegClearance(hx, hy, hz, cx, cy, cz, 1.0, 0.3, out _, out _, out _) < 0.1) continue;   // through a wall
+                    }
+                    if (InsideAny(portals, cx, cy, cz)) continue;
+                    return (cx, cy, cz);
+                }
+        return null;
     }
 
     /// <summary>

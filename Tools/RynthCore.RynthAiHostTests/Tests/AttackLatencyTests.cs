@@ -26,6 +26,7 @@ internal static class AttackLatencyTests
         r.Add("attack latency: the first cast at a new target skips the Attack Spell Delay only with the server gates", NewTargetInterval);
         r.Add("attack latency: a killed monster isn't locked again from the old scan list", NoRelockOfTheDead);
         r.Add("attack latency: [CombatLatency] charges each wait, one line per engagement, throttled", LatencyLine);
+        r.Add("attack latency (R-20261115-165857-1de7): time the arbiter gave another activity is 'held ... by', not 'other'", LatencyHeld);
     }
 
     // ── Busy leftovers ────────────────────────────────────────────────────────
@@ -163,6 +164,27 @@ internal static class AttackLatencyTests
         t.OnLock(6, 6000);
         t.OnDrop();
         Check.True(t.OnAttack(6, 6100, "Melee", null) == null, "dropped before attacking: nothing");
+    }
+
+    // 2026-11-15, R-20261115-165857-1de7: "lock->attack 3687 ms (... other 3281)" was a healing kit the
+    // arbiter ran in the Buffing slot while combat didn't tick; the line said "other".
+    private static void LatencyHeld()
+    {
+        var t = new CombatLatencyTracker();
+        t.OnLock(1, 1000);
+        t.OnTick(1, 1033, CombatLatencyTracker.Wait.Busy);
+        t.OnHeld(1, 2033, "Buffing");
+        t.OnHeld(1, 4033, "Buffing");
+        t.OnTick(1, 4066, CombatLatencyTracker.Wait.Busy);
+        Check.Eq(t.Held, 3000.0, "the held ticks' time is the hold's");
+        Check.Eq(t.Waited(CombatLatencyTracker.Wait.Other), 0.0, "not other's");
+        string? line = t.OnAttack(1, 4100, "Magic", "Kirit");
+        Check.Eq(line, "[CombatLatency] lock->attack 3100 ms (stance 0, face 0, busy 66, cast 0, interval 0, other 34, held 3000 ms by Buffing) Magic 'Kirit'",
+            "the line names the holder");
+
+        t.OnLock(2, 9000);
+        string? plain = t.OnAttack(2, 9100, "Magic", null);
+        Check.False((plain ?? "").Contains("held"), "a lock nobody held: the line as before");
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

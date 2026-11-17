@@ -176,6 +176,13 @@ public sealed class LegacyUiSettings
     /// </summary>
     public bool LootChestsMacroOffLeaveOpen = false;
     /// <summary>
+    /// Loot Nearby Chests (2026-11-14, off by default): while the macro runs with Looting on and no
+    /// fight, a chest within loot range is walked to, opened and looted by the loot profile, then
+    /// left alone until it resets. A locked one: a carried key that fits, else a lockpick when the
+    /// Lockpick skill is good enough, else skipped for 10 minutes. NearbyChestLooter.cs.
+    /// </summary>
+    public bool LootNearbyChests = false;
+    /// <summary>
     /// Item Tool > Chest re-lock wait (s) (2026-11-05): the chest looter's next key goes on the chest
     /// this long after it was opened (sooner when the client reads it locked again). 125 s covers ACE's
     /// default chest reset (120 s); a chest with a shorter timer can use less. 5..600
@@ -1557,6 +1564,7 @@ public sealed class SettingsBridgePayload
     public bool LootJumpEnabled { get; set; }
     public bool LootChestsMacroOff { get; set; } = true;   // an engine that doesn't know it leaves it on
     public bool LootChestsMacroOffLeaveOpen { get; set; }   // off: an engine that doesn't know it closes, as before
+    public bool? LootNearbyChests { get; set; }             // Loot Nearby Chests; absent (an engine without the row) = unchanged
     public int? ChestRelockWaitSec { get; set; }           // Item Tool's re-lock wait; absent (the engine has no row for it) = unchanged
     public int LootJumpHeight { get; set; }
     public int LootOwnership { get; set; }

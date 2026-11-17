@@ -49,6 +49,7 @@ internal static class ServerPolicy
     private const string ThreadVar = "RYNTHAI_THREAD_RUN";
 
     public const string PatrolOffMessage = "[RynthAi] The dungeon patrol is turned off in Threads on DreamWeave (its owners asked for that).";
+    public const string DunNavToOffMessage = "[RynthAi] DunNav-To is turned off in Threads on DreamWeave (its owners asked for that).";
 
     /// <summary>A Thread run: the dungeon landblock it is in (0 = not known yet) and the landblock the gem was
     /// used in (0 = none: the run was learned from a [REALM] line).</summary>

@@ -26,6 +26,7 @@ internal static class HazardFloorTests
     public static void Register(Runner r)
     {
         r.Add("hazard floors: a polygon facing up at FloorZ or more is floor; walls, ceilings, steep slopes are not", WalkableFloor);
+        r.Add("hazard floors (2026-11-16): kept out of where that shuts the walk in (stands on one, or most of the dungeon behind them); a side pool isn't", ShutIn);
         r.Add("hazard floors: a cell's floor surfaces are its floor polygons', not its walls', ceiling's or portals'", FloorSurfaces);
         r.Add("hazard floors: a hazard texture on a cell's wall doesn't make it a hazard; on its floor it does", WallVersusFloor);
         r.Add("hazard floors: learnhere takes a rare floor texture, never a wall texture", LearnIgnoresWalls);
@@ -222,5 +223,28 @@ internal static class HazardFloorTests
             Check.Eq(DungeonHazardSurfaces.HazardTextureCount, 0, "and the set stays empty");
         }
         finally { ResetSet(); }
+    }
+
+    // A Thread arrived on lava: 14 of its cells reachable round 9 lava cells, the explore "done" with 8 of 75 rooms.
+    private static void ShutIn()
+    {
+        // A corridor 1-2-3-4-5-6, and a side room 7 off 2.
+        var g = new Dictionary<uint, DungeonNavNode>();
+        void Link(uint a, uint b)
+        {
+            if (!g.TryGetValue(a, out var na)) g[a] = na = new DungeonNavNode { CellId = a };
+            if (!g.TryGetValue(b, out var nb)) g[b] = nb = new DungeonNavNode { CellId = b };
+            na.Neighbors.Add(b); nb.Neighbors.Add(a);
+        }
+        Link(1, 2); Link(2, 3); Link(3, 4); Link(4, 5); Link(5, 6); Link(2, 7);
+        var lava = new HashSet<uint> { 3 };
+        Check.True(DungeonPathfinder.HazardFloorsShutIn(g, 1, lava, lava, out int r, out int j), $"lava across the corridor: shut in ({r} of {j})");
+        Check.Eq(r, 3, "1, 2 and the side room reachable");
+        Check.Eq(j, 7, "of the 7 the openings join");
+        var under = new HashSet<uint> { 1 };
+        Check.True(DungeonPathfinder.HazardFloorsShutIn(g, 1, under, under, out _, out _), "standing on lava: shut in");
+        var side = new HashSet<uint> { 7 };
+        Check.False(DungeonPathfinder.HazardFloorsShutIn(g, 1, side, side, out r, out j), $"a pool in the side room: kept out of ({r} of {j})");
+        Check.False(DungeonPathfinder.HazardFloorsShutIn(g, 1, lava, null, out _, out _), "no floor cells: nothing to walk");
     }
 }

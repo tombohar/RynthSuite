@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using RynthCore.Plugin.RynthAi;
@@ -25,6 +26,9 @@ internal static class VitalWandGateTests
 
     public static void Register(Runner r)
     {
+        r.Add("heal before stamina: health falling to Emergency Heal At within a stamina kit's 3 s: the healing kit goes, no stamina kit", HealBeforeStaminaWhenFalling);
+        r.Add("heal before stamina: health steady or falling slowly: the stamina kit goes as before", StaminaWhenHealthSteady);
+        r.Add("heal before stamina: the projection (latest high, at least 1 s of rate, 4 s window)", HealthProjection);
         r.Add("vital wand gate: out of Magic with a healing kit carried, Heal Self starts no wand swap (not handled)", HealRefusedWithKit);
         r.Add("vital wand gate: the refused Heal Self falls through to the kit despite Kit Min Success", KitDespiteMinSuccessAfterRefusal);
         r.Add("vital wand gate: a caster already wielded in melee stance: the Magic stance change only, no weapon move", StanceOnlyWithCasterWielded);
@@ -32,20 +36,21 @@ internal static class VitalWandGateTests
         r.Add("vital wand gate: Revitalize with a stamina kit, Stamina to Mana in a fight, the script heal with a health potion: no swap", OtherVitalsRefused);
         r.Add("vital wand gate: a pure caster in Magic mode with a kit carried still casts Heal Self", PureCasterUnaffected);
         r.Add("vital wand gate: buffing still swaps to the wand with a kit carried", BuffsStillSwap);
-        r.Add("vital wand gate: Revitalize refused, no stamina potion: the stamina kit is used despite Kit Min Success", StaminaKitDespiteMinSuccess);
+        r.Add("vital wand gate: a stamina kit under Stamina Kit Min Success % is never used, with a weapon out too; Revitalize goes instead", StaminaKitDespiteMinSuccess);
         r.Add("vital wand gate: Stamina to Mana never swaps in a fight; out of one with no mana potion it may", ManaInFightNoSwap);
         r.Add("vital wand gate: in Magic stance with no wand in hand and a kit carried, Heal Self is not gated", MagicNoWandNotGated);
         r.Add("vital wand gate: a kit its line called used up, or gone from the client's pack, is no kit: Heal Self is handled and the swap is allowed", GoneKitAllowsSwap);
         r.Add("vital wand gate: a swap already under way finishes when a kit reappears (no abandoned swap, no kit mid-wield)", SwapInFlightFinishes);
         r.Add("vital wand gate: a kit the server refused 3 times within 10 s is no kit for the gate; a kit landing counts it again", RefusedKitAllowsSwap);
-        r.Add("vital wand gate: the mana step's stamina refill also uses the stamina kit despite Kit Min Success", ManaRefillStaminaLastResort);
+        r.Add("vital wand gate: the mana step's stamina refill respects Stamina Kit Min Success % too", ManaRefillStaminaLastResort);
         r.Add("vital wand gate: out of a fight Stamina to Mana may swap with a mana potion carried; in a fight it may not", ManaPotionOutOfFightSwaps);
         r.Add("vital wand gate: a refusal streak ages out: 11 s after the last refusal the kit counts again", RefusedStreakAgesOut);
         r.Add("vital wand gate: no wand found: Heal Self takes the bare-handed Magic stance, not gated", NoWandNotGated);
         r.Add("vital wand gate: one line when it starts refusing, one when the swap may go again or nothing asks for 5 s, one for a refused kit", GateLogLines);
         r.Add("vital wand gate: under Emergency Heal At the kit despite Kit Min Success still goes; the HP failsafe's recall still swaps to the wand", EmergencyFloorKept);
-        r.Add("vital wand gate: the between-fights top-off (no Revitalize) uses a stamina kit under Stamina Kit Min Success as the last resort", TopOffStaminaLastResort);
+        r.Add("vital wand gate: the between-fights top-off (no Revitalize) uses no stamina kit under Stamina Kit Min Success %", TopOffStaminaLastResort);
         r.Add("vital wand gate: at or under Emergency Heal At a health spell may swap to the wand with a kit carried (the surest heal goes)", EmergencySpellMaySwap);
+        r.Add("emergency heal: under Stamina To Health At but over Emergency Heal At, a melee character casts Stamina to Health, no kit first", StamToHealthLineFirst);
         r.Add("buffs wait: under Heal At in a fight no buff is cast and the arbiter isn't asked for buffs; over it or out of a fight they go on", BuffsWaitWhileHurt);
     }
 
@@ -63,6 +68,42 @@ internal static class VitalWandGateTests
         SetVitals(a, 45, 74, 100);
         Check.False(VitalCast(a, "Heal Self"), "45%, over Emergency Heal At: the gate still refuses Heal Self");
         Check.True(Why(a).Contains("no wand swap for a vital spell", StringComparison.Ordinal), "with its reason: " + Why(a));
+    }
+
+    // 2026-11-13: Stamina To Health At over Emergency Heal At = the spell is the emergency heal.
+    private static void StamToHealthLineFirst()
+    {
+        var b = Rig(CombatMode.Melee, new[] { Kit }, kitMinSuccess: 0);
+        S.HealAt = 0; S.TopOffHP = 0; S.EmergencyHealAt = 15; S.StaminaToHealthAt = 40;
+        b.InCombatOverride = () => true;
+        SetVitals(b, 35, 74, 100);
+        Check.True(b.CheckVitals(), "35% under Stamina To Health At 40%: the vitals act: " + Why(b));
+        Check.Eq(FakeHost.UsesOn.Count, 0, "no kit ahead of the spell");
+        Check.True(SwapActive(b), "Stamina to Health's wand swap is under way");
+
+        // Under Emergency Heal At too: the kit-first order is unchanged.
+        var k = Rig(CombatMode.Melee, new[] { Kit }, kitMinSuccess: 0);
+        S.HealAt = 0; S.TopOffHP = 0; S.EmergencyHealAt = 15; S.StaminaToHealthAt = 40;
+        k.InCombatOverride = () => true;
+        SetVitals(k, 10, 74, 100);
+        Check.True(k.CheckVitals(), "10%: the vitals act");
+        Check.Eq(FakeHost.UsesOn.Count, 1, "under Emergency Heal At the kit goes first, as before");
+
+        // Stamina at or under the floor: no spell, the normal chain (the kit) heals.
+        var f = Rig(CombatMode.Melee, new[] { Kit }, kitMinSuccess: 0);
+        S.HealAt = 50; S.TopOffHP = 50; S.EmergencyHealAt = 15; S.StaminaToHealthAt = 40;
+        f.InCombatOverride = () => true;
+        SetVitals(f, 35, 10, 100);
+        Check.True(f.CheckVitals(), "35%, stamina 10%: the vitals act");
+        Check.Eq(FakeHost.UsesOn.Count, 1, "no Stamina to Health under its stamina floor: the kit under Heal At");
+
+        // Defaults (30 / 30): both lines together, kit first as before.
+        var d = Rig(CombatMode.Melee, new[] { Kit }, kitMinSuccess: 0);
+        S.HealAt = 0; S.TopOffHP = 0; S.EmergencyHealAt = 30; S.StaminaToHealthAt = 30;
+        d.InCombatOverride = () => true;
+        SetVitals(d, 25, 74, 100);
+        Check.True(d.CheckVitals(), "25% on the 30 / 30 defaults: the vitals act");
+        Check.Eq(FakeHost.UsesOn.Count, 1, "defaults unchanged: the kit first");
     }
 
     // 2026-11-07: four weapon auras in a row with a golem hitting him under Heal At; the emergency heal waited for the last cast.
@@ -142,19 +183,25 @@ internal static class VitalWandGateTests
         Check.True(SwapActivity() > before, "the recall's wand swap starts with a kit and a potion carried");
     }
 
-    // b2e1ade4: between fights out of Magic no Revitalize is cast for Top Off Stamina; kits still top off,
-    // and with this port a stamina kit under Stamina Kit Min Success % is that last resort.
+    // b2e1ade4: between fights out of Magic no Revitalize is cast for Top Off Stamina; kits still top off.
+    // 2026-11-13: a stamina kit under Stamina Kit Min Success % is not used (no last resort); the wand
+    // comes out for Revitalize instead (Tom), between fights too.
     private static void TopOffStaminaLastResort()
     {
         var b = Rig(CombatMode.Melee, new[] { StamKit }, kitMinSuccess: 95);
         b.InCombatOverride = () => false;
         S.TopOffStam = 60; S.RestamAt = 10;
         SetVitals(b, 100, 40, 100);
-        Check.True(b.CheckVitals(), "stamina 40% under Top Off Stamina 60%, no fight: acts");
-        Check.Eq(FakeHost.UsesOn.Count, 1, "one kit use");
-        Check.Eq(FakeHost.UsesOn[0].Source, StamKit, "the stamina kit");
-        Check.Eq(FakeHost.Casts.Count, 0, "no Revitalize");
-        Check.Eq(FakeHost.CombatModeRequests.Count(m => m == CombatMode.Magic), 0, "no Magic stance");
+        Check.True(b.CheckVitals(), "stamina 40% under Top Off Stamina 60%, no fight, kit under its %: acts: " + Why(b));
+        Check.Eq(FakeHost.UsesOn.Count, 0, "no kit use under Stamina Kit Min Success %");
+        Check.True(SwapActive(b), "the wand swap for Revitalize is under way");
+
+        var ok = Rig(CombatMode.Melee, new[] { StamKit }, kitMinSuccess: 0);
+        ok.InCombatOverride = () => false;
+        S.TopOffStam = 60; S.RestamAt = 10;
+        SetVitals(ok, 100, 40, 100);
+        Check.True(ok.CheckVitals(), "control, min 0: the top-off acts");
+        Check.Eq(FakeHost.UsesOn.Count, 1, "control: the kit tops off");
     }
 
     // Out of a fight buffing is about to swap to the wand anyway, so a
@@ -183,10 +230,8 @@ internal static class VitalWandGateTests
         bool acted = (bool)typeof(BuffManager).GetMethod("AttemptManaRefill", Np)!.Invoke(b, args)!;
         Check.True(acted, "the mana step acts");
         Check.True((bool)args[1], "by refilling stamina");
-        Check.Eq(FakeHost.UsesOn.Count, 1, "one kit use");
-        Check.Eq(FakeHost.UsesOn[0].Source, StamKit, "the stamina kit Kit Min Success skipped");
-        Check.True(FakeHost.Logs.Any(l => l.Contains("using the stamina kit despite Stamina Kit Min Success", StringComparison.Ordinal)), "logged");
-        Check.Eq(SwapActivity(), 0, "no swap");
+        Check.Eq(FakeHost.UsesOn.Count, 0, "no kit under Stamina Kit Min Success %");
+        Check.True(SwapActive(b), "Revitalize's wand swap goes instead (the kit under its % refuses nothing)");
     }
 
     /// <summary>The kit sent and refused by the server (a UseDone with an error code).</summary>
@@ -329,6 +374,71 @@ internal static class VitalWandGateTests
         Check.Eq(FakeHost.Wields.Count, 0, "no wield");
     }
 
+    // 2026-11-11 16:24: Drakkon (Heal At 1, Emergency Heal At 30, Re-stam To 90) took three stamina kits in a
+    // row while a monster hit him, each started over 30%, and died. 2026-11-17: the heal goes first.
+    private static void HealBeforeStaminaWhenFalling()
+    {
+        var b = Rig(CombatMode.Melee, new[] { Kit, StamKit }, kitMinSuccess: 0);
+        S.HealAt = 1; S.TopOffHP = 95; S.EmergencyHealAt = 30; S.RestamAt = 50; S.RestamTo = 90;
+        DateTime now = new DateTime(2026, 1, 1, 18, 0, 0);
+        b.Clock = () => now;
+        SetVitals(b, 100, 100, 100);
+        b.CheckVitals();                                   // a reading at full health
+        Check.Eq(FakeHost.UsesOn.Count, 0, "full health, full stamina: nothing used");
+        now = now.AddMilliseconds(1500);
+        SetVitals(b, 70, 30, 100);                         // 30% lost in 1.5 s: 60% more in a kit's 3 s
+        Check.True(b.CheckVitals(), "70% and falling 20%/s, stamina 30% under Re-stam At: the vitals act: " + Why(b));
+        Check.Eq(FakeHost.UsesOn.Count, 1, "one use");
+        Check.Eq(FakeHost.UsesOn[0].Source, Kit, "the healing kit, not the stamina kit");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("a heal first, the stamina after it", StringComparison.Ordinal)), "the line says why");
+    }
+
+    private static void StaminaWhenHealthSteady()
+    {
+        // Steady: the same health 1.5 s ago.
+        var b = Rig(CombatMode.Melee, new[] { Kit, StamKit }, kitMinSuccess: 0);
+        S.HealAt = 1; S.TopOffHP = 95; S.EmergencyHealAt = 30; S.RestamAt = 50; S.RestamTo = 90;
+        DateTime now = new DateTime(2026, 1, 1, 18, 0, 0);
+        b.Clock = () => now;
+        SetVitals(b, 70, 100, 100);
+        b.CheckVitals();
+        now = now.AddMilliseconds(1500);
+        SetVitals(b, 70, 30, 100);
+        Check.True(b.CheckVitals(), "70% steady, stamina 30%: the vitals act");
+        Check.Eq(FakeHost.UsesOn.Count, 1, "one use");
+        Check.Eq(FakeHost.UsesOn[0].Source, StamKit, "the stamina kit, as before");
+
+        // Falling slowly: 100% to 90% over 3 s (10% more in a kit's 3 s, well over 30%).
+        var s = Rig(CombatMode.Melee, new[] { Kit, StamKit }, kitMinSuccess: 0);
+        S.HealAt = 1; S.TopOffHP = 95; S.EmergencyHealAt = 30; S.RestamAt = 50; S.RestamTo = 90;
+        DateTime t = new DateTime(2026, 1, 1, 18, 0, 0);
+        s.Clock = () => t;
+        SetVitals(s, 100, 100, 100);
+        s.CheckVitals();
+        t = t.AddSeconds(3);
+        SetVitals(s, 90, 30, 100);
+        Check.True(s.CheckVitals(), "90% falling slowly, stamina 30%: the vitals act");
+        Check.Eq(FakeHost.UsesOn.Count, 1, "one use");
+        Check.Eq(FakeHost.UsesOn[0].Source, StamKit, "slow fall: the stamina kit");
+    }
+
+    private static void HealthProjection()
+    {
+        DateTime t0 = new DateTime(2026, 1, 1, 18, 0, 0);
+        var none = new List<(DateTime, int)>();
+        Check.Eq(BuffManager.ProjectedHealthPct(none, t0, 60, 3000), 60, "no samples: health as it is");
+        var fall = new List<(DateTime, int)> { (t0, 100), (t0.AddMilliseconds(500), 100), (t0.AddMilliseconds(1500), 80) };
+        // Latest high at +0.5 s, 20% lost in 1 s: 60% more over 3 s.
+        Check.Eq(BuffManager.ProjectedHealthPct(fall, t0.AddMilliseconds(1500), 80, 3000), 20, "20%/s from the latest high: 80 -> 20");
+        var hit = new List<(DateTime, int)> { (t0, 100) };
+        // One hit 0.2 s after the reading: the rate is taken over 1 s, not 0.2 s.
+        Check.Eq(BuffManager.ProjectedHealthPct(hit, t0.AddMilliseconds(200), 90, 3000), 60, "one hit: over at least 1 s (10%/s -> 60)");
+        var rising = new List<(DateTime, int)> { (t0, 40), (t0.AddMilliseconds(1000), 70) };
+        Check.Eq(BuffManager.ProjectedHealthPct(rising, t0.AddMilliseconds(1000), 70, 3000), 70, "rising: health as it is");
+        var stale = new List<(DateTime, int)> { (t0, 100) };
+        Check.Eq(BuffManager.ProjectedHealthPct(stale, t0.AddMilliseconds(5000), 50, 3000), 50, "a high older than the 4 s window is no trend");
+    }
+
     private static void SetVitals(BuffManager b, uint health, uint stamina, uint mana)
     {
         var v = (PlayerVitalsCache)typeof(BuffManager).GetField("_vitals", Np)!.GetValue(b)!;
@@ -343,13 +453,18 @@ internal static class VitalWandGateTests
             S.RestamAt = 50;
             SetVitals(b, 100, 20, 100);
             Check.True(b.CheckVitals(), $"min {minSuccess}: stamina 20% under Re-stam At 50%: the chain acts");
-            Check.Eq(FakeHost.UsesOn.Count, 1, $"min {minSuccess}: one kit use");
-            Check.Eq(FakeHost.UsesOn[0].Source, StamKit, $"min {minSuccess}: the stamina kit");
-            bool lastResort = FakeHost.Logs.Any(l => l.Contains("using the stamina kit despite Stamina Kit Min Success", StringComparison.Ordinal));
-            if (minSuccess == 95) Check.True(lastResort, "under Kit Min Success: used as the last resort, logged");
-            else Check.False(lastResort, "control, chance fine: the normal kit use, no last-resort line");
-            Check.Eq(FakeHost.CombatModeRequests.Count(m => m == CombatMode.Magic), 0, $"min {minSuccess}: no Magic stance");
-            Check.Eq(FakeHost.Casts.Count, 0, $"min {minSuccess}: no Revitalize");
+            if (minSuccess == 95)
+            {
+                Check.Eq(FakeHost.UsesOn.Count, 0, "under Stamina Kit Min Success % (weapon out, no 30% bar): no kit");
+                Check.True(SwapActive(b), "Revitalize's wand swap goes instead");
+            }
+            else
+            {
+                Check.Eq(FakeHost.UsesOn.Count, 1, "control, min 0: one kit use");
+                Check.Eq(FakeHost.UsesOn[0].Source, StamKit, "control: the stamina kit");
+                Check.Eq(FakeHost.CombatModeRequests.Count(m => m == CombatMode.Magic), 0, "control: no Magic stance");
+                Check.Eq(FakeHost.Casts.Count, 0, "control: no Revitalize");
+            }
         }
     }
 

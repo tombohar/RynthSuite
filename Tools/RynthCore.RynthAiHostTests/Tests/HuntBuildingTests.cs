@@ -27,6 +27,7 @@ internal static class HuntBuildingTests
         r.Add("hunt buildings: of a building's two doors, the one giving the shorter walk (the other's way round never asked for)", NearerDoor);
         r.Add("hunt buildings: from inside, a monster outdoors is walked to out through the nearer door, then on RynthNav's map", OutOfBuilding);
         r.Add("hunt buildings: inside a building with no door known (or none known at all): back out the way in", NoDoorFallsBack);
+        r.Add("hunt buildings (2026-11-16): inside, no door it can walk to from here, or no way on from any: back out the way in, no monster left out", NoDoorFromHere);
         r.Add("hunt buildings: one in the same building through its rooms; one in another building out of one door and in by another", SameAndOtherBuilding);
         r.Add("hunt buildings: a door whose step out isn't on the ground is never used; a building it doesn't know is left alone", DoorOffTheGround);
         r.Add("building map: a hand-built house: its door faces out, a window and a slit are no doors, a shared opening joins two buildings", HandBuiltHouse);
@@ -200,6 +201,44 @@ internal static class HuntBuildingTests
         h2.Track(V(1021, 1000), indoors: true);
         d = h2.Tick(T0, V(1021, 1000), RoomW, true, Sorted(C(1, V(990, 1000), V(1021, 1000))), nav.Path, null);
         Check.True(d.Act == OutdoorHunt.Act.Walk && h2.WalkingOut, "no building map at all: the same");
+    }
+
+    // A Thread: after a kill in a building every monster outside was "left out for 120 s: no door of
+    // building 1747#1 it can walk to" and the hunt stood 2 min. Where it stands is the trouble, not them.
+    private static void NoDoorFromHere()
+    {
+        // The house's only door is in the east room, and the west room (where it stands) doesn't join it.
+        var house = House(East(RoomE, 1030, 1000));
+        house.Apart.Add((RoomW, RoomE));
+        var h = new OutdoorHunt();
+        h.Start(T0, V(990, 1000));
+        h.Track(V(1018, 1000), indoors: false);
+        h.Track(V(1020, 1000), indoors: true);
+        h.Track(V(1022, 1000), indoors: true);
+        var me = V(1022, 1000);
+        var d = h.Tick(T0, me, RoomW, true, Sorted(C(1, V(990, 1000), me), C(2, V(1000, 1030), me)), new Nav().Path, house);
+        Check.True(d.Act == OutdoorHunt.Act.Walk && h.WalkingOut && h.Note.Contains("back out the way in"), $"no door from here: back out the way in ({d.Act}, {h.Note})");
+        Check.False(h.IsSkipped(1, T0.AddSeconds(5)) || h.IsSkipped(2, T0.AddSeconds(5)), "no monster left out for it");
+
+        // A door it can walk to, but RynthNav finds no way on from its step to either monster.
+        var house2 = House(West(RoomW, 1020, 1000));
+        var nav = new Nav();
+        nav.Overrides[(990, 1000)] = new(OutdoorHunt.PathStatus.NoPath, Array.Empty<Vec>(), 0, 0);
+        nav.Overrides[(1000, 1030)] = new(OutdoorHunt.PathStatus.NoPath, Array.Empty<Vec>(), 0, 0);
+        var h2 = new OutdoorHunt();
+        h2.Start(T0, V(990, 1000));
+        h2.Track(V(1018, 1000), indoors: false);
+        h2.Track(V(1022, 1000), indoors: true);
+        d = h2.Tick(T0, me, RoomW, true, Sorted(C(1, V(990, 1000), me), C(2, V(1000, 1030), me)), nav.Path, house2);
+        Check.True(d.Act == OutdoorHunt.Act.Walk && h2.WalkingOut, $"no way on from its door: back out the way in ({d.Act}, {h2.Note})");
+        Check.False(h2.IsSkipped(1, T0.AddSeconds(5)) || h2.IsSkipped(2, T0.AddSeconds(5)), "none left out for that either");
+
+        // Outdoors again, one RynthNav can't reach is left out as before.
+        var h3 = new OutdoorHunt();
+        h3.Start(T0, V(990, 1000));
+        var out1 = V(1000, 1000);
+        d = h3.Tick(T0, out1, Outdoors, true, Sorted(C(1, V(990, 1000), out1)), nav.Path, house2);
+        Check.True(h3.IsSkipped(1, T0.AddSeconds(5)), "outdoors, an unreachable one is still left out");
     }
 
     private static void SameAndOtherBuilding()

@@ -100,6 +100,11 @@ public sealed partial class RynthLuaPlugin
         ch["IsBusy"] = DynValue.NewCallback((c, a) => DynValue.NewBoolean(ChBusy()));
         ch["SpellBook"] = MakeSpellBook(s);
 
+        // The server's yes/no prompts (engine API v85, ConfirmationResponder): the next one of a type
+        // answered for the script, without the client showing its dialog. 2026-11-15, for example:
+        // DreamWeave's Fragment Press asks "Destroy this gem at the press?" before it grinds a gem.
+        ch["AnswerNextPrompt"] = DynValue.NewCallback((c, a) => DynValue.NewBoolean(ChAnswerNextPrompt(LuaArgs.Of(a, ch))));
+
         ch["Trade"] = CreateTradeTable(s, ctx);
 
         var mt = new Table(s);
@@ -121,6 +126,60 @@ public sealed partial class RynthLuaPlugin
         game["Character"] = DynValue.NewTable(ch);
     }
 
+    /// <summary>The longest AnswerNextPrompt arms for (ms): an arm answers whatever prompt of its type comes next.</summary>
+    internal const int PromptArmMaxMs = 30000;
+    internal const int PromptArmDefaultMs = 5000;
+
+    /// <summary>
+    /// game.Character.AnswerNextPrompt([type [, timeoutMs [, minPercent]]]): the next server prompt of
+    /// <c>type</c> (a ClientConfirmationType, default YESNO) that arrives within timeoutMs (default
+    /// PromptArmDefaultMs, at most PromptArmMaxMs; 0 or less disarms) is answered for the script:
+    /// Yes when the server's "N percent chance" is at least minPercent (default 0: always), else No.
+    /// One-shot, one slot per client. False when the engine can't (before API v85) or the arguments
+    /// are bad; true when armed (or disarmed).
+    /// </summary>
+    private bool ChAnswerNextPrompt(DynValue[] args)
+    {
+        if (!Host.HasConfirmationAnswers) return false;
+        DynValue t = LuaArgs.At(args, 0), ms = LuaArgs.At(args, 1), min = LuaArgs.At(args, 2);
+        uint type = t.IsNil() ? RynthCore.PluginSdk.RynthCoreHost.ConfirmationKind.YesNo : (uint)LuaArgs.Num(t, -1);
+        if (type < 1 || type > 7) return false;
+        int timeout = ms.IsNil() ? PromptArmDefaultMs : (int)Math.Min(PromptArmMaxMs, LuaArgs.Num(ms, PromptArmDefaultMs));
+        int minPercent = min.IsNil() ? 0 : (int)Math.Clamp(LuaArgs.Num(min, 0), 0, 100);
+        int r = Host.ArmConfirmation(type, minPercent, Math.Max(0, timeout));
+        if (r == 1) Host.Log($"[RynthLua] a script armed the answer to the next prompt of type {type} for {timeout} ms (Yes from {minPercent}%)");
+        return r == 1;
+    }
+
+    /// <summary>
+    /// game.Character.LastPrompt: the last server prompt this session, or nil: { Seq, Type, ContextId,
+    /// Percent (-1: none in its text), Outcome ("Shown": the client's dialog, "Accepted", "Declined",
+    /// "SendFailed", "AcceptedSticky"), AgeMs }.
+    /// </summary>
+    private DynValue ChLastPrompt(Script s)
+    {
+        if (!Host.HasConfirmationAnswers
+            || !Host.TryGetLastConfirmation(out int seq, out uint type, out uint context, out int percent, out int outcome, out int ageMs)
+            || outcome == RynthCore.PluginSdk.RynthCoreHost.ConfirmationOutcome.None)
+            return DynValue.Nil;
+        var t = new Table(s);
+        t.Set("Seq", DynValue.NewNumber(seq));
+        t.Set("Type", DynValue.NewNumber(type));
+        t.Set("ContextId", DynValue.NewNumber(context));
+        t.Set("Percent", DynValue.NewNumber(percent));
+        t.Set("Outcome", DynValue.NewString(outcome switch
+        {
+            RynthCore.PluginSdk.RynthCoreHost.ConfirmationOutcome.Shown => "Shown",
+            RynthCore.PluginSdk.RynthCoreHost.ConfirmationOutcome.Accepted => "Accepted",
+            RynthCore.PluginSdk.RynthCoreHost.ConfirmationOutcome.Declined => "Declined",
+            RynthCore.PluginSdk.RynthCoreHost.ConfirmationOutcome.SendFailed => "SendFailed",
+            RynthCore.PluginSdk.RynthCoreHost.ConfirmationOutcome.AcceptedSticky => "AcceptedSticky",
+            _ => outcome.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        }));
+        t.Set("AgeMs", DynValue.NewNumber(ageMs));
+        return DynValue.NewTable(t);
+    }
+
     /// <summary>game.Character.&lt;key&gt; for everything that isn't a raw field.</summary>
     private DynValue ChProperty(Script s, ScriptContext ctx, string key)
     {
@@ -136,6 +195,7 @@ public sealed partial class RynthLuaPlugin
             case "InPortalSpace": return DynValue.NewBoolean(Host.HasIsPortaling && Host.IsPortaling());
             case "Vitae": return DynValue.NewNumber(pid != 0 && Host.HasGetVitae ? Host.GetVitae(pid) : 1.0);
             case "Busy": return DynValue.NewBoolean(ChBusy());
+            case "LastPrompt": return ChLastPrompt(s);
             case "Health": return DynValue.NewNumber(ChVitalCurrent(1));
             case "Stamina": return DynValue.NewNumber(ChVitalCurrent(3));
             case "Mana": return DynValue.NewNumber(ChVitalCurrent(5));

@@ -64,6 +64,33 @@ public sealed partial class RynthAiPlugin
     }
 
     /// <summary>
+    /// The portals within NavigationEngine.EscapePortalRangeMeters of the character, indoors or out
+    /// (world x east, y north, z), for the navigation engine's stuck escapes: a burst must not run into
+    /// one (2026-11-15, DreamWeave Thread 0x00B5: out through the Thread Exit, twice). Asked only when
+    /// an escape is about to run.
+    /// </summary>
+    private IReadOnlyList<(double X, double Y, double Z)> EscapePortalsNear()
+    {
+        var list = new List<(double X, double Y, double Z)>();
+        if (_objectCache == null || !Host.HasGetObjectPosition || !Host.HasGetPlayerPose) return list;
+        if (!Host.TryGetPlayerPose(out uint pc, out float px, out float py, out float pz, out _, out _, out _, out _) || pc == 0) return list;
+        double wx = ((pc >> 24) & 0xFF) * 192.0 + px, wy = ((pc >> 16) & 0xFF) * 192.0 + py;
+        double range = NavigationEngine.EscapePortalRangeMeters;
+        foreach (var wo in _objectCache.GetLandscapeObjects())
+        {
+            uint uid = unchecked((uint)wo.Id);
+            bool portal = wo.ObjectClass == AcObjectClass.Portal
+                || (wo.ObjectClass == AcObjectClass.Unknown && Host.TryGetItemType(uid, out uint type) && (type & PatrolItemTypePortal) != 0);
+            if (!portal) continue;
+            if (!Host.TryGetObjectPosition(uid, out uint cell, out float x, out float y, out float z) || cell == 0) continue;
+            double ox = ((cell >> 24) & 0xFF) * 192.0 + x, oy = ((cell >> 16) & 0xFF) * 192.0 + y;
+            if (Math.Abs(ox - wx) > range || Math.Abs(oy - wy) > range) continue;
+            list.Add((ox, oy, z));
+        }
+        return list;
+    }
+
+    /// <summary>
     /// The running patrol's dungeon has a portal it wasn't built round (one that arrived after the
     /// build: a dungeon's objects stream in after portal space, a summoned portal). Checked every
     /// PatrolPortalCheckMs.
@@ -99,7 +126,8 @@ public sealed partial class RynthAiPlugin
     /// </summary>
     private int LeadPatrolPastPortals(NavRouteParser route, Dictionary<uint, DungeonNavNode> graph, DungeonGeometry? geometry,
                                       List<PatrolPortal> portals, List<PortalAvoidance>? report, NavPoint? walkOut,
-                                      double playerWX, double playerWY, double playerWZ, int startIdx, double wall)
+                                      double playerWX, double playerWY, double playerWZ, int startIdx, double wall,
+                                      bool loop = true)
     {
         if (portals.Count == 0 || route.Points.Count == 0) return startIdx;
         if (report != null)
@@ -138,7 +166,7 @@ public sealed partial class RynthAiPlugin
         lead.AddRange(corners);
         if (lead.Count == 0) return startIdx;
         route.Points.InsertRange(startIdx, lead);
-        DungeonPathfinder.KeepOutOfPortals(route.Points, closed: true, graph, geometry, portals, report, wall);
+        DungeonPathfinder.KeepOutOfPortals(route.Points, closed: loop, graph, geometry, portals, report, wall);
         for (int i = 0; i < route.Points.Count; i++)
             if (ReferenceEquals(route.Points[i], lead[0])) return i;
         return Math.Min(startIdx, route.Points.Count - 1);

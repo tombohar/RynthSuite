@@ -16,6 +16,14 @@ internal sealed class LegacyAdvancedSettingsUi
 
     private static readonly string[] AttackHeights = { "Low", "Medium", "High" };
 
+    /// <summary>Loot Nearby Chests' tooltip (the engine's Settings row says the same).</summary>
+    internal const string NearbyChestsTooltip =
+        "While the macro runs with Looting on and you're not fighting, walks to a chest within loot range\n" +
+        "(Corpse Max range), opens it and loots it by your loot profile, then leaves it alone until it resets\n" +
+        "(it locks again, or the chest relock wait passes). A locked chest: a key you carry that fits is used;\n" +
+        "else a lockpick, if your Lockpick skill gives you at least 50% against its lock; else it's skipped\n" +
+        "and tried again in 10 minutes. Corpses come first. Off by default. Status: /ra chests.";
+
     /// <summary>
     /// The environment-impact throttle's shared numbers (one set for missiles and magic), drawn
     /// under each response combo. <paramref name="id"/> keeps the two copies' ImGui ids apart.
@@ -1150,6 +1158,9 @@ internal sealed class LegacyAdvancedSettingsUi
                                          "RynthAi closes the chest when it's done (some chests lock again on close).");
                     ImGui.Unindent();
                 }
+                ImGui.Checkbox("Loot Nearby Chests", ref _settings.LootNearbyChests);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(NearbyChestsTooltip);
                 ImGui.Checkbox("Jump When Looting", ref _settings.LootJumpEnabled);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Hop (the keyboard jump) just before each pickup, so the server skips the\n" +

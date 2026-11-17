@@ -405,6 +405,16 @@ public sealed partial class RynthAiPlugin
             StopHunt("another route was loaded", say: true);
             return;
         }
+        // A walk that ran out: the nav engine turned nav off, as for any finished Once route (so the
+        // arbiter doesn't hold "Navigating" for nothing). The hunt owns nav while it runs: on again at once
+        // with no walk left (an empty route: nothing to hold the tick for), not off until the next walk.
+        // Off in between, the Nav switch kept flicking off, and stayed off while the hunt waited
+        // ("nav keeps shutting off", Tom 2026-11-16).
+        if (s.NavRouteFinished())
+        {
+            InstallHuntRoute(s, Array.Empty<OutdoorHunt.Vec>());
+            s.EnableNavigation = true;
+        }
         if (!TryHuntPosition(out uint cell, out var me)) return;
         if (InDungeon(cell)) { StopHunt("went into a dungeon", say: true); return; }
         // A building's rooms (InDungeon said it isn't a dungeon): off RynthNav's landscape map. The way in

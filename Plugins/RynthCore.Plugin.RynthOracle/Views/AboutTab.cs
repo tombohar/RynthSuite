@@ -17,7 +17,10 @@ internal sealed partial class OracleView
         OracleSettings s = _c.Settings;
         w.SeparatorText("Settings");
         w.Checkbox("Read quest flags when you log in", "o.readlogin", s.ReadQuestsAtLogin, v => { s.ReadQuestsAtLogin = v; s.Save(); });
-        w.Tooltip("Sends /myquests once after login so the quest pages have data.");
+        // 2026-11-13 (R-20261110-155059-e947): the login read alone went stale over a long session.
+        w.Tooltip("Sends /myquests after login so the quest pages have data, and again while quest timers are on screen "
+                  + "and the flags are over 10 minutes old, or when the server turns a quest down as solved too recently "
+                  + "(only with the replies hidden).");
         w.Checkbox("Hide the replies to RynthOracle's own requests", "o.hide", s.HideOwnQuestReplies, v => { s.HideOwnQuestReplies = v; s.Save(); });
         w.Tooltip("/myquests. A command you type yourself always shows its reply.");
         w.Checkbox("Show the Void window for characters with Void Magic", "o.void", s.AutoShowVoidWindow, v => { s.AutoShowVoidWindow = v; s.Save(); });

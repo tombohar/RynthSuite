@@ -358,6 +358,12 @@ public sealed partial class RynthLuaPlugin
         if (!death && (line.EndsWith("killed you!", StringComparison.OrdinalIgnoreCase)
                        || line.EndsWith("killed you.", StringComparison.OrdinalIgnoreCase)))
             death = true;
+        // DreamWeave's own: "You are fatally punctured by X! (Killing blow: 130 damage. You had 21/346 health.)"
+        // (any of AC's death verbs, then the blow). 2026-11-15: a script missed one, the health read
+        // having skipped the 0 too.
+        if (!death && line.IndexOf("(Killing blow:", StringComparison.Ordinal) >= 0
+                   && line.IndexOf(" You had ", StringComparison.Ordinal) >= 0)
+            death = true;
         if (!death) return;
 
         long now = Environment.TickCount64;

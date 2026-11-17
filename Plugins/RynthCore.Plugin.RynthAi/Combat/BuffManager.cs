@@ -2122,6 +2122,9 @@ public partial class BuffManager : IDisposable
         _isRechargingMana    = false;
         _isRechargingStamina = false;
 
+        // Every check, kits in flight too: how fast health is falling (BuffManager.HealBeforeStamina.cs).
+        RecordHealthSample(curHealthPct, Clock());
+
         // A kit's heal hasn't landed yet: nothing else for vitals until it has (see KitPending).
         if (KitPending())
         {
@@ -2206,6 +2209,13 @@ public partial class BuffManager : IDisposable
         bool manaLow = curManaPct < manaThreshold || ManaUnderLine(inCombat, out _);
         if (manaLow)
         {
+            // Stamina too low for Stamina to Mana: the refill starts with a stamina use, so a falling
+            // health heals first (BuffManager.HealBeforeStamina.cs).
+            if (curStamPct <= StaminaToManaFloorPct() && TopStaminaToManaId() != 0 && HealBeforeStaminaUse(curHealthPct, inCombat))
+            {
+                _isHealingSelf = true;
+                return true;
+            }
             _vitalWhy = "";
             if (AttemptManaRefill(curStamPct, out bool refilledStamina))
             {
@@ -2244,6 +2254,13 @@ public partial class BuffManager : IDisposable
         // regenerates otherwise. Under Re-stam At, or in a Re-stam To run, the cast goes as before.
         bool castNeedsSwap = !inCombat && !_restamRun && curStamPct >= _settings.RestamAt
                              && CurrentCombatMode != CombatMode.Magic && !FightsWithMagic();
+        // Health falling to a heal line within the stamina use (a kit's 2.4 s, Revitalize's swap and
+        // cast): the heal first. A Re-stam To run took kit after kit while a monster hit (BuffManager.HealBeforeStamina.cs).
+        if (curStamPct < stamThreshold && HealBeforeStaminaUse(curHealthPct, inCombat))
+        {
+            _isHealingSelf = true;
+            return true;
+        }
         int sentBefore = _vitalActionsSent;
         if (curStamPct < stamThreshold && AttemptStaminaChain(allowCast: !castNeedsSwap))
         {
@@ -2391,6 +2408,15 @@ public partial class BuffManager : IDisposable
         bool emergencyKit = emergencyAt > 0 && curHealthPct <= emergencyAt;
         bool stamToHealth = StaminaToHealthAllowed(_settings, curHealthPct, curStamPct);
         if (!emergencyKit && !stamToHealth) return false;
+
+        // 0. Under Stamina To Health At but still over Emergency Heal At (2026-11-13): Stamina to
+        //    Health Self is the heal, with no kit ahead of it. A melee character with Stamina To
+        //    Health At set above Emergency Heal At wants the spell there; the kit-first step below
+        //    used to take every such heal while a kit was carried, so the spell's own line never
+        //    did anything out of Magic mode. Not castable (no stamina, Life Magic, parked): the
+        //    normal chain runs. Under Emergency Heal At the order below is unchanged.
+        if (stamToHealth && !emergencyKit)
+            return AttemptVitalCast("Stamina to Health Self");
 
         // 1. Out of Magic mode a kit first (no wand swap at critical health), then a health
         //    potion: Heal Self from melee is a wand swap, the Magic stance and the cast, 4-5 s
@@ -3004,12 +3030,15 @@ public partial class BuffManager : IDisposable
     /// <paramref name="missing"/> points is at least that. Below it the caller falls through
     /// to the spell, as VTank does.
     /// </summary>
-    private bool KitChanceOk(int kitId, string kitName, uint missing, bool willBePeace, int minPct)
+    private bool KitChanceOk(int kitId, string kitName, uint missing, bool willBePeace, int minPct, bool log = true)
     {
         // A weapon out: the spell is a wand swap, the Magic stance and the cast first (4 s and more
-        // from melee), so a kit gets a lower bar. Drakkon, 2026-10-14 13:50: a 51% kit was skipped
-        // for Heal Self from melee and he died before the cast went out.
-        if (CurrentCombatMode == CombatMode.Melee || CurrentCombatMode == CombatMode.Missile)
+        // from melee), so a healing kit gets a lower bar. Drakkon, 2026-10-14 13:50: a 51% kit was
+        // skipped for Heal Self from melee and he died before the cast went out. Not stamina kits
+        // (2026-11-13): low stamina doesn't kill, and the bar hid Stamina Kit Min Success % (50 read
+        // as 30, a 16% Greater Stamina Kit every 3 s).
+        bool staminaKit = kitName.EndsWith("Stamina Kit", StringComparison.OrdinalIgnoreCase);
+        if (!staminaKit && (CurrentCombatMode == CombatMode.Melee || CurrentCombatMode == CombatMode.Missile))
             minPct = Math.Min(minPct, WeaponOutKitMinPct);
         if (minPct <= 0 || _charSkills == null) return true;
 
@@ -3028,10 +3057,10 @@ public partial class BuffManager : IDisposable
         double chance = 1.0 - 1.0 / (1.0 + Math.Exp(0.03 * (skill - difficulty)));
         int pct = (int)Math.Floor(Math.Clamp(chance, 0, 1) * 100);
         bool ok = pct >= minPct;
-        if (!ok && (RynthClock.Now - _lastKitChanceLog).TotalSeconds >= 10)
+        if (!ok && log && (RynthClock.Now - _lastKitChanceLog).TotalSeconds >= 10)
         {
             _lastKitChanceLog = RynthClock.Now;
-            _host.Log($"[RynthAi] Vitals: {kitName} would work {pct}% of the time on {missing} missing (skill {skill} vs {difficulty}), under {minPct}%: using the spell.");
+            _host.Log($"[RynthAi] Vitals: {kitName} would work {pct}% of the time on {missing} missing (skill {skill} vs {difficulty}), under {minPct}%: not used{(staminaKit ? " (Revitalize or a potion instead, if any)" : "; the spell instead")}.");
         }
         return ok;
     }

@@ -380,6 +380,7 @@ public sealed partial class RynthAiPlugin
         if (_doorAttempts >= DoorMaxAttempts)
         {
             Host.Log($"[RynthAi] Door: 0x{(uint)_doorTargetId:X8} still closed after {_doorAttempts} uses ({why}), cooldown");
+            NoteExploreDoorRefused(unchecked((uint)_doorTargetId), "wouldn't open");
             EnterDoorCooldown(now);
             return true;
         }
@@ -419,6 +420,7 @@ public sealed partial class RynthAiPlugin
     private void EnterDoorCooldown(long now, bool locked = false)
     {
         if (locked && _doorTargetId != 0) _doorLockedRecently[_doorTargetId] = now;
+        if (locked && _doorTargetId != 0) NoteExploreDoorRefused(unchecked((uint)_doorTargetId), "locked");
         _doorState = DoorState.Cooldown;
         _doorActionAt = now;
     }

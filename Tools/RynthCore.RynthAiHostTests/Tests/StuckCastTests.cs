@@ -24,6 +24,7 @@ internal static class StuckCastTests
         r.Add("stuck cast: after a 'too busy' UseDone nothing starts until the server answers; no timer re-send while our cast is open", NoResendAfterTooBusy);
         r.Add("stuck cast: with no cast of ours open, one probe after 1.5 s, then doubling; a UseDone(0) clears", ProbeWhenNothingOpen);
         r.Add("too busy (Conquest 10-25): a try held by another check (animating) is not spent; the next asker (combat) gets it", TryNotSpentWhenHeld);
+        r.Add("too busy (R-20261115-172110-9e6a): a try let through but sent nothing with is not spent; combat, asking next, gets it", TrySpentOnlyBySend);
         r.Add("stuck cast: a held cast is turned to its target at cycle + 1 s, broken by a jump TurnGraceMs after the turn; a normal 4 s cast trips neither", TurnThenJump);
         r.Add("stuck cast: already facing the target (no turn), the jump is at cycle + 2 s", JumpWithoutTurn);
         r.Add("stuck cast: no starts in the air; after landing, no UseDone in 3 s -> Peace mode, 3 s more -> going on", AfterTheJump);
@@ -346,6 +347,38 @@ internal static class StuckCastTests
     // Conquest report R-20261025-183343 (Dargoth Hera): a corpse pickup and a cast went out together, the
     // cast was refused 'too busy', and the buff step took all three tries after it while the character was
     // still animating, so it sent nothing; combat never got a try and the fight stood for the latch's 15 s.
+    // 2026-11-15, R-20261115-172110-9e6a: the buff step passed MayStart three times in a 15 s latch, found
+    // nothing to cast and sent nothing; combat, asking after it, never got a try with eleven monsters in range.
+    private static void TrySpentOnlyBySend()
+    {
+        var host = Setup();
+        try
+        {
+            Check.True(MayAs(host, "Combat", HealNeed.None), "free");
+            Cast(host, "Heart Rend");
+            _t += 100;
+            FakeHost.UseDone(ActionPacer.TooBusyErr);
+            Check.False(MayAs(host, "Combat", HealNeed.None), "held right after the 0x1D");
+            _t += ActionPacer.BusyProbeMs;
+            Check.True(MayAs(host, "Buff", HealNeed.None), "the buff step is let through with the try");
+            // ...and sends nothing (nothing to cast).
+            Check.True(MayAs(host, "Combat", HealNeed.None), "unused, the try is still there for combat");
+            Check.False(FakeHost.Logs.Any(l => l.Contains("one try (#")), "nothing spent it yet");
+            Check.True(host.CastSpellFor(Monster, DrainHealthOtherI, "Combat", "Heart Rend"), "combat casts");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("Combat: one try (#1)")), "the send spent it, and it was combat's");
+            FakeHost.UseDone(ActionPacer.TooBusyErr);
+            Check.False(MayAs(host, "Buff", HealNeed.None), "spent: the next asker waits for the next try");
+
+            // Let through and never used: after TryOpenMs it counts as spent (no endless passes).
+            _t += ActionPacer.BusyProbeMs * 2;
+            Check.True(MayAs(host, "Buff", HealNeed.None), "the second try is let through");
+            _t += ActionPacer.TryOpenMs;
+            Check.False(MayAs(host, "Combat", HealNeed.None), "unused for TryOpenMs: spent, the next one waits");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("went unused for") && l.Contains("first let through for Buff")), "and said so");
+        }
+        finally { Done(); }
+    }
+
     private static void TryNotSpentWhenHeld()
     {
         var host = Setup();
@@ -361,9 +394,11 @@ internal static class StuckCastTests
             Check.False(MayAs(host, "Buff", HealNeed.None), "the buff step's try is held by the animation");
             FakeHost.CastBusy = 0;
             Check.True(MayAs(host, "Combat", HealNeed.None), "combat gets the try the buff step couldn't use");
+            Check.True(host.CastSpellFor(Monster, DrainHealthOtherI, "Combat", "Heart Rend"), "and casts with it");
             Check.False(MayAs(host, "Buff", HealNeed.None), "and only one start has it");
             Check.Eq(FakeHost.Logs.Count(l => l.Contains("one try (#1)")), 1, "one try logged");
             Check.True(FakeHost.Logs.Any(l => l.Contains("Combat: one try (#1)")), "and it was combat's");
+            FakeHost.UseDone(ActionPacer.TooBusyErr);    // refused again: the latch goes on
             // The next try is counted from the one that went (doubling as before).
             _t += ActionPacer.BusyProbeMs * 2 - 1;
             Check.False(MayAs(host, "Combat", HealNeed.None), "the next try waits twice as long");
@@ -389,8 +424,8 @@ internal static class StuckCastTests
             Check.False(Start(host), "held until BusyProbeMs");
             _t += 1;
             Check.True(Start(host), "one probe at BusyProbeMs");
-            Check.False(Start(host), "only one");
             Cast(host, "Heart Rend");
+            Check.False(Start(host), "only one (the send spent it; 2026-11-15 a pass that sends nothing doesn't)");
             _t += 100;
             FakeHost.UseDone(ActionPacer.TooBusyErr);   // refused again
             _t += ActionPacer.BusyProbeMs * 2 - 101;

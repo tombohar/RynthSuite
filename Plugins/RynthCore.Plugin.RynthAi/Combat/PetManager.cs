@@ -96,6 +96,21 @@ internal sealed class PetManager
     // get parked so we advance to the next configured essence instead of looping.
     private readonly Dictionary<int, long> _deviceCooldownUntil = new();
 
+    // The summon cooldown every essence shares (2026-11-13, R-20261113-130755-35ae: "proper pet is
+    // not spawned ... goes back to random pet spawns"). Nearly every ACE combat essence carries
+    // SharedCooldown 213 / 45 s (231 of the 310 "... Essence" weenies in the world data; 6 carry
+    // another group, the rest none), so a summon that lands puts EVERY essence on cooldown, not
+    // only its own; the report's log shows it: "You have used this item too recently" for an
+    // essence last used 48 s before, 37 s after another essence's summon. Only its own was parked, so when the pet died
+    // before 45 s the loop skipped the chosen essence and used the next listed one, another element:
+    // refused "You have used this item too recently" (an 8 s timeout each) for most of the window,
+    // and summoned for real when it was tried at the window's edge, a few hundred ms before the
+    // chosen essence's own park ran out. Until this time no essence is used; then the chosen one is.
+    private long _summonCooldownUntil;
+    private long _summonCooldownLogged;   // the _summonCooldownUntil whose wait was logged
+    /// <summary>A summon refused "used this item too recently": the chosen essence is tried again after this.</summary>
+    private const long TooRecentlyRetryMs = 5_000;
+
     // The server's word over a stale Structure read (2026-10-05). A read
     // can say 0 while the server holds a full essence; the server then answers a refill with
     // "already full" (or refills it and the read still lags), and deciding from the read alone
@@ -241,6 +256,7 @@ internal sealed class PetManager
             {
                 _summonElement = PetChoice.ElementOf(_host, unchecked((uint)_activeDeviceId),
                     _objectCache[_activeDeviceId]?.Name ?? "");
+                _summonCooldownUntil = _actionIssuedAt + DeviceUseCooldownMs;   // every essence's, not only this one's
                 AssumePetFor(now, AssumeActiveAfterSummonMs);
                 // Judge the essence again now its pet is out: one used before its appraisal landed
                 // (it waits only AppraisalWaitMs) may turn out no combat pet device.
@@ -284,7 +300,10 @@ internal sealed class PetManager
             if (_state != PetState.Summoning && _activeDeviceId != 0)
                 _deviceCooldownUntil[_activeDeviceId] = now + DeviceFailCooldownMs;   // refill timeout: park as before
             if (summonConfirmed)
+            {
+                _summonCooldownUntil = _actionIssuedAt + DeviceUseCooldownMs;
                 AssumePetFor(now, AssumeActiveAfterSummonMs);
+            }
             else if (_state == PetState.Summoning)
                 _assumePetActiveUntil = 0;
             Reset();
@@ -317,6 +336,22 @@ internal sealed class PetManager
                 _host.Log($"[RynthAi] Pet: the server says a pet is already active (essence 0x{(uint)_activeDeviceId:X8}); " +
                           $"pets the server has gone quiet about count as out for the next {GhostCheckOffMs / 60_000} min.");
                 AssumePetFor(NowMs, AssumeActiveAfterSummonMs);
+                GoIdle();
+                return;
+            }
+            // "You have used this item too recently" (2026-11-13, R-20261113-130755-35ae): the cooldown
+            // every essence shares is still running (a summon by hand, or the server's clock a little
+            // behind ours at the window's edge). The refusal started nothing, so this essence is not
+            // parked for 45 s, which sent the next try to another element's essence; every essence
+            // waits a moment and the chosen one is tried again. No 8 s timeout either.
+            if (text.Contains("used this item too recently", StringComparison.OrdinalIgnoreCase))
+            {
+                long now = NowMs;
+                if (_activeDeviceId != 0) _deviceCooldownUntil.Remove(_activeDeviceId);
+                _summonCooldownUntil = Math.Max(_summonCooldownUntil, now + TooRecentlyRetryMs);
+                _summonCooldownLogged = _summonCooldownUntil;   // this line is the wait's log
+                _host.Log($"[RynthAi] Pet: the server refused essence 0x{(uint)_activeDeviceId:X8}: used too recently (the summon cooldown " +
+                          $"every essence shares); trying the chosen essence again in {TooRecentlyRetryMs / 1000}s, not another one.");
                 GoIdle();
                 return;
             }
@@ -462,6 +497,22 @@ internal sealed class PetManager
         if (!IsSummoningTrained()) return;
 
         if (!_host.HasUseObject) return;
+
+        // The summon cooldown every essence shares is running (the last pet died or went before it
+        // ended): wait for it rather than try the next listed essence, another element the server
+        // refuses or, at the window's edge, summons (R-20261113-130755-35ae).
+        if (now < _summonCooldownUntil)
+        {
+            if (_summonCooldownLogged != _summonCooldownUntil)
+            {
+                _summonCooldownLogged = _summonCooldownUntil;
+                long since = now - (_summonCooldownUntil - DeviceUseCooldownMs);
+                _host.Log($"[RynthAi] Pet: no pet out {since / 1000}s after the last summon (it died or went); every essence " +
+                          $"shares the {DeviceUseCooldownMs / 1000}s summon cooldown, so the next summon waits " +
+                          $"{(_summonCooldownUntil - now + 999) / 1000}s for the chosen essence instead of using another.");
+            }
+            return;
+        }
 
         // Best essence for the monster being fought first (Damage panel pet choice:
         // a specific essence, an element, or Auto = lowest learned resist), then the
@@ -945,6 +996,7 @@ internal sealed class PetManager
         }
         _claimNewPetsUntil = 0;
         _assumePetActiveUntil = 0;
+        _summonCooldownUntil = 0;   // a passive pet's essence carries no shared cooldown (ACE world data)
         _host.Log($"[RynthAi] Pet: essence 0x{(uint)dev:X8} '{_objectCache[dev]?.Name ?? "?"}' brought out {pets} pet(s) but is no combat pet device " +
                   "(no charges, no Summoning requirement, no summoning-gem icon); not used for combat again this session, and its pet holds nothing.");
     }

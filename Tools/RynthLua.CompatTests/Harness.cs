@@ -84,6 +84,20 @@ internal static class Harness
         }
 
         Fn("chat", a => { W.IncomingChat(Str(a, 0), (int)Num(a, 1, 0)); return DynValue.Nil; });
+        // The server prompt answers: what the script armed, and the last prompt the "server" sent.
+        Fn("promptArm", a =>
+        {
+            var t = new Table(s);
+            t["Type"] = (double)FakeHost.ArmType; t["MinPercent"] = (double)FakeHost.ArmMinPercent;
+            t["TimeoutMs"] = (double)FakeHost.ArmTimeoutMs; t["Calls"] = (double)FakeHost.ArmCalls;
+            return DynValue.NewTable(t);
+        });
+        Fn("setLastPrompt", a =>
+        {
+            FakeHost.PromptSeq = (int)Num(a, 0); FakeHost.PromptType = (uint)Num(a, 1); FakeHost.PromptContext = (uint)Num(a, 2);
+            FakeHost.PromptPercent = (int)Num(a, 3, -1); FakeHost.PromptOutcome = (int)Num(a, 4); FakeHost.PromptAgeMs = (int)Num(a, 5);
+            return DynValue.Nil;
+        });
         Fn("chatInput", a =>
         {
             int eat = 0;

@@ -53,6 +53,8 @@ internal static class CombatHookTests
         r.Add("combat hook: a script answer at an ignored monster is rejected, even one hitting us (RynthAi casts its own)", HookRejectsIgnoredTarget);
         r.Add("combat hook: a script heal (a drain) at a fight target whose rule turned to Priority 0 is rejected", HookHealRejectsIgnoredTarget);
         r.Add("blacklist: casts answered 'too busy' (UseDone 0x1D) are not no-damage casts (answered 0: the target is dropped)", RefusedCastsNotJudged);
+        r.Add("ghost (R-20261115-172110-9e6a): two casts answered 'target not acquired' (UseDone 0x42C) mark the target a ghost and stop the casting", NotAcquiredMarksGhost);
+        r.Add("blacklist (2026-11-15): melee landing nothing across a building's wall (one inside, one out) keeps the target off 5 min; elsewhere the usual timeout", AcrossWallBlacklistLonger);
         r.Add("loot jump: Think sends no cast while in the air after a loot jump; it casts on the landing, or at the cap", LootJumpHoldsAttack);
         r.Add("loot jump: a swing refused in the air (WeenieError 0x4EB) is not a no-damage attack (without it: a miss)", MeleeInAirNotJudged);
         r.Add("combat hook: ctx.pending is the cast in flight; ctx.last the last resolved one, err its first UseDone (final; -1 when missed or after 7 s)", LastErrIsTheCastsAnswer);
@@ -1079,6 +1081,79 @@ internal static class CombatHookTests
                 Check.True(FakeHost.Logs.Any(l => l.Contains(answer == ActionPacer.TooBusyErr
                     ? "refused 'too busy' (UseDone 0x1D): not counted" : "refused in the air (UseDone 0x4EB): not counted")), $"{what}: logged");
             }
+        }
+    });
+
+    // 2026-11-15, R-20261115-172110-9e6a: every Blade Arc at a target the server didn't have came back
+    // UseDone 0x42C about 70 ms after the send, and combat cast again at once (13 casts in 0.85 s, the
+    // hourglass going round), never dropping it.
+    private static void NotAcquiredMarksGhost() => Guard(() =>
+    {
+        var rig = new AttackRig(setup: () => { FakeHost.ServerGates = true; FakeHost.LastUseDoneCalls = true; });
+        rig.S.EnableRaycasting = false;
+        rig.Attack();
+        Check.Eq(FakeHost.Casts.Count, 1, "the first cast goes out");
+        FakeHost.UseDone(CombatManager.TargetNotAcquiredErr);
+        rig.Attack();
+        Check.Eq(FakeHost.Casts.Count, 2, "one 'target not acquired' could be a death on the way: one more cast");
+        Check.False(rig.C.Ghosts.IsGhost(Target), "not a ghost yet");
+        FakeHost.UseDone(CombatManager.TargetNotAcquiredErr);
+        rig.Attack();
+        Check.Eq(FakeHost.Casts.Count, 2, "the second answer: no third cast at it");
+        Check.True(rig.C.Ghosts.IsGhost(Target), "it is a ghost");
+        Check.Eq(rig.C.activeTargetId, 0, "and dropped");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("[Ghost]") && l.Contains("'target not acquired' (UseDone 0x42C)") && !l.Contains("it hasn't moved")),
+                   "logged with the server's answer as the evidence: " + FakeHost.Logs.LastOrDefault(l => l.Contains("[Ghost]")));
+        SetField(rig.C, "_lastScanTime", DateTime.MinValue);   // the scan's own throttle
+        rig.C.ScanNearbyTargets();
+        Check.False(rig.C.ScannedTargets.Any(t => t.Id == Target), "the scan skips it");
+
+        // An answer in between that isn't 0x42C (the server has it after all): the count starts over.
+        var real = new AttackRig(setup: () => { FakeHost.ServerGates = true; FakeHost.LastUseDoneCalls = true; });
+        real.S.EnableRaycasting = false;
+        real.Attack();
+        FakeHost.UseDone(CombatManager.TargetNotAcquiredErr);
+        real.Attack();
+        FakeHost.UseDone(0);
+        real.Attack();
+        FakeHost.UseDone(CombatManager.TargetNotAcquiredErr);
+        real.Attack();
+        Check.Eq(FakeHost.Casts.Count, 4, "not two in a row: every cast goes");
+        Check.False(real.C.Ghosts.IsGhost(Target), "and it is no ghost");
+        Check.Eq(real.C.activeTargetId, Target, "the target stays");
+    });
+
+    // A Thread, 2026-11-15: the character in a building, a mage 2.5 m off outside it, no raycast blocking
+    // it: three swings for nothing, blacklisted 30 s, locked again, round and round.
+    private static void AcrossWallBlacklistLonger() => Guard(() =>
+    {
+        foreach (bool across in new[] { true, false })
+        {
+            string what = across ? "inside a building, the target outside" : "both outside";
+            var rig = new AttackRig(setup: () => { FakeHost.WeaponCalls = true; FakeHost.CombatModeValue = CombatMode.Melee; });
+            rig.S.BlacklistAttempts = 3;
+            rig.S.EnableRaycasting = false;
+            var bm = Field<RynthCore.Plugin.RynthAi.Raycasting.BlacklistManager>(rig.C, "_blacklistManager");
+            bm.TimeoutSeconds = 30;
+            FakeHost.PlayerPose = (across ? 0x01010105u : 0x0101001Bu, 0f, 0f, 0f);
+            FakeHost.Positions[Player] = FakeHost.PlayerPose;
+            var tp = FakeHost.Positions[Target];
+            FakeHost.Positions[Target] = (0x0101001Cu, tp.Item2, tp.Item3, tp.Item4);
+            SetField(rig.C, "_pendingJudgeTargetId", (int)Target);
+            SetField(rig.C, "_damageSincePendingCast", false);
+            SetField(rig.C, "_consecutiveCastMisses", 2);
+            SetField(rig.C, "_pendingJudgeCastAt", DateTime.Now.AddSeconds(-30));
+            CallPrivate(rig.C, "JudgePendingCast");
+            var exp = Field<Dictionary<int, DateTime>>(bm, "_blacklistExpirations");
+            Check.True(exp.TryGetValue((int)Target, out DateTime until), what + ": blacklisted after the third swing for nothing");
+            double secs = (until - DateTime.Now).TotalSeconds;
+            if (across)
+            {
+                Check.True(secs > CombatManager.AcrossWallBlacklistSec - 10, $"{what}: off {secs:0} s (5 min)");
+                Check.True(FakeHost.Logs.Any(l => l.Contains("across a building's wall")), what + ": logged");
+            }
+            else
+                Check.True(secs < 40, $"{what}: off {secs:0} s (the usual 30)");
         }
     });
 

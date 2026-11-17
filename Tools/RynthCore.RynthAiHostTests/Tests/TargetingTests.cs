@@ -239,6 +239,53 @@ internal static class TargetingTests
         FakeHost.WeaponCalls = true;
         FakeHost.CombatModeValue = CombatMode.Magic;
         Check.Eq(magic.Tick(), A, "magic: one on a balcony in sight is still a target");
+
+        // 2026-11-16, a Thread: in a building, an Armoredillo 5.5 m up and 8 m off in another of its cells
+        // (h 8.1, dz +5.5: a gentle slope by the rule above). It was locked and chased round under it.
+        Check.False(CombatManager.OutOfMeleeReachUpOrDown(9.8, 5.5), "by the slope alone it would be walked to");
+        var balcony = new ScanPick(20);
+        balcony.Place(A, "Mob A", north: 8, up: 5.5);
+        FakeHost.Positions[Player] = (Lb | 0x0107, 96f, 96f, 0f);
+        FakeHost.PlayerPose = (Lb | 0x0107, 96f, 96f, 0f);
+        FakeHost.Positions[A] = (Lb | 0x0100, FakeHost.Positions[A].Item2, FakeHost.Positions[A].Item3, FakeHost.Positions[A].Item4);
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Melee;
+        Check.Eq(balcony.Tick(), 0u, "melee, both inside, another cell 5.5 m up: not the target (the stairs first)");
+
+        // 2026-11-16 17:11, a Thread: the building's floor above 3.0 m up, the monsters in the next cell 2.5 m
+        // off; "more than 3 m" let them through and they were swung at from the floor below.
+        var floorAbove = new ScanPick(20);
+        floorAbove.Place(A, "Mob A", north: 2.5, up: 3.0);
+        FakeHost.Positions[Player] = (Lb | 0x0125, 96f, 96f, 0f);
+        FakeHost.PlayerPose = (Lb | 0x0125, 96f, 96f, 0f);
+        FakeHost.Positions[A] = (Lb | 0x0126, FakeHost.Positions[A].Item2, FakeHost.Positions[A].Item3, FakeHost.Positions[A].Item4);
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Melee;
+        Check.Eq(floorAbove.Tick(), 0u, "melee, both inside, the next cell 3.0 m up: not the target");
+
+        var stair = new ScanPick(20);
+        stair.Place(A, "Mob A", north: 2.5, up: 2.0);
+        FakeHost.Positions[Player] = (Lb | 0x0125, 96f, 96f, 0f);
+        FakeHost.PlayerPose = (Lb | 0x0125, 96f, 96f, 0f);
+        FakeHost.Positions[A] = (Lb | 0x0126, FakeHost.Positions[A].Item2, FakeHost.Positions[A].Item3, FakeHost.Positions[A].Item4);
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Melee;
+        Check.Eq(stair.Tick(), A, "the next cell 2.0 m up (a stair): still the target");
+
+        var hill = new ScanPick(20);
+        hill.Place(A, "Mob A", north: 8, up: 5.5);
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Melee;
+        Check.Eq(hill.Tick(), A, "outdoors, the same up a hillside: still the target");
+
+        var sameCell = new ScanPick(20);
+        sameCell.Place(A, "Mob A", north: 8, up: 5.5);
+        FakeHost.Positions[Player] = (Lb | 0x0107, 96f, 96f, 0f);
+        FakeHost.PlayerPose = (Lb | 0x0107, 96f, 96f, 0f);
+        FakeHost.Positions[A] = (Lb | 0x0107, FakeHost.Positions[A].Item2, FakeHost.Positions[A].Item3, FakeHost.Positions[A].Item4);
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Melee;
+        Check.Eq(sameCell.Tick(), A, "inside, up a ramp in the same cell: still the target");
     }
 
     public static void Register(Runner r)

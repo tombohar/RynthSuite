@@ -872,6 +872,16 @@ public partial class CombatManager : IDisposable
     /// <summary>True only when actively attacking a specific target. Unlike HasTargets, this is false between kills even when more monsters are scanned nearby.</summary>
     public bool IsActivelyEngaged => activeTargetId != 0;
 
+    /// <summary>
+    /// How long ago the current target was locked while its first attack or cast hasn't gone out
+    /// ([CombatLatency]'s pending engagement); -1 when there is none. The looter's starved turn holds
+    /// a corpse open for it (CorpseOpenController, StarvedOpenYieldsMs; 2026-11-15).
+    /// </summary>
+    public double FirstAttackPendingMs =>
+        _latency.Pending && activeTargetId != 0 && _targetLockedAt != DateTime.MinValue
+            ? Math.Max(0, (RynthClock.Now - _targetLockedAt).TotalMilliseconds)
+            : -1;
+
     /// <summary>Yards inside which a scanned mob counts as "on top of me".</summary>
     private const double CloseAttackYards = 5.0;
 
@@ -1243,7 +1253,8 @@ public partial class CombatManager : IDisposable
             // here. A test character locked golems 6 m up in a building and swung under them until they
             // came down. Not counted as a monster nearby out of sight, so navigation (the hunt's walk up
             // the stairs) isn't held for it.
-            if (hasMobPos && OutOfMeleeReachUpOrDown(dist, tz - meZ) && MeleeIsTheAttackOn(wo, attackType))
+            if (hasMobPos && (OutOfMeleeReachUpOrDown(dist, tz - meZ) || OtherFloorInside(meCell, (uint)wo.Id, tz - meZ))
+                && MeleeIsTheAttackOn(wo, attackType))
             {
                 if (notePassed) NotePassedOver(wo.Id, dist, PassedOverOtherLevel);
                 continue;
@@ -1445,12 +1456,47 @@ public partial class CombatManager : IDisposable
     private void ObserveOffensiveAnswer()
     {
         if (_pendingOffensiveErr >= 0 || !_host.HasUseDoneSeq) return;
+        uint answer;
         try
         {
-            if (_host.TryGetLastUseDone(out int seq, out uint err) && seq == _pendingOffensiveSeqAtSend + 1)
-                _pendingOffensiveErr = err;
+            if (!_host.TryGetLastUseDone(out int seq, out uint err) || seq != _pendingOffensiveSeqAtSend + 1) return;
+            _pendingOffensiveErr = answer = err;
         }
-        catch { }
+        catch { return; }
+        NoteOffensiveAnswer(_pendingOffensiveTargetId, answer);
+    }
+
+    // ── The server doesn't have the target (2026-11-15, R-20261115-172110-9e6a) ─────────────────
+    // A Carenzi Stalker 29.8 m off and 3.6 m up: every Blade Arc at it came back UseDone 0x42C
+    // (TargetNotAcquired: ACE's Player_Magic finds no such object on the landblock) about 70 ms
+    // after the send, and combat cast again at once, 13 casts in 0.85 s (the hourglass "going nuts"),
+    // then, after a 15 s 'too busy' latch, the same again. The target was never dropped: the ghost
+    // check only judges swings and no-damage casts, and a refused cast is neither. The server's own
+    // answer says it plainly, so NotAcquiredGhostAfter of them in a row at one target mark it a ghost.
+
+    /// <summary>ACE's TargetNotAcquired, as a UseDone error: the server has no such target.</summary>
+    internal const uint TargetNotAcquiredErr = 0x42C;
+    /// <summary>Casts at one target answered TargetNotAcquired in a row that make it a ghost.</summary>
+    internal const int NotAcquiredGhostAfter = 2;
+    private int _notAcquiredTarget, _notAcquiredCount;
+
+    /// <summary>The server answered the offensive cast at <paramref name="target"/> with <paramref name="err"/>.</summary>
+    private void NoteOffensiveAnswer(int target, uint err)
+    {
+        if (target == 0) return;
+        if (err != TargetNotAcquiredErr)
+        {
+            // A 'too busy' says nothing about the target; any other answer means the server has it.
+            if (target == _notAcquiredTarget && err != ActionPacer.TooBusyErr) { _notAcquiredTarget = 0; _notAcquiredCount = 0; }
+            return;
+        }
+        if (target != _notAcquiredTarget) { _notAcquiredTarget = target; _notAcquiredCount = 0; }
+        if (++_notAcquiredCount < NotAcquiredGhostAfter) return;
+        _notAcquiredTarget = 0;
+        _notAcquiredCount = 0;
+        MarkGhost(target, _worldFilter[target]?.Name, ServerSilentMs(target, RynthClock.Now),
+                  $"the server answered {NotAcquiredGhostAfter} casts at it in a row 'target not acquired' (UseDone 0x{TargetNotAcquiredErr:X})",
+                  serverSaid: true);
     }
     private const double OFFENSIVE_NOCHAT_TIMEOUT_MS = 5000.0;
     // ACE doesn't emit "You cast X" chat for offensive war magic, so we infer
@@ -2546,6 +2592,18 @@ public partial class CombatManager : IDisposable
             _blacklistManager.ReportFailure(tid);
             if (_blacklistManager.IsBlacklisted(tid))
             {
+                // A melee target on the other side of a building's wall: the scan's skip for that needs a
+                // raycast to call it blocked, and it may not (2026-11-15, a Thread: the character in a
+                // building, a mage 2.5 m off outside it, losBlk=0). Three swings for nothing, 30 s off,
+                // locked again, round and round, and an open chest waited on that fight. Off for
+                // AcrossWallBlacklistSec instead: the hunt walks round through a door meanwhile.
+                if (CurrentCombatMode != CombatMode.Magic && _playerId != 0
+                    && _host.TryGetObjectPosition(_playerId, out uint meCellNow, out _, out _, out _)
+                    && AcrossBuildingWall(meCellNow, (uint)tid))
+                {
+                    _blacklistManager.BlacklistFor(tid, AcrossWallBlacklistSec);
+                    _host.Log($"[Blacklist] 0x{(uint)tid:X8} is across a building's wall (one inside, one out): off {AcrossWallBlacklistSec} s");
+                }
                 string what = CurrentCombatMode == CombatMode.Magic ? "casts" : "attacks";
                 _host.WriteToChat($"[RynthAi] {_consecutiveCastMisses} {what} with no damage — blacklisting 0x{(uint)tid:X8}", 2);
                 _consecutiveCastMisses = 0;
@@ -4411,7 +4469,7 @@ public partial class CombatManager : IDisposable
     /// when the engine can (v83). Its no-damage blacklist entry, if any, is dropped (the ghost
     /// mark outlives it).
     /// </summary>
-    internal void MarkGhost(int id, string? name, double silentMs, string why)
+    internal void MarkGhost(int id, string? name, double silentMs, string why, bool serverSaid = false)
     {
         if (id == 0) return;
         uint pid = _playerId != 0 ? _playerId : _host.GetPlayerId();
@@ -4420,7 +4478,8 @@ public partial class CombatManager : IDisposable
         Ghosts.Mark(id, name ?? "", spot, lb, RynthClock.Now);
         _blacklistManager.ClearFailure(id);
         string silent = silentMs < 0 ? "nothing from the server about it since it was first seen" : $"nothing from the server about it for {silentMs / 1000:0}s";
-        _host.Log($"[Ghost] 0x{id:X8} '{name}' is a ghost: {why}, {silent}, it hasn't moved [{DescribeTargetPos(id)}]. " +
+        // serverSaid: the server's own answer is the evidence (TargetNotAcquired), not stillness.
+        _host.Log($"[Ghost] 0x{id:X8} '{name}' is a ghost: {why}, {silent}{(serverSaid ? "" : ", it hasn't moved")} [{DescribeTargetPos(id)}]. " +
                   $"Skipped until the server sends anything about it or the landblock changes (ghosts now: {Ghosts.Count}).");
         if (id == activeTargetId || id == _lockedTargetId)
             DropTarget("ghost (the server doesn't have it)");
@@ -4784,7 +4843,14 @@ public partial class CombatManager : IDisposable
                    || _settings.BotAction == "Combat"
                    || _settings.BotAction == "Navigating"
                    || (_settings.BotAction == "Looting" && !_settings.BoostLootPriority);
-        if (!canRun) return;
+        if (!canRun)
+        {
+            // [CombatLatency]: a locked target waiting on another activity's tick (2026-11-15,
+            // R-20261115-165857-1de7: a heal's 3.3 s read as "other").
+            if (_latency.Pending && activeTargetId != 0)
+                _latency.OnHeld(activeTargetId, Environment.TickCount64, _settings.BotAction);
+            return;
+        }
 
         if (_settings.EnableCombat)
         {
@@ -7067,9 +7133,30 @@ public partial class CombatManager : IDisposable
         return aIn != bIn;
     }
 
+    /// <summary>How long a melee target that took no damage across a building's wall stays off (see JudgePendingCast).</summary>
+    internal const int AcrossWallBlacklistSec = 300;
+
     private bool AcrossBuildingWall(uint meCell, uint targetId)
         => meCell != 0 && _host.TryGetObjectPosition(targetId, out uint tc, out _, out _, out _) && tc != 0
            && InsideVersusOutside(meCell, tc);
+
+    /// <summary>Inside and in another cell, a monster more than this above or below is on another floor. A
+    /// building's floor above can be 3.0 m up: "more than MeleeMaxRiseM" let it through (2026-11-16 17:11, a
+    /// Thread: two monsters 3.0 m up in the next cell were locked and swung at from the floor below).</summary>
+    internal const double OtherFloorRiseM = 2.5;
+
+    /// <summary>
+    /// Both inside (a building's rooms or a dungeon's cells), in different cells, and the monster more than
+    /// OtherFloorRiseM above or below: another floor or a balcony. The slope rule (OutOfMeleeReachUpOrDown)
+    /// lets one 8 m off through as a gentle ramp, and it was locked and chased round in circles under it
+    /// (2026-11-16, a Thread: 5.5 m up in a building). Left to the hunt or the patrol, which walk up the stairs.
+    /// </summary>
+    private bool OtherFloorInside(uint meCell, uint targetId, double dz)
+    {
+        if (!(Math.Abs(dz) > OtherFloorRiseM) || (meCell & 0xFFFF) < 0x0100) return false;
+        return _host.TryGetObjectPosition(targetId, out uint tc, out _, out _, out _) && tc != 0
+               && (tc & 0xFFFF) >= 0x0100 && (tc >> 16) == (meCell >> 16) && tc != meCell;
+    }
 
     internal static bool OutOfMeleeReachUpOrDown(double dist, double dz)
     {
@@ -7845,6 +7932,15 @@ public partial class CombatManager : IDisposable
         // A ring or a wall hits several monsters: its damage isn't the fight target's alone.
         bool multiTarget = isRing || castShape == ShapeWall;
         if (offensiveSpellId != 0 && ManaHoldsCast(offensiveSpellId)) return;   // mana reserve
+        // The last cast's answer first, while it is still that cast's: a recast in the tick its
+        // UseDone came in would drop it unread. A second TargetNotAcquired at this target marks it
+        // a ghost and drops it (NoteOffensiveAnswer): then nothing is cast at it (2026-11-15).
+        if (offensiveSpellId != 0)
+        {
+            int castAt = activeTargetId;
+            ObserveOffensiveAnswer();
+            if (activeTargetId != castAt || activeTargetId == 0) return;
+        }
         if (offensiveSpellId != 0)
         {
             LastCombatSkipReason = "cast"; // D4 record-only: offensive cast issued this tick

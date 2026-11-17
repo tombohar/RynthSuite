@@ -230,6 +230,16 @@ internal sealed partial class MetaManager
         if (_expressions != null) _expressions.LastChestLooted = lastChest;
     }
 
+    // The dungeon explore's state and rooms, for radunexplore[] / radunexplorerooms[] / radunexplorevisited[].
+    private Func<(int State, int Rooms, int Visited)>? _dunExploreStatus;
+    private Func<string>? _dunExploreInfo;
+    public void SetDunExploreStatus(Func<(int State, int Rooms, int Visited)>? status, Func<string>? info = null)
+    {
+        _dunExploreStatus = status;
+        _dunExploreInfo = info;
+        if (_expressions != null) { _expressions.DunExploreStatus = status; _expressions.DunExploreInfo = info; }
+    }
+
     public void SetPlayerId(uint id)
     {
         _playerId = id;
@@ -352,6 +362,8 @@ internal sealed partial class MetaManager
         engine.CorpseOpenedByMe = _corpseOpenedByMe;
         engine.CombatTargetCount = _combatTargetCount;
         engine.LastChestLooted = _lastChestLooted;
+        engine.DunExploreStatus = _dunExploreStatus;
+        engine.DunExploreInfo = _dunExploreInfo;
         // vtsetsetting[] / vtgetsetting[] take VTank names and units, as '/vt opt set|get' does.
         engine.VtOptionSetter = TrySetVtOption;
         engine.VtOptionGetter = GetVtOption;
@@ -1599,6 +1611,7 @@ internal sealed partial class MetaManager
         ["pickupmacrooff"]            = "LootChestsMacroOff",   // Settings > Looting > Pickup with macro off
         ["lootchestsmacrooff"]        = "LootChestsMacroOff",
         ["meleethroughwalls"]         = "MeleeThroughWalls",    // Settings > Combat > Targeting > Melee through walls
+        ["lootnearbychests"]          = "LootNearbyChests",     // Settings > Looting > Loot Nearby Chests
         ["dooropenrange"]             = "OpenDoorRange",
         ["autofellowmanagement"]      = "AutoFellowMgmt",
         ["switchwandstodebuff"]       = "UseDispelItems",

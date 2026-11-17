@@ -297,11 +297,11 @@ internal sealed class DungeonGeometry
 
     public bool TryGetDoorway(uint a, uint b, out DungeonDoorway door) => _doorways.TryGetValue(EdgeKey(a, b), out door!);
 
-    /// <summary>Openings whose centre is within r (horizontally) of (x, y) and 2 m of height z.</summary>
-    public IEnumerable<DungeonDoorway> DoorwaysNear(double x, double y, double z, double r)
+    /// <summary>Openings whose centre is within r (horizontally) of (x, y) and <paramref name="dz"/> of height z.</summary>
+    public IEnumerable<DungeonDoorway> DoorwaysNear(double x, double y, double z, double r, double dz = 2.0)
     {
         foreach (var d in _doorways.Values)
-            if ((d.X - x) * (d.X - x) + (d.Y - y) * (d.Y - y) <= r * r && Math.Abs(d.Z - z) < 2.0) yield return d;
+            if ((d.X - x) * (d.X - x) + (d.Y - y) * (d.Y - y) <= r * r && Math.Abs(d.Z - z) < dz) yield return d;
     }
 
     public bool HasFloor(uint cell) => _floors.ContainsKey(cell);

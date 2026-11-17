@@ -120,6 +120,12 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     // portalled to a different dungeon.
     private bool _dunPatrolActive;
     private uint _dunPatrolLandblock;
+    // Openings the patrol couldn't get through (something not on the dungeon map in them, 2026-11-14: a spider
+    // web spawned in a doorway), closed for its laps in that dungeon until it is in another one.
+    private readonly HashSet<ulong> _dunPatrolStuckEdges = new();
+    private int _dunPatrolStuckOpenings;   // the openings _dunPatrolStuckEdges closes (one can be two cell pairs)
+    private readonly List<PatrolPortal> _dunPatrolStuckSpots = new();   // spots in a room it got stuck at for good: walked round
+    private uint _dunPatrolStuckLb;
     // The patrol's own route object: the patrol is the mode for as long as it is the loaded route
     // (a macro stop or start leaves it; another route loaded in its place ends it, said in chat).
     private NavRouteParser? _dunPatrolRoute;
@@ -620,6 +626,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             // The dungeon patrol keeps its order after a fight (Go To Closest Waypoint is for
             // routes; on a patrol loop the closest point can be near the end).
             KeepWaypointAfterPause = () => _dunPatrolActive,
+            // Stuck escapes keep out of portals (RynthAiPlugin.PatrolPortals.cs).
+            EscapePortals = EscapePortalsNear,
         };
         // Plans the detours: the dungeon cell graph indoors, RynthNav's navmesh outdoors.
         // Reads the raycast geometry and hazards through the fields, so it follows their
@@ -677,6 +685,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     // never checked, and "raycast warming up" held off the no-progress
                     // blacklist, for the whole session. The setup wires it too (below).
                     WireRaycastIntoCombat();
+                    // The dungeon map closes doorways the cells' placed objects stand across (a spider web:
+                    // DungeonPathfinder.Blocked.cs). No map is built before this (it needs the raycast's DungeonLOS).
+                    var loaderRef = raycastRef.GeometryLoader;
+                    DungeonPathfinder.StaticMeshSource = lb => loaderRef.GetDungeonStaticMeshes(lb);
                     _dashboard?.SetRaycast(raycastRef);
                     _terrainOverlay?.SetRaycast(raycastRef);
                     _radarWallRenderer?.SetRaycast(raycastRef);
@@ -785,7 +797,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _combatManager.BuffingWantsTick = () => _buffManager != null
             && (_buffManager.PendingSpellId != 0 || _buffManager.WantsVitalRecharge
                 || (_dashboard?.Settings?.EnableBuffing == true && _buffManager.NeedsAnyBuff()));
-        _combatManager.HoldNewTarget = LootHoldsNewTarget;   // Boost Loot Priority: one kill, one loot; the death wait (2026-11-08)
+        _combatManager.HoldNewTarget = LootHoldsNewTarget;   // Boost Loot Priority: one kill, one loot (the death wait holds no target since 2026-11-15)
         _combatManager.HoldNewTargetWhy = LootHoldWhy;
         _combatManager.ManaReserveHold = spellId => _buffManager?.OffensiveCastHold(spellId);   // the mana reserve
         _combatManager.ManaCanEverAfford = spellId => _buffManager?.CanEverAfford(spellId) ?? true;   // script hook: never-payable spells
@@ -844,6 +856,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _metaManager.SetCorpseOpenedCheck(id => _completedCorpses.ContainsKey(id));
         _metaManager.SetCombatTargetCount(() => _combatManager?.LastScanPossible ?? -1);
         _metaManager.SetLastChestLooted(() => _lastChestLootedId);
+        _metaManager.SetDunExploreStatus(DunExploreStatus, DunExploreInfoJson);
         if (_dashboard != null)
             _dashboard.MetaSnapshotProvider = () => _metaManager?.GetStateSnapshot();
         // A hot reload: the meta carries on where it was (Resume Meta After Reload).
@@ -1850,6 +1863,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     // looping through it — or with the Dungeon Patrol settings changed since.
                     // Cheap no-op unless a new hazard cell was registered or a setting changed.
                     TickDunPatrolHazardReroute();
+                    // The dungeon explore: rooms entered, reroutes, its end (no-op unless one runs).
+                    TickDunExplore();
                     // Outdoor hunting's next walk (no-op unless /ra hunt is on).
                     TickOutdoorHunt();
                 });
@@ -2517,6 +2532,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         try { NoteServerPolicyChat(text); } catch { }   // DreamWeave's Thread lines (ServerPolicy)
         try { NoteDoorServerText(text); } catch { }   // "The door is locked!" (the door logic)
         try { ItemToolChat(text); } catch { }   // the key's answers (chest looter)
+        try { NearbyChestsChat(text); } catch { }   // the lockpick's and key's answers (Loot Nearby Chests)
         try { _sessionStats?.OnChatWindowText(text); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats chat"); }
         try { NoteMonsterStatsChat(text, chatType); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "monster stats chat"); }
         // The Meta Manager eats the reply to its own /myquests poll (only that).
@@ -4106,6 +4122,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "groundloot":   HandleGroundLootCommand(parts); break;
             case "addnavpt":     HandleAddNavPointCommand(); break;
             case "lootname":     HandleLootNameCommand(parts); break;
+            case "chests":       HandleNearbyChestsCommand(); break;
             case "navheading":   HandleNavHeadingCommand(parts); break;
             case "dfheight":     HandleDfHeightCommand(parts); break;
             case "nav":          HandleNavCommand(parts); break;
@@ -4127,7 +4144,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "refreshquests": _questTracker?.Refresh(); ReplyOk("[RynthAi] Quest flag refresh requested."); break;
             case "metamgr":       QueueMetaMgrCommand(parts); Reply.Answered(); break;   // Meta Manager: applied (and answered) on the next tick
             case "dunnav":        HandleDungeonNavCommand(parts); break;
+            case "dunnav-to":     HandleDunNavToCommand(parts); break;      // walk to an object in this dungeon (RynthAiCommands.cs)
             case "dunnav-patrol": HandleDungeonNavPatrolCommand(parts); break;
+            case "dunnav-explore": HandleDunExploreCommand(parts); break;   // RynthAiPlugin.DunExplore.cs
             case "dunroute":      HandleDunRouteCommand(parts); break;          // RynthAiPlugin.DunRoutes.cs
             case "dunpatrol-save": HandleDunPatrolSaveCommand(parts); break;
             case "hunt": HandleHuntCommand(parts); break;

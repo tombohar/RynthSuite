@@ -42,6 +42,54 @@ internal static class PetSelectionTests
         r.Add("pet choice: an essence used before its appraisal that turns out passive is learned, and its pet holds nothing (before: held for good)", PassiveLearnedAfterSummon);
         r.Add("pet choice: the Pets tab shows a listed passive essence under Cosmetic, unticked, and the combat pick skips it", PetsTabShowsPassiveAsCosmetic);
         r.Add("pet choice: pack fill does not list an appraised passive essence as a Pet; a combat essence and an unappraised one still are", FillSkipsPassiveEssence);
+        // R-20261113-130755-35ae (Conquest, 2026.11.12.1): "Cold chosen -> Frost ..." on every line, yet
+        // when the pet died before 45 s the next listed essences (other elements) were used: refused
+        // "used this item too recently" for most of the window, summoned for real at its edge.
+        r.Add("pet choice: the pet dies inside the shared 45 s cooldown: the chosen element waits for it; no other essence is used (before: the next listed)", ChosenWaitsSharedCooldown);
+        r.Add("pet choice: 'used this item too recently' does not park the chosen essence 45 s; it is tried again in 5 s, no other essence (before: the next listed)", TooRecentlyRetriesChosen);
+    }
+
+    /// <summary>The report's fight: Cold chosen for the monster, a Fire essence listed after the Frost one.</summary>
+    private static Rig ColdChosenRig()
+    {
+        var rig = new Rig(frostFirst: true);
+        rig.Store.SetManualPet(MobWcid, "E:Cold");
+        return rig;
+    }
+
+    private static void ChosenWaitsSharedCooldown()
+    {
+        using var rig = ColdChosenRig();
+        rig.Run(1_500);
+        Check.Eq(Rig.UsesOf(Frost), 1, "Cold chosen: the Frost essence is summoned");
+        Check.True(Logged("Cold chosen -> Frost Moar Essence"), "the choice line names it");
+        FakeHost.Ints[(Frost, StructureKey)] = 49;      // the summon landed: a charge spent
+        rig.ShowPet(Ours, "Pet Tester's Frost Moar");
+        rig.Run(18_000);
+        Check.Eq(Rig.UsesOf(Frost) + Rig.UsesOf(Essence), 1, "the pet is out: no second summon");
+        FakeHost.Names.Remove(Ours);                    // the pet dies about 20 s in
+        FakeHost.Positions.Remove(Ours);
+        rig.Run(20_000);
+        Check.Eq(Rig.UsesOf(Essence), 0, "inside the 45 s cooldown every essence shares, the Fire essence is not used (before: it was, at once)");
+        Check.True(Logged("every essence shares the 45s summon cooldown"), "the wait is logged");
+        rig.Run(8_000);
+        Check.Eq(Rig.UsesOf(Frost), 2, "the cooldown over: the chosen Frost essence is summoned again");
+        Check.Eq(Rig.UsesOf(Essence), 0, "and never the Fire one");
+        Check.Eq(FakeHost.Logs.Count(l => l.Contains("every essence shares the 45s")), 1, "the wait logged once");
+    }
+
+    private static void TooRecentlyRetriesChosen()
+    {
+        using var rig = ColdChosenRig();
+        rig.Run(1_500);
+        Check.Eq(Rig.UsesOf(Frost), 1, "Cold chosen: the Frost essence is tried");
+        rig.Pets.OnChatWindowText("You have used this item too recently");   // a pet summoned by hand started the cooldown
+        Check.True(Logged("used too recently"), "the refusal is logged");
+        rig.Run(3_000);
+        Check.Eq(Rig.UsesOf(Frost) + Rig.UsesOf(Essence), 1, "no Use for a moment");
+        rig.Run(3_000);
+        Check.Eq(Rig.UsesOf(Frost), 2, "the chosen Frost essence is tried again (before: parked 45 s, so the Fire one went)");
+        Check.Eq(Rig.UsesOf(Essence), 0, "never the Fire one");
     }
 
     private const uint Golem = 0x80320030;      // Common Golem Essence: a passive pet's essence

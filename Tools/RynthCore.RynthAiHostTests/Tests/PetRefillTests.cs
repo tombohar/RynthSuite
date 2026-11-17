@@ -39,7 +39,7 @@ internal static class PetRefillTests
         r.Add("pets: 'not enough charges' after a confirmed refill ends the trust; refill again", TrustEndsOnEmptySummon);
         r.Add("pets: refilled twice in 2 min and still empty (no reply) -> parked 5 min", SilentRefillsParked);
         r.Add("pets: the server's 'full' trust expires after 30 min", TrustExpires);
-        r.Add("pets: a landed summon whose pet is not in the cache yet holds a second essence back for the 10 s window", LandedSummonHoldsWindow);
+        r.Add("pets: a landed summon whose pet is not in the cache yet holds a second essence back for the 10 s window, then the shared 45 s cooldown", LandedSummonHoldsWindow);
         r.Add("pets: failed summon (no charge drop) does not assume a pet; waits the 45 s essence cooldown", FailedSummonRespectsCooldown);
         r.Add("pets: Boost Nav Priority along a route (RynthAi only follows it): no summon with a monster near; route unloaded: it summons", BoostNavNoSummon);
         r.Add("pets: Boost Nav Priority with no route: it summons as with the flag off (R-20261103-000159-a65e)", BoostNavNoRouteSummons);
@@ -280,7 +280,12 @@ internal static class PetRefillTests
         FakeHost.Ints[(Essence2, StructureKey)] = 49;     // whichever essence it was, its charge dropped
         rig.Run(8_000);
         Check.Eq(rig.AllSummons, 1, "inside the 10 s window the other essence is not used");
+        // Window over and still no pet: the other essence used to be summoned now. Every ACE combat
+        // essence shares one 45 s cooldown (SharedCooldown 213), so the server refused it; the next
+        // summon waits for that cooldown (2026-11-13, R-20261113-130755-35ae).
         rig.Run(5_000);
-        Check.Eq(rig.AllSummons, 2, "window over and still no pet: the other essence is used");
+        Check.Eq(rig.AllSummons, 1, "window over and still no pet: the shared 45 s cooldown still runs, no other essence");
+        rig.Run(32_000);
+        Check.Eq(rig.AllSummons, 2, "the cooldown over: the next summon goes");
     }
 }
