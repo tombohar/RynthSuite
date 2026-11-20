@@ -42,6 +42,39 @@ internal static class ManaStoneChoiceTests
         r.Add("mana stones: in a fight, worn gear that runs low is still refilled (armor without mana drops its spells)", RefillInFight);
         r.Add("eternal charge: tapping is ignored while it is in the pack, and applies again when it leaves", EternalIgnoresTapping);
         r.Add("eternal charge: a use with no answer is tried again in 20 s, not 5 minutes", EternalRetriesSoon);
+        r.Add("mana tap with macro off (on by default): the macro stopped, stones still refill gear and drain tap loot", TapWithMacroOff);
+        r.Add("mana tap with macro off, unticked: nothing while the macro is stopped; it starts with the macro", NoTapWithMacroOffUnticked);
+    }
+
+    // 2026-11-19: mana tapping ran only while the macro ran. "Mana tap with macro off" (on by default) lets it
+    // work while you play by hand too; mana tapping itself is on by default for a new character.
+    private static void TapWithMacroOff()
+    {
+        var fresh = new LegacyUiSettings();
+        Check.True(fresh.ManaTapMacroOff, "Mana tap with macro off is on by default");
+        Check.True(fresh.EnableManaTapping, "and so is mana tapping");
+
+        using var refill = new Rig(tapping: true, new (uint, int?)[] { (StoneA, 3000) });   // the mace reads 0 of 5000
+        refill.S.IsMacroRunning = false;
+        refill.Run(1000);
+        Check.Eq(refill.OnPlayer.Count, 1, "macro off: the charged stone refills the worn mace");
+
+        using var drain = new Rig(tapping: true, new (uint, int?)[] { (StoneA, null) }, ringToDrain: true, maceMana: 5000);
+        drain.S.IsMacroRunning = false;
+        drain.Run(1000);
+        Check.Eq(drain.OnRing.Count, 1, "macro off: the ring looted for tapping is drained into the empty stone");
+    }
+
+    private static void NoTapWithMacroOffUnticked()
+    {
+        using var rig = new Rig(tapping: true, new (uint, int?)[] { (StoneA, 3000) });
+        rig.S.ManaTapMacroOff = false;
+        rig.S.IsMacroRunning = false;
+        rig.Run(3000);
+        Check.Eq(rig.OnPlayer.Count, 0, "unticked, macro off: no stone used");
+        rig.S.IsMacroRunning = true;
+        rig.Run(1000);
+        Check.Eq(rig.OnPlayer.Count, 1, "the macro starts: the stone goes on the player");
     }
 
     private const uint ChargeA = 0x80400031, ChargeB = 0x80400032, ChargeC = 0x80400033;

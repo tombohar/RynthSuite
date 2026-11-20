@@ -71,6 +71,86 @@ public sealed class InventoryManager
         _cache = cache;
     }
 
+    // ── The last move or merge, until the server answers it (2026-11-18, R-20261117-230613-88c5) ──
+    // AC lets the client have one item request out at a time: a pack move fills the client's pending
+    // inventory request slot, and until the server's answer about that item comes back the client
+    // refuses every use, move and pickup with "You can only move or use one item at a time" and
+    // sends nothing (RynthCore ClientActionGates). AutoCram runs on the first tick after a corpse is
+    // released, and the looter claimed and used the next corpse 1-3 ms after the cram's move, four
+    // times in 100 s in the report: each open was refused, the looter waited 5 s for an answer that
+    // could never come, then opened the corpse again. So the next item action (a corpse, door or chest
+    // use, salvage, a mana stone, a pet) waits for this move's answer: the item seen out of the pack it
+    // was moved from, or out of the stack it was merged from, or the server refusing it
+    // (InventoryServerSaveFailed naming it). At most MoveAnswerMaxMs, so a lost answer holds nothing
+    // for long.
+    private uint _flightId;
+    private int _flightFrom;
+    private int _flightStack;
+    private bool _flightIsMerge;
+    private int _flightErrSeq;
+    private DateTime _flightSentAt = DateTime.MinValue;
+    private string _flightWhat = "";
+
+    /// <summary>Longest a move counts as unanswered: answers come in 50-300 ms; this only bounds a lost one.</summary>
+    internal const double MoveAnswerMaxMs = 3000;
+    private const uint EventInventoryServerSaveFailed = 0x00A0;
+
+    private void NoteMoveSent(uint id, int fromContainer, int stackCount, bool merge, string what)
+    {
+        _flightId = id;
+        _flightFrom = fromContainer;
+        _flightStack = stackCount;
+        _flightIsMerge = merge;
+        _flightErrSeq = LastWeenieErrorSeq();
+        _flightSentAt = RynthClock.Now;
+        _flightWhat = what;
+    }
+
+    private int LastWeenieErrorSeq()
+    {
+        try { return _host.HasGetLastWeenieError && _host.TryGetLastWeenieError(out int seq, out _, out _, out _) ? seq : 0; }
+        catch { return 0; }
+    }
+
+    /// <summary>
+    /// True while AutoCram's or AutoStack's last move has no answer from the server yet: the client
+    /// refuses any other item action until it has one. <paramref name="what"/> says which move.
+    /// </summary>
+    public bool MoveUnanswered(out string what)
+    {
+        what = "";
+        if (_flightId == 0) return false;
+        double age = (RynthClock.Now - _flightSentAt).TotalMilliseconds;
+        if (age >= MoveAnswerMaxMs || age < 0 || MoveAnswered())
+        {
+            _flightId = 0;
+            return false;
+        }
+        what = $"the {(_flightIsMerge ? "merge" : "move")} of {_flightWhat} sent {age:0} ms ago has no answer yet";
+        return true;
+    }
+
+    private bool MoveAnswered()
+    {
+        int id = unchecked((int)_flightId);
+        try
+        {
+            // The server refused it: InventoryServerSaveFailed names the item (it empties the client's slot too).
+            if (_host.HasGetLastWeenieError && _host.TryGetLastWeenieError(out int seq, out _, out uint evt, out uint obj)
+                && seq != _flightErrSeq && evt == EventInventoryServerSaveFailed && obj == _flightId)
+                return true;
+        }
+        catch { }
+        // Gone from the client (merged away, destroyed) or out of the pack it was moved from.
+        int container = _cache.GetContainerId(id);
+        if (container == 0 || container != _flightFrom) return true;
+        // A merge that left the source in place: its stack shrank.
+        if (_flightIsMerge && (_cache[id]?.Values(LongValueKey.StackCount, -999) ?? -999) is int n
+            && n != -999 && n != _flightStack)
+            return true;
+        return false;
+    }
+
     // Kept as a no-op for call-site compatibility. Scans are now driven by
     // the backoff timer below — we re-scan every 2 seconds when idle, every
     // 500 ms after an action, so external "dirty" signals aren't needed.
@@ -234,6 +314,7 @@ public sealed class InventoryManager
             // Enqueue accepted — record as PENDING and confirm on a later snapshot (do
             // NOT blacklist; success and a deferred-but-pending move look identical here).
             _cramPending[item.Id] = new Pending { EnqueuedAt = RynthClock.Now, FromContainer = playerId };
+            NoteMoveSent(unchecked((uint)item.Id), playerId, amount, merge: false, $"'{item.Name}'");
             return true; // one action per tick
         }
 
@@ -375,6 +456,7 @@ public sealed class InventoryManager
                 EnqueuedAt = RynthClock.Now, FromContainer = playerId, TargetCount = target.Count, SourceCount = source.Count,
                 Group = g.Key, Name = source.Item.Name ?? "", Guessed = guessed,
             };
+            NoteMoveSent(unchecked((uint)source.Item.Id), source.Item.Container, source.Count, merge: true, $"'{source.Item.Name}'");
             return true; // one action per tick
         }
 

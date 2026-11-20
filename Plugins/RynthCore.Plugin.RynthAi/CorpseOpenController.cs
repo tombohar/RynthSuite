@@ -1018,6 +1018,22 @@ public sealed partial class RynthAiPlugin
             }
             return;
         }
+        // AutoCram's or AutoStack's move has no answer yet (2026-11-18, R-20261117-230613-88c5). The
+        // cram runs on the first tick after a corpse is released, and this open went out 1-3 ms
+        // after it: the client still held the cram in its one pending item request, refused the use
+        // ("You can only move or use one item at a time") and sent nothing, and the looter waited
+        // 5 s for an answer before opening it again. The answer takes 50-300 ms; the claim's clock
+        // stops meanwhile (as for the salvage panel above).
+        if (ItemMoveHold() is string moveHold)
+        {
+            FreezeCorpseTimeout(now);
+            if (_openHeldByMoveLoggedFor != _targetCorpseId)
+            {
+                _openHeldByMoveLoggedFor = _targetCorpseId;
+                LootDiag($"[RynthAi] Corpse loot: open of 0x{(uint)_targetCorpseId:X8} waits: {moveHold} (the client takes one item action at a time).");
+            }
+            return;
+        }
         // A starved turn's open waits for combat's first attack at a target it has just locked
         // (2026-11-15, R-20261115-165857-1de7). A monster came into range 0.4 s after the claim,
         // the starved turn kept Looting (none within 5 yd), and the open went out 0.3 s after the
@@ -1108,6 +1124,7 @@ public sealed partial class RynthAiPlugin
 
     private long _corpseOpenBusyWaitSince;
     private bool _openHeldBySalvageLogged;
+    private int _openHeldByMoveLoggedFor;   // the corpse whose open waited for AutoCram's/AutoStack's move (logged once)
     private int _openHeldForAttackLoggedFor;   // the corpse whose open waited for combat's first attack (logged once)
 
     /// <summary>A starved turn's open waits this long at most for combat's first attack at a fresh lock

@@ -199,7 +199,9 @@ internal sealed class ManaStoneManager
         // on for any refill, so charged stones and bought Mana Charges were never used with it
         // off (2026-10-08).
         if (!_settings.EnableManaTapping && !HasChargedRefillStone()) { Reset(); return; }
-        if (!_settings.IsMacroRunning)    { Reset(); return; }
+        // Mana tap with macro off (on by default, 2026-11-19): stones refill worn gear and drain
+        // tap loot while you play by hand too. Off: only while the macro runs, as before.
+        if (!_settings.IsMacroRunning && !_settings.ManaTapMacroOff) { Reset(); return; }
 
         long now = NowMs;
 

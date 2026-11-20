@@ -21,6 +21,19 @@ public sealed partial class RynthAiPlugin
     private string? SalvagePanelHold() =>
         _salvageManager?.PanelPending == true ? "the salvage panel is opening; the use waits for the salvage to go out" : null;
 
+    /// <summary>
+    /// AutoCram's or AutoStack's last move has no answer from the server yet (2026-11-18,
+    /// R-20261117-230613-88c5). The client holds that move in its one pending item request, and a
+    /// corpse, chest or door use sent now is refused with "You can only move or use one item at a
+    /// time" and never sent, so the looter waited 5 s for an answer that could not come. Null when
+    /// nothing is in flight.
+    /// </summary>
+    private string? ItemMoveHold() =>
+        _inventoryManager?.MoveUnanswered(out string what) == true ? what : null;
+
+    /// <summary>UseAudit.WorldUseHold: what an automatic door or corpse use waits for, or null.</summary>
+    private string? WorldUseHoldReason() => SalvagePanelHold() ?? ItemMoveHold();
+
     /// <summary>UseAudit.AfterSend: a use or use-on went out - record it as the action the server is answering.</summary>
     private static void RecordUseForPacing(RynthCoreHost host, UseAudit.SentUse use)
     {
@@ -63,6 +76,10 @@ public sealed partial class RynthAiPlugin
             if (ActionPacer.Enabled
                 && (ActionPacer.Current(Host) != null || ActionPacer.GestureHolds(Host, "Items", HealNeed.None, out _)))
                 busy++;   // an unanswered server action, or the character still animating (a pack move of a wielded item, a stone, a summon would start on top)
+            // AutoCram's or AutoStack's move has no answer yet: the client refuses any other item
+            // action until it has one (2026-11-18, R-20261117-230613-88c5; ItemMoveHold).
+            if (_inventoryManager?.MoveUnanswered(out _) == true)
+                busy++;
             return busy;
         }
     }

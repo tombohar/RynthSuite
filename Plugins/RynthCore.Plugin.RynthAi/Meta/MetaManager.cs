@@ -222,6 +222,26 @@ internal sealed partial class MetaManager
         if (_expressions != null) _expressions.CombatTargetCount = count;
     }
 
+    // Combat's ghosts (GhostTracker: monsters the server no longer has for us), left out of the
+    // monster-distance conditions like the combat scan leaves them out.
+    private Func<int, bool>? _isGhostMonster;
+    public void SetGhostCheck(Func<int, bool>? isGhost) => _isGhostMonster = isGhost;
+
+    /// <summary>
+    /// A monster the monster-distance conditions count: alive or not yet known (no health update),
+    /// attackable, not a ghost. ACE sends a monster's health only once it is selected, appraised or
+    /// hit, so most monsters nearby have none; skipping those (2026-04-17 to 11-19) made "no monsters
+    /// within 30" hold the moment the last monster fought died, with others standing 7 m away
+    /// (R-20261119-123029-4bd1: a meta's clear-the-site state left and turned combat off). The combat
+    /// scan and Monster Priority Count have always counted them.
+    /// </summary>
+    private bool CountsAsLiveMonster(WorldObjectCache cache, WorldObject obj)
+    {
+        if (cache.GetHealthRatio(obj.Id) == 0f) return false;   // dead, pending reclassification
+        if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable(unchecked((uint)obj.Id))) return false;
+        return _isGhostMonster?.Invoke(obj.Id) != true;
+    }
+
     // The last chest looted to the end, for ralastchestlooted[].
     private Func<uint>? _lastChestLooted;
     public void SetLastChestLooted(Func<uint>? lastChest)
@@ -761,9 +781,7 @@ internal sealed partial class MetaManager
                     {
                         if (obj.Id == pid) continue;
                         if (obj.ObjectClass != AcObjectClass.Monster) continue;
-                        float hp = _objectCache.GetHealthRatio(obj.Id);
-                        if (hp == 0f || hp < 0f) continue;
-                        if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable(unchecked((uint)obj.Id))) continue;
+                        if (!CountsAsLiveMonster(_objectCache, obj)) continue;
                         if (_objectCache.Distance(obj.Id, pid) <= maxDist && rx.IsMatch(obj.Name))
                             matchCount++;
                     }
@@ -783,10 +801,7 @@ internal sealed partial class MetaManager
                 {
                     if (obj.Id == pid) continue; // never count self
                     if (obj.ObjectClass != AcObjectClass.Monster) continue;
-                    float hp = _objectCache.GetHealthRatio(obj.Id);
-                    if (hp == 0f) continue; // dead, pending reclassification
-                    if (hp < 0f) continue;  // never received a health update — stale/untracked
-                    if (_host.HasObjectIsAttackable && !_host.ObjectIsAttackable(unchecked((uint)obj.Id))) continue;
+                    if (!CountsAsLiveMonster(_objectCache, obj)) continue;
                     if (_objectCache.Distance(obj.Id, pid) <= maxD)
                         return false;
                 }

@@ -126,6 +126,8 @@ internal static class MoveAudit
     private static readonly System.Collections.Generic.HashSet<uint> _motionsOn = new();
     private static readonly System.Collections.Generic.HashSet<string> _actionHoldLogged = new();
     private static long _actionHoldLoggedFor = long.MinValue;
+    private static readonly System.Collections.Generic.HashSet<string> _handHoldLogged = new();
+    private static long _handHoldLoggedRun = -1;
 
     /// <summary>Callers whose movement is never held: the cast nudge, a macro stop, typed commands.</summary>
     internal static bool IsExemptFromActionHold(string who) =>
@@ -150,6 +152,23 @@ internal static class MoveAudit
             bool moving;
             lock (Gate) moving = motion != 0 ? _motionsOn.Contains(motion) : (_autoRunOn || _motionsOn.Count > 0);
             if (moving) return false;   // a real stop always goes through, however old the start
+        }
+        // The player casting by hand (2026-11-18, R-20261118-214609-a9a8): a start or a turn of ours would
+        // move the character in the player's cast windup. Stops are left to the rules below.
+        if (!isStop && ActionPacer.HandCasting(host))
+        {
+            bool logHand;
+            lock (Gate)
+            {
+                if (_handHoldLoggedRun != ActionPacer.HandCastRuns) { _handHoldLoggedRun = ActionPacer.HandCastRuns; _handHoldLogged.Clear(); }
+                logHand = Enabled && _handHoldLogged.Add(who);
+            }
+            if (logHand)
+            {
+                try { host.Log($"[Move] {PluginName}/{who} {call} held (move/turn): the player is casting by hand"); }
+                catch { }
+            }
+            return true;
         }
         var pending = ActionPacer.Current(host);
         if (pending == null) return false;

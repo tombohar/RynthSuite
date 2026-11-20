@@ -1277,11 +1277,90 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             if (setup.PartIds != null && setup.PartIds.Length > 0)
             {
                 var gfxVol = GetGfxObjBounds(setup.PartIds[0]);
+                // A big object's first-part sphere is its render bound, not a wall (R-20261119-114214-b9ed,
+                // landblock 0xB64A): wall panel 0x02001C33 is 24 x 0.4 m but its part sphere 28 m round,
+                // and 0x02001C39 (29 parts, not one with physics polygons) got a 13 m sphere. They stand
+                // every 24 m along the landblock edge, so the spheres filled the corner: a line between a
+                // character and a monster 1.5 m off crossed a sphere's surface and read as blocked, and
+                // the selected monster was locked and dropped every 2 s without a cast (and a line through
+                // a panel, both ends inside a sphere, read as clear). Its parts' physics polygons are what
+                // AC collides with; with none at all nothing stops a spell there.
+                // Tools/RynthCore.LosProof checks this spot.
+                if (gfxVol != null && gfxVol.Type == BoundingVolume.VolumeType.Sphere && gfxVol.Dimensions.X > LargePartSphereRadius)
+                {
+                    var mesh = PartsPhysicsMesh(setup, out bool drawingOnly);
+                    if (mesh != null) { result.Add(mesh); return result; }
+                    if (drawingOnly) return result;
+                }
                 if (gfxVol != null)
                     result.Add(gfxVol);
             }
 
             return result;
+        }
+
+        /// <summary>Past this radius a part's sorting sphere is too coarse to stand for the object (meters).</summary>
+        internal const float LargePartSphereRadius = 4.0f;
+
+        /// <summary>
+        /// The physics polygons of every part of <paramref name="setup"/>, placed by its part frames, as one
+        /// triangle mesh (null when there are none or a part couldn't be read). <paramref name="drawingOnly"/>:
+        /// every part was read and none has physics polygons (the GfxObj's HasPhysics flag, 0x01), so nothing
+        /// in the object collides.
+        /// </summary>
+        private BoundingVolume PartsPhysicsMesh(SetupInfo setup, out bool drawingOnly)
+        {
+            drawingOnly = false;
+            int count = setup.PartIds.Length;
+            bool anyPhysics = false, allRead = true;
+            for (int i = 0; i < count; i++)
+            {
+                byte[] head = _portalDat.GetFileData(setup.PartIds[i]);
+                if (head == null || head.Length < 8) { allRead = false; continue; }
+                if ((BitConverter.ToUInt32(head, 4) & 0x01) != 0) anyPhysics = true;
+            }
+            if (!anyPhysics)
+            {
+                drawingOnly = allRead;
+                return null;
+            }
+            if (setup.PartFrames == null || setup.PartFrames.Length < count) return null;
+
+            var triangles = new List<Vector3>();
+            for (int i = 0; i < count && triangles.Count / 3 < MAX_BUILDING_TRIANGLES; i++)
+            {
+                if (setup.PartFrames[i] == null) return null;
+                var mesh = LoadGfxObjMesh(setup.PartIds[i]);
+                if (mesh == null) continue;   // a drawing-only part (or unreadable: the rest still stand)
+                foreach (var face in mesh.Faces)
+                {
+                    TriangulateAndTransform(face, mesh.Vertices, setup.PartFrames[i], triangles);
+                    if (triangles.Count / 3 >= MAX_BUILDING_TRIANGLES) break;
+                }
+            }
+            if (triangles.Count < 3) return null;
+
+            float minX = float.MaxValue, minY = float.MaxValue, minZ = float.MaxValue;
+            float maxX = float.MinValue, maxY = float.MinValue, maxZ = float.MinValue;
+            foreach (var v in triangles)
+            {
+                if (v.X < minX) minX = v.X; if (v.X > maxX) maxX = v.X;
+                if (v.Y < minY) minY = v.Y; if (v.Y > maxY) maxY = v.Y;
+                if (v.Z < minZ) minZ = v.Z; if (v.Z > maxZ) maxZ = v.Z;
+            }
+            return new BoundingVolume
+            {
+                Type = BoundingVolume.VolumeType.TriangleMesh,
+                Center = new Vector3((minX + maxX) * 0.5f, (minY + maxY) * 0.5f, (minZ + maxZ) * 0.5f),
+                Dimensions = new Vector3(maxX - minX, maxY - minY, maxZ - minZ),
+                Min = new Vector3(minX, minY, minZ),
+                Max = new Vector3(maxX, maxY, maxZ),
+                MeshTriangles = triangles.ToArray(),
+                IsDoor = false,
+                // Physics polygons only, so no box stands in for missing walls (and a thin panel turned
+                // on the landblock would make a big one).
+                NoAabbFallback = true
+            };
         }
 
         // ── Triangle mesh loading ───────────────────────────────────────────
@@ -1678,7 +1757,8 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                         Min = worldMin,
                         Max = worldMax,
                         MeshTriangles = tris,
-                        IsDoor = localVol.IsDoor
+                        IsDoor = localVol.IsDoor,
+                        NoAabbFallback = localVol.NoAabbFallback   // a parts mesh (PartsPhysicsMesh): its triangles are all of it
                     };
                 }
 

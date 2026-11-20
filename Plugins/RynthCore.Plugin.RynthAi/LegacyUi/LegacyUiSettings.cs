@@ -839,6 +839,9 @@ public sealed class LegacyUiSettings
     public bool EnableManaTapping   = true;
     public int  ManaTapMinMana      = 2500;
     public int  ManaStoneKeepCount  = 5;
+    /// <summary>Mana tap with macro off: refills and drains run with the macro stopped too (on by default;
+    /// absent from an older profile = on). Off: only while the macro runs.</summary>
+    public bool ManaTapMacroOff     = true;
 
     // ── AutoVendor (UtilityBelt AutoVendor; /ub autovendor, /ub vendor) ────────
     /// <summary>Run AutoVendor when a vendor opens (and allow /ub autovendor). UB defaults this on;
@@ -1244,6 +1247,8 @@ public sealed class ItemsBridgePayload
     public bool                 EnableManaTapping { get; set; } = true;   // absent from an old profile = the new default
     public int                  ManaTapMinMana    { get; set; }
     public int                  ManaStoneKeepCount { get; set; }
+    /// <summary>Mana tap with macro off. Absent (an engine without the toggle) = unchanged.</summary>
+    public bool?                ManaTapMacroOff   { get; set; }
     public string               CurrentTargetName { get; set; } = string.Empty;
     /// <summary>Listed weapons the character no longer carries (not in the pack, not wielded), by
     /// id: the engine's Items face shows them as missing. Display only, never read back.</summary>

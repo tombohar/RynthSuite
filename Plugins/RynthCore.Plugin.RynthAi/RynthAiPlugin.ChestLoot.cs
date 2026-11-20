@@ -448,6 +448,10 @@ public sealed partial class RynthAiPlugin
         }
         if (now < _chestReopenDueAt || _activity != BotActivity.Looting)
             return true;
+        // AutoCram's or AutoStack's move has no answer yet: the client would refuse the use (2026-11-18,
+        // R-20261117-230613-88c5). It takes 50-300 ms; ChestReopenStaleMs still bounds the wait.
+        if (ItemMoveHold() != null)
+            return true;
 
         if (IsLootingBlockedByPack(settings))
         {

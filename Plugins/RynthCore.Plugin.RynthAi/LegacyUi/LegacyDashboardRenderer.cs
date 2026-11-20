@@ -497,13 +497,26 @@ internal sealed partial class LegacyDashboardRenderer
 
         RefreshAllLists();
 
-        // Load MonsterRules from monsters.json (overrides what was in the profile)
-        // and migrate existing rules to that file if it doesn't exist yet.
+        // The Monsters rules belong to the profile (2026-11-18). The MonsterProfiles file is the
+        // active profile's copy, kept for the Monster Editor and tagged with that profile's name.
+        // It overrides the profile's rules only when it is this profile's copy (or untagged, from
+        // before the tag: then it was the one list every profile used). Another profile's copy is
+        // replaced by this profile's rules. Before, the file always won, so a reload or relog
+        // brought back the rules last edited under another profile.
         MigrateMonstersToFile();
-        LoadMonstersFromFile();
+        string? monstersOwner = ReadMonstersOwner();
+        bool fileIsOurs = monstersOwner == null || monstersOwner.Equals(activeProfile, StringComparison.OrdinalIgnoreCase);
+        if (fileIsOurs) LoadMonstersFromFile();
         // Always re-insert the catch-all "Default" rule at index 0; without it the
         // combat system has no fallback weapon/damage selection for unmatched mobs.
         _settings.EnsureDefaultRule();
+        if (!fileIsOurs)
+        {
+            _host.Log($"[RynthAi] Monsters: the Monsters file held profile '{monstersOwner}''s rules; using profile '{activeProfile}''s own.");
+            SaveMonstersFile();
+        }
+        else if (monstersOwner == null && File.Exists(MonstersFilePath))
+            WriteMonstersOwner();
         SetupMonsterWatcher();
 
         if (holdUnreadable)
@@ -1012,6 +1025,31 @@ internal sealed partial class LegacyDashboardRenderer
         LoadMonstersFromFile();
     }
 
+    // Which profile the MonsterProfiles file belongs to: "<file>.profile", one line, the profile name.
+    // A separate file so the rules file keeps the shape the Monster Editor reads and writes.
+    private string MonstersOwnerPath => MonstersFilePath.Length == 0 ? string.Empty : MonstersFilePath + ".profile";
+
+    /// <summary>The profile the Monsters file was written for; null when it isn't tagged (or there's no file).</summary>
+    private string? ReadMonstersOwner()
+    {
+        try
+        {
+            string path = MonstersOwnerPath;
+            if (path.Length == 0 || !File.Exists(path)) return null;
+            string name = File.ReadAllText(path).Trim();
+            return name.Length > 0 ? name : null;
+        }
+        catch { return null; }
+    }
+
+    private void WriteMonstersOwner()
+    {
+        string path = MonstersOwnerPath;
+        string profile = _settings.SelectedProfile ?? string.Empty;
+        if (path.Length == 0 || profile.Length == 0) return;
+        try { File.WriteAllText(path, profile); } catch { }
+    }
+
     /// <summary>Saves the Monsters rules after a change made outside the panel (a chat command).</summary>
     public void SaveMonsterRules() => SaveMonstersFile();
 
@@ -1037,6 +1075,7 @@ internal sealed partial class LegacyDashboardRenderer
                 Directory.CreateDirectory(_monstersFolder);
                 File.WriteAllText(path, json);
             });
+            WriteMonstersOwner();
 
             if (_monsterWatcher != null)
                 _monsterWatcher.EnableRaisingEvents = wasEnabled;
@@ -1832,6 +1871,7 @@ internal sealed partial class LegacyDashboardRenderer
                 EnableManaTapping = _settings.EnableManaTapping,
                 ManaTapMinMana    = _settings.ManaTapMinMana,
                 ManaStoneKeepCount = _settings.ManaStoneKeepCount,
+                ManaTapMacroOff   = _settings.ManaTapMacroOff,
                 CurrentTargetName = _currentTargetId != 0 ? (_targetLabel ?? string.Empty) : string.Empty,
                 // The engine's Items face marks these "(missing)"; display only (ApplyItemsJson ignores it).
                 MissingIds        = MissingWeaponIds().OrderBy(id => id).ToList(),
@@ -1856,6 +1896,7 @@ internal sealed partial class LegacyDashboardRenderer
             _settings.EnableManaTapping  = p.EnableManaTapping;
             _settings.ManaTapMinMana     = p.ManaTapMinMana;
             _settings.ManaStoneKeepCount = p.ManaStoneKeepCount;
+            if (p.ManaTapMacroOff is bool tapMacroOff) _settings.ManaTapMacroOff = tapMacroOff;   // an engine without the toggle leaves it
             SaveSettings();
         }
         catch { }
@@ -2039,6 +2080,11 @@ internal sealed partial class LegacyDashboardRenderer
             // New profile — force save current settings as its initial state
             _lastSavedJson = string.Empty;
         }
+
+        // The Monsters rules just loaded are this profile's: the Monsters file (and the Monster
+        // Editor) now hold them, tagged with this profile, so a reload or relog keeps them.
+        _settings.EnsureDefaultRule();
+        SaveMonstersFile();
 
         ApplyUiStateFromSettings();
 
@@ -2359,6 +2405,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.EnableManaTapping        = tmp.EnableManaTapping;
         dst.ManaTapMinMana           = tmp.ManaTapMinMana;
         dst.ManaStoneKeepCount       = tmp.ManaStoneKeepCount;
+        dst.ManaTapMacroOff          = tmp.ManaTapMacroOff;
         dst.AutoVendorEnabled          = tmp.AutoVendorEnabled;
         dst.AutoVendorEnableBuying     = tmp.AutoVendorEnableBuying;
         dst.AutoVendorEnableSelling    = tmp.AutoVendorEnableSelling;

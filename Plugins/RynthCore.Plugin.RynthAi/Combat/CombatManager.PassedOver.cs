@@ -55,6 +55,7 @@ public partial class CombatManager
     internal const string PassedOverNeverAttack = "on the never-attack list";
     internal const string PassedOverGhost = "a ghost (the server doesn't have it)";
     internal const string PassedOverEnvironment = "left for hitting the environment";
+    internal const string PassedOverOutOfReach = "out of range of the attack (the server said so), no nearer yet";
     internal const string PassedOverNotAttackable = "not attackable";
 
     /// <summary>Tests: the LOS verdict per monster instead of the ray test (true = blocked).</summary>

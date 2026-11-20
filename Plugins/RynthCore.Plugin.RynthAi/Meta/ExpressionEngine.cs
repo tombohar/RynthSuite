@@ -3749,6 +3749,7 @@ internal sealed partial class ExpressionEngine
             ["CorpseApproachRangeMax"] = (() => D(s.CorpseApproachRangeMax), v => { if (double.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out double d)) s.CorpseApproachRangeMax = d; }),
             ["CorpseApproachRangeMin"] = (() => D(s.CorpseApproachRangeMin), v => { if (double.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out double d)) s.CorpseApproachRangeMin = d; }),
             ["ManaStoneKeepCount"]     = (() => I(s.ManaStoneKeepCount),     v => { if (int.TryParse(v, out int i)) s.ManaStoneKeepCount = i; }),
+            ["ManaTapMacroOff"]        = (() => B(s.ManaTapMacroOff),        v => s.ManaTapMacroOff = ToDouble(v) != 0),   // Items > Mana Stone Tapping > With macro off
             ["RebuffSecondsRemaining"] = (() => I(s.RebuffSecondsRemaining), v => { if (int.TryParse(v, out int i)) s.RebuffSecondsRemaining = i; }),
             ["BlacklistTimeoutSec"]    = (() => I(s.BlacklistTimeoutSec),    v => { if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out double d) && d >= 0) s.BlacklistTimeoutSec = (int)Math.Round(d); }),
             ["RebuffTopOffSecondsRemaining"] = (() => I(s.RebuffTopOffSecondsRemaining), v => { if (int.TryParse(v, out int i)) s.RebuffTopOffSecondsRemaining = i; }),

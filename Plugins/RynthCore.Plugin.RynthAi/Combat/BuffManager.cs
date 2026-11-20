@@ -310,6 +310,8 @@ public partial class BuffManager : IDisposable
     private const double BusyHealRetryMs   = 1500;
     // Refusals in a row (with backoff, about 3.5 s or more) before StopCompletely: longer than any real gesture.
     private const int BusyStopAtStreak     = 4;
+    // The player's hand-cast refusal line was logged for this run (cleared by a refusal outside one).
+    private bool _handRefusalLogged;
 
     // "Not enough mana" refusal (see OnChatWindowText): the refused family rests
     // briefly and buffing pauses; neither is a silent-no-show strike.
@@ -4493,7 +4495,7 @@ public partial class BuffManager : IDisposable
 
     /// <summary>
     /// Buffing's built-in list (no buff profile chosen): creature mastery, Focus, Willpower and
-    /// Life Magic Mastery first, the other creature buffs for usable skills, life protections,
+    /// Life Magic Mastery first, then Mana Conversion Mastery, the other creature buffs for usable skills, life protections,
     /// weapon auras, armor banes. Pump thread: it reads the character's skills.
     /// </summary>
     internal List<string> BuildBuiltInBuffList() => BuildBuiltInBuffList(out _);
@@ -4507,6 +4509,7 @@ public partial class BuffManager : IDisposable
         var step2_Focus           = new List<string>();
         var step3_Willpower       = new List<string>();
         var step3b_LifeMastery    = new List<string>();
+        var step3c_ManaConversion = new List<string>();
         var step4_OtherCreature   = new List<string>();
         var step5_LifeAndItem     = new List<string>();
         var step6_WeaponAuras     = new List<string>();
@@ -4529,6 +4532,12 @@ public partial class BuffManager : IDisposable
             }
             if (kvp.Value.Contains("Creature Enchantment Mastery"))
                 step1_CreatureMastery.Add(kvp.Value);
+            // Right after the four that raise casting skill (R-20261119-195743-1993): Mana Conversion
+            // lowers what every buff after it costs, and it came near the end of the creature buffs.
+            // Not before Focus and Willpower: it is a creature spell, and cast before they raise the
+            // skill it would land a level low and be recast in the same run (the upgrade pass).
+            else if (kvp.Value == "Mana Conversion Mastery")
+                step3c_ManaConversion.Add(kvp.Value);
             else if (kvp.Value == "Life Magic Mastery")
                 step3b_LifeMastery.Add(kvp.Value);
             else if (!BaseCreatureBuffs.Contains(kvp.Value))
@@ -4570,6 +4579,7 @@ public partial class BuffManager : IDisposable
         final.AddRange(step2_Focus);
         final.AddRange(step3_Willpower);
         final.AddRange(step3b_LifeMastery);   // the four that raise casting skill and mana come first
+        final.AddRange(step3c_ManaConversion);   // then what cheapens every cast after it
         final.AddRange(step4_OtherCreature);
         final.AddRange(step5_LifeAndItem);
         final.AddRange(step6_WeaponAuras);
@@ -4725,6 +4735,23 @@ public partial class BuffManager : IDisposable
         // construction → 0x00460D1D killed regardless of gate precision.
         if (lower.Contains("you're too busy") || lower.Contains("you are too busy"))
         {
+            // The player casting by hand (2026-11-18, R-20261118-214609-a9a8 / R-20261118-205826-9c70):
+            // this is the refusal of the player's own click from AC's spell bar, not of anything RynthAi
+            // sent (RynthAi starts nothing while the player casts, ActionPacer.HandCastHolds). Counting it
+            // escalated the backoff to 8 s and, at the 4th, sent StopCompletely into the cast that was
+            // running (the player's, or RynthAi's own), which can drop it. A kit or buff of ours still
+            // waiting keeps waiting for its own result or give-up time.
+            if (ActionPacer.HandCasting(_host))
+            {
+                ObserveLastUseDone();
+                if (!_handRefusalLogged)
+                {
+                    _handRefusalLogged = true;
+                    _host.Log("[BuffChat] 'You're too busy!' answers the player's own cast by hand (AC's spell bar or a hotkey), not RynthAi's: no backoff, no stop, pending kept.");
+                }
+                return;
+            }
+            _handRefusalLogged = false;
             // A kit in flight with no result yet: this is its refusal (see KitRefused). Our bot
             // sends nothing else while a kit is pending (CheckVitals returns at KitPending).
             if (_kitUsedAt != DateTime.MinValue && _kitLandedAt == DateTime.MinValue

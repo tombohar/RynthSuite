@@ -675,7 +675,8 @@ internal static class MetaTests
         }
         FakeHost.NotAttackable.Add(crier);
         var host = FakeHost.Create();
-        // The lurker never got a health update (untracked); the dead one reads 0.
+        // The lurker never got a health update (untracked: ACE sends health only once a monster is selected,
+        // appraised or hit, so most monsters nearby have none); the dead one reads 0.
         var cache = FakeHost.MakeCache(host, Player, new[] { drudge, farDrudge, crier, dead, lurker },
             new Dictionary<uint, float> { [drudge] = 1f, [farDrudge] = 0.5f, [crier] = 1f, [dead] = 0f });
         var rig = new Rig(host, Player);
@@ -684,23 +685,30 @@ internal static class MetaTests
         rig.S.MonsterRules.Add(new MonsterRule { Name = "^Drudge" });
 
         Check.True(rig.Holds(C.MonsterNameCountWithinDistance, "Drudge,20,1"), "one drudge within 20");
-        Check.False(rig.Holds(C.MonsterNameCountWithinDistance, "Drudge,20,2"), "dead and untracked ones do not count");
-        Check.True(rig.Holds(C.MonsterNameCountWithinDistance, "drudge,100,2"), "two within 100 (ignores case, inclusive)");
-        Check.False(rig.Holds(C.MonsterNameCountWithinDistance, "Drudge,99.9,2"), "the far one is at 100");
+        Check.True(rig.Holds(C.MonsterNameCountWithinDistance, "Drudge,20,2"), "the untracked lurker counts (R-20261119-123029-4bd1)");
+        Check.False(rig.Holds(C.MonsterNameCountWithinDistance, "Drudge,20,3"), "the dead one does not");
+        Check.True(rig.Holds(C.MonsterNameCountWithinDistance, "drudge,100,3"), "three within 100 (ignores case, inclusive)");
+        Check.False(rig.Holds(C.MonsterNameCountWithinDistance, "Drudge,99.9,3"), "the far one is at 100");
         Check.False(rig.Holds(C.MonsterNameCountWithinDistance, "Crier,20,1"), "not attackable");
         Check.False(rig.Holds(C.MonsterNameCountWithinDistance, "Drudge,x,1"), "bad distance");
         Check.False(rig.Holds(C.MonsterNameCountWithinDistance, "Drudge,20"), "missing count");
         Check.False(rig.Holds(C.MonsterNameCountWithinDistance, "(,20,1"), "bad regex");
         Check.True(rig.Holds(C.MonsterNameCountWithinDistance, "Drudge,20,0"), "at least 0 always holds");
 
-        Check.True(rig.Holds(C.NoMonstersWithinDistance, "9"), "none within 9 (crier, dead, untracked skipped)");
+        Check.True(rig.Holds(C.NoMonstersWithinDistance, "4"), "none within 4 (the crier at 1 is not attackable)");
+        Check.False(rig.Holds(C.NoMonstersWithinDistance, "5"), "the untracked lurker at 5 is a monster (the dead one there is not)");
         Check.False(rig.Holds(C.NoMonstersWithinDistance, "10"), "the drudge at 10");
+        // A ghost (combat's GhostTracker: the server no longer has it) is left out, like the combat scan leaves it.
+        rig.M.SetGhostCheck(id => id == unchecked((int)lurker));
+        Check.True(rig.Holds(C.NoMonstersWithinDistance, "9"), "the lurker is a ghost: none within 9");
+        Check.False(rig.Holds(C.MonsterNameCountWithinDistance, "Drudge,20,2"), "a ghost is not counted by name either");
+        rig.M.SetGhostCheck(null);
         Check.False(rig.Holds(C.NoMonstersWithinDistance, ""), "empty means 20");
         Check.False(rig.Holds(C.NoMonstersWithinDistance, "0"), "0 means 20");
         Check.False(rig.Holds(C.NoMonstersWithinDistance, "junk"), "junk means 20");
 
-        // Priority counts use the Monsters list (Default excluded) and, unlike the two above,
-        // do count a monster that never had a health update.
+        // Priority counts use the Monsters list (Default excluded) and, like the two above,
+        // count a monster that never had a health update.
         Check.True(rig.Holds(C.MonsterPriorityCountWithinDistance, "2,20"), "drudge + untracked lurker");
         Check.False(rig.Holds(C.MonsterPriorityCountWithinDistance, "3,20"), "not three within 20");
         Check.True(rig.Holds(C.MonsterPriorityCountWithinDistance, "3,100"), "three within 100");

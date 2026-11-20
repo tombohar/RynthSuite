@@ -267,6 +267,9 @@ public partial class CombatManager : IDisposable
     // Grace period: keep activeTargetId alive for this long after it disappears from scan,
     // so a single bad LOS result or scan gap doesn't hand control to navigation.
     private DateTime _targetLostScanTime = DateTime.MinValue;
+    // The last scan that left the fight target out for a wall in the way: the drop line says why
+    // (R-20261119-114214-b9ed: "scan grace expired" didn't say it was line of sight).
+    private DateTime _engagedLosBlockedAt = DateTime.MinValue;
     private const double TARGET_SCAN_GRACE_MS = 1500.0;
 
     // The locked target (see HandleCombatTrigger: with Target Lock on it is held until it dies,
@@ -1229,6 +1232,13 @@ public partial class CombatManager : IDisposable
                 continue;
             }
 
+            // Refused 'Out of Range!' and no nearer since (CombatManager.OutOfReach.cs).
+            if (IsOutOfReach(wo.Id, dist))
+            {
+                if (notePassed) NotePassedOver(wo.Id, dist, PassedOverOutOfReach);
+                continue;
+            }
+
             // Just killed (KillerNotification) but not yet a corpse — skip so we
             // don't re-lock and cast at it during its death animation.
             if (_recentlyKilled.ContainsKey(wo.Id)) continue;
@@ -1298,6 +1308,7 @@ public partial class CombatManager : IDisposable
             if (losBlocked)
             {
                 _nearbyNoLos++; // in range + attackable but wall-blocked — still stops nav
+                if (isEngaged) _engagedLosBlockedAt = RynthClock.Now;
                 if (notePassed) NotePassedOver(wo.Id, dist, PassedOverLos);
                 continue;
             }
@@ -1484,6 +1495,7 @@ public partial class CombatManager : IDisposable
     private void NoteOffensiveAnswer(int target, uint err)
     {
         if (target == 0) return;
+        if (err == MissileOutOfRangeErr) NoteOutOfReach(target);   // CombatManager.OutOfReach.cs
         if (err != TargetNotAcquiredErr)
         {
             // A 'too busy' says nothing about the target; any other answer means the server has it.
@@ -2000,7 +2012,10 @@ public partial class CombatManager : IDisposable
             // count toward the blacklist miss streak. Clear pending silently
             // so JudgePendingOffensiveCast's 500ms no-too-busy window stays
             // honest, and the next attempt can be issued under the throttle.
-            if (lo.Contains("you're too busy") || lo.Contains("you are too busy"))
+            // The player's own click refused while our cast runs (2026-11-18, R-20261118-205826-9c70,
+            // 15:52:54-58: refusals of 'Casting Incantation of Force Streak' during our Force Arc, which
+            // hit) is not ours: our cast stays pending and counted.
+            if ((lo.Contains("you're too busy") || lo.Contains("you are too busy")) && !ActionPacer.HandCasting(_host))
             {
                 _pendingOffensiveSpellId   = 0;
                 _pendingOffensiveTargetId  = 0;
@@ -2092,8 +2107,10 @@ public partial class CombatManager : IDisposable
 
         // Refused mid-gesture: the debuff never went out, so don't let the result timeout
         // mark it as landed. Retry it (counted, so a refusal loop can't run forever).
-        if (text.IndexOf("you're too busy", StringComparison.OrdinalIgnoreCase) >= 0
-            || text.IndexOf("you are too busy", StringComparison.OrdinalIgnoreCase) >= 0)
+        // Not when it is the player's own cast by hand that was refused (2026-11-18): our debuff is running.
+        if ((text.IndexOf("you're too busy", StringComparison.OrdinalIgnoreCase) >= 0
+             || text.IndexOf("you are too busy", StringComparison.OrdinalIgnoreCase) >= 0)
+            && !ActionPacer.HandCasting(_host))
         {
             NoteDebuffFailed("Refused");
             return;
@@ -3002,22 +3019,43 @@ public partial class CombatManager : IDisposable
         float curHp = tid != 0 ? _worldFilter.GetHealthRatio(tid) : -1f;
         bool curServerAlive = curHp > 0f && !_worldFilter.IsHealthEstimated(tid);
         bool noticeForNeighbour = otherVictim != 0 && curServerAlive;
-        if (tid != 0 && curMatches && (noticeForSwappedMob || !curAttacked || noticeForNeighbour))
+        // 2026-11-18, R-20261118-012228-179f (DreamWeave, melee, a pack of same-named Olthoi): the
+        // fight target was dropped as dead twice in 4 s while it was alive and fighting. The weapon
+        // cleaves: each swing hits the target and a same-named neighbour, and in Melee mode every
+        // damage line naming the target is the target's (ResolveHitVictim), so the neighbour is
+        // never "hit by us" and FindRecentlyHitVictim finds no one when the neighbour dies. The
+        // notice was the target's, the target was dropped, kept off the scan for 4 s, and the bot
+        // swung at the next one (the "dead" target was back in the scan exactly 4 s later). But
+        // the server said the target was alive: combat's QueryHealth makes it the server's
+        // selection, so ACE pushes its health with every hit, the lethal one too (DamageHistory.Add
+        // sends the 0 before OnDeath sends the notice), and a cleave strikes the aimed target first.
+        // A server health that came with or after our last hit on it, above 0, means the notice is
+        // a neighbour's even when we can't say which. The health is asked again: a target that did
+        // die some other way (a damage-over-time tick sends no health) answers 0 and is dropped as
+        // "hp=0" on the next tick.
+        bool aliveByFreshHealth = !noticeForNeighbour && tid != 0 && curMatches && curServerAlive
+                                  && _fightTargetId == tid && TryFreshFightHealth(out float freshHp) && freshHp > 0f;
+        if (tid != 0 && curMatches && (noticeForSwappedMob || !curAttacked || noticeForNeighbour || aliveByFreshHealth))
         {
             _host.Log($"[RynthAi] Kill notice names 0x{tid:X8} '{curName}' but " +
                       (noticeForSwappedMob ? $"belongs to predicted kill 0x{pendingKillId:X8}"
                        : noticeForNeighbour ? $"it is alive ({curHp:0.00}); a neighbour we hit died (0x{otherVictim:X8})"
+                       : aliveByFreshHealth ? $"the server says it is alive ({DescribeFightHealthAge()}); a same-named monster near it died (a cleave, a pet, a ring), not known which; its health is asked again"
                        : "it hasn't been attacked yet") +
                       " — keeping the target");
             if (noticeForNeighbour)
                 SuppressGuessedDeath(otherVictim, nowKill);
+            if (aliveByFreshHealth)
+                try { if (_host.HasQueryHealth) _host.QueryHealth((uint)tid); } catch { }
         }
         else if (tid != 0 && curMatches)
         {
             _recentlyKilled[tid] = nowKill.AddMilliseconds(RECENTLY_KILLED_SUPPRESS_MS);
             NoteConfirmedKill(tid, nowKill);
             ForgetScanned(tid);
-            DropTarget("killed (KillerNotification)");
+            // The server health it was dropped on, so a report shows whether the drop was sure
+            // (R-20261118-012228-179f).
+            DropTarget($"killed (KillerNotification; {(_fightTargetId == tid ? DescribeFightHealthAge() : "not the fight being tracked")})");
         }
         else if (pendingKillId == 0)
         {
@@ -3374,6 +3412,18 @@ public partial class CombatManager : IDisposable
         if (_fightHealthAt == DateTime.MinValue || ratio <= 0f) return false;
         return _fightLastHitAt == DateTime.MinValue
                || _fightHealthAt >= _fightLastHitAt.AddMilliseconds(-FightHealthHitSlackMs);
+    }
+
+    /// <summary>The fight target's last server health and how old it and our last hit on it are, for
+    /// the kill-notice log lines (R-20261118-012228-179f): "server health 0.61 40 ms ago, last hit
+    /// 35 ms ago", or "no server health this fight".</summary>
+    private string DescribeFightHealthAge()
+    {
+        if (_fightHealthAt == DateTime.MinValue) return "no server health this fight";
+        DateTime now = TargetClock();
+        string hit = _fightLastHitAt == DateTime.MinValue ? "no hit yet"
+                   : $"last hit {(now - _fightLastHitAt).TotalMilliseconds:0} ms ago";
+        return $"server health {_fightHealth:0.00} {(now - _fightHealthAt).TotalMilliseconds:0} ms ago, {hit}";
     }
 
     /// <summary>
@@ -3819,7 +3869,9 @@ public partial class CombatManager : IDisposable
                 _targetLostScanTime = RynthClock.Now;
 
             if ((RynthClock.Now - _targetLostScanTime).TotalMilliseconds > TARGET_SCAN_GRACE_MS)
-                DropTarget("scan grace expired");
+                DropTarget((RynthClock.Now - _engagedLosBlockedAt).TotalMilliseconds <= TARGET_SCAN_GRACE_MS
+                    ? "scan grace expired (out of sight: the line-of-sight check finds a wall in the way)"
+                    : "scan grace expired");
             return true;
         }
         _targetLostScanTime = DateTime.MinValue; // back in scan — reset grace timer

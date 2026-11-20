@@ -54,6 +54,7 @@ internal static class CombatHookTests
         r.Add("combat hook: a script heal (a drain) at a fight target whose rule turned to Priority 0 is rejected", HookHealRejectsIgnoredTarget);
         r.Add("blacklist: casts answered 'too busy' (UseDone 0x1D) are not no-damage casts (answered 0: the target is dropped)", RefusedCastsNotJudged);
         r.Add("ghost (R-20261115-172110-9e6a): two casts answered 'target not acquired' (UseDone 0x42C) mark the target a ghost and stop the casting", NotAcquiredMarksGhost);
+        r.Add("out of range (R-20261119-155301-121a): a cast answered 'Out of Range!' (UseDone 0x550) drops the target until it comes 3 m nearer", OutOfRangeDropsTarget);
         r.Add("blacklist (2026-11-15): melee landing nothing across a building's wall (one inside, one out) keeps the target off 5 min; elsewhere the usual timeout", AcrossWallBlacklistLonger);
         r.Add("loot jump: Think sends no cast while in the air after a loot jump; it casts on the landing, or at the cap", LootJumpHoldsAttack);
         r.Add("loot jump: a swing refused in the air (WeenieError 0x4EB) is not a no-damage attack (without it: a miss)", MeleeInAirNotJudged);
@@ -1087,6 +1088,46 @@ internal static class CombatHookTests
     // 2026-11-15, R-20261115-172110-9e6a: every Blade Arc at a target the server didn't have came back
     // UseDone 0x42C about 70 ms after the send, and combat cast again at once (13 casts in 0.85 s, the
     // hourglass going round), never dropping it.
+    // 2026.11.15.3: an Olthoi Hive Warrior 88 m off, every Incantation of Force Arc at it answered UseDone
+    // 0x550 about 60 ms after the send, and combat cast again at once (1,027 casts since the last kill).
+    private static void OutOfRangeDropsTarget() => Guard(() =>
+    {
+        var rig = new AttackRig(setup: () => { FakeHost.ServerGates = true; FakeHost.LastUseDoneCalls = true; });
+        rig.S.EnableRaycasting = false;
+        rig.Attack();
+        Check.Eq(FakeHost.Casts.Count, 1, "the first cast goes out");
+        FakeHost.UseDone(CombatManager.MissileOutOfRangeErr);
+        rig.Attack();
+        Check.Eq(FakeHost.Casts.Count, 1, "the server said 'Out of Range!': no second cast at it");
+        Check.Eq(rig.C.activeTargetId, 0, "the target is dropped");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("out of range at 10 m") && l.Contains("UseDone 0x550")),
+                   "logged with the distance and the answer: " + FakeHost.Logs.LastOrDefault(l => l.Contains("out of range")));
+        Check.Eq(FakeHost.Chat.Count(l => l.Contains("is out of range at 10 yd")), 1, "said once in chat");
+
+        SetField(rig.C, "_lastScanTime", DateTime.MinValue);   // the scan's own throttle
+        rig.C.ScanNearbyTargets();
+        Check.False(rig.C.ScannedTargets.Any(t => t.Id == Target), "the scan leaves it out");
+        Check.True(rig.C.ScannedTargets.Any(t => t.Id == Other), "the other monster is still a target");
+
+        FakeHost.Positions[(uint)Target] = (0x0101001Bu, 0f, 8f, 0f);   // 2 m nearer: not enough
+        SetField(rig.C, "_lastScanTime", DateTime.MinValue);
+        rig.C.ScanNearbyTargets();
+        Check.False(rig.C.ScannedTargets.Any(t => t.Id == Target), "2 m nearer: still left out");
+
+        FakeHost.Positions[(uint)Target] = (0x0101001Bu, 0f, 6f, 0f);   // 4 m nearer
+        SetField(rig.C, "_lastScanTime", DateTime.MinValue);
+        rig.C.ScanNearbyTargets();
+        Check.True(rig.C.ScannedTargets.Any(t => t.Id == Target), "4 m nearer: a target again");
+
+        // Control: any other answer leaves the target alone.
+        var ok = new AttackRig(setup: () => { FakeHost.ServerGates = true; FakeHost.LastUseDoneCalls = true; });
+        ok.S.EnableRaycasting = false;
+        ok.Attack();
+        FakeHost.UseDone(0);
+        ok.Attack();
+        Check.Eq(ok.C.activeTargetId, Target, "answered 0: still the target");
+    });
+
     private static void NotAcquiredMarksGhost() => Guard(() =>
     {
         var rig = new AttackRig(setup: () => { FakeHost.ServerGates = true; FakeHost.LastUseDoneCalls = true; });

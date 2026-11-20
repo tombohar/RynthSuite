@@ -209,6 +209,10 @@ internal static class ActionPacer
             _holdsByWho.Clear();
             _playerHoldUntil = _playerHoldSince = _playerHolds = _playerHeldStarts = 0;
             _playerHoldLogged.Clear();
+            _handCastAt = _handCastSince = 0; _handRunCasts = _handRunRefusals = 0;
+            _handCasts = _handRuns = _handRefusals = _handHeldStarts = 0;
+            _handSpell = "";
+            _handLogged.Clear();
             _lastTimeout = "";
             ClearBusyLocked();
             _stuckBreaks = 0;
@@ -432,6 +436,127 @@ internal static class ActionPacer
         Log(host, $"[Pace] the player's turn is over after {held} ms; RynthAi goes on");
     }
 
+    // ── The player casting by hand (2026-11-18) ─────────────────────────────
+    // R-20261118-214609-a9a8 and R-20261118-205826-9c70 (DreamWeave, 2026.11.15.3), "spells are not
+    // connecting anymore", the player "casting arc VII": a 'too busy' UseDone about every 0.4 s with
+    // nothing sent by RynthAi (no [CombatCast], no pending buff, the pacer only waiting). The sender
+    // was the player, casting from AC's own spell bar or hotkeys while the macro ran: AC prints
+    // "Casting <spell>" (chat type 26) for each of those (15:52:54.643 'Casting Incantation of Force
+    // Arc', then 'Casting Incantation of Force Streak' x3, each answered 'You're too busy!' 35-50 ms
+    // later), and the heartbeat's input clock read idle=0 exactly while the refusals ran. RynthAi's
+    // own casts never print that line. ACE refuses every cast while the character's last one is
+    // still running (VerifyBusy), so each click during a cast came back 0x1D.
+    // RynthAi took those refusals as its own: the buff step escalated its backoff to 8 s and, at
+    // the 4th, sent StopCompletely "to clear a stuck gesture" in the middle of a running cast (the
+    // player's at 16:45:18.6, its own Force Arc at 15:52:58.2), which can drop that cast; and its
+    // buff pass kept the server busy so the player's clicks were refused.
+    // Now each such line gives the player the character for HandCastHoldMs from it: RynthAi starts
+    // no cast, use, stance change or movement (an emergency heal still may), the 'too busy' answers
+    // in that time are the player's (no breaker evidence, no backoff, no stop), logged at the start
+    // and the end of the run.
+
+    /// <summary>How long after the player's last cast by hand (AC's "Casting ..." line) RynthAi leaves the character to the player.</summary>
+    public const long HandCastHoldMs = 3000;
+    private static long _handCastAt;             // the last "Casting ..." line (0 = none yet)
+    private static long _handCastSince;          // the first one of this run
+    private static int _handRunCasts, _handRunRefusals;
+    private static long _handCasts, _handRuns, _handRefusals, _handHeldStarts;
+    private static string _handSpell = "";
+    private static readonly HashSet<string> _handLogged = new();
+
+    /// <summary>The player's casts by hand seen (AC's "Casting ..." lines), runs of them, and the 'too busy' answers to them.</summary>
+    public static long HandCasts => _handCasts;
+    public static long HandCastRuns => _handRuns;
+    public static long HandCastRefusals => _handRefusals;
+
+    /// <summary>
+    /// AC printed "Casting <paramref name="spell"/>": the player cast from the spell bar or a hotkey (RynthAi's
+    /// casts never print it). Starts or extends the player's hand-cast run (HandCastHoldMs from now).
+    /// </summary>
+    public static void NoteHandCast(RynthCoreHost host, string spell)
+    {
+        if (!Enabled) return;
+        long now = NowMs();
+        string? end = EndHandRunIfOver(now);
+        bool began;
+        lock (Gate)
+        {
+            began = _handCastAt == 0;
+            if (began)
+            {
+                _handCastSince = now;
+                _handRunCasts = 0;
+                _handRunRefusals = 0;
+                _handRuns++;
+                _handLogged.Clear();
+            }
+            _handCastAt = now;
+            _handRunCasts++;
+            _handCasts++;
+            _handSpell = spell;
+        }
+        if (end != null) Log(host, end);
+        if (began)
+            Log(host, $"[Pace] the player is casting by hand: AC's own 'Casting {spell}' (the spell bar or a hotkey, not RynthAi). " +
+                      $"RynthAi starts nothing new (an emergency heal still may) and takes the server's 'too busy' answers as the player's " +
+                      $"until {HandCastHoldMs} ms after the last one");
+    }
+
+    /// <summary>True within HandCastHoldMs of the player's last cast by hand.</summary>
+    public static bool HandCasting(RynthCoreHost host)
+    {
+        if (!Enabled) return false;
+        string? end = EndHandRunIfOver(NowMs());
+        if (end != null) { Log(host, end); return false; }
+        lock (Gate) return _handCastAt != 0;
+    }
+
+    /// <summary>The run's end line when HandCastHoldMs has passed since its last cast (the run is closed), else null.</summary>
+    private static string? EndHandRunIfOver(long now)
+    {
+        lock (Gate)
+        {
+            if (_handCastAt == 0 || now - _handCastAt < HandCastHoldMs) return null;
+            string line = $"[Pace] the player's casting by hand is over ({_handRunCasts} cast(s) in {_handCastAt - _handCastSince} ms, " +
+                          $"last '{_handSpell}', {_handRunRefusals} 'too busy' answer(s) to them): RynthAi goes on";
+            _handCastAt = 0;
+            _handLogged.Clear();
+            return line;
+        }
+    }
+
+    /// <summary>A 'too busy' answer while the player casts by hand: theirs (counted). False when no run is on.</summary>
+    private static bool TakeHandRefusalLocked(long now)
+    {
+        if (_handCastAt == 0 || now - _handCastAt >= HandCastHoldMs) return false;
+        _handRunRefusals++;
+        _handRefusals++;
+        return true;
+    }
+
+    /// <summary>True (with why) while the player casts by hand; an emergency heal is not held. One log line per run and subsystem.</summary>
+    private static bool HandCastHolds(RynthCoreHost host, string who, HealNeed heal, out string why)
+    {
+        why = "";
+        if (!HandCasting(host)) return false;
+        // The server's answers are still read while the run holds every start (ServerBusyHolds, which
+        // reads them, is not reached): its 'too busy' answers are counted as the player's here.
+        ObserveUseDone(host, NowMs(), out string? seen);
+        if (seen != null) Log(host, seen);
+        if (heal == HealNeed.Emergency) return false;
+        string spell;
+        bool log;
+        lock (Gate)
+        {
+            _handHeldStarts++;
+            log = _handLogged.Add(who);
+            spell = _handSpell;
+        }
+        why = $"the player is casting by hand ({spell})";
+        if (log) Log(host, $"[Pace] {who} waits: {why}");
+        return true;
+    }
+
     /// <summary>True (with why) while another plugin has the player's turn. One log line per hold and subsystem.</summary>
     private static bool PlayerHoldsStart(RynthCoreHost host, string who, out string why)
     {
@@ -478,6 +603,7 @@ internal static class ActionPacer
     {
         if (!Enabled) { why = ""; return true; }
         if (PlayerHoldsStart(host, who, out why)) return false;
+        if (HandCastHolds(host, who, heal, out why)) return false;   // the player casting by hand (2026-11-18)
         // A buff, heal, kit or potion in the air is refused by ACE: wait for the landing. Combat checks
         // it itself, at the attack, so a stance change is not held; loot and doors never.
         if (who == "Buff" && LootJumpAirborne(host, out why)) return false;
@@ -604,6 +730,7 @@ internal static class ActionPacer
         why = "";
         if (!Enabled) return false;
         if (PlayerHoldsStart(host, who, out why)) return true;   // the item managers' moves wait too
+        if (HandCastHolds(host, who, heal, out why)) return true;   // and while the player casts by hand
         bool busy;
         try { busy = host.HasGetCastBusyState && host.GetCastBusyState() != 0; } catch { busy = false; }
         long now = NowMs();
@@ -897,7 +1024,10 @@ internal static class ActionPacer
             if (err == TooBusyErr)
             {
                 if (_busySince == 0) { _busySince = now; if (_hung == null) _busyLogged.Clear(); }
-                _busyRefusals++;
+                // The player's click refused while a cast runs (2026-11-18, R-20261118-214609-a9a8): the
+                // server is busy all the same (the latch), but it says nothing about a cast of ours, so it is
+                // no evidence for the stuck-cast breaker.
+                if (!TakeHandRefusalLocked(now)) _busyRefusals++;
                 return;
             }
             if (_busySince != 0 || _hung != null || _stage != BreakStage.None)
@@ -1377,6 +1507,7 @@ internal static class ActionPacer
             lines.Add($"  Sent {_started}, answered {_answered}, no answer in time {_timedOut}{(_lastTimeout.Length > 0 ? $" (last: {_lastTimeout})" : "")}");
             lines.Add($"  Starts held {_heldStarts}, moves held {_heldMoves}, heals let ahead {_healsAhead}, sent over an unanswered one {_sentOverOutstanding}");
             lines.Add($"  The player's turn (key presses from other plugins): {_playerHolds}, starts held for them {_playerHeldStarts}");
+            lines.Add($"  The player casting by hand (AC's 'Casting ...'): {_handCasts} cast(s) in {_handRuns} run(s), {_handRefusals} 'too busy' answer(s) to them, starts held {_handHeldStarts}");
             lines.Add($"  Mode changes refused while waiting {_modeRefused}, skipped (already in that mode) {_modeSkipped}");
             lines.Add($"  Held while the character was animating {_gestureHolds}, animation time limits {_gestureLimits}");
             lines.Add($"  Held after a 'too busy' answer {_refusalHolds}, held casts turned to {_heldTurns}, stuck casts broken {_stuckBreaks} ({_forcedBreaks} by the HP failsafe; limit {StuckCastMs} ms)");
@@ -1457,6 +1588,8 @@ internal static class ActionPacer
                 return false;
             }
             if (PlayerHoldsStart(host, "mode:" + who, out _)) return false;
+            // A stance change fails a cast in progress on ACE: never under the player's own cast (2026-11-18).
+            if (HandCastHolds(host, "mode:" + who, HealNeed.None, out _)) return false;
             PacedAction? a = Current(host);
             if (a != null)
             {

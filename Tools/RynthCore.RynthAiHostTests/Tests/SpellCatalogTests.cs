@@ -33,6 +33,7 @@ internal static class SpellCatalogTests
         r.Add("buff profile: save, list and load round-trip", ProfileRoundTrip);
         r.Add("buff profile: an id-only entry is filled in; a newer schema is refused", ProfileNormalizeAndSchema);
         r.Add("buff profile: a chosen profile replaces the built-in list (order kept, no disabled or duplicate lines)", ProfileReplacesList);
+        r.Add("built-in buffs (R-20261119-195743-1993): Mana Conversion Mastery right after the four that raise casting skill, before the rest", ManaConversionEarly);
         r.Add("buff profile: a profile spell casts the best level known", ProfileResolvesTier);
         r.Add("buff profile: a name with no tier ladder falls back to its spell family", ProfileFamilyFallback);
         r.Add("buff profile: Loaded Files lists profiles, picks one by index, and the snapshot reports it", LoadedFilesPicker);
@@ -174,6 +175,16 @@ internal static class SpellCatalogTests
     });
 
     // ── Buffing with a profile ──────────────────────────────────────────────
+
+    private static void ManaConversionEarly()
+    {
+        var list = NewBuffs(500).BuildBuiltInBuffList();
+        Check.Eq(string.Join(",", list.Take(5)),
+                 "Creature Enchantment Mastery,Focus Self,Willpower Self,Life Magic Mastery,Mana Conversion Mastery",
+                 "the four that raise casting skill, then Mana Conversion Mastery (it cheapens the rest)");
+        Check.Eq(list.IndexOf("Strength Self"), 5, "then the other creature buffs");
+        Check.Eq(list.Count(b => b == "Mana Conversion Mastery"), 1, "once");
+    }
 
     private static void ProfileReplacesList()
     {

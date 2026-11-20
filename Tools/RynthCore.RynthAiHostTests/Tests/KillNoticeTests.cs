@@ -38,6 +38,8 @@ internal static class KillNoticeTests
         r.Add("kill notice: the fight is over when the last monster dies - looting gets the tick", FightOverLoots);
         r.Add("targeting: a top-priority monster's tier holds while its death is only a guess", GuessedDeathHoldsTier);
         r.Add("targeting (melee): after a kill and its echo the same-named top priority is next, not a lesser one", EchoKeepsTopPriorityNext);
+        r.Add("kill notice (melee, cleave): a same-named neighbour's death keeps the target the server says is alive", CleaveKillKeepsLiveTarget);
+        r.Add("kill notice (melee): the fight target's own death (the server's 0, or no fresh health) still drops it", MeleeOwnDeathStillDrops);
     }
 
     // ── The rig ──────────────────────────────────────────────────────────────
@@ -305,5 +307,96 @@ internal static class KillNoticeTests
         rig.C.HandleCombatTrigger();
         Check.Eq(rig.C.activeTargetId, Id(twin), "the Priority 5 twin is next (it was 4 s out of the scan before)");
         Check.True(rig.Scanned(lesser), "the lesser one was a candidate too");
+    }
+
+    // ── Melee cleave: the neighbour's notice names the target ────────────────
+    // R-20261118-012228-179f (2026-11-18, DreamWeave, melee with a cleaving weapon in a pack of
+    // same-named Olthoi): "switching targets when it shouldn't be". A swing hits the target and,
+    // by cleave, a same-named neighbour; in Melee mode both damage lines are the target's, so when
+    // the neighbour died its notice was matched to the target, which was dropped while alive (the
+    // server's health for it had just said 0.6), kept off the scan for 4 s, and the bot turned to
+    // the next one - twice in 4 s in the report. ACE pushes the fight target's health with every
+    // hit (combat's QueryHealth made it the server's selection), the lethal one too, before the
+    // notice: a fresh health above 0 says the target didn't die.
+
+    /// <summary>The plugin's OnUpdateHealth for a creature: the cache and combat's fight-health clock.</summary>
+    private static void ServerHealth(Rig rig, uint id, float ratio)
+    {
+        rig.Cache.OnUpdateHealth(id, ratio);
+        rig.C.NoteServerHealth(Id(id), ratio);
+    }
+
+    /// <summary>A melee strike on the target with its health from the server (as ACE sends it with the
+    /// hit) and a cleave hit on a same-named neighbour (a line naming the same name).</summary>
+    private static void StrikeWithCleave(Rig rig, uint target, float healthAfter)
+    {
+        ServerHealth(rig, target, healthAfter);
+        rig.C.OnCombatDamage(40, 1, false, true);
+        rig.C.HandleChatForDamage("You slash Drumtaken Sentry for 40 points of slashing damage!");
+        rig.C.HandleChatForDamage("You slash Drumtaken Sentry for 31 points of slashing damage!");   // the cleave
+    }
+
+    private static Rig MeleePair(out uint target, out uint twin)
+    {
+        var rig = new Rig(CombatMode.Melee);
+        FakeHost.TargetCalls = true;   // QueryHealth counted
+        target = rig.Mob(Sentry, SentryWcid, 2);
+        twin = rig.Mob(Sentry, SentryWcid, 3);
+        rig.Build(target);
+        rig.Store.SetManualHp(SentryWcid, 200);
+        return rig;
+    }
+
+    private static void CleaveKillKeepsLiveTarget()
+    {
+        var rig = MeleePair(out uint target, out uint twin);
+        StrikeWithCleave(rig, target, 0.80f);
+        rig.Now = rig.Now.AddMilliseconds(1000);
+        StrikeWithCleave(rig, target, 0.61f);
+        int queriesBefore = FakeHost.HealthQueries.Count(q => q == target);
+
+        // The next strike's cleave kills the neighbour: no damage line for it, its notice only.
+        rig.Now = rig.Now.AddMilliseconds(900);
+        ServerHealth(rig, target, 0.55f);
+        rig.C.HandleChatForDamage("You slash Drumtaken Sentry for 38 points of slashing damage!");
+        rig.C.OnKillNotification("You killed Drumtaken Sentry!");
+
+        Check.Eq(rig.C.activeTargetId, Id(target), "the target the server says is alive is kept");
+        Check.False(rig.Suppressed(target), "and not kept off the scan");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("the server says it is alive") && l.Contains("keeping the target")),
+            "the log says why");
+        Check.Eq(FakeHost.HealthQueries.Count(q => q == target), queriesBefore + 1,
+            "its health is asked again (a target dead some other way answers 0)");
+
+        rig.Rescan();
+        rig.C.HandleCombatTrigger();
+        Check.Eq(rig.C.activeTargetId, Id(target), "no switch to another monster");
+        Check.False(FakeHost.Logs.Any(l => l.Contains("[CombatTarget] lock") || l.Contains("[CombatTarget] switch")),
+            "no new lock");
+    }
+
+    private static void MeleeOwnDeathStillDrops()
+    {
+        // The lethal hit: the server's 0 comes before the notice.
+        var rig = MeleePair(out uint target, out uint twin);
+        StrikeWithCleave(rig, target, 0.30f);
+        rig.Now = rig.Now.AddMilliseconds(1000);
+        ServerHealth(rig, target, 0f);
+        rig.C.OnKillNotification("You killed Drumtaken Sentry!");
+        Check.Eq(rig.C.activeTargetId, 0, "health 0: the target died, dropped");
+        Check.True(rig.Suppressed(target), "and kept off the scan while its corpse forms");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("killed (KillerNotification; server health 0.00")),
+            "the drop names the server health it went on");
+
+        // The health stream stopped (the player selected something else): the last health is older
+        // than the hits since, so it says nothing about the kill and the notice is the target's.
+        rig = MeleePair(out target, out twin);
+        StrikeWithCleave(rig, target, 0.30f);
+        rig.Now = rig.Now.AddMilliseconds(1500);
+        rig.C.HandleChatForDamage("You slash Drumtaken Sentry for 40 points of slashing damage!");
+        rig.Now = rig.Now.AddMilliseconds(1200);
+        rig.C.OnKillNotification("You killed Drumtaken Sentry!");
+        Check.Eq(rig.C.activeTargetId, 0, "stale health: the notice is the target's, dropped");
+        Check.False(rig.Suppressed(twin), "the neighbour isn't taken for it");
     }
 }

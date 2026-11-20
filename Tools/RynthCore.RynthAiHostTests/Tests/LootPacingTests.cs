@@ -20,6 +20,12 @@ namespace RynthCore.RynthAiHostTests.Tests;
 //     client (the salvage panel open wins), and the corpse loop then waits for an open that never
 //     comes. Corpse opens (and every automatic door/corpse use, via UseAudit.WorldUseHold) wait
 //     while the salvage panel is pending; the corpse claim's timeout is not charged meanwhile.
+//  I. R-20261117-230613-88c5 (2026-11-18), "after looting a corpse it says you can only move or use
+//     one item at a time": AutoCram ran on the first tick after a corpse was released, and the
+//     looter used the next corpse 1-3 ms after the cram's move. The client still held the move in
+//     its one pending item request, refused the use and sent nothing, and the looter waited 5 s for
+//     an answer (four times in 100 s). The open now waits for the move's answer (the item out of the
+//     main pack, or the server refusing it), 3 s at most; so do the other item actions (PacedBusy).
 internal static class LootPacingTests
 {
     private const uint Player = 0x50000E01;
@@ -27,6 +33,10 @@ internal static class LootPacingTests
     private const uint CorpseB = 0x80073023;
     private const uint Ust = 0x80000E11;
     private const uint Junk = 0x80000E12;
+    private const uint Gem = 0x80000E13;
+    private const uint SidePack = 0x80000E14;
+    private const uint ItemTypeGem = 0x800;
+    private const uint ItemsCapacityKey = 6;
     private const uint UstWcid = 20646;
     private const uint ItemTypeContainer = 0x200, ItemTypeArmor = 0x2;
     private const uint LongDescKey = 16;
@@ -37,6 +47,8 @@ internal static class LootPacingTests
     public static void Register(Runner r)
     {
         r.Add("salvage/loot: no corpse open (or auto door/corpse use) while the salvage panel is pending; the claim is kept and opened after the execute", CorpseOpenWaitsForSalvagePanel);
+        r.Add("loot pacing (R-20261117-230613-88c5): no corpse open (or auto door/corpse use, salvage, stone) while AutoCram's move is unanswered; the open goes on the answer", CorpseOpenWaitsForCramMove);
+        r.Add("loot pacing (R-20261117-230613-88c5): a cram the server refuses frees the open at once; a lost answer holds it 3 s at most", CramMoveHoldBounds);
     }
 
     private static void World()
@@ -171,6 +183,134 @@ internal static class LootPacingTests
         finally
         {
             RynthAiPlugin.CorpseClock = savedClock;
+            UseAudit.Reset("?", null);
+        }
+    }
+
+    // A gem loose in the main pack and an empty side pack: AutoCram has one move to make.
+    private static void CramWorld()
+    {
+        World();
+        FakeHost.WeenieErrorCalls = true;
+        FakeHost.Names[Gem] = "Black Opal";
+        FakeHost.ItemTypes[Gem] = ItemTypeGem;
+        FakeHost.Containers[Gem] = Player;
+        FakeHost.Names[SidePack] = "Backpack";
+        FakeHost.ItemTypes[SidePack] = ItemTypeContainer;
+        FakeHost.Ints[(SidePack, ItemsCapacityKey)] = 24;
+        FakeHost.Containers[SidePack] = Player;
+    }
+
+    private static InventoryManager CramBot(RynthCoreHost host, Bot bot)
+    {
+        _ = bot.Cache[unchecked((int)Gem)];
+        _ = bot.Cache[unchecked((int)SidePack)];
+        bot.S.EnableAutocram = true;
+        var inv = new InventoryManager(host, bot.S, bot.Cache);
+        bot.Set("_inventoryManager", inv);
+        // As RynthAiPlugin's init wires it.
+        UseAudit.WorldUseHold = (Func<string?>)Delegate.CreateDelegate(typeof(Func<string?>), bot.P,
+            typeof(RynthAiPlugin).GetMethod("WorldUseHoldReason", Any)!);
+        return inv;
+    }
+
+    private static int PacedBusy(Bot bot) => (int)typeof(RynthAiPlugin).GetProperty("PacedBusy", Any)!.GetValue(bot.P)!;
+
+    private static void CorpseOpenWaitsForCramMove()
+    {
+        CramWorld();
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        long now = 60_000_000;
+        var start = new DateTime(2026, 11, 17, 23, 0, 0);
+        var savedClock = RynthAiPlugin.CorpseClock;
+        RynthAiPlugin.CorpseClock = () => now;
+        RynthClock.TestNow = () => start.AddMilliseconds(now - 60_000_000);
+        try
+        {
+            UseAudit.Reset("RynthAi", () => true);
+            var inv = CramBot(host, bot);
+
+            // The tick after a corpse is released: no corpse claimed or open, so the cram goes out.
+            bot.Call("TickCramStack", bot.S);
+            Check.True(FakeHost.Moves.Any(m => m.Id == Gem && m.Pack == SidePack), "AutoCram moves the gem into the side pack");
+            Check.True(inv.MoveUnanswered(out string what), "the move has no answer yet");
+            Check.True(what.Contains("Black Opal"), "the hold names the item: " + what);
+            Check.True(PacedBusy(bot) > 0, "salvage, mana stones, pets and the next cram see it as busy");
+
+            // The same tick and the next ones: the looter claims the next corpse, but its open waits.
+            for (int i = 0; i < 5; i++) { bot.Tick(); now += 30; }
+            Check.Eq(CorpseUses(), 0, "no corpse use while the cram's move is unanswered (the client would refuse it)");
+            Check.Eq(bot.Get<int>("_targetCorpseId"), unchecked((int)CorpseA), "the corpse is claimed and kept");
+            Check.Eq(FakeHost.Logs.Count(l => l.Contains("waits: the move of 'Black Opal'")), 1, "the wait is logged once");
+            Check.False(host.UseFor(CorpseB, "Nav", "test: an automatic world use"), "an automatic door/corpse use is held too");
+            Check.Eq(CorpseUses(), 0, "and not sent");
+
+            // The server answers: the gem is in the side pack. The open goes out on the next tick.
+            FakeHost.Containers[Gem] = SidePack;
+            bot.Tick();
+            Check.Eq(CorpseUses(), 1, "the corpse is opened once the move is answered");
+            Check.True(FakeHost.Uses.Contains(CorpseA), "the claimed corpse");
+            Check.False(inv.MoveUnanswered(out _), "nothing in flight");
+            Check.Eq(PacedBusy(bot), 0, "and nothing busy");
+        }
+        finally
+        {
+            RynthAiPlugin.CorpseClock = savedClock;
+            RynthClock.TestNow = null;
+            UseAudit.Reset("?", null);
+        }
+    }
+
+    private static void CramMoveHoldBounds()
+    {
+        CramWorld();
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        long now = 60_000_000;
+        var start = new DateTime(2026, 11, 17, 23, 0, 0);
+        var savedClock = RynthAiPlugin.CorpseClock;
+        RynthAiPlugin.CorpseClock = () => now;
+        RynthClock.TestNow = () => start.AddMilliseconds(now - 60_000_000);
+        try
+        {
+            UseAudit.Reset("RynthAi", () => true);
+            var inv = CramBot(host, bot);
+
+            // Refused: InventoryServerSaveFailed naming the gem (the report's last cram, 18:05:38.869).
+            bot.Call("TickCramStack", bot.S);
+            Check.True(inv.MoveUnanswered(out _), "the move is out");
+            FakeHost.WeenieError(0, evt: 0x00A0, obj: SidePack);
+            Check.True(inv.MoveUnanswered(out _), "a refusal naming another object is not this move's answer");
+            FakeHost.WeenieError(0, evt: 0x00A0, obj: Gem);
+            Check.False(inv.MoveUnanswered(out _), "the server refused the move: that is its answer");
+            bot.Tick();
+            Check.Eq(CorpseUses(), 1, "the open goes out at once");
+
+            // Lost: no answer at all (a fresh manager, the gem still in the main pack). The hold
+            // ends after MoveAnswerMaxMs. (The looter lets go of the corpse it opened, so the cram runs.)
+            bot.Set("_targetCorpseId", 0);
+            bot.Set("_openedContainerId", 0);
+            var inv2 = CramBot(host, bot);
+            bot.Call("TickCramStack", bot.S);
+            Check.True(inv2.MoveUnanswered(out _), "a second move is out");
+            Check.False(host.UseFor(CorpseB, "Nav", "test: an automatic world use"), "an automatic world use is held");
+            long sent = now;
+            bool freed = false;
+            while (now - sent < 5000)
+            {
+                if (host.UseFor(CorpseB, "Nav", "test: an automatic world use")) { freed = true; break; }
+                now += 100;
+            }
+            long held = now - sent;
+            Check.True(freed, "the use goes out in the end");
+            Check.True(held >= (long)InventoryManager.MoveAnswerMaxMs, $"held until the answer limit ({held} ms)");
+            Check.True(held <= (long)InventoryManager.MoveAnswerMaxMs + 100, $"and no longer ({held} ms)");
+        }
+        finally
+        {
+            RynthAiPlugin.CorpseClock = savedClock;
+            RynthClock.TestNow = null;
             UseAudit.Reset("?", null);
         }
     }

@@ -177,6 +177,7 @@ public sealed partial class RynthAiPlugin
             if (_p._targetCorpseId != 0 || _p._openedContainerId != 0) return "the corpse looter is busy";
             if (_p.GroundPickupInFlight) return "a ground pickup is in flight";
             if (_p._salvageManager?.PanelPending == true) return "the salvage panel is opening";
+            if (_p.ItemMoveHold() is string move) return move;   // R-20261117-230613-88c5: the client would refuse the use
             if (!ActionPacer.MayStart(Host, "Loot", HealNeed.None, out string why))
                 return why.Length > 0 ? why : "the server owes an answer";
             long now = CorpseNowMs;

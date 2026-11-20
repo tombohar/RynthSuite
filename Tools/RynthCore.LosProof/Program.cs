@@ -83,6 +83,7 @@ internal static class Program
         MagicArcShortPairs(pairs);
         MagicArcLongLines(polys);
         MagicArcOutdoors();
+        OutdoorWallPieces();
 
         var ex = pairs.Where(p => p.Kind == 'W' && cells.TryGetValue(p.Cell, out var ca) && ca.Struct != 0)
                       .OrderBy(p => (p.B - p.A).Length()).FirstOrDefault();
@@ -242,6 +243,42 @@ internal static class Program
                           $"(arc only: {arcOnly}); highest rise above the line {maxApex:0.00} m");
         Expect(tested > 20, "found outdoor lines to test");
         Expect(arcOnly * 100 <= Math.Max(1, tested) * 5, "outdoors an arc is clear wherever the line is (at most 5% clip a tree or roof)");
+    }
+
+    /// <summary>
+    /// R-20261119-114214-b9ed (2026-11-19): in landblock 0xB64A, wall panel 0x02001C33 (24 x 0.4 m) and the
+    /// drawing-only 0x02001C39 stand every 24 m along the landblock edge. They have no collision spheres or
+    /// cylinders, so each got its first part's render sphere (28 m and 13 m round), which filled the corner
+    /// cell: a monster 1.5 m away kept dropping out of sight. Now the parts' physics polygons stand for them
+    /// (GeometryLoader.PartsPhysicsMesh): the corner is open, and the panels block (with both ends inside
+    /// the old sphere, a line through a panel crossed no sphere surface and read as clear).
+    /// </summary>
+    private static void OutdoorWallPieces()
+    {
+        const uint lb = 0xB64A;
+        uint cell = (lb << 16) | 0x0040;
+        float bx = (lb >> 8) * 192f, by = (lb & 0xFF) * 192f;
+        Console.WriteLine($"\n=== Outdoor wall pieces, landblock 0x{lb:X4} cell 0x0040 ===");
+        var geometry = _geo.GetLandblockGeometry(cell);
+        int bigSpheres = geometry.Count(v => v.Type == BoundingVolume.VolumeType.Sphere && v.Dimensions.X > 8f
+            && v.Max.X >= bx + 166 && v.Min.X <= bx + 194 && v.Max.Y >= by + 166 && v.Min.Y <= by + 194);
+        Vector3 At(float x, float y) => new Vector3(bx + x, by + y, _geo.GetTerrainZWorld(bx + x, by + y));
+        var rnd = new Random(1);
+        int n = 0, blocked = 0;
+        for (int i = 0; i < 4000; i++)
+        {
+            float x = 168 + (float)rnd.NextDouble() * 22, y = 168 + (float)rnd.NextDouble() * 22;
+            double a = rnd.NextDouble() * Math.PI * 2;
+            n++;
+            if (_fsm.IsPathBlocked(cell, At(x, y), At(x + (float)(1.5 * Math.Cos(a)), y + (float)(1.5 * Math.Sin(a))), TargetingFSM.AttackType.Linear, out _))
+                blocked++;
+        }
+        Console.WriteLine($"  spheres over 8 m reaching the corner: {bigSpheres}; 1.5 m lines in the corner blocked: {blocked} of {n}");
+        Expect(bigSpheres == 0, "no render sphere stands in for the wall pieces");
+        Expect(blocked * 100 <= n * 2, "a monster 1.5 m away in the corner is in sight (at most 2% blocked; it was 4.3%)");
+        bool wallsBlock = new[] { ((188f, 180f), (196f, 180f)), ((188f, 160f), (196f, 160f)), ((180f, 188f), (180f, 196f)) }
+            .All(l => _fsm.IsPathBlocked(cell, At(l.Item1.Item1, l.Item1.Item2), At(l.Item2.Item1, l.Item2.Item2), TargetingFSM.AttackType.Linear, out _));
+        Expect(wallsBlock, "a line through a wall panel on the landblock edge is blocked");
     }
 
     private static bool TerrainBetween(Vector3 a, Vector3 b)

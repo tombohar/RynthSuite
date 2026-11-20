@@ -1759,7 +1759,8 @@ internal static class BuffTests
         var list = rig.B.BuildDynamicBuffList();
         Check.Eq(string.Join(", ", list.Take(4)), string.Join(", ", Head), "Creature Enchantment, Focus, Willpower, Life Magic first");
         int strength = list.IndexOf("Strength Self"), heavy = list.IndexOf("Heavy Weapon Mastery"), armor = list.IndexOf("Armor Self");
-        Check.True(strength == 4, $"everything else follows, Strength next (at {strength})");
+        Check.Eq(list.IndexOf("Mana Conversion Mastery"), 4, "Mana Conversion Mastery right after the head (R-20261119-195743-1993)");
+        Check.True(strength == 5, $"everything else follows, Strength next (at {strength})");
         Check.True(strength < heavy && heavy < armor, "and keeps its old order (attributes, masteries, prots)");
         Check.True(list.IndexOf("Blood Drinker Self") > armor, "weapon auras stay after the prots");
 

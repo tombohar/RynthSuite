@@ -260,7 +260,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         var hookHost = Host;
         CombatHook.LastUseDone = () => hookHost.HasUseDoneSeq && hookHost.TryGetLastUseDone(out int s, out uint e) ? (s, e) : null;
         RynthCore.Plugin.Shared.UseAudit.AfterSend = RecordUseForPacing;
-        RynthCore.Plugin.Shared.UseAudit.WorldUseHold = SalvagePanelHold;
+        // The salvage panel opening, or AutoCram's/AutoStack's move not answered yet (2026-11-18,
+        // R-20261117-230613-88c5): either way the client would refuse the use.
+        RynthCore.Plugin.Shared.UseAudit.WorldUseHold = WorldUseHoldReason;
         // "The door is locked!" comes as a transient string (ACE Door.ActOnUse): the door logic picks a
         // lock only when the server says so (DoorInteractionController). The chat line is the fallback.
         // The four combat events (hits and evades both ways, by name) feed the Monster Stats
@@ -855,6 +857,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _metaManager.SetKillClock(_killClock);
         _metaManager.SetCorpseOpenedCheck(id => _completedCorpses.ContainsKey(id));
         _metaManager.SetCombatTargetCount(() => _combatManager?.LastScanPossible ?? -1);
+        _metaManager.SetGhostCheck(id => _combatManager?.Ghosts.IsGhost(id) == true);
         _metaManager.SetLastChestLooted(() => _lastChestLootedId);
         _metaManager.SetDunExploreStatus(DunExploreStatus, DunExploreInfoJson);
         if (_dashboard != null)
@@ -2529,6 +2532,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     public override void OnChatWindowText(string? text, int chatType, ref int eat)
     {
         if (string.IsNullOrEmpty(text)) return;
+        try { NoteHandCastChat(text, chatType); } catch { }   // the player casting by hand (RynthAiPlugin.HandCast.cs), before the refusal handlers
         try { NoteServerPolicyChat(text); } catch { }   // DreamWeave's Thread lines (ServerPolicy)
         try { NoteDoorServerText(text); } catch { }   // "The door is locked!" (the door logic)
         try { ItemToolChat(text); } catch { }   // the key's answers (chest looter)
