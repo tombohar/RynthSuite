@@ -363,7 +363,7 @@ public sealed partial class RynthAiPlugin
         if (!isRebuild)
         {
             if (!settings.IsMacroRunning && RefuseMacroStartForVTank()) return false;   // one bot per client (Decal bridge)
-            settings.IsMacroRunning = true;
+            settings.SetMacroRunning(true, "the dungeon explore");
             // As the patrol: the explore picked its own start; the macro-start "nearest waypoint" pick
             // on the next tick must not move it (on a walk that ends it would skip rooms).
             _macroWasRunning = true;
@@ -700,7 +700,7 @@ public sealed partial class RynthAiPlugin
         if (!settings.IsMacroRunning)
         {
             if (RefuseMacroStartForVTank()) return;
-            settings.IsMacroRunning = true;
+            settings.SetMacroRunning(true, "the dungeon explore");
             _macroWasRunning = true;
         }
         settings.CurrentNavPath = string.Empty;
@@ -1002,7 +1002,7 @@ public sealed partial class RynthAiPlugin
         if (toward == 0)
         {
             if (geo != null && StuckSpot(route, at, from, wx, wy, z, label, lx, ly, "with the next points in its cell too", out spot, out note)) return true;
-            Host.Log($"[RynthAi] {label}: stuck in cell {from:X8} with the next {StuckLookAheadPoints} points in it too: nothing to close");
+            Host.Log($"[RynthAi] {label}: stuck in cell {from:X8} with the next {StuckLookAheadPoints} points in it too: nothing to close{_navigationEngine?.LastStuckNote()}");
             return false;
         }
         var open = closed.Count > 0 ? DungeonPathfinder.WithoutOpenings(graph, new HashSet<ulong>(closed), from) : graph;
@@ -1028,7 +1028,7 @@ public sealed partial class RynthAiPlugin
         string twins = keys.Count > 1 ? $" and {keys.Count - 1} more cell pair(s) through the same opening" : "";
         string seen = geo != null && geo.TryGetDoorway(a, b, out var dw) ? ThingsInDoorway(landblock, dw, inDoorway) : "";
         Host.Log($"[RynthAi] {label}: stuck for good at ({lx:F1},{ly:F1},{z:F1}) heading for waypoint {at} (cell {toward:X8}): "
-                 + $"closing the opening between {note}{twins} ({stuckCount + 1} closed){seen}");
+                 + $"closing the opening between {note}{twins} ({stuckCount + 1} closed){seen}{_navigationEngine?.LastStuckNote()}");
         return true;
     }
 
@@ -1051,7 +1051,7 @@ public sealed partial class RynthAiPlugin
         };
         note = $"a spot in cell {cell:X8}";
         Host.Log($"[RynthAi] {label}: stuck for good at ({lx:F1},{ly:F1},{z:F1}) heading for waypoint {at}, {where}: "
-                 + $"walking round the spot ({spot.X:F1},{spot.Y:F1}) {StuckSpotRadius:F1} m round it");
+                 + $"walking round the spot ({spot.X:F1},{spot.Y:F1}) {StuckSpotRadius:F1} m round it{_navigationEngine?.LastStuckNote()}");
         return true;
     }
 

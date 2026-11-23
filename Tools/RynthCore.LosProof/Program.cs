@@ -23,6 +23,7 @@ internal static class Program
     private static GeometryLoader _geo = null!;
     private static TargetingFSM _fsm = null!;
     private static int _fails;
+    private static HashSet<Pair> _throughObject = new();
     private static readonly Vector3 Chest = new Vector3(0, 0, 1.0f);
     private const uint Lb = 0x6346;
 
@@ -72,6 +73,15 @@ internal static class Program
             Console.WriteLine($"  pairs: {pairs.Count} built and written to {fixture}");
         }
 
+        // The fixture's "nothing between" was judged on the walls alone. Since the 2026-11-18 loader the
+        // cells' placed objects are in LOS as AC collides with them, so an open, same-cell or ramp line
+        // whose chest-height line crosses one (0x0200028F, the 1.5 m pillars in the room centres; the
+        // 0x02000B3A/0x02000B3B poles) is its own row, expected blocked, and out of rows 4, 5 and 7.
+        var statics = _geo.GetStaticCollision(Lb);
+        _throughObject = pairs.Where(p => (p.Kind == 'O' || p.Kind == 'M' || p.Kind == 'R') && statics.Any(s => s.Parts.Any(part =>
+            RaycastEngine.IsLinearPathBlocked(p.A + Chest, p.B + Chest, new List<BoundingVolume> { part }, false)))).ToHashSet();
+        Console.WriteLine($"  placed objects: {statics.Count}; open, same-cell and ramp lines through one: {_throughObject.Count}");
+
         // Builds before the melee type existed tested melee as Linear.
         var melee = Enum.TryParse("Melee", out TargetingFSM.AttackType m) ? m : TargetingFSM.AttackType.Linear;
         Console.WriteLine($"\n=== Melee (Lucy): AttackType.{melee} ===");
@@ -84,6 +94,8 @@ internal static class Program
         MagicArcLongLines(polys);
         MagicArcOutdoors();
         OutdoorWallPieces();
+        TumerokHills();
+        NeftetRocks();
 
         var ex = pairs.Where(p => p.Kind == 'W' && cells.TryGetValue(p.Cell, out var ca) && ca.Struct != 0)
                       .OrderBy(p => (p.B - p.A).Length()).FirstOrDefault();
@@ -107,7 +119,7 @@ internal static class Program
 
         void Row(char kind, string what, bool expectBlocked, double limitPct)
         {
-            var set = pairs.Where(p => p.Kind == kind).ToList();
+            var set = pairs.Where(p => kind == 'P' ? _throughObject.Contains(p) : p.Kind == kind && !_throughObject.Contains(p)).ToList();
             int blocked = set.Count(Blocked);
             Console.WriteLine($"  {what}: blocked {blocked} / {set.Count}");
             if (limitPct < 0) return;
@@ -122,6 +134,7 @@ internal static class Program
         Row('M', "5. monster 1.5 m away, same cell, nothing between", false, openLimitPct < 0 ? -1 : 0);
         Row('D', "6. in view through a doorway at an angle     ", false, openLimitPct < 0 ? -1 : 10);
         Row('R', "7. up or down a ramp or step, nothing between", false, openLimitPct);
+        Row('P', "8. a placed object on the line (pillar, pole)", true, openLimitPct < 0 ? -1 : 0);
     }
 
     // ── Arc spells ───────────────────────────────────────────────────────────────
@@ -279,6 +292,84 @@ internal static class Program
         bool wallsBlock = new[] { ((188f, 180f), (196f, 180f)), ((188f, 160f), (196f, 160f)), ((180f, 188f), (180f, 196f)) }
             .All(l => _fsm.IsPathBlocked(cell, At(l.Item1.Item1, l.Item1.Item2), At(l.Item2.Item1, l.Item2.Item2), TargetingFSM.AttackType.Linear, out _));
         Expect(wallsBlock, "a line through a wall panel on the landblock edge is blocked");
+    }
+
+    /// <summary>
+    /// R-20261122-203611-ff3d (2026-11-22): on the Withered Tumerok hills (landblock 0x1C13) a caster in
+    /// cell 0x3F cast Blade Arc after Blade Arc at Tumeroks 56-68 m off and 11 m up the hill (cells
+    /// 0x2E/0x2F), each "stopped short of the target": the verdict didn't test the ground. Lines the
+    /// landscape cuts are now blocked; ones over it stay clear.
+    /// </summary>
+    private static void TumerokHills()
+    {
+        const uint lb = 0x1C13;
+        uint cell = (lb << 16) | 0x003F;
+        float bx = (lb >> 8) * 192f, by = (lb & 0xFF) * 192f;
+        Console.WriteLine($"\n=== Hills, landblock 0x{lb:X4} cell 0x003F -> cells 0x2E/0x2F ===");
+        Vector3 At(float x, float y) => new Vector3(bx + x, by + y, _geo.GetTerrainZWorld(bx + x, by + y));
+        var rnd = new Random(4);
+        int n = 0, cut = 0, plugin = 0, pluginArc = 0, agree = 0;
+        for (int i = 0; i < 3000 && n < 400; i++)
+        {
+            var a = At(168 + (float)rnd.NextDouble() * 24, 144 + (float)rnd.NextDouble() * 24);
+            var b = At(120 + (float)rnd.NextDouble() * 24, 120 + (float)rnd.NextDouble() * 48);
+            float d = (b - a).Length();
+            if (d < 50 || d > 70) continue;
+            n++;
+            bool ground = TerrainBetween(a + Chest, b + Chest);   // this tool's own 0.25 m samples
+            bool line = _fsm.IsPathBlocked(cell, a, b, TargetingFSM.AttackType.Linear, out _);
+            bool arc = _fsm.IsMagicArcPathBlocked(cell, a, b, out _);
+            if (ground) cut++;
+            if (line) plugin++;
+            if (arc) pluginArc++;
+            if (!ground || line) agree++;
+        }
+        Console.WriteLine($"  {n} lines 50-70 m: the ground cuts {cut}; the plugin blocks {plugin} straight, {pluginArc} as arcs; every ground-cut line blocked: {(agree == n ? "yes" : $"no ({n - agree} missed)")}");
+        Expect(n > 100, "found lines to test");
+        Expect(cut > 0 && n - agree <= cut / 20, "a line the ground cuts is blocked (at most 5% missed: 1.5 m samples vs 0.25 m)");
+        Expect(pluginArc <= plugin, "an arc, flying higher, is never blocked where the straight line is clear");
+    }
+
+    /// <summary>
+    /// R-20261120-203229-771e (2026-11-20): Neftet's rock spires and mesas (landblocks 0x8764/0x8864) are
+    /// GfxObjs placed on their own, and each got its sorting sphere, 9-75 m round. A character and
+    /// monsters 50 m off behind a spire stood inside the same spheres, so the line read as clear and every
+    /// cast went into the rock. Now their physics polygons stand for them.
+    /// </summary>
+    private static void NeftetRocks()
+    {
+        const uint lb = 0x8764;
+        uint cell = (lb << 16) | 0x0034;
+        float bx = (lb >> 8) * 192f, by = (lb & 0xFF) * 192f;
+        Console.WriteLine($"\n=== Neftet rocks, landblock 0x{lb:X4} cell 0x0034 ===");
+        var geometry = _geo.GetLandblockGeometry(cell);
+        int bigSpheres = geometry.Count(v => v.Type == BoundingVolume.VolumeType.Sphere && v.Dimensions.X > 8f);
+        Vector3 At(float x, float y) => new Vector3(bx + x, by + y, _geo.GetTerrainZWorld(bx + x, by + y));
+        var rnd = new Random(2);
+        int n = 0, blocked = 0;
+        for (int i = 0; i < 2000; i++)
+        {
+            var a = At(144 + (float)rnd.NextDouble() * 24, 72 + (float)rnd.NextDouble() * 24);
+            var b = At(192 + (float)rnd.NextDouble() * 24, 96 + (float)rnd.NextDouble() * 24);
+            float d = (b - a).Length();
+            if (d < 44 || d > 56) continue;
+            n++;
+            if (_fsm.IsPathBlocked(cell, a, b, TargetingFSM.AttackType.Linear, out _)) blocked++;
+        }
+        rnd = new Random(3);
+        int m = 0, shortBlocked = 0;
+        for (int i = 0; i < 1000; i++)
+        {
+            float x = 146 + (float)rnd.NextDouble() * 20, y = 74 + (float)rnd.NextDouble() * 20;
+            double a2 = rnd.NextDouble() * Math.PI * 2;
+            m++;
+            if (_fsm.IsPathBlocked(cell, At(x, y), At(x + (float)(3 * Math.Cos(a2)), y + (float)(3 * Math.Sin(a2))), TargetingFSM.AttackType.Linear, out _))
+                shortBlocked++;
+        }
+        Console.WriteLine($"  spheres over 8 m: {bigSpheres}; 44-56 m lines from the player's cell to the monsters' (0x88640005): blocked {blocked} of {n}; 3 m lines in the player's cell: blocked {shortBlocked} of {m}");
+        Expect(bigSpheres == 0, "no render sphere stands in for a rock");
+        Expect(n > 100 && blocked * 100 >= n * 80, "the spires between the two cells block the lines through them (at least 80%; it was 10%)");
+        Expect(shortBlocked * 100 <= m * 5, "short lines on the open ground around the player stay clear (at most 5%; it was 8.2%)");
     }
 
     private static bool TerrainBetween(Vector3 a, Vector3 b)

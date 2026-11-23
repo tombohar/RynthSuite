@@ -38,11 +38,12 @@ public sealed partial class RynthNavPlugin
     private readonly List<PortalAvoid.Spot> _blockedSpots = new();
 
     /// <summary>DriveTo for the walk's own steering: remembers that it ran and which way.</summary>
-    private void WalkDrive(double deg)
+    private void WalkDrive(double deg, bool tight = false)
     {
-        DriveTo(deg, _steerOpen);
+        WalkSteer servo = tight ? _steerTight : _steerOpen;
+        DriveTo(deg, servo);
         _lastDriveDeg = deg;
-        _ranLastTick = !_steerOpen.TurnInPlace;
+        _ranLastTick = !servo.TurnInPlace;
     }
 
     /// <summary>

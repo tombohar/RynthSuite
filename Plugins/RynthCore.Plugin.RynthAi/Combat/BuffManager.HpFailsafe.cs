@@ -260,7 +260,7 @@ public partial class BuffManager
     private void StartFailsafeRecall(DateTime now, int hp, double failedSec)
     {
         HpFailsafeRecalls++;
-        _settings.IsMacroRunning = false;
+        _settings.SetMacroRunning(false, "the HP failsafe (heals failing at Emergency Heal At: a recall)");
         _macroStoppedByFailsafe = true;
         MacroStopForRecall?.Invoke();
         // The heal the jump broke is not waited on, here or by the pacer: a stuck cast may never be
@@ -319,7 +319,7 @@ public partial class BuffManager
             else if (MayRestartMacro != null && !MayRestartMacro()) what = "the macro stays off (VTank yield)";
             else
             {
-                _settings.IsMacroRunning = true;   // the heals and kits run again; the failsafe re-arms
+                _settings.SetMacroRunning(true, "the HP failsafe after its recall");   // the heals and kits run again; the failsafe re-arms
                 what = "macro back on to keep healing";
             }
             _macroStoppedByFailsafe = false;

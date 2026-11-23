@@ -39,6 +39,8 @@ public sealed partial class RynthAiPlugin
     {
         // A meta file that lost data (CallState rules with no target): its load warning.
         _dashboard?.DrainMetaNotices(line => Host.WriteToChat(line, CommandReply.FailColor));
+        // VirindiTank navs in a folder the nav list doesn't show (LegacyUi/StrayNavs.cs): where they go.
+        _dashboard?.DrainStrayNavNotice(line => Host.WriteToChat(line, CommandReply.FailColor));
         if (DataWriteGuard.PendingCount == 0) return;
         DataWriteGuard.DrainChat(line => Host.WriteToChat(line, 2));
     }

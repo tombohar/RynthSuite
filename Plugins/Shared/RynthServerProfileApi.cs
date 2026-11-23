@@ -40,6 +40,14 @@
 //      "afterCap": true,                // last, only once the item's tink slots are full
 //      "stackGroup": "x", "stackCap": 10  // rows of one group share this cap per item
 //    } ],
+//    "summons": [ {                     // the server's own summon items that hold other summoning
+//                                       //  items (RynthAi's combat summoner; ServerSummonView). Optional.
+//      "wcid": 1007741,                 // the item's wcid (0 / absent: by name only)
+//      "nameMatch": "Duo Summon Gem",   // the item's name holds this ("" with a wcid: by wcid only)
+//      "slotPrefix": "Summon ",         // its LongDesc names each held item: "Summon 1: <item name>"
+//      "slots": 2,                      // it summons nothing until it holds this many (default 2)
+//      "elementIsLast": true            // its own element (UiEffects) is the last held item's
+//    } ],
 //    "discord": "", "website": "", "wiki": "", "source": "",
 //    "values": {                        // live numbers for this character on this server ({} when none;
 //                                       //  ServerProfileView.Value reads one; RynthServerProfile.Value*):

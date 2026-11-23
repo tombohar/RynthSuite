@@ -18,6 +18,60 @@ internal static class StraightenTests
     public static void Register(Runner r)
     {
         r.Add("straighten: Thread 0x00ED's explore on the real dats has far fewer turns, every leg walkable, every room still crossed (if the dats are here)", Real00ED);
+        r.Add("straighten: Thread 0x0278's ramp U-turn under a corridor is never cut by a leg off the floor (if the dats are here)", Real0278);
+    }
+
+    // 2026-11-17, a DreamWeave Thread in 0x0278: a ramp (cell 019E) climbs south from the room at -36 to a corridor
+    // at -30 that runs back north over it. Seen from above the walk's U-turn lay on one line (x 594), and the
+    // straightened walk went from the foot of the ramp straight on north, (594, 22874, -36) to (594, 22927.5, -24):
+    // the character ran along the bottom into the room's end wall and stuck there. A straightened leg stays on the
+    // floor (DungeonPathfinder.LegOnFloor): the only legs off it are ones the walk was laid with.
+    private static void Real0278()
+    {
+        string acDir = DunRouteTests.AcDir;
+        if (!Directory.Exists(acDir)) { Console.WriteLine("    (no dats on this PC: skipped)"); return; }
+        var loader = new GeometryLoader();
+        if (!loader.Initialize(acDir)) { Console.WriteLine("    (geometry loader failed: " + loader.StatusMessage + ")"); return; }
+        try
+        {
+            const uint lb = 0x0278;
+            DungeonPathfinder.InvalidateCache();
+            var graph = DungeonPathfinder.GetGraph(lb, loader.CellDat);
+            var geo = DungeonPathfinder.GetGeometry(lb, loader.CellDat, loader.DungeonLOS)!;
+            Check.NotNull(geo, "geometry");
+            static NavPoint W(double x, double y, double z)
+                => new() { Type = NavPointType.Point, NS = DungeonGeometry.WorldToNav(y), EW = DungeonGeometry.WorldToNav(x), Z = z / 240.0 };
+            Check.False(DungeonPathfinder.LegOnFloor(geo, W(594, 22874, -36), W(594, 22927.5, -24)), "the leg walked in game leaves the floor");
+            Check.True(DungeonPathfinder.LegOnFloor(geo, W(594, 22881, -30), W(594, 22927.5, -24)), "the corridor's own leg up to room 72 stays on it");
+
+            string Key(NavPoint a, NavPoint b) => $"{a.NS:F6},{a.EW:F6},{a.Z:F5}>{b.NS:F6},{b.EW:F6},{b.Z:F5}";
+            // Where that run started, and where the walks were laid again from after it got stuck.
+            foreach (uint start in new uint[] { 0x02780369, 0x0278015E, 0x02780164 })
+            {
+                DungeonPathfinder.StraightenEnabled = false;
+                var laid = DungeonPathfinder.BuildExploreRoute(graph, start, null, geo, null, null, null, null, out _).Points;
+                DungeonPathfinder.StraightenEnabled = true;
+                var pts = DungeonPathfinder.BuildExploreRoute(graph, start, null, geo, null, null, null, null, out _).Points;
+                DungeonPathfinder.MainRouteNote = null;
+                var laidOff = new HashSet<string>();
+                for (int i = 0; i + 1 < laid.Count; i++)
+                    if (!DungeonPathfinder.LegOnFloor(geo, laid[i], laid[i + 1])) laidOff.Add(Key(laid[i], laid[i + 1]));
+                var newOff = new List<string>();
+                for (int i = 0; i + 1 < pts.Count; i++)
+                    if (!DungeonPathfinder.LegOnFloor(geo, pts[i], pts[i + 1]) && !laidOff.Contains(Key(pts[i], pts[i + 1])))
+                        newOff.Add($"[{i}] ({DungeonGeometry.NavToWorld(pts[i].EW):F1},{DungeonGeometry.NavToWorld(pts[i].NS):F1},{pts[i].Z * 240:F1})"
+                                 + $" > ({DungeonGeometry.NavToWorld(pts[i + 1].EW):F1},{DungeonGeometry.NavToWorld(pts[i + 1].NS):F1},{pts[i + 1].Z * 240:F1})");
+                Console.WriteLine($"    from {start:X8}: {pts.Count} points straightened, {laid.Count} as laid ({laidOff.Count} legs laid off the floor: no way round)");
+                Check.True(pts.Count < laid.Count, $"from {start:X8}: still straightened ({pts.Count} of {laid.Count})");
+                Check.Eq(newOff.Count, 0, $"from {start:X8}: no straightened leg off the floor ({string.Join("; ", newOff.Take(4))})");
+            }
+        }
+        finally
+        {
+            DungeonPathfinder.StraightenEnabled = true;
+            loader.Dispose();
+            DungeonPathfinder.InvalidateCache();
+        }
     }
 
     private static void Real00ED()

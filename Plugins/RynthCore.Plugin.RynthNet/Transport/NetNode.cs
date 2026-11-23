@@ -455,6 +455,7 @@ public sealed class NetNode : IDisposable
             if (!IsRunning) { client.Dispose(); return; }
             peer = new PeerConnection(this, client, outbound: true, expectedNodeId: nodeId, kernelPid: pid);
             _connections.Add(peer);
+            _dialedPipes[nodeId] = name;
         }
         peer.Start(Wire.Hello(NodeId, Pid, _identity));
     }
@@ -645,12 +646,31 @@ public sealed class NetNode : IDisposable
         return true;
     }
 
+    // ── A peer that drops right after connecting (FlapBackoff.cs, R-20261122-193027-b795) ─────────
+    private readonly Dictionary<string, string> _dialedPipes = new();   // expected node id -> the pipe dialed
+    private readonly Dictionary<string, int> _flaps = new();            // pipe name -> short-lived links in a row
+
+    /// <summary>Under _lock: a dialed link closed; a short-lived one sets the wait before the next dial.</summary>
+    private void NoteDialedClosed(PeerConnection peer, long now)
+    {
+        if (!peer.Outbound || !_dialedPipes.TryGetValue(peer.ExpectedNodeId, out string? pipe)) return;
+        _dialedPipes.Remove(peer.ExpectedNodeId);
+        long life = now - peer.ConnectedAtMs;
+        if (life >= FlapBackoff.StableLifeMs) { _flaps.Remove(pipe); return; }
+        if (life >= FlapBackoff.FlapLifeMs) return;
+        int n = _flaps.TryGetValue(pipe, out int f) ? f + 1 : 1;
+        _flaps[pipe] = n;
+        _badPipes[pipe] = now + FlapBackoff.DelayMs(n);
+        if (n == 3) Log($"[RynthNet] {pipe} keeps dropping right after connecting: redialing it less often (up to every {FlapBackoff.MaxDelayMs / 1000} s).");
+    }
+
     internal void OnPeerClosed(PeerConnection peer, string reason)
     {
         bool wasJoined = false;
         NodeIdentity identity;
         lock (_lock)
         {
+            NoteDialedClosed(peer, NowMs);
             _connections.Remove(peer);
             if (peer.Joined && _peers.TryGetValue(peer.NodeId, out PeerConnection? current) && ReferenceEquals(current, peer))
             {

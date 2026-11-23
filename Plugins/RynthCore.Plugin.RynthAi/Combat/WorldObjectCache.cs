@@ -1505,11 +1505,17 @@ public class WorldObjectCache
                 // buffing ignore it and try every other one. So only a side pack, or the main pack with
                 // the item's own container field set and no wielder, means "in a pack". Buffing's wand
                 // swap puts the weapons into a side pack (the stale-record case of 2026-10-17/18).
-                if (containerId != playerId) _packWalkIds.Add(unchecked((int)itemId));
+                bool inPack = false;
+                if (containerId != playerId) inPack = true;
                 else if (_host.HasGetObjectOwnershipInfo
                          && _host.TryGetObjectOwnershipInfo(itemId, out uint inContainer, out uint byWielder, out _)
                          && inContainer != 0 && byWielder == 0)
+                    inPack = true;
+                if (inPack)
+                {
                     _packWalkIds.Add(unchecked((int)itemId));
+                    NoteHomePack(unchecked((int)itemId), unchecked((int)containerId));
+                }
 
                 if (isContainer && seenContainers.Add(itemId))
                     pendingContainers.Enqueue(itemId);
@@ -1553,6 +1559,80 @@ public class WorldObjectCache
     // both snapshot disciplines: the (cache) overload force-refreshes for the AV-
     // risky dequip paths (must not read stale); the (inv) overload reuses a caller-
     // supplied snapshot (AutoCram's single per-tick snapshot — no double BFS).
+    // ── A weapon goes back where it came from (R-20261121-040524-f6ed) ──────────
+    // The pack walk notes the pack each item was last seen in (the main pack = the player's id).
+    // A wand swap put the weapons it took off into the side pack with the most free slots, which
+    // changes as packs fill: "it randomly throws them into pack 1, 2 or 4". Now the swaps ask for
+    // the pack the weapon came from first.
+    private readonly Dictionary<int, int> _homePack = new();
+
+    private void NoteHomePack(int itemId, int containerId)
+    {
+        if (_homePack.Count >= 4096) _homePack.Clear();   // a bound, not a cut: inventories hold a few hundred
+        _homePack[itemId] = containerId;
+    }
+
+    /// <summary>The pack <paramref name="itemId"/> was last seen in (the player's id = the main pack), or 0.</summary>
+    public int HomePackOf(int itemId)
+    {
+        lock (_gate) return _homePack.TryGetValue(itemId, out int p) ? p : 0;
+    }
+
+    /// <summary>
+    /// As <see cref="FindPackFor(RynthCoreHost, WorldObjectCache?, bool, int)"/>, for putting
+    /// <paramref name="forItems"/> away: the pack they all came from when it still has
+    /// <paramref name="requireFree"/> free slots (the main pack only with <paramref name="includeMainPack"/>),
+    /// else the usual choice.
+    /// </summary>
+    public static int FindPackFor(RynthCoreHost host, WorldObjectCache? cache,
+                                  bool includeMainPack, int requireFree, IReadOnlyList<int> forItems)
+    {
+        if (cache == null) return 0;
+        int playerId = unchecked((int)host.GetPlayerId());
+        if (playerId == 0) return 0;
+        var inv = cache.GetDirectInventory(forceRefresh: true);
+        int home = 0;
+        foreach (int id in forItems)
+        {
+            int h = id == 0 ? 0 : cache.HomePackOf(id);
+            if (h == 0 || (home != 0 && h != home)) { home = 0; break; }
+            home = h;
+        }
+        if (home != 0 && (home != playerId || includeMainPack)
+            && FreeSlotsIn(inv, playerId, home, host) >= Math.Max(1, requireFree))
+            return home;
+        return FindPackFor(inv, playerId, includeMainPack, requireFree, host);
+    }
+
+    /// <summary>Free item slots in one of the player's packs (the player's id = the main pack), or -1 when unknown.</summary>
+    internal static int FreeSlotsIn(IReadOnlyList<WorldObject> inv, int playerId, int packId, RynthCoreHost? host)
+    {
+        if (packId == playerId)
+        {
+            int mainUsed = 0;
+            foreach (var p in inv)
+            {
+                if (p.Container != playerId) continue;
+                if (p.ObjectClass == AcObjectClass.Container || p.ObjectClass == AcObjectClass.Foci) continue;
+                if (p.Values(LongValueKey.EquippedSlots, 0) != 0) continue;
+                if (host.HasValue && IsWieldable(p) && IsWieldedByPlayer(host.Value, p)) continue;
+                mainUsed++;
+            }
+            return 102 - mainUsed;
+        }
+        WorldObject? pack = null;
+        foreach (var p in inv)
+            if (p.Id == packId) { pack = p; break; }
+        if (pack == null || pack.ObjectClass != AcObjectClass.Container || pack.Container != playerId) return -1;
+        if (!string.IsNullOrEmpty(pack.Name) && pack.Name.IndexOf("Foci", StringComparison.OrdinalIgnoreCase) >= 0) return -1;
+        int capacity = pack.Values(LongValueKey.ItemsCapacity, 0);
+        if (capacity <= 0) return -1;
+        int used = 0;
+        foreach (var it in inv)
+            if (it.Container == packId && it.ObjectClass != AcObjectClass.Container) used++;
+        return capacity - used;
+    }
+
     public static int FindPackFor(RynthCoreHost host, WorldObjectCache? cache,
                                   bool includeMainPack, int requireFree)
     {

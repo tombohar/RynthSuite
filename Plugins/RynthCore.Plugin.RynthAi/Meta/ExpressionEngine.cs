@@ -234,6 +234,10 @@ internal sealed partial class ExpressionEngine
     // radunexploreinfo[]: the explore as JSON (state, rooms, the shut doors and the rooms behind each, the
     // lever errand, the last lever's result), "{}" before the first. For the Lua script's json.decode.
     internal Func<string>? DunExploreInfo { get; set; }
+    // rabuffsdue[seconds] (RynthAi only, 2026-11-20): how many buffs a rebuff would cast if Rebuff With were
+    // `seconds` (BuffManager.CountBuffsDue): the character's, the item spells' and the shield's. -1 with buffing
+    // off or no buff manager. A script asks it before a Thread, since Lua sees only the character's own.
+    internal Func<int, int>? BuffsDue { get; set; }
 
     // ── Backward-compat shim ──────────────────────────────────────────────────
 
@@ -422,6 +426,9 @@ internal sealed partial class ExpressionEngine
             "radunexplorerooms"    => (DunExploreStatus?.Invoke().Rooms ?? 0).ToString(CultureInfo.InvariantCulture),
             "radunexplorevisited"  => (DunExploreStatus?.Invoke().Visited ?? 0).ToString(CultureInfo.InvariantCulture),
             "radunexploreinfo"     => DunExploreInfo?.Invoke() ?? "{}",
+            "ranav"                => EvalRaNav(),
+            "rabuffsdue"           => (BuffsDue?.Invoke(double.TryParse(A(0), NumberStyles.Float, CultureInfo.InvariantCulture, out double dueSec)
+                                                        ? (int)Math.Clamp(dueSec, 0, int.MaxValue) : 0) ?? -1).ToString(CultureInfo.InvariantCulture),
 
             // ── World object queries ──────────────────────────────────────────
             "wobjectfindnearestbytemplatetype"        => EvalWobjectFindNearestByTemplateType(A(0)),
@@ -3726,6 +3733,7 @@ internal sealed partial class ExpressionEngine
             ["TargetLock"]          = (() => B(s.TargetLock),          v => s.TargetLock          = ToDouble(v) != 0),
             ["FightSelectedTarget"] = (() => B(s.FightSelectedTarget), v => s.FightSelectedTarget = ToDouble(v) != 0),
             ["MeleeThroughWalls"]   = (() => B(s.MeleeThroughWalls),   v => s.MeleeThroughWalls   = ToDouble(v) != 0),
+            ["DebuffAllBeforeAttacking"] = (() => B(s.DebuffAllBeforeAttacking), v => s.DebuffAllBeforeAttacking = ToDouble(v) != 0),
             ["RingRange"]           = (() => I(s.RingRange),           v => { if (int.TryParse(v, out int i)) s.RingRange        = i; }),
             ["ApproachRange"]       = (() => I(s.ApproachRange),       v => { if (int.TryParse(v, out int i)) s.ApproachRange    = i; }),
             ["MinRingTargets"]      = (() => I(s.MinRingTargets),      v => { if (int.TryParse(v, out int i)) s.MinRingTargets   = i; }),
@@ -3745,6 +3753,7 @@ internal sealed partial class ExpressionEngine
             ["MissileAttackPower"]  = (() => I(s.MissileAttackPower),  v => { if (int.TryParse(v, out int i)) s.MissileAttackPower = i; }),
             ["CustomPetRange"]      = (() => I(s.CustomPetRange),      v => { if (int.TryParse(v, out int i)) s.CustomPetRange   = i; }),
             ["PetMinMonsters"]      = (() => I(s.PetMinMonsters),      v => { if (int.TryParse(v, out int i)) s.PetMinMonsters   = i; }),
+            ["PetElement"]          = (() => s.PetElement.Length > 0 ? s.PetElement : "Any", v => s.PetElement = PetChoice.NormalizeElement(v)),
             // VTank-meta migration (Phase 2): fields existed but weren't exposed here.
             ["CorpseApproachRangeMax"] = (() => D(s.CorpseApproachRangeMax), v => { if (double.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out double d)) s.CorpseApproachRangeMax = d; }),
             ["CorpseApproachRangeMin"] = (() => D(s.CorpseApproachRangeMin), v => { if (double.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out double d)) s.CorpseApproachRangeMin = d; }),

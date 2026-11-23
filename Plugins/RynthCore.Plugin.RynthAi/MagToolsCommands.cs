@@ -253,6 +253,7 @@ public sealed partial class RynthAiPlugin
         ["pickupmacrooff"]            = "LootChestsMacroOff",   // Settings > Looting > Pickup with macro off
         ["lootchestsmacrooff"]        = "LootChestsMacroOff",
         ["meleethroughwalls"]         = "MeleeThroughWalls",    // Settings > Combat > Targeting > Melee through walls
+        ["debuffallbeforeattacking"]  = "DebuffAllBeforeAttacking",   // Settings > Combat > Targeting > Debuff every monster in range before attacking
         ["lootnearbychests"]          = "LootNearbyChests",     // Settings > Looting > Loot Nearby Chests
         ["dooropenrange"]             = "OpenDoorRange",
         ["autofellowmanagement"]      = "AutoFellowMgmt",

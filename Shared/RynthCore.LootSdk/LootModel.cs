@@ -13,7 +13,7 @@ public enum LootAction
     Sell,
     Salvage,
     Read,
-    KeepUpTo,   // "Keep #" — keep at most LootRule.KeepCount in inventory
+    KeepUpTo,   // "Keep #" — keep at most LootRule.KeepCount in inventory (or picked up per day: PerDayHours)
 }
 
 // ── Condition base ────────────────────────────────────────────────────────────
@@ -98,6 +98,12 @@ public sealed class LootRule : System.ComponentModel.INotifyPropertyChanged
     // Always written: the context skips default values, and a skipped "Keep # 0" would load back as 1.
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.Never)]
     public int        KeepCount { get; set; } = 1;
+
+    /// <summary>
+    /// "Keep # per day" (LootPerDay): with KeepUpTo, at most KeepCount picked up in any window of
+    /// this many hours, counted by pickups, not the pack. 0 = off; left out of the file then.
+    /// </summary>
+    public int        PerDayHours { get; set; }
 
     public List<LootCondition> Conditions { get; set; } = new();
 }

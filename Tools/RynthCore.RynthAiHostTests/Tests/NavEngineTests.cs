@@ -51,6 +51,7 @@ internal static class NavEngineTests
         r.Add("nav engine: a stuck detour rejoins the nearest waypoint ahead", RejoinAhead);
         r.Add("nav engine: a rejoin never goes back, past a chat point, beyond 20 yd or 8 points", RejoinLimits);
         r.Add("nav engine: a rejoin on a Linear route heading back follows the route backwards", RejoinLinearReverse);
+        r.Add("nav engine: stuck for good belongs to the route it was found on: a route put in since is not stuck yet", StuckForGoodBelongsToItsRoute);
         r.Add("nav engine: a waypoint in a different area holds nav with one chat line", AreaHold);
         r.Add("nav engine: an undecided area check walks on and asks again every 2 s", AreaUnknownRetry);
         r.Add("nav engine: the hold ends when the areas match again", AreaResumes);
@@ -740,6 +741,24 @@ internal static class NavEngineTests
         At(34.5, 2);
         StuckUntilDetour(nav);
         Check.Eq(IndexOf(nav, p.PlanTargets.FirstOrDefault()), 12, "heading back, it rejoins at [12] (the route backwards), not [11] or [14]");
+    }
+
+    // 2026-11-17, a DreamWeave Thread in 0x0278: stuck for good, the explore laid its walk again round that way, but a
+    // rebuff had started (navigation doesn't run then) and the engine still said stuck for good: the explore laid it
+    // again five times in 2.4 s, closing a real opening each time, until the walk reached nothing and it ended.
+    private static void StuckForGoodBelongsToItsRoute()
+    {
+        FakeHost.Reset(); At(10.5, 2);
+        var p = new FakePlanner();   // no plans: each detour attempt fails at once
+        var nav = new Nav(Line(RT.Circular, 16, 3), idx: 1, planner: p);
+        var tgt = nav.S.CurrentRoute.Points[nav.Idx];
+        Face((tgt.NS - NS0) * 240.0, (tgt.EW - EW0) * 240.0);
+        for (int i = 0; i < 3000 && !nav.E.DetoursUsedUpAndStuck; i++) nav.Tick(100);
+        Check.True(nav.E.DetoursUsedUpAndStuck, $"standing still: every detour tried, stuck for good ({p.PlanTargets.Count} tried)");
+        nav.S.CurrentRoute = Line(RT.Circular, 16, 3);   // laid again; no tick (a rebuff)
+        Check.False(nav.E.DetoursUsedUpAndStuck, "a route put in since: not stuck on it before navigation has walked it");
+        nav.Tick(100);
+        Check.False(nav.E.DetoursUsedUpAndStuck, "and navigation running it starts the count again");
     }
 
     // ── Different area ────────────────────────────────────────────────────────

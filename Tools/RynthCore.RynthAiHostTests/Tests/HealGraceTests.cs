@@ -47,9 +47,12 @@ internal static class HealGraceTests
         Check.Eq(BuffManager.KitWaitVerdict(1200, -1, 699, true, false), BuffManager.KitWaitEnd.Waiting, "UseDone(0) 699 ms ago, no line: wait");
         Check.Eq(BuffManager.KitWaitVerdict(1200, -1, 700, true, false), BuffManager.KitWaitEnd.Answered, "UseDone(0) 700 ms ago, no line: none is coming");
         Check.Eq(BuffManager.KitWaitVerdict(1200, -1, 700, true, true), BuffManager.KitWaitEnd.Waiting, "UseDone(0) but a motion plays: another action's answer, wait");
-        Check.Eq(BuffManager.KitWaitVerdict(1200, 300, -1, true, false), BuffManager.KitWaitEnd.Waiting, "line seen 300 ms ago: the vitals grace runs");
-        Check.Eq(BuffManager.KitWaitVerdict(9000, 300, -1, true, false), BuffManager.KitWaitEnd.Waiting, "a line seen: its grace runs out even past the limit");
-        Check.Eq(BuffManager.KitWaitVerdict(1200, 700, -1, true, false), BuffManager.KitWaitEnd.Landed, "line seen 700 ms ago: done");
+        // 2026-11-20: the catch-up after the line is 300 ms (was 700), or none once the vitals show the heal.
+        Check.Eq(BuffManager.KitWaitVerdict(1200, 299, -1, true, false), BuffManager.KitWaitEnd.Waiting, "line seen 299 ms ago: the vitals catch-up runs");
+        Check.Eq(BuffManager.KitWaitVerdict(9000, 200, -1, true, false), BuffManager.KitWaitEnd.Waiting, "a line seen: its catch-up runs out even past the limit");
+        Check.Eq(BuffManager.KitWaitVerdict(1200, 300, -1, true, false), BuffManager.KitWaitEnd.Landed, "line seen 300 ms ago: done");
+        Check.Eq(BuffManager.KitWaitVerdict(1200, 0, -1, true, false, vitalsCaughtUp: true), BuffManager.KitWaitEnd.Landed, "line seen, the vitals show its heal: done at once");
+        Check.Eq(BuffManager.KitWaitVerdict(1200, -1, 300, true, false, vitalsCaughtUp: true), BuffManager.KitWaitEnd.Waiting, "no line: the caught-up flag means nothing");
     }
 
     private static long _t;

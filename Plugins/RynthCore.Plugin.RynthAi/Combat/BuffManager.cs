@@ -293,6 +293,9 @@ public partial class BuffManager : IDisposable
     internal BuffCastChain Chain => _chain;
     /// <summary>This tick skipped the animation gate (the fast path): only a buff cast may go out.</summary>
     private bool _fastChainTick;
+    /// <summary>This tick skipped the animation gate for a vital cast in the between-fights top-off
+    /// (FastVitalChainNow): only a vital spell cast may go out; a kit, potion or buff waits a tick.</summary>
+    private bool _fastVitalTick;
     private string _fastChainWhy = "";
 
     // Held-cast nudge (2026-10-05): a cast the server holds open (incantation, no result) is
@@ -375,33 +378,68 @@ public partial class BuffManager : IDisposable
         return _healthFellAt != DateTime.MinValue && (now - _healthFellAt).TotalMilliseconds < HealthFellCountsMs;
     }
 
-    // ── Buffs wait while hurt in a fight (2026-11-07) ──
-    // Drakkon cast four weapon auras (2.4 s each) one after another with a golem's Force Bolts hitting him
-    // and his health under Heal At; the emergency heal then waited for the last aura's cast and he died.
-    // Under Heal At in a fight no new buff cast starts (one already sent finishes) and the arbiter doesn't
-    // give Buffing the tick for buffs: the heals (vital recharge keeps its slot) and combat go first. The
-    // buffs carry on once health is back over Heal At or the fight is over.
-    private bool _buffHurtWaitOn;
+    // ── Buffs wait for the fight (2026-11-07, every buff since 2026-11-20) ──
+    // 2026-11-07: a character cast four weapon auras (2.4 s each) one after another with a golem's Force Bolts
+    // hitting him and his health under Heal At; the emergency heal then waited for the last aura's cast and
+    // he died. Then only health under Heal At held the buffs back.
+    // 2026-11-20, DreamWeave Thread 0x5C47: a Virindi dispelled Robustify and Executor's Blessing in the
+    // middle of a fight. RynthAi put his hand wraps away for the staff and cast them with a Rager on him and
+    // five monsters in range, and he died 4 s later. The owner: "dispel makes sense... but i think we should
+    // clear the mobs nearby before we rebuff". So in a fight (a monster within Monster Range, or health
+    // falling: InCombatNow) no new buff cast starts, whatever the health; one already sent finishes. The
+    // arbiter doesn't give Buffing the tick for buffs, so combat goes first, and the heals (a vital recharge
+    // keeps its slot). A rebuff run under way stops between two casts and carries on once the fight is over.
+    // The same for a dispelled buff and one at Rebuff With. A Force Rebuff the player asked for still goes in a
+    // fight (their own ask), except under Heal At, as before.
+    private bool _buffFightWaitOn;                         // a wait with buffs to cast was logged
+    private DateTime _buffFightWaitSince = DateTime.MinValue;
+    private DateTime _buffFightNeedCheckedAt = DateTime.MinValue;
 
-    /// <summary>True while health is under Heal At in a fight: no new buff cast. Logs the start and end of each wait.</summary>
-    public bool BuffsWaitForHealth()
+    /// <summary>True in a fight: no new buff cast. A Force Rebuff the player asked for waits only while health
+    /// is under Heal At. Logs the start (when there are buffs to cast) and the end of each wait.</summary>
+    public bool BuffsWaitForFight()
     {
-        bool wait = _settings.HealAt > 0 && _vitals.HealthPct > 0 && _vitals.HealthPct < _settings.HealAt && InCombatNow();
-        if (wait != _buffHurtWaitOn)
+        bool fight = InCombatNow();
+        bool hurt = _settings.HealAt > 0 && _vitals.HealthPct > 0 && _vitals.HealthPct < _settings.HealAt;
+        bool playersOwn = _isForceRebuffing && !_isAutoBatchRebuff;
+        bool wait = fight && (!playersOwn || hurt);
+        DateTime now = RynthClock.Now;
+        if (!wait)
         {
-            _host.Log(wait
-                ? $"[Buff] buffs wait: health {_vitals.HealthPct}% is under Heal At {_settings.HealAt}% in a fight; heals and combat go first."
-                : $"[Buff] buffs go on: health {_vitals.HealthPct}%, {(InCombatNow() ? "back over Heal At" : "the fight is over")}.");
-            _buffHurtWaitOn = wait;
+            if (_buffFightWaitOn)
+                _host.Log($"[Buff] buffs go on: {(fight ? $"health {_vitals.HealthPct}%, back over Heal At, for the Force Rebuff you asked for" : "the fight is over")} (they waited {(now - _buffFightWaitSince).TotalSeconds:0} s).");
+            _buffFightWaitOn = false;
+            return false;
         }
-        return wait;
+        // Logged only when something is held back (a fight with every buff up isn't a wait); asked once a second.
+        if (!_buffFightWaitOn && (now - _buffFightNeedCheckedAt).TotalMilliseconds >= 1000)
+        {
+            _buffFightNeedCheckedAt = now;
+            if (NeedsAnyBuff())
+            {
+                _buffFightWaitOn = true;
+                _buffFightWaitSince = now;
+                _host.Log($"[Buff] buffs wait: {FightWhy(hurt)}; they go on once the fight is over (combat and the heals first).");
+            }
+        }
+        return true;
+    }
+
+    private string FightWhy(bool hurt)
+    {
+        string why = InCombatOverride != null ? "a fight"
+            : _combatManager?.HasCloseThreat(System.Math.Max(1, _settings.MonsterRange)) == true
+                ? $"a monster within Monster Range ({_settings.MonsterRange} yd)"
+                : "health falling (something is hitting you)";
+        return hurt ? $"{why}, health {_vitals.HealthPct}% under Heal At {_settings.HealAt}%" : why;
     }
 
     // ── Rebuff When Idle (RebuffWhenIdle + RebuffIdleMarginMinutes; VTank's "idlebufftopoff") ──
     // The checkbox was saved and shown since the first version but nothing read it (a player asked,
     // 2026-10-30, whether "buff only when idle" was implemented). What it means (the owner): an earlier
     // timer for idle moments. The regular rebuff is unchanged: a buff at or under Rebuff With
-    // (RebuffSecondsRemaining), or dispelled, is recast as always, in a fight or not. With the option
+    // (RebuffSecondsRemaining), or dispelled, is recast as always, once a fight is over (BuffsWaitForFight,
+    // since 2026-11-20; before that in a fight too). With the option
     // on and the bot idle (IdleForTopOff: no fight target, no monster within Monster Range, no corpse
     // to loot, no salvage), a rebuff run also starts once a buff is at or under Rebuff With plus the
     // margin (default 2 minutes). Such an early run never starts in a fight, and one under way stops
@@ -1266,10 +1304,28 @@ public partial class BuffManager : IDisposable
         value = 0;
         if (_settings.EmergencyHealAt > 0 && hp <= _settings.EmergencyHealAt) { value = _settings.EmergencyHealAt; return "Emergency Heal At"; }
         if (StaminaToHealthAllowed(_settings, hp, stamPct)) { value = _settings.StaminaToHealthAt; return "Stamina To Health At"; }
-        value = inCombat ? _settings.HealAt : _settings.TopOffHP;
-        if (hp < value) return inCombat ? "Heal At" : "Top Off HP";
+        bool fightLines = FightHealthLine(inCombat);
+        value = fightLines ? _settings.HealAt : _settings.TopOffHP;
+        if (hp < value) return fightLines ? "Heal At" : "Top Off HP";
         return "";
     }
+
+    /// <summary>
+    /// The vital lines a fight uses (Heal At, Re-stam At, Get Mana At) apply during a buff run too, not
+    /// only with a monster in range: the Top Off lines are for between fights and buff runs, and the
+    /// top-off follows the run (R-20261120-181322-b31b, 2026.11.19.1). With Top Mana 95 and Get Mana
+    /// At 20 a run cast Stamina to Mana ten times at 77-100% mana, then kits to win the stamina back.
+    /// </summary>
+    private bool UseFightVitalLines(bool inCombat) => inCombat || _isForceRebuffing;
+
+    /// <summary>
+    /// Heal At (the fight line) or Top Off HP for health. The fight line is for a fight RynthAi is
+    /// fighting (and a buff run, UseFightVitalLines): with Combat off nothing of ours fights back, so a
+    /// monster near or hitting must not lower the line. Top Off HP applies then (2026-11-22: Combat off,
+    /// Heal At 0, a monster hitting; every hit made it "a fight", Heal At 0 healed nothing, and the
+    /// character stood until it died).
+    /// </summary>
+    private bool FightHealthLine(bool inCombat) => UseFightVitalLines(inCombat && _settings.EnableCombat);
 
     // ── What the activity display says while the arbiter's slot is "Buffing" ──
     // BotAction stays "Buffing" for every vitals job: it is a control string (CombatManager's
@@ -1407,6 +1463,7 @@ public partial class BuffManager : IDisposable
             string line = ActiveHealLine(_vitals.HealthPct, _vitals.StaminaPct, out int lineValue, out bool inCombat);
             _healLatency.Observe(Now, _vitals.HealthPct, line, lineValue, inCombat, HealInFlight());
         }
+        else if (!_settings.IsMacroRunning) _healLatency.MacroOff(Now, _vitals.HealthPct);   // no episode spans a stop
         try { HeartbeatCore(); }
         finally
         {
@@ -1464,6 +1521,7 @@ public partial class BuffManager : IDisposable
         PollCastTracker();
         ObserveBuffChain();
         _fastChainTick = false;
+        _fastVitalTick = false;
 
         // Heals failing at Emergency Heal At: break the cast, then recall (BuffManager.HpFailsafe.cs).
         TickHpFailsafe();
@@ -1792,8 +1850,14 @@ public partial class BuffManager : IDisposable
         // buff, the next buff skips the animation gate only (the pacer's gesture hold and the
         // engine's cast gate below). Every other gate stays.
         _fastChainTick = FastChainNow();
-        if (!PacerAllows(out string paceWhy, gestureGate: !_fastChainTick))
+        // The same for a vital cast after our own vital cast in the between-fights top-off (FastVitalChainNow).
+        _fastVitalTick = !_fastChainTick && FastVitalChainNow();
+        // A heal held by the character's animation past HealAnimationCapMs (all told, across the short
+        // clear moments between hit recoils) skips the animation gates (BuffManager.HealAnimationCap.cs).
+        bool healAnimCap = HealAnimationCapReached();
+        if (!PacerAllows(out string paceWhy, gestureGate: !_fastChainTick && !_fastVitalTick && !healAnimCap))
         {
+            NoteHealAnimationHold(IsAnimationHold(paceWhy));
             LastBuffSkipReason = "server answering the last action: " + paceWhy;
             Hold("server answering the last action", paceWhy);
             return;
@@ -1815,21 +1879,31 @@ public partial class BuffManager : IDisposable
         // NeedsAnyBuff and is the sole writer of the "Buffing" string.
         // A heal goes ahead of a busy count the server has already finished (BusyHoldsHeal);
         // everything else still waits for the count to drop.
-        bool gateOpen = _fastChainTick || CastGateWatchdog.CanCastNow(_host.CanCastNow, s => _host.Log(s));
+        bool gateOpen = _fastChainTick || _fastVitalTick || healAnimCap || CastGateWatchdog.CanCastNow(_host.CanCastNow, s => _host.Log(s));
         bool busyHolds = BusyCount > 0
             && !_pacerLetHealAhead   // the pacing let this heal go ahead of an unanswered corpse use (its rules)
             && (ActiveHealLine(_vitals.HealthPct, _vitals.StaminaPct, out _, out _).Length == 0 || BusyHoldsHeal());
         if (!gateOpen || busyHolds)
         {
+            NoteHealAnimationHold(!gateOpen);
             LastBuffSkipReason = busyHolds ? "busy (BusyCount>0)" : "cast gate closed (CanCastNow=false / gesture animating)";
             if (!gateOpen) Hold("cast gate (a gesture is animating)");
             else Hold("busy count", $"busy {BusyCount}");
             return;
         }
 
+        EndHealAnimationHold();   // the vitals step is reached: the heal is not held by the animation
         if (CheckVitals())
         {
             if (_healHold.Length == 0) Hold(_healWaitKind.Length > 0 ? _healWaitKind : "vitals step busy", _vitalWhy);
+            return;
+        }
+        // The animation gate was skipped for a vital cast only: nothing else goes this tick, and the
+        // next tick waits for the animation as usual (what goes then is no vital cast of this chain).
+        if (_fastVitalTick)
+        {
+            _chain.HoldForAnimation();
+            Hold("cast gate (a gesture is animating)");
             return;
         }
 
@@ -1877,8 +1951,9 @@ public partial class BuffManager : IDisposable
         if (manaFloor > 0 && _vitals.MaxMana > 0 && _vitals.ManaPct < manaFloor)
         {
             // The floor refills on its own: Stamina to Mana (or a potion) right here, then buffing
-            // carries on. CheckVitals only refills below Top Off Mana out of combat, so a Top Off
-            // Mana under Get Mana At left buffing waiting on natural regen - one buff every 1-2
+            // carries on. CheckVitals refilled only below Top Off Mana out of combat (a buff run uses
+            // Get Mana At there too since 2026-11-20), so a Top Off Mana under Get Mana At left
+            // buffing waiting on natural regen - one buff every 1-2
             // minutes (tester, 10-01: 85 minutes of "buffing waits", Stamina to Mana never cast).
             // A low stamina is topped up first (kit, Revitalize, potion) so Stamina to Mana can run.
             // Each source's reason, for the log line below: it used to show only the last one tried
@@ -1986,8 +2061,8 @@ public partial class BuffManager : IDisposable
 
         if (_settings.EnableBuffing)
         {
-            if (BuffsWaitForHealth())
-                return;   // hurt in a fight: no new buff cast (a run in progress resumes after)
+            if (BuffsWaitForFight())
+                return;   // in a fight: no new buff cast (a run in progress resumes after)
             if (CheckAndCastSelfBuffs())
                 return;
 
@@ -2161,10 +2236,14 @@ public partial class BuffManager : IDisposable
         // Otherwise idle → top up to the HIGH (TopOffHP / TopOffStam /
         // TopOffMana) thresholds so we re-engage at full. Thresholds are
         // strict "<": set a value to 0 to disable that vital in that mode.
+        // A buff run uses the fight's lines too (UseFightVitalLines); the top-off comes after it.
         bool inCombat = InCombatNow();
-        int hpThreshold   = inCombat ? _settings.HealAt    : _settings.TopOffHP;
-        int manaThreshold = inCombat ? _settings.GetManaAt : _settings.TopOffMana;
-        int stamThreshold = StaminaLine(inCombat, curStamPct, _settings, ref _restamRun, ref _restamRunCasts);
+        bool fightLines = UseFightVitalLines(inCombat);
+        bool fightHpLine  = FightHealthLine(inCombat);   // Combat off: Top Off HP even while hit
+        int hpThreshold   = fightHpLine ? _settings.HealAt : _settings.TopOffHP;
+        if (fightHpLine) WarnNoFightHealLine(curHealthPct);
+        int manaThreshold = fightLines ? _settings.GetManaAt : _settings.TopOffMana;
+        int stamThreshold = StaminaLine(fightLines, curStamPct, _settings, ref _restamRun, ref _restamRunCasts);
 
         // A flag is set only when something was actually done about the vital.
         // WantsVitalRecharge holds the arbiter on Buffing, above combat and nav, so
@@ -2192,10 +2271,10 @@ public partial class BuffManager : IDisposable
             }
             _healUnavailableUntil = RynthClock.Now.AddMilliseconds(HealUnavailableMs);
             Hold("nothing could heal", $"kit: {Why(kitWhy)}; Heal Self: {Why(spellWhy)}; potion: {Why(potionWhy)}");
-            LogNoHeal($"health {curHealthPct}% < {(inCombat ? "Heal At" : "Top Off HP")} {hpThreshold}% but nothing healed: " +
+            LogNoHeal($"health {curHealthPct}% < {(fightHpLine ? "Heal At" : "Top Off HP")} {hpThreshold}% but nothing healed: " +
                       $"kit: {Why(kitWhy)}; Heal Self: {Why(spellWhy)}; potion: {Why(potionWhy)}");
         }
-        else if (!inCombat && curHealthPct < _settings.HealAt)
+        else if (!fightLines && curHealthPct < _settings.HealAt)
         {
             LogNoHeal($"health {curHealthPct}% < Heal At {_settings.HealAt}% but no monster within MonsterRange " +
                       $"{_settings.MonsterRange} yd, so the idle Top Off HP {hpThreshold}% applies");
@@ -2208,7 +2287,7 @@ public partial class BuffManager : IDisposable
 
         // Mana: under Get Mana At / Top Off Mana, or (a caster) under the reserve kept for Stamina
         // to Mana (ManaUnderLine; see "Mana reserve" at the top).
-        bool manaLow = curManaPct < manaThreshold || ManaUnderLine(inCombat, out _);
+        bool manaLow = curManaPct < manaThreshold || ManaUnderLine(fightLines, out _);
         if (manaLow)
         {
             // Stamina too low for Stamina to Mana: the refill starts with a stamina use, so a falling
@@ -2285,6 +2364,31 @@ public partial class BuffManager : IDisposable
     }
 
     private DateTime _staminaNoSwapLoggedAt = DateTime.MinValue;
+    private DateTime _noFightLineLoggedAt = DateTime.MinValue;
+    private DateTime _noFightLineChatAt = DateTime.MinValue;
+
+    /// <summary>
+    /// Heal At 0 switches healing off in a fight; with Emergency Heal At and Stamina To Health At 0 as
+    /// well, nothing heals in a fight at any health (2026-11-22: eight deaths in a row with no heal sent
+    /// in the minutes before each, Heal At and Emergency Heal At both 0). Said in the log (each minute)
+    /// and in chat (each 5 minutes) while health is under Top Off HP in a fight; nothing else changes.
+    /// </summary>
+    private void WarnNoFightHealLine(int hp)
+    {
+        if (_settings.HealAt > 0 || _settings.EmergencyHealAt > 0 || _settings.StaminaToHealthAt > 0) return;
+        if (hp <= 0 || hp >= Math.Max(1, _settings.TopOffHP)) return;
+        var now = RynthClock.Now;
+        if ((now - _noFightLineLoggedAt).TotalSeconds < 60) return;
+        _noFightLineLoggedAt = now;
+        string text = $"health {hp}% in a fight and no heal line covers fights (Heal At 0, Emergency Heal At 0, " +
+                      $"Stamina To Health At 0): nothing heals until the fight ends. Set Heal At or Emergency Heal At (Advanced settings, Recharge).";
+        _host.Log("[RynthAi] Vitals: " + text);
+        if ((now - _noFightLineChatAt).TotalMinutes >= 5)
+        {
+            _noFightLineChatAt = now;
+            _host.WriteToChat("[RynthAi] " + char.ToUpperInvariant(text[0]) + text[1..], 2);
+        }
+    }
 
     /// <summary>
     /// The heal chain of the vitals step (CheckVitals, and the one-touch heal): a kit, Heal Self and a
@@ -2586,14 +2690,23 @@ public partial class BuffManager : IDisposable
         _pendingVitalSpellId = spellId;   // instant: confirmed by chat, never by the registry
         _pendingVitalLabel = label;
         _pendingVitalBase = what;
-        bool castOk = _host.CastSpellFor(targetId, spellId, "Buff",
-            SpellTableStub.GetById(spellId)?.Name ?? what);
+        string castName = SpellTableStub.GetById(spellId)?.Name ?? what;
+        bool fast = _fastVitalTick;
+        if (fast)
+            _host.Log($"[BuffChain] vital '{castName}' goes without waiting for the animation: {_fastChainWhy}");
+        // Recorded for the vital fast path only out of a fight: in one, the chain's state stays as it was.
+        bool chainIt = !InCombatNow();
+        int seqAtSend = UseDoneSeqNow();
+        bool castOk = _host.CastSpellFor(targetId, spellId, "Buff", castName);
         _lastCastAttempt = RynthClock.Now;
         if (!castOk)
         {
             _pendingSpellId = 0;
+            if (chainIt) _chain.VitalClientRefused(spellId, castName, fast, Now, s => _host.Log(s));
             return VitalNo($"the client refused the cast (spell {spellId})");
         }
+        if (chainIt)
+            _chain.SentVital(spellId, castName, seqAtSend, ActionPacer.Started, ActionPacer.AttacksSent, MoveAudit.MovementSends, fast);
         sent = true;
         _vitalActionsSent++;
         _lastVitalCastAt = RynthClock.Now;
@@ -2663,6 +2776,7 @@ public partial class BuffManager : IDisposable
             if (ConsumableLookup.Resolve(_worldObjectCache, rule) is not WorldObject potion) continue;
             if (IsKitName(potion.Name)) continue;
             if (Array.FindIndex(types, t => t.Equals(DrinkType(rule, potion), StringComparison.OrdinalIgnoreCase)) < 0) continue;
+            if (_fastVitalTick) return FastTickItemWait("the potion");
             if (HeldCastBlocksItemUse(out string heldWhy)) return VitalNo(heldWhy);
             _host.Log($"[RynthAi] Vitals: drinking {rule.Name} ({rule.Type})" + (potion.Id != rule.Id ? " from a new stack." : "."));
             _host.UseFor(unchecked((uint)potion.Id), "Buff", $"vitals: drink {rule.Name} ({rule.Type}) from the Items list");
@@ -2680,6 +2794,7 @@ public partial class BuffManager : IDisposable
             string? kind = RynthCore.Plugin.RynthAi.LegacyUi.LegacyWeaponsUi.PotionType(wo);
             if (kind == null || Array.FindIndex(types, t => t.Equals(kind, StringComparison.OrdinalIgnoreCase)) < 0) continue;
             if (IsKitName(wo.Name)) continue;
+            if (_fastVitalTick) return FastTickItemWait("the potion");
             if (HeldCastBlocksItemUse(out string heldWhy)) return VitalNo(heldWhy);
             _host.Log($"[RynthAi] Vitals: using {wo.Name} from the pack ({kind}).");
             _host.UseFor(unchecked((uint)wo.Id), "Buff", $"vitals: {kind} potion from the pack");
@@ -2774,6 +2889,7 @@ public partial class BuffManager : IDisposable
         uint missing = _vitals.MaxHealth > _vitals.CurrentHealth ? _vitals.MaxHealth - _vitals.CurrentHealth : 0;
         // Combat has the tick (BuffManager.HealHold.cs): no peace switch goes out, so the chance is the stance it is in.
         if (!ignoreMinSuccess && !KitChanceOk(kit.Id, kit.Name ?? "", missing, _settings.PeaceModeForKits && !_vitalsNoPeaceSwitch, _settings.KitMinSuccessPct)) return VitalNo($"{kit.Name} under Kit Min Success %");
+        if (_fastVitalTick) return FastTickItemWait("the healing kit");
         if (_settings.PeaceModeForKits && mode != CombatMode.NonCombat && _host.HasChangeCombatMode && _vitalsNoPeaceSwitch)
             NoteHealHoldRefusal(peace: true, "the healing kit");
         if (_settings.PeaceModeForKits && mode != CombatMode.NonCombat && _host.HasChangeCombatMode && !_vitalsNoPeaceSwitch)
@@ -2825,6 +2941,7 @@ public partial class BuffManager : IDisposable
             underMinSuccess = true;
             return false;
         }
+        if (_fastVitalTick) return FastTickItemWait("the stamina kit");
         if (_settings.PeaceModeForKits && mode != CombatMode.NonCombat && _host.HasChangeCombatMode && _vitalsNoPeaceSwitch)
             NoteHealHoldRefusal(peace: true, "the stamina kit");
         if (_settings.PeaceModeForKits && mode != CombatMode.NonCombat && _host.HasChangeCombatMode && !_vitalsNoPeaceSwitch)
@@ -2867,22 +2984,35 @@ public partial class BuffManager : IDisposable
     private bool _kitSawAnimating;                          // the motion queue read busy since the send
     // 3.5 s: the longest healthy kit answer is 2.5 s (ActionPacer's time limits). Stamina kits share it.
     internal const double KitResultTimeoutMs = 3500;
-    private const double KitLandGraceMs = 700;
+    // A UseDone(0) for the kit with no line: how long to wait for a line after all.
+    internal const double KitLandGraceMs = 700;
+    // After the kit's result line (2026-11-20): the next kit waited KitLandGraceMs (700 ms) after every
+    // line for the vitals to catch up, sized on 10-03 when the vitals were read every 30th tick (1-3 s).
+    // Since 10-05 they are read every 100 ms (RynthAiPlugin.VitalsPollMs) from the engine's snapshot,
+    // which ACE's vital update (sent before the line, Healer.DoHealing) has already reached when the
+    // line arrives. The wait now ends as soon as the vitals show the healed amount the line names
+    // (KitVitalsCaughtUp), or KitVitalsCatchUpMs after the line (a failed kit names none): 3 vitals reads.
+    // Stamina kits chained 3.1 s apart in the logs (16:46:45.572 line, next kit 46.302); now ~2.5 s.
+    internal const double KitVitalsCatchUpMs = 300;
     /// <summary>Kits let go with no result line (heal grace or the time limit) (tests, status).</summary>
     internal int KitRetries { get; private set; }
+    // The kit's vital (health, or stamina for a stamina kit) when it went out, and what its line said it healed (0 = none named).
+    private uint _kitVitalAtUse;
+    private int _kitLineAmount;
 
     internal enum KitWaitEnd { Waiting, Landed, Answered, NotTaken, TimedOut }
 
     /// <summary>
     /// The kit wait, from what has been seen since the send (pure; a ms value below 0 = not seen): the
-    /// result line plus KitLandGraceMs; the kit's UseDone(0) with no line plus KitLandGraceMs, with no
-    /// motion playing; nothing at all from the server (<paramref name="serverTookIt"/> false) and no
-    /// motion playing after ActionPacer.HealGraceMs; or KitResultTimeoutMs whatever happened.
+    /// result line, then the vitals showing its heal (<paramref name="vitalsCaughtUp"/>) or KitVitalsCatchUpMs;
+    /// the kit's UseDone(0) with no line plus KitLandGraceMs, with no motion playing; nothing at all from
+    /// the server (<paramref name="serverTookIt"/> false) and no motion playing after ActionPacer.HealGraceMs;
+    /// or KitResultTimeoutMs whatever happened.
     /// </summary>
     internal static KitWaitEnd KitWaitVerdict(double msSinceUse, double msSinceLanded, double msSinceAnswered,
-        bool serverTookIt, bool animatingNow)
+        bool serverTookIt, bool animatingNow, bool vitalsCaughtUp = false)
     {
-        if (msSinceLanded >= 0) return msSinceLanded >= KitLandGraceMs ? KitWaitEnd.Landed : KitWaitEnd.Waiting;
+        if (msSinceLanded >= 0) return vitalsCaughtUp || msSinceLanded >= KitVitalsCatchUpMs ? KitWaitEnd.Landed : KitWaitEnd.Waiting;
         if (msSinceAnswered >= KitLandGraceMs && !animatingNow) return KitWaitEnd.Answered;
         if (!serverTookIt && !animatingNow && msSinceUse >= ActionPacer.HealGraceMs) return KitWaitEnd.NotTaken;
         if (msSinceUse >= KitResultTimeoutMs) return KitWaitEnd.TimedOut;
@@ -2912,6 +3042,30 @@ public partial class BuffManager : IDisposable
         _kitSawAnimating = false;
         _kitIsStamina = stamina;
         _kitSeqAtUse = UseDoneSeqNow();
+        _kitVitalAtUse = stamina ? _vitals.CurrentStamina : _vitals.CurrentHealth;
+        _kitLineAmount = 0;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex KitAmountRx =
+        new(@"heal yourself for ([\d,]+) (health|stamina) point", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>The amount a kit's result line says it healed ("You heal yourself for 52 Health points."), 0 if none.</summary>
+    internal static int KitLineAmount(string lower)
+    {
+        var m = KitAmountRx.Match(lower);
+        return m.Success && int.TryParse(m.Groups[1].Value.Replace(",", ""), out int n) ? n : 0;
+    }
+
+    /// <summary>The vitals already show the heal the kit's line named: its vital at or over what it was
+    /// at the use plus that amount (capped at the maximum). Nothing named (a failed kit): false.</summary>
+    private bool KitVitalsCaughtUp()
+    {
+        if (_kitLandedAt == DateTime.MinValue || _kitLineAmount <= 0) return false;
+        uint cur = _kitIsStamina ? _vitals.CurrentStamina : _vitals.CurrentHealth;
+        uint max = _kitIsStamina ? _vitals.MaxStamina : _vitals.MaxHealth;
+        if (max == 0) return false;
+        uint want = Math.Min(max, _kitVitalAtUse + (uint)_kitLineAmount);
+        return cur >= want;
     }
 
     private bool MotionQueueBusy => _host.HasGetCastBusyState && !_host.CanCastNow;
@@ -2954,7 +3108,7 @@ public partial class BuffManager : IDisposable
         var end = KitWaitVerdict(sinceUse,
             _kitLandedAt != DateTime.MinValue ? (now - _kitLandedAt).TotalMilliseconds : -1,
             _kitAnsweredAt != DateTime.MinValue ? (now - _kitAnsweredAt).TotalMilliseconds : -1,
-            KitServerTookIt(), MotionQueueBusy);
+            KitServerTookIt(), MotionQueueBusy, KitVitalsCaughtUp());
         if (end == KitWaitEnd.Waiting) return true;
         if (end != KitWaitEnd.Landed)
         {
@@ -3026,6 +3180,17 @@ public partial class BuffManager : IDisposable
     /// <summary>Kit Min Success % with a melee or missile weapon out, when Kit Min Success is higher.</summary>
     internal const int WeaponOutKitMinPct = 30;
 
+    /// <summary>A vital spell now would need a wand swap first: a melee or missile stance, or out of Magic
+    /// stance with a wand to swap to that is not in hand (peace with the weapon still wielded).</summary>
+    private bool SpellNeedsWandSwap()
+    {
+        int mode = CurrentCombatMode;
+        if (mode == CombatMode.Melee || mode == CombatMode.Missile) return true;
+        if (mode == CombatMode.Magic) return false;
+        int wand = FindWandInItems();
+        return wand != 0 && !IsBuffWandWielded(wand);
+    }
+
     /// <summary>
     /// True when a kit may be used: <paramref name="minPct"/> (Kit Min Success % for healing kits,
     /// Stamina Kit Min Success % for stamina kits) is 0, or the kit's chance of working on
@@ -3040,7 +3205,9 @@ public partial class BuffManager : IDisposable
         // (2026-11-13): low stamina doesn't kill, and the bar hid Stamina Kit Min Success % (50 read
         // as 30, a 16% Greater Stamina Kit every 3 s).
         bool staminaKit = kitName.EndsWith("Stamina Kit", StringComparison.OrdinalIgnoreCase);
-        if (!staminaKit && (CurrentCombatMode == CombatMode.Melee || CurrentCombatMode == CombatMode.Missile))
+        // Peace with the weapon still in hand is the same swap (2026-11-22: a 53% kit skipped in peace
+        // with hand wraps wielded; the wand swap, the stance and a fizzle took 9 s for one +115 heal).
+        if (!staminaKit && SpellNeedsWandSwap())
             minPct = Math.Min(minPct, WeaponOutKitMinPct);
         if (minPct <= 0 || _charSkills == null) return true;
 
@@ -3141,6 +3308,35 @@ public partial class BuffManager : IDisposable
         }
         // The shield's armor spells start a batch the same way (BuffManager.Shield.cs).
         return ShieldBuffBelowThreshold(desiredBuffs, thresholdSec);
+    }
+
+    /// <summary>
+    /// How many buffs a rebuff with <paramref name="thresholdSec"/> as its line would cast: the character's own,
+    /// the item spells (weapon auras, armor banes) and the shield's; a missing or dispelled one counts, a parked
+    /// one doesn't (as AnyBuffBelowThreshold). -1 with buffing off. For scripts, through rabuffsdue[seconds]
+    /// (2026-11-20): a script that reads only the character's enchantments, so before a Thread it never saw
+    /// thirteen item spells with 14 minutes left, and RynthAi recast them in the Thread.
+    /// </summary>
+    public int CountBuffsDue(int thresholdSec)
+    {
+        if (!_settings.EnableBuffing) return -1;
+        var desiredBuffs = BuildDynamicBuffList();
+        int sec = Math.Max(0, thresholdSec);
+        int due = 0;
+        DateTime now = RynthClock.Now;
+        foreach (string buffBaseName in desiredBuffs)
+        {
+            AcSkillType castSkill = SkillFor(buffBaseName);
+            if (!IsSkillUsable(castSkill)) continue;
+            int spellId = FindBestSpellId(buffBaseName, castSkill);
+            if (spellId == 0) continue;
+            int family = SpellTableStub.GetById(spellId)?.Family ?? 0;
+            if (family != 0 && _buffFailCooldownUntil.TryGetValue(family, out DateTime coolUntil) && now < coolUntil)
+                continue;
+            if (!IsBuffActive(spellId, sec)) due++;
+        }
+        if (ShieldBuffBelowThreshold(desiredBuffs, sec)) due++;
+        return due;
     }
 
     // "[FR] skip ..." lines while a rebuff runs: the selector runs every tick (~30 ms), and a
@@ -4713,6 +4909,7 @@ public partial class BuffManager : IDisposable
         if (_kitUsedAt != DateTime.MinValue && _kitLandedAt == DateTime.MinValue && IsKitResultLine(lower))
         {
             _kitLandedAt = RynthClock.Now;
+            _kitLineAmount = KitLineAmount(lower);
             NoteKitResultLine(text, lower);   // "... is used up." naming it: kit picks skip it (BuffManager.KitUsedUp.cs)
             ClearKitRefusedStreaks();         // a kit landed: the refusal streaks end (BuffManager.VitalWandGate.cs)
         }
@@ -4781,6 +4978,8 @@ public partial class BuffManager : IDisposable
                 _host.Log($"[BuffChat] PARKED pending={_pendingSpellId}{(PendingIsShield ? " (on the shield)" : "")} — AC too busy (cast gesture in progress); throttle kept, backing off before re-issue.");
                 if (_pendingSpellId != _pendingVitalSpellId)
                     _chain.TooBusyLine(_pendingSpellId, s => _host.Log(s));
+                else
+                    _chain.TooBusyLineVital(_pendingSpellId, Now, s => _host.Log(s));
             }
             if (!pendingRunning) _pendingSpellId = 0;
 
@@ -5142,6 +5341,35 @@ public partial class BuffManager : IDisposable
         bool hasLast = _host.TryGetLastUseDone(out int lastSeq, out uint lastErr);
         return _chain.Eligible(ActionPacer.Started, ActionPacer.AttacksSent, MoveAudit.MovementSends, hasLast, lastSeq, lastErr,
             _host.GetUseDoneSeq(), Now, out _fastChainWhy);
+    }
+
+    /// <summary>
+    /// The vital fast path for this tick (BuffCastChain, "Vital casts in the between-fights top-off"):
+    /// the setting and the pacing are on, the character is in Magic stance, no monster is within
+    /// Monster Range and health isn't falling (InCombatNow: in a fight nothing changes), a vital is
+    /// under a line (else the buff chain's own rules), no kit is in flight, no held stop, and the last
+    /// action was our own vital cast answered by UseDone(0) moments ago. Only a vital cast rides it.
+    /// </summary>
+    private bool FastVitalChainNow()
+    {
+        if (!_settings.FastBuffChain || !ActionPacer.Enabled) return false;
+        if (!_host.HasUseDoneSeq || CurrentCombatMode != CombatMode.Magic) return false;
+        if (_vitals.MaxHealth == 0 || KitPending() || VitalsClearOfEveryLine()) return false;
+        if (InCombatNow()) return false;
+        if (MoveAudit.HasPendingStop) return false;
+        bool hasLast = _host.TryGetLastUseDone(out int lastSeq, out uint lastErr);
+        return _chain.EligibleVital(ActionPacer.Started, ActionPacer.AttacksSent, MoveAudit.MovementSends, hasLast, lastSeq, lastErr,
+            _host.GetUseDoneSeq(), Now, out _fastChainWhy);
+    }
+
+    /// <summary>A kit, potion or peace switch on a vital fast-path tick: not sent (the animation gate was
+    /// skipped for a cast only); handled, so nothing else stands in for it, and it goes next tick.</summary>
+    private bool FastTickItemWait(string what)
+    {
+        _chain.HoldForAnimation();   // no fast path again until the next cast: the kit goes once the animation ends
+        _vitalWhy = $"{what} waits for the animation (this tick only lets a vital cast go)";
+        _healWaitKind = "cast gate (a gesture is animating)";
+        return true;
     }
 
     /// <summary>True when health, stamina and mana are at or over every line the vitals step acts on
@@ -5528,7 +5756,8 @@ public partial class BuffManager : IDisposable
     private bool HealIsUrgent(int hp, int stamPct)
     {
         string line = ActiveHealLine(hp, stamPct, out _, out bool inCombat);
-        return line is "Emergency Heal At" or "Stamina To Health At" || (line == "Heal At" && inCombat);
+        // Top Off HP while being hit with Combat off (FightHealthLine) is as urgent as Heal At in a fight.
+        return line is "Emergency Heal At" or "Stamina To Health At" || (line is "Heal At" or "Top Off HP" && inCombat);
     }
 
     private bool EnsureMagicMode(bool forBuff = false, bool urgentHeal = false)
@@ -5745,7 +5974,7 @@ public partial class BuffManager : IDisposable
         // one of these two branches fires per call — no same-tick wield/unwield race.
         if (wandId != 0 && IsWieldedLive(wandId))
         {
-            int openPack = WorldObjectCache.FindPackFor(_host, _worldObjectCache, includeMainPack: true, requireFree: 1);
+            int openPack = WorldObjectCache.FindPackFor(_host, _worldObjectCache, includeMainPack: true, requireFree: 1, new[] { wandId });
             if (openPack != 0) _host.MoveItemInternal((uint)wandId, (uint)openPack, 0, 1);
         }
         else if (bowId != 0 && !IsWieldedLive(bowId))
@@ -5838,7 +6067,7 @@ public partial class BuffManager : IDisposable
 
             case HandSwapSequence.Act.MoveToPack:
             {
-                int pack = WorldObjectCache.FindPackFor(_host, _worldObjectCache, includeMainPack: true, requireFree: 1);
+                int pack = WorldObjectCache.FindPackFor(_host, _worldObjectCache, includeMainPack: true, requireFree: 1, new[] { step.Id });
                 if (pack == 0)
                 {
                     WorldObjectCache.WarnPackFull(_host, "can't put the weapon away to switch to the wand, so buffs and spell heals can't cast");
@@ -5966,7 +6195,7 @@ public partial class BuffManager : IDisposable
         if ((now - _modeChangedAt).TotalMilliseconds < BurstQuietMs) return 0;
         var moves = _wandSwap.Blockers(hands);
         if (moves.Count == 0 || moves.Count > 2) return 0;
-        int pack = WorldObjectCache.FindPackFor(_host, _worldObjectCache, includeMainPack: true, requireFree: moves.Count);
+        int pack = WorldObjectCache.FindPackFor(_host, _worldObjectCache, includeMainPack: true, requireFree: moves.Count, moves);
         if (pack == 0) return 0;
         if (!_host.ChangeCombatModeFor(CombatMode.NonCombat, "Buff", "wand swap burst: peace, the hands and the wand at once")) return 1;
         foreach (int id in moves)

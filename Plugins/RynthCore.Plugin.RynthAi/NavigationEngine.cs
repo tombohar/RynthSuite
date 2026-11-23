@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.PluginSdk;
 using RynthCore.Plugin.Shared;
@@ -131,6 +133,9 @@ internal sealed class NavigationEngine
     // ── Stuck watchdog ───────────────────────────────────────────────────────
     private double _watchdogNs = double.NaN;
     private double _watchdogEw = double.NaN;
+    private long   _watchdogAt;                       // when _watchdogNs/Ew were taken
+    private double _watchdogMovedYd = double.NaN;     // moved in the last watchdog window, for the stuck lines
+    private double _watchdogWindowMs;
     private long   _watchdogNext;
     private int    _stuckCount;
     private bool   _inRecovery;
@@ -155,6 +160,8 @@ internal sealed class NavigationEngine
         public int    Number;          // session recovery counter, for the log
         public string Reason = string.Empty;
         public string Planner = string.Empty;
+        public bool   Navmesh;         // RynthNav navmesh corners: the corner gate applies (NavmeshRaycast)
+        public bool   TargetMoved;     // the rejoin waypoint is inside something placed: the last point stands in for it
         public List<NavPoint> Points = new();
         public int    Index;           // next detour point to reach
         public int    StartIdx;        // ActiveNavIndex when it began (a change cancels it)
@@ -193,8 +200,14 @@ internal sealed class NavigationEngine
 
     /// <summary>Every detour for the current waypoint has been tried and the character is still stuck there
     /// (only the escapes are left, for as long as it takes): the dungeon explore takes this as a way it can't
-    /// get through, something the map doesn't have standing in it (a spider web spawned in a doorway).</summary>
-    public bool DetoursUsedUpAndStuck => _detour == null && _detourAttempts >= MaxDetourAttempts && _stuckCount >= 2;
+    /// get through, something the map doesn't have standing in it (a spider web spawned in a doorway).
+    /// Only on the route walked when that was found: a route put in since (the explore laid again round that
+    /// way) clears it when navigation next runs, and until then it is not yet stuck at all. Navigation doesn't
+    /// run while buffing: 2026-11-17, a DreamWeave Thread in 0x0278, the explore laid its walk again five times in
+    /// 2.4 s during a rebuff, each time "stuck for good" on the walk before, closing a real opening or spot each
+    /// time until the walk from the start reached nothing and the explore ended as done.</summary>
+    public bool DetoursUsedUpAndStuck => _detour == null && _detourAttempts >= MaxDetourAttempts && _stuckCount >= 2
+                                         && ReferenceEquals(_settings.CurrentRoute, _lastRoute);
 
     private INavRecoveryPlanner? _planner;
     private Detour? _detour;
@@ -239,6 +252,9 @@ internal sealed class NavigationEngine
     // ── Observability (GetStateSnapshot / /ra navstate) ──────────────────────
     private double _lastDistYd     = double.NaN;
     private double _lastHeadingErr = double.NaN;
+    // The heading the steering last aimed at (0 = north, clockwise; NaN = not steered yet), kept from
+    // HeadingErrorTo / SteerToWaypoint for the stuck lines.
+    private double _lastDesiredDeg = double.NaN;
     private long   _lastSteerAt;
 
     // ── Derived thresholds (from settings) ──────────────────────────────────
@@ -273,8 +289,12 @@ internal sealed class NavigationEngine
     // half a metre of its centre line, at under 15 degrees. The lookahead is off at them too.
     internal const double DoorwayReachYd  = 1.0;   // NavMarkerRenderer draws doorway rings at this size
     private const double DoorwaySweepMult = 1.5;
-    private double ReachFor(NavPoint p) => p.Doorway ? Math.Min(ArrivalYards, DoorwayReachYd) : ArrivalYards;
-    private double SweepFor(NavPoint p) => ReachFor(p) * (p.Doorway ? Math.Min(SweepMult, DoorwaySweepMult) : SweepMult);
+    // A Jump step is reached as tightly as a doorway, from a file too (Doorway is never saved): it stands at
+    // the edge it was laid or recorded at (/ra nav addjump, 2026-11-18), and a jump a yard or two short of a
+    // ledge or a stepping stone falls short.
+    private static bool Tight(NavPoint p) => p.Doorway || p.Type == NavPointType.Jump;
+    private double ReachFor(NavPoint p) => Tight(p) ? Math.Min(ArrivalYards, DoorwayReachYd) : ArrivalYards;
+    private double SweepFor(NavPoint p) => ReachFor(p) * (Tight(p) ? Math.Min(SweepMult, DoorwaySweepMult) : SweepMult);
 
     // Lookahead (corner rounding): within this distance of a waypoint, blend the aim point
     // toward the next one so corners are rounded. It used to be the Lookahead setting alone
@@ -291,15 +311,57 @@ internal sealed class NavigationEngine
         => Math.Clamp(CornerRoundPerReachYd * (reachYd - CornerRoundFreeReachYd), 0.0, Math.Max(0.0, lookaheadSetting));
     private double LookaheadYards => CornerLookaheadYards(_settings.NavLookaheadYards, ArrivalYards);
 
+    // Corner gate (2026-11-18). A hunt walk is RynthNav's path, laid 1 m off the walls; nav turned toward the
+    // next corner at the nav point reach (1.5 yd) without looking, and the cut across the inside of the corner
+    // left the mesh's safe corridor for the building corner the path went round. A walk simulation on the live
+    // tiles (0x7D64, 0xA9B4, 0x32D9, 0x64D5, 0x238E, 1,309 walks) had the centre line through baked collision on
+    // 157 walks at reach 1.5, and on 10 with this gate (the body's sides, 0.48 m out, touching it: 343 to 167).
+    // So on walks along RynthNav's corners (a hunt walk, a planned GoTo, a navmesh detour) a corner is reached at
+    // the nav point reach, or blended toward the next one, only while RynthNav's raycast from the character to the
+    // next corner is clear (RynthNav's own walker does the same: PathFollow.Advance); otherwise as tightly as a
+    // doorway point (DoorwayReachYd). Meta, VTank and saved routes are never gated and keep their reach exactly.
+
+    /// <summary>RynthNav's navmesh raycast (RynthNav.Path v2) from (x, y, z) to (x, y, z), world units: RayClear (1)
+    /// when a straight walk stays on the mesh. Set by the plugin (RynthAiPlugin.HuntRaycast); null: no corner gate.</summary>
+    public Func<double, double, double, double, double, double, int>? NavmeshRaycast { get; set; }
+
+    private bool CornerGated(NavRouteParser route) => NavmeshRaycast != null && (route.OutdoorHuntWalk || route.NavmeshCorners);
+    private double TightReachYd => Math.Min(ArrivalYards, DoorwayReachYd);
+    private int _cornerHeldIdx = -1;     // the route waypoint whose turn the gate has held (for the arrival line)
+
+    /// <summary>
+    /// False when the walk may not turn the corner at <paramref name="pt"/> yet: a gated walk, the character inside
+    /// the reach (or the lookahead blend) but outside the tight reach, a corner after it, and no straight walk to
+    /// that corner on the navmesh. True everywhere the answer changes nothing, so the raycast is asked only there.
+    /// </summary>
+    private bool CornerOpen(NavPoint pt, NavPoint? next, double dist, double blendYd)
+    {
+        if (Tight(pt) || dist < TightReachYd || dist >= Math.Max(ReachFor(pt), blendYd)) return true;
+        if (next == null || !IsWalkTarget(next.Type)) return true;   // the walk's end: no corner to turn
+        return NavmeshStraightTo(next);
+    }
+
+    /// <summary>The navmesh raycast from the character to <paramref name="p"/> is clear.</summary>
+    private bool NavmeshStraightTo(NavPoint p)
+    {
+        var ray = NavmeshRaycast;
+        if (ray == null) return true;
+        if (!_host.TryGetPlayerPose(out uint cell, out float lx, out float ly, out float lz, out _, out _, out _, out _) || cell == 0)
+            return false;
+        double ax = ((cell >> 24) & 0xFF) * 192.0 + lx, ay = ((cell >> 16) & 0xFF) * 192.0 + ly;
+        double bz = p.Z != 0.0 ? p.Z * 240.0 : lz;   // 0: not recorded
+        return ray(ax, ay, lz, NavToWorld(p.EW), NavToWorld(p.NS), bz) == RynthNavPathApiV1.RayClear;
+    }
+
     // Pass-through: a plain waypoint the character has gone past (it is beyond the point along
     // the way it came, and no farther to the side than the sweep radius) counts as reached,
     // so nav doesn't turn round to walk back to it. "Beyond along the way it came" means the
     // point is behind the character: a corner cut toward the next point never qualifies.
-    // Doorway points keep their own tight reach and sweep and never use it.
+    // Doorway and Jump points keep their own tight reach and sweep and never use it.
     private const double PassMinLegYd = 1.0;   // shorter approach: no reliable direction
     private bool PassedThrough(NavPoint pt, double ns, double ew)
     {
-        if (pt.Doorway || double.IsNaN(_legStartNs)) return false;
+        if (Tight(pt) || double.IsNaN(_legStartNs)) return false;
         double ux = (pt.NS - _legStartNs) * 240.0, uy = (pt.EW - _legStartEw) * 240.0;
         double len = Math.Sqrt(ux * ux + uy * uy);
         if (len < PassMinLegYd) return false;
@@ -484,6 +546,7 @@ internal sealed class NavigationEngine
             _lastRoute      = route;
             _inPause        = false;
             _closestDist    = double.MaxValue;
+            _cornerHeldIdx  = -1;
             _linearDir      = 1;
             if (!sameWalk)
             {
@@ -662,10 +725,20 @@ internal sealed class NavigationEngine
         }
         _campHoldAnnounced = false;
 
-        // Arrival check
-        if (dist < ReachFor(pt))
+        // Corner gate (see NavmeshRaycast): on a walk along RynthNav's corners the turn waits for a clear raycast.
+        bool cornerOpen = true;
+        if (CornerGated(route))
         {
-            _host.Log($"Nav: arrived at [{idx}] dist={dist:F1}yd → advancing");
+            int ni = PeekNext(idx, route);
+            cornerOpen = CornerOpen(pt, ni >= 0 ? route.Points[ni] : null, dist, LookaheadYards);
+            if (!cornerOpen) _cornerHeldIdx = idx;
+        }
+
+        // Arrival check
+        if (dist < (cornerOpen ? ReachFor(pt) : TightReachYd))
+        {
+            string held = _cornerHeldIdx == idx ? $" (corner held to {TightReachYd:F1}yd: no straight walk to the next on the navmesh)" : "";
+            _host.Log($"Nav: arrived at [{idx}] dist={dist:F1}yd → advancing{held}");
             _closestDist = double.MaxValue;
             UpdateStatusLine(idx, dist, route, 0.0);
             // Advance before the jump: the Jumper pauses nav and later restores what it
@@ -703,7 +776,7 @@ internal sealed class NavigationEngine
         }
         _closestDist = Math.Min(_closestDist, dist);
 
-        SteerToWaypoint(idx, pt, route, ns, ew, dist);
+        SteerToWaypoint(idx, pt, route, ns, ew, dist, cornerOpen);
     }
 
     public void Stop()
@@ -1083,14 +1156,15 @@ internal sealed class NavigationEngine
 
 
     private void SteerToWaypoint(int idx, NavPoint pt, NavRouteParser route,
-                                 double ns, double ew, double dist)
+                                 double ns, double ew, double dist, bool cornerOpen = true)
     {
-        _steerDoorway = pt.Doorway;
+        _steerDoorway = Tight(pt);
         // ── Lookahead blend ──────────────────────────────────────────────────
         double tNS = pt.NS, tEW = pt.EW;
         // Never at a doorway point: blending toward the next point there is exactly the corner
-        // cut that meets a narrow opening at an angle.
-        if (dist < LookaheadYards && !pt.Doorway)
+        // cut that meets a narrow opening at an angle. Nor at a corner the gate holds (no straight
+        // walk to the next one on the navmesh).
+        if (dist < LookaheadYards && !Tight(pt) && cornerOpen)
         {
             int ni = PeekNext(idx, route);
             // Only blend toward the NEXT waypoint when it is a real travel target
@@ -1112,6 +1186,7 @@ internal sealed class NavigationEngine
         // ── Desired heading (0=North, clockwise) ────────────────────────────
         double desiredDeg = Math.Atan2(tEW - ew, tNS - ns) * (180.0 / Math.PI);
         if (desiredDeg < 0) desiredDeg += 360.0;
+        _lastDesiredDeg = desiredDeg;
 
         // ── Current heading from quaternion (always reliable) ───────────────
         double currentDeg;
@@ -1141,6 +1216,7 @@ internal sealed class NavigationEngine
     {
         double desiredDeg = Math.Atan2(tEW - ew, tNS - ns) * (180.0 / Math.PI);
         if (desiredDeg < 0) desiredDeg += 360.0;
+        _lastDesiredDeg = desiredDeg;
 
         if (TryGetQuaternionHeading(out float qHeading))
         {
@@ -1365,6 +1441,7 @@ internal sealed class NavigationEngine
     {
         int oldIdx = _settings.ActiveNavIndex;
         _closestDist = double.MaxValue;
+        _cornerHeldIdx = -1;
         _portalState = PortalState.None;
         // Reaching a waypoint is progress: the next snag gets a fresh detour budget.
         _detourAttempts       = 0;
@@ -2379,6 +2456,8 @@ internal sealed class NavigationEngine
         {
             double dN = ns - _watchdogNs, dE = ew - _watchdogEw;
             double moved = Math.Sqrt(dN * dN + dE * dE) * 240.0;
+            _watchdogMovedYd  = moved;
+            _watchdogWindowMs = Now - _watchdogAt;
             if (moved < StuckYd)
             {
                 _stuckCount++;
@@ -2391,6 +2470,7 @@ internal sealed class NavigationEngine
         }
         _watchdogNs = ns;
         _watchdogEw = ew;
+        _watchdogAt = Now;
     }
 
     // ── Escapes and portals (2026-11-15) ────────────────────────────────────
@@ -2429,6 +2509,55 @@ internal sealed class NavigationEngine
         double px = ((cell >> 24) & 0xFF) * 192.0 + lx, py = ((cell >> 16) & 0xFF) * 192.0 + ly;
         return EscapeOffsetClear(px, py, lz, curDeg, near, ref offset, out note);
     }
+
+    // ── Room for a burst on the dungeon map (2026-11-18) ────────────────────────────────────────
+    // The bursts are blind: +75, -75, then 165 degrees off the heading, whatever is there. In a dungeon the map knows
+    // the walls and what the cells place, so a burst that would run head-on into one (a side step into the wall of a
+    // corner, a crate beside the altar it stuck on) is turned to the side that has room. A burst sliding along the
+    // face it stuck on gets on, so it is kept: the rungs still try their different sides in turn.
+
+    /// <summary>The dungeon map's room for an escape burst: how far (metres, up to 2) the character (cell, world x, y, z)
+    /// gets along a compass heading (0 north, clockwise) before it runs into something; NaN where the map doesn't say.
+    /// RynthAiPlugin sets it (NavRecoveryPlanner.EscapeRoom).</summary>
+    public Func<uint, double, double, double, double, double>? EscapeRoom { get; set; }
+    /// <summary>A burst that gets less than this far runs head-on into something: another heading is looked for.</summary>
+    internal const double EscapeRoomTight = 0.5;
+    /// <summary>The other heading is taken when it gets this much farther.</summary>
+    internal const double EscapeRoomBetter = 0.5;
+    private static readonly double[] EscapeRoomDeg = { +SideStepDeg, -SideStepDeg, BackOutDeg, -BackOutDeg };
+
+    private bool RoomiestEscapeOffset(double curDeg, ref double offset, out string? note)
+    {
+        note = null;
+        var room = EscapeRoom;
+        if (room == null || !_host.TryGetPlayerPose(out uint cell, out float lx, out float ly, out float lz, out _, out _, out _, out _) || cell == 0) return false;
+        double px = ((cell >> 24) & 0xFF) * 192.0 + lx, py = ((cell >> 16) & 0xFF) * 192.0 + ly;
+        return PickRoomiestEscape(curDeg, ref offset, h => room(cell, px, py, lz, h), out note);
+    }
+
+    /// <summary>The pure half of <see cref="RoomiestEscapeOffset"/>: the rung's offset when it has EscapeRoomTight ahead
+    /// (or the map doesn't say), else the side-step or back-out offset with the most room, when that is EscapeRoomBetter
+    /// more. True (note says so) when it turned the burst.</summary>
+    internal static bool PickRoomiestEscape(double curDeg, ref double offset, Func<double, double> roomAt, out string? note)
+    {
+        note = null;
+        double first = offset, own = roomAt(Wrap360(curDeg + first));
+        if (double.IsNaN(own) || own >= EscapeRoomTight) return false;
+        double pick = first, pickRoom = double.NegativeInfinity;
+        foreach (double off in EscapeRoomDeg)
+        {
+            if (Math.Abs(off - first) < 0.01) continue;
+            double r = roomAt(Wrap360(curDeg + off));
+            if (!double.IsNaN(r) && r > pickRoom) { pick = off; pickRoom = r; }
+        }
+        if (Math.Abs(pick - first) < 0.01 || !(pickRoom > own + EscapeRoomBetter)) return false;
+        note = string.Create(CultureInfo.InvariantCulture,
+            $"escape burst turned {pick:+0;-0}° instead of {first:+0;-0}° for room on the dungeon map ({pickRoom:F1} m clear ahead, {own:F1} m that way)");
+        offset = pick;
+        return true;
+    }
+
+    private static double Wrap360(double deg) { deg %= 360.0; return deg < 0 ? deg + 360.0 : deg; }
 
     /// <summary>The pure half of <see cref="PortalSafeEscapeOffset"/> (world position given).</summary>
     internal static bool EscapeOffsetClear(double px, double py, double pz, double curDeg,
@@ -2483,6 +2612,11 @@ internal sealed class NavigationEngine
         }
 
         _settings.NavIsStuck = true;
+        // Where, before anything moves the character: every stuck line ends with it.
+        string where = StuckWhere(route);
+        _lastStuckWhere = where;
+        _lastStuckAt    = Now;
+        _lastStuckCount = _stuckCount;
         StopMovement();
 
         // Escalation ladder, keyed on how many consecutive watchdog windows have
@@ -2492,7 +2626,7 @@ internal sealed class NavigationEngine
         {
             // Nothing shook us loose. Waypoints are never skipped (2026-09-28):
             // start the ladder over (jump, side-steps, back-out) on the same one.
-            _host.Log($"Nav: stuck x{_stuckCount} at [{_settings.ActiveNavIndex}] — still stuck, retrying the escapes.");
+            _host.Log($"Nav: stuck x{_stuckCount} at [{_settings.ActiveNavIndex}] — still stuck, retrying the escapes | {where}");
             _stuckCount = 1;
         }
 
@@ -2503,13 +2637,17 @@ internal sealed class NavigationEngine
         if (_detour != null)
             EndDetour("stuck on the detour", success: false);
         else if (TryStuckDetour(route))
+        {
+            _host.Log($"Nav: stuck x{_stuckCount} — detour, recovery #{_recoveryNumber} | {where}");
             return;
+        }
 
         // Rungs 2+ need a heading we can command. Without TurnToHeading the only
         // primitive we have is the jump, so stay on rung 1 rather than autorunning
         // blindly into whatever we happen to be facing.
         if (_stuckCount <= 1 || !_host.HasTurnToHeading || !TryGetQuaternionHeading(out float curDeg))
         {
+            _host.Log($"Nav: stuck x{_stuckCount} — jump | {where}");
             _recoveryKind  = RecoveryKind.Jump;
             _recoveryUntil = Now + (long)RecoveryMs;
             _inRecovery    = true;
@@ -2524,23 +2662,26 @@ internal sealed class NavigationEngine
             _ => BackOutDeg,
         };
 
+        // In a dungeon, a burst heading straight into a wall or something placed is turned to where the map has room.
+        if (RoomiestEscapeOffset(curDeg, ref offset, out string? roomNote)) _host.Log($"Nav: stuck x{_stuckCount} — {roomNote} | {where}");
+
         // A burst must not run the character into a portal (it fires on touch): the rung's heading if
         // it keeps away from every portal near, else the nearest one that does; none: the jump instead.
         if (!PortalSafeEscapeOffset(curDeg, ref offset, out string? portalNote))
         {
-            _host.Log($"Nav: stuck x{_stuckCount} — every escape heading runs at a portal ({portalNote}): jumping instead.");
+            _host.Log($"Nav: stuck x{_stuckCount} — every escape heading runs at a portal ({portalNote}): jumping instead | {where}");
             _recoveryKind  = RecoveryKind.Jump;
             _recoveryUntil = Now + (long)RecoveryMs;
             _inRecovery    = true;
             _host.JumpNonAutonomous(0.5f);
             return;
         }
-        if (portalNote != null) _host.Log($"Nav: stuck x{_stuckCount} — {portalNote}.");
+        if (portalNote != null) _host.Log($"Nav: stuck x{_stuckCount} — {portalNote} | {where}");
 
         double escapeHeading = curDeg + offset;
         if (escapeHeading >= 360.0) escapeHeading -= 360.0; else if (escapeHeading < 0.0) escapeHeading += 360.0;
 
-        _host.Log($"Nav: stuck x{_stuckCount} — escape burst {offset:+0;-0}° for {RecoveryBurstMs:F0}ms.");
+        _host.Log($"Nav: stuck x{_stuckCount} — escape burst {offset:+0;-0}° for {RecoveryBurstMs:F0}ms | {where}");
         _host.TurnToHeadingBy("Nav", (float)escapeHeading);
         StartForward();
         _recoveryKind  = RecoveryKind.Escape;
@@ -2959,9 +3100,68 @@ internal sealed class NavigationEngine
 
     // ── Starting / ending a detour ───────────────────────────────────────────
 
+    /// <summary>Stucks at the latest stuck spot (within StuckSpotYards of each other), for the outdoor hunt: at
+    /// StuckSpotRepeatHits it leaves the monster it walks to and keeps its walks off the spot. StuckSpotSeq: every stuck noted.</summary>
+    internal int StuckSpotHits => _stuckSpotHits;
+    internal int StuckSpotSeq { get; private set; }
+    internal const int StuckSpotRepeatHits = StuckSpotRepeat;
+
+    // ── Where a stuck happened (2026-11-18) ──────────────────────────────────
+    // Only 2 of the logged dungeon stucks had a position, and the 0x01F5 and A9B4 replays failed for want of z.
+    // Every "Nav: stuck xN" line ends with " | " and the spot as key=value words, on the one line:
+    //   cell=0x019001A2 at=(262.00,38.00,-12.00) heading=271 desired=268 target=[5] to=(263.10,38.20,-12.00) 1.1m
+    //   moved=0.42m/5.0s walk=Circular
+    // at/to are local to the character's landblock (a dungeon's coordinates); heading is where it faces, desired
+    // where nav last steered it (0 = north, clockwise); target is the route index, "[5]/detour#3:2/4" on a detour
+    // (its point 2 of 4); moved is the stuck watchdog's window; walk is hunt, navmesh (a planned GoTo) or the
+    // route's type.
+    private string _lastStuckWhere = string.Empty;
+    private long   _lastStuckAt;
+    private int    _lastStuckCount;
+
+    /// <summary>The last stuck's spot (the words after " | " on its stuck line); empty before the first stuck.</summary>
+    internal string LastStuckWhere => _lastStuckWhere;
+
+    /// <summary>"; last nav stuck x2 4.1s ago: cell=..." for a line about the same trouble logged later (the explore's
+    /// stuck for good); empty when nav hasn't been stuck.</summary>
+    internal string LastStuckNote()
+        => _lastStuckWhere.Length == 0 ? string.Empty
+         : string.Create(CultureInfo.InvariantCulture, $"; last nav stuck x{_lastStuckCount} {(Now - _lastStuckAt) / 1000.0:F1}s ago: {_lastStuckWhere}");
+
+    private string StuckWhere(NavRouteParser route)
+    {
+        var inv = CultureInfo.InvariantCulture;
+        var sb = new StringBuilder(200);
+        bool pose = _host.TryGetPlayerPose(out uint cell, out float lx, out float ly, out float lz, out _, out _, out _, out _) && cell != 0;
+        if (pose) sb.Append(inv, $"cell=0x{cell:X8} at=({lx:F2},{ly:F2},{lz:F2})");
+        else sb.Append("cell=? at=?");
+        sb.Append(TryGetQuaternionHeading(out float heading) ? string.Create(inv, $" heading={heading:F0}") : " heading=?");
+        sb.Append(double.IsNaN(_lastDesiredDeg) ? " desired=?" : string.Create(inv, $" desired={_lastDesiredDeg:F0}"));
+
+        // The point it was heading for: a detour's when one is walked, else the route's.
+        int idx = _settings.ActiveNavIndex;
+        NavPoint? t = null;
+        string which = $"[{idx}]";
+        var d = _detour;
+        if (d != null && d.Index < d.Points.Count) { t = d.Points[d.Index]; which = $"[{idx}]/detour#{d.Number}:{d.Index + 1}/{d.Points.Count}"; }
+        else if (IndexValid(idx, route)) t = route.Points[idx];
+        sb.Append(" target=").Append(which);
+        if (t != null && pose)
+        {
+            double ox = ((cell >> 24) & 0xFF) * 192.0, oy = ((cell >> 16) & 0xFF) * 192.0;
+            double tx = NavToWorld(t.EW) - ox, ty = NavToWorld(t.NS) - oy, tz = t.Z * 240.0;
+            double off = Math.Sqrt((tx - lx) * (tx - lx) + (ty - ly) * (ty - ly));
+            sb.Append(inv, $" to=({tx:F2},{ty:F2},{tz:F2}) {off:F1}m");
+        }
+        sb.Append(double.IsNaN(_watchdogMovedYd) ? " moved=?" : string.Create(inv, $" moved={_watchdogMovedYd:F2}m/{_watchdogWindowMs / 1000.0:F1}s"));
+        sb.Append(" walk=").Append(route.OutdoorHuntWalk ? "hunt" : route.NavmeshCorners ? "navmesh" : route.RouteType.ToString());
+        return sb.ToString();
+    }
+
     private void NoteStuckSpot()
     {
         if (!TryGetPos(out double ns, out double ew)) return;
+        StuckSpotSeq++;
         if (!double.IsNaN(_stuckSpotNs) && NavYd(ns - _stuckSpotNs, ew - _stuckSpotEw) <= StuckSpotYards)
         {
             _stuckSpotHits++;
@@ -3018,6 +3218,8 @@ internal sealed class NavigationEngine
             Number     = number,
             Reason     = reason,
             Planner    = plan.Planner,
+            Navmesh    = plan.NavmeshCorners,
+            TargetMoved = plan.TargetMoved && plan.Points.Count > 0,
             Points     = plan.Points,
             StartIdx   = idx,
             RejoinIdx  = rejoin,
@@ -3105,7 +3307,11 @@ internal sealed class NavigationEngine
 
         var p = d.Points[d.Index];
         double dist = NavYd(p.NS - ns, p.EW - ew);
-        if (dist < ReachFor(p) || (d.ClosestDist < SweepFor(p) && dist > d.ClosestDist + 0.3))
+        double look = Math.Min(LookaheadYards, 2.0);
+        var next = d.Index + 1 < d.Points.Count ? d.Points[d.Index + 1] : route.Points[d.RejoinIdx];
+        // A navmesh detour is RynthNav's path too: its corners wait for a clear raycast (the corner gate).
+        bool cornerOpen = !d.Navmesh || NavmeshRaycast == null || CornerOpen(p, next, dist, look);
+        if (dist < (cornerOpen ? ReachFor(p) : TightReachYd) || (d.ClosestDist < SweepFor(p) && dist > d.ClosestDist + 0.3))
         {
             d.Index++;
             d.ClosestDist = double.MaxValue;
@@ -3113,6 +3319,15 @@ internal sealed class NavigationEngine
             {
                 // Back on the route: resume at the rejoin waypoint; normal nav walks the last leg.
                 _settings.ActiveNavIndex = d.RejoinIdx;
+                if (d.TargetMoved)
+                {
+                    // The waypoint is inside something placed (0x00C1 room 81: a statue's middle) and the detour's last
+                    // point is the nearest spot clear of it: that is reaching it. Walking on at it ran into the
+                    // statue again, stuck after stuck, until the detours were used up.
+                    Advance(route);
+                    EndDetour($"reached the spot nearest [{d.RejoinIdx}] (it is inside something placed), on to [{_settings.ActiveNavIndex}]", success: true);
+                    return;
+                }
                 EndDetour($"rejoined the route at [{d.RejoinIdx}]", success: true);
             }
             return;
@@ -3120,12 +3335,10 @@ internal sealed class NavigationEngine
         d.ClosestDist = Math.Min(d.ClosestDist, dist);
 
         // Aim point: blend toward the following point near arrival, but less than the
-        // route does (doorways are narrow).
+        // route does (doorways are narrow), and not at a corner the gate holds.
         double tNS = p.NS, tEW = p.EW;
-        double look = Math.Min(LookaheadYards, 2.0);
-        if (look > 0.0 && dist < look && !p.Doorway)
+        if (look > 0.0 && dist < look && !p.Doorway && cornerOpen)
         {
-            var next = d.Index + 1 < d.Points.Count ? d.Points[d.Index + 1] : route.Points[d.RejoinIdx];
             double t = 1.0 - dist / look;
             tNS = Lerp(p.NS, next.NS, t);
             tEW = Lerp(p.EW, next.EW, t);
@@ -3154,6 +3367,8 @@ internal sealed class NavigationEngine
         d.Points   = plan.Points;
         d.Index    = 0;
         d.Planner  = plan.Planner;
+        d.Navmesh  = plan.NavmeshCorners;
+        d.TargetMoved = plan.TargetMoved && plan.Points.Count > 0;
         d.LengthYd = plan.LengthYd;
         d.Doorways = plan.Doorways;
         d.DoorRequests.Clear();

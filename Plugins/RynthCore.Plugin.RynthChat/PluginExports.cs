@@ -88,6 +88,19 @@ public static unsafe class PluginExports
         catch { return 0; }
     }
 
+    /// <summary>
+    /// How many player lines (tells, say, fellowship, allegiance, channels) the scrollback keeps in
+    /// a ring of their own, past the main one (the engine's "Player chat history"; 0.4.0). Returns
+    /// the number applied (clamped to 0..20000; -1 for 0, off), or 0 before the plugin is up.
+    /// Engines before it never call this, and the plugin keeps ChatBuffer.DefaultPlayerCapacity.
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthChatSetPlayerCapacity", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int SetPlayerCapacity(int lines)
+    {
+        try { return Runtime.Plugin?.SetPlayerScrollbackCapacity(lines) ?? 0; }
+        catch { return 0; }
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "RynthChatSendLine", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void SendLine(IntPtr ansiText)
     {

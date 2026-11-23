@@ -12,6 +12,10 @@
 // One TinkerRunner works one tab's scan at a time.
 // Above the benches: "Auto-confirm crafting" (CraftAutoConfirm), Yes to the server's chance prompt
 // at the chosen percent for crafts the player starts by hand.
+// The Kits sub-tab: "Make kits" (KitRunner / KitPlanner) makes Plentiful Healing Kits from their
+// ingredients, one combine at a time, only while the macro is off (also /ra kits). Under it,
+// "Make kits when low" (KitAuto; the macro side is RynthAiPlugin.Kits.cs) does the same by itself
+// while the macro runs, when the kits carried fall under the line and nothing is around.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -31,6 +35,17 @@ internal sealed class CraftingTab
     /// <summary>Auto-confirm crafting (the sticky engine answer for hand-made crafts).</summary>
     public CraftAutoConfirm AutoConfirm { get; }
 
+    /// <summary>Make kits (the Kits sub-tab, /ra kits).</summary>
+    public KitRunner Kits { get; }
+
+    /// <summary>Make kits when low: when a run may start with the macro on, and the waits (ticked by RynthAiPlugin.Kits.cs).</summary>
+    public KitAuto AutoKits { get; }
+
+    /// <summary>A command asked for the Kits sub-tab (the next frame selects it).</summary>
+    private volatile bool _selectKits;
+    public void SelectKitsTab() => _selectKits = true;
+    private static readonly byte[] KitsTabLabel = System.Text.Encoding.UTF8.GetBytes("Kits\0");
+
     // Custom-row editor (render thread only)
     private int _newMaterial = TinkerCatalog.Steel;
     private int _newKind;
@@ -45,6 +60,8 @@ internal sealed class CraftingTab
         _ctx = ctx;
         Runner = new TinkerRunner(ctx, RowsFor, SettingsFor);
         AutoConfirm = new CraftAutoConfirm(() => ctx.Host, () => ctx.Settings, ctx.Chat);
+        Kits = new KitRunner(ctx);
+        AutoKits = new KitAuto { Say = ctx.Chat };
     }
 
     private CraftingTabState C => _ctx.State.Crafting;
@@ -88,13 +105,20 @@ internal sealed class CraftingTab
     {
         Runner.Tick(nowMs);
         AutoConfirm.Tick(nowMs);
+        Kits.Tick(nowMs);
     }
 
-    public void OnChat(string text) => Runner.OnChat(text);
+    public void OnChat(string text)
+    {
+        Runner.OnChat(text);
+        Kits.OnChat(text);
+    }
 
     public void OnLogout()
     {
         Runner.OnLogout();
+        Kits.OnLogout();
+        AutoKits.Reset();
         AutoConfirm.Release();
     }
 
@@ -119,7 +143,183 @@ internal sealed class CraftingTab
         if (ImGui.BeginTabItem("Jewelry")) { RenderBench(TinkerBench.Jewelry); ImGui.EndTabItem(); }
         if (ImGui.BeginTabItem("Trinkets")) { RenderBench(TinkerBench.Trinkets); ImGui.EndTabItem(); }
         if (ImGui.BeginTabItem("Items")) { RenderBench(TinkerBench.Items); ImGui.EndTabItem(); }
+        bool selectKits = _selectKits;
+        _selectKits = false;
+        if (BeginTab(KitsTabLabel, selectKits ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None)) { RenderKits(); ImGui.EndTabItem(); }
         ImGui.EndTabBar();
+    }
+
+    /// <summary>BeginTabItem with flags and no close button (ImGui.NET only wraps flags with p_open).</summary>
+    private static unsafe bool BeginTab(byte[] labelUtf8Z, ImGuiTabItemFlags flags)
+    {
+        fixed (byte* label = labelUtf8Z)
+            return ImGuiNative.igBeginTabItem(label, null, flags) != 0;
+    }
+
+    // ── Kits (render thread) ────────────────────────────────────────────────
+
+    /// <summary>The Kits sub-tab: what the pack makes, the floor and count, Make kits / Stop.</summary>
+    private void RenderKits()
+    {
+        var k = Kits;
+        k.MarkViewed(MiniRemoteContext.NowMs);
+        SafeImGui.TextWrapped("Makes kits from their ingredients, one combine at a time, waiting for each result. "
+                              + "Every combine uses your Healing skill and can fail: a failure destroys one of each item. "
+                              + "Runs only while the macro is off, and stops if you move, leave peace mode or take damage.");
+        ImGui.Spacing();
+
+        int floor = Math.Clamp(C.KitMinChancePercent, 0, 100);
+        ImGui.SetNextItemWidth(90);
+        if (ImGui.InputInt("Min chance %##kitfloor", ref floor, 5))
+        {
+            int value = Math.Clamp(floor, 0, 100);
+            _ctx.Post(() => C.KitMinChancePercent = value);
+        }
+        if (ImGui.IsItemHovered())
+            SafeImGui.SetTooltip("Never try a combine whose chance is under this (0 = any chance).\n"
+                                 + "Worked out from your buffed Healing skill before every combine; when AC asks,\n"
+                                 + "RynthAi also says No to a lower server percent. Also /ra kits floor <0-100>.");
+        ImGui.SameLine();
+        int count = Math.Max(0, C.KitMakeCount);
+        ImGui.SetNextItemWidth(90);
+        if (ImGui.InputInt("Kits to make##kitcount", ref count, 1))
+        {
+            int value = Math.Clamp(count, 0, 1000);
+            _ctx.Post(() => C.KitMakeCount = value);
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("How many kits one run makes (0 = as many as the pack makes).");
+
+        var plan = k.Plan;
+        if (plan.Length == 0)
+        {
+            SafeImGui.TextDisabled("Reading your pack...");
+        }
+        else if (ImGui.BeginTable("##kits", 5, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.SizingStretchProp))
+        {
+            ImGui.TableSetupColumn("Kit", ImGuiTableColumnFlags.WidthFixed, 150);
+            ImGui.TableSetupColumn("Can make", ImGuiTableColumnFlags.WidthFixed, 65);
+            ImGui.TableSetupColumn("In your pack");
+            ImGui.TableSetupColumn("Chance");
+            ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 80);
+            ImGui.TableHeadersRow();
+            bool macroOn = _ctx.Settings?.IsMacroRunning == true;
+            foreach (var row in plan)
+            {
+                ImGui.PushID(row.Recipe.Id);
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn();
+                ImGui.TextUnformatted(row.Recipe.Name);
+                ImGui.TableNextColumn();
+                ImGui.TextUnformatted(row.CanMake.ToString());
+                ImGui.TableNextColumn();
+                SafeImGui.TextWrapped(KitPlanner.PartsText(row));
+                ImGui.TableNextColumn();
+                foreach (var c in row.Chances)
+                {
+                    string text = $"{c.Step.Label}: {(c.Percent >= 0 ? c.Percent + "%" : "?")}";
+                    if (c.UnderFloor) SafeImGui.TextColored(LegacyDashboardRenderer.ColAmber, text + " (under the floor)");
+                    else SafeImGui.TextDisabled(text);
+                }
+                ImGui.TableNextColumn();
+                string why = macroOn ? "Turn the macro off first: kits are made only while it is off."
+                    : k.Running ? "A kit run is going."
+                    : row.Blocked;
+                ImGui.BeginDisabled(why.Length > 0);
+                if (ImGui.SmallButton("Make kits"))
+                {
+                    var recipe = row.Recipe;
+                    int ask = Math.Max(0, C.KitMakeCount);
+                    int n = ask > 0 ? Math.Min(ask, row.CanMake) : row.CanMake;
+                    int fl = Math.Clamp(C.KitMinChancePercent, 0, 100);
+                    _ctx.Confirm("Make kits",
+                        $"Make up to {n} {recipe.Name}(s)?\n\nChance: {KitPlanner.ChancesText(row)} (floor {fl}%).\n"
+                        + "A failed combine destroys one of each item it used.\n"
+                        + "It stops if you move, leave peace mode, take damage or turn the macro on.",
+                        () =>
+                        {
+                            string refused = Kits.Start(recipe, ask);
+                            if (refused.Length > 0) _ctx.Chat("[RynthAi] Make kits: can't start - " + refused + ".");
+                        }, "Make kits");
+                }
+                ImGui.EndDisabled();
+                if (why.Length > 0 && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled)) SafeImGui.SetTooltip(why);
+                ImGui.PopID();
+            }
+            ImGui.EndTable();
+        }
+
+        ImGui.BeginDisabled(!k.Running);
+        if (ImGui.Button("Stop##kitstop")) _ctx.Post(() => Kits.Stop("stopped by you"));
+        ImGui.EndDisabled();
+        ImGui.SameLine();
+        SafeImGui.TextDisabled(k.Status);
+        if (k.LastSummary.Length > 0) SafeImGui.TextWrapped("Last run: " + k.LastSummary);
+        RenderAutoKits();
+        SafeImGui.TextDisabled("Ingredients: Soft Bandages, Treated Hyssop and Treated Mandrake (Healing must be trained). Also /ra kits.");
+    }
+
+    /// <summary>Make kits when low: the checkbox, the two numbers and what it is doing.</summary>
+    private void RenderAutoKits()
+    {
+        var settings = _ctx.Settings;
+        if (settings == null) return;
+        ImGui.Separator();
+        bool on = settings.MakeKitsWhenLow;
+        if (ImGui.Checkbox("Make kits when low##kitauto", ref on))
+        {
+            bool value = on;
+            _ctx.Post(() =>
+            {
+                settings.MakeKitsWhenLow = value;
+                if (value) AutoKits.LookNow();
+                else
+                {
+                    if (Kits.Auto) Kits.Stop("Make kits when low turned off", KitStopKind.Other);
+                    AutoKits.Off();
+                }
+                _ctx.SaveCombatSettings?.Invoke();
+            });
+        }
+        if (ImGui.IsItemHovered())
+            SafeImGui.SetTooltip("While the macro runs: when you carry fewer Plentiful Healing Kits than the first number,\n"
+                                 + "make up to the second number from your pack, at the Min chance % above.\n"
+                                 + $"Only when nothing is around: no monster within {KitAuto.DefaultRadiusYd:0} yd (or your Monster Range, if bigger),\n"
+                                 + $"no hit for {KitAuto.HurtQuietMs / 1000} s, no healing, buffing, looting or fight. The macro waits meanwhile;\n"
+                                 + "a monster, a hit, a heal or moving stops it at once. Also /ra kits auto on|off.");
+        ImGui.SameLine();
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("when fewer than");
+        ImGui.SameLine();
+        int below = Math.Clamp(settings.MakeKitsBelow, 1, KitAuto.MaxBelow);
+        ImGui.SetNextItemWidth(80);
+        if (ImGui.InputInt("##kitbelow", ref below, 1))
+        {
+            int value = Math.Clamp(below, 1, KitAuto.MaxBelow);
+            _ctx.Post(() => { settings.MakeKitsBelow = value; _ctx.SaveCombatSettings?.Invoke(); });
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip($"A run starts when you carry fewer kits than this (1-{KitAuto.MaxBelow}). Also /ra kits auto below N.");
+        ImGui.SameLine();
+        ImGui.TextUnformatted("kits, make up to");
+        ImGui.SameLine();
+        int upTo = Math.Clamp(settings.MakeKitsUpTo, 1, KitAuto.MaxUpTo);
+        ImGui.SetNextItemWidth(80);
+        if (ImGui.InputInt("##kitupto", ref upTo, 1))
+        {
+            int value = Math.Clamp(upTo, 1, KitAuto.MaxUpTo);
+            _ctx.Post(() => { settings.MakeKitsUpTo = value; _ctx.SaveCombatSettings?.Invoke(); });
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip($"The most kits one run makes (1-{KitAuto.MaxUpTo}); fewer when the pack runs out. Also /ra kits auto upto M.");
+        if (!settings.MakeKitsWhenLow) SafeImGui.TextDisabled("Make kits when low is off.");
+        else SafeImGui.TextDisabled("Make kits when low: " + AutoStatusText(settings));
+    }
+
+    /// <summary>What Make kits when low is doing ("running 2/5", "waiting: monster 22 yd away; next check in 4 s", ...).</summary>
+    public string AutoStatusText(LegacyUiSettings settings)
+    {
+        if (!settings.MakeKitsWhenLow) return "off";
+        if (Kits.Auto) return $"running {Kits.MadeCount}/{Math.Max(1, Kits.Limit)}";
+        if (!settings.IsMacroRunning) return "waiting: the macro is off";
+        return AutoKits.Status;
     }
 
     /// <summary>Auto-confirm crafting: the checkbox, the percent and what it has done.</summary>

@@ -66,6 +66,31 @@ internal static class NavPathQuery
 
     private static int Lb(double world) => (int)Math.Clamp(Math.Floor(world / 192.0), 0, 255);
 
+    /// <summary>A portal's own floor: within 2.5 u across, and 3 u up or down, of where it stands.</summary>
+    public static readonly RcVec3f PortalFloorExtents = new(2.5f, 3f, 2.5f);
+
+    /// <summary>
+    /// The polygon a portal stands on, at its own height (Detour: east, height, north), 0 when the navmesh
+    /// has none there. A portal in a cellar or a tunnel under a town (11-18: Zaikhal's Olthoi Tunnel, 7.7 u
+    /// under the street) is found by its height, not by the walker's: looked for from the street, the
+    /// nearest polygon is the street right above it.
+    /// </summary>
+    public static long PortalFloor(DtNavMeshQuery q, IDtQueryFilter filter, double east, double height, double north, out RcVec3f pt)
+    {
+        q.FindNearestPoly(new RcVec3f((float)east, (float)height, (float)north), PortalFloorExtents, filter, out long r, out pt, out _);
+        return r;
+    }
+
+    /// <summary>Whether a walk from <paramref name="sRef"/> reaches <paramref name="gRef"/>: a whole corridor that ends on it.</summary>
+    public static bool Reaches(DtNavMeshQuery q, long sRef, RcVec3f sPt, long gRef, RcVec3f gPt, IDtQueryFilter filter)
+    {
+        if (sRef == 0 || gRef == 0) return false;
+        if (sRef == gRef) return true;
+        Span<long> polys = new long[MaxPolys];
+        DtStatus st = q.FindPath(sRef, gRef, sPt, gPt, filter, polys, out int pc, polys.Length);
+        return !st.Failed() && pc > 0 && polys[pc - 1] == gRef;
+    }
+
     /// <summary>The polygon under <paramref name="p"/> (Detour axes): close up first, then the wide search.</summary>
     public static long SnapStart(DtNavMeshQuery q, RcVec3f p, IDtQueryFilter filter, out RcVec3f pt)
     {
@@ -75,24 +100,82 @@ internal static class NavPathQuery
     }
 
     /// <summary>
+    /// How far past a circle's edge the plain corridor's straight path must stay, everywhere, for it to be
+    /// taken over the corridor round the circles (<see cref="Corridor"/>): the corners pushed off the walls
+    /// afterwards move up to the wall clearance (1 m by default).
+    /// </summary>
+    public const double PlainClearMargin = 2.0;
+
+    /// <summary>
     /// The polygon corridor from sRef to gRef through <paramref name="first"/>; when that doesn't reach
     /// the goal and <paramref name="fallback"/> is set (the first filter keeps out of portals), planned
     /// again through <paramref name="plain"/> (<paramref name="fellBack"/>). <paramref name="status"/> is
-    /// the last FindPath's (its partial flag included).
+    /// the last FindPath's (its partial flag included). When the way round the circles does reach the goal,
+    /// the plain corridor is taken instead if its straight path is shorter and keeps clear of every circle
+    /// (<paramref name="plainTaken"/>).
     /// </summary>
     public static int Corridor(DtNavMeshQuery q, long sRef, long gRef, RcVec3f sPt, RcVec3f gPt,
                                IDtQueryFilter first, IDtQueryFilter plain, bool fallback, Span<long> polys,
-                               out bool fellBack, out DtStatus status)
+                               out bool fellBack, out DtStatus status, out bool plainTaken)
     {
-        fellBack = false;
+        fellBack = false; plainTaken = false;
         status = q.FindPath(sRef, gRef, sPt, gPt, first, polys, out int pc, polys.Length);
         if ((pc == 0 || polys[pc - 1] != gRef) && fallback)
         {
             // No way round the portals to there: plan as before (the caller's steering keeps out of them).
             status = q.FindPath(sRef, gRef, sPt, gPt, plain, polys, out pc, polys.Length);
             fellBack = true;
+            return pc;
+        }
+        // The way round the circles can go far round for nothing: every polygon a circle touches is left out,
+        // and on open ground one polygon can be a whole town square. 2026-11-18, a DreamWeave Thread in Yaraq:
+        // the Thread Exit's 4 m circle touched the edge of the 73 x 161 m polygon that is the town's middle
+        // (7D64), so every hunt walk west went round the north edge of town, 262-380 m for 72-119 m, the hunt
+        // called them all "too far round" and stood waiting. The plain corridor goes 40-97 m clear of the Exit.
+        if (fallback && pc > 0 && first is AvoidFilter round && round.Portals.Count > 0)
+        {
+            Span<long> alt = new long[polys.Length];
+            DtStatus st = q.FindPath(sRef, gRef, sPt, gPt, plain, alt, out int apc, alt.Length);
+            if (!st.Failed() && apc > 0 && alt[apc - 1] == gRef
+                && StraightLength(q, sPt, gPt, alt[..apc], round.Portals, out double plainLen, out bool clear) && clear
+                && StraightLength(q, sPt, gPt, polys[..pc], null, out double roundLen, out _) && plainLen < roundLen - 0.5)
+            {
+                alt[..apc].CopyTo(polys);
+                pc = apc; status = st; plainTaken = true;
+            }
         }
         return pc;
+    }
+
+    /// <summary>
+    /// The flat length of the straight path along <paramref name="corridor"/>; with <paramref name="circles"/>,
+    /// whether every leg keeps <see cref="PlainClearMargin"/> past every circle's edge (never, then, when a
+    /// circle holds the start or the end). False when Detour gives no straight path (or more corners than it holds).
+    /// </summary>
+    internal static bool StraightLength(DtNavMeshQuery q, RcVec3f sPt, RcVec3f gPt, Span<long> corridor,
+                                        PortalAvoid? circles, out double length, out bool clear)
+    {
+        length = 0; clear = false;
+        Span<DtStraightPath> sp = new DtStraightPath[MaxStraightCorners];
+        DtStatus st = q.FindStraightPath(sPt, gPt, corridor, corridor.Length, sp, out int n, MaxStraightCorners, 0);
+        if (st.Failed() || n < 1 || st.Has(DtStatus.DT_BUFFER_TOO_SMALL)) return false;
+        for (int i = 1; i < n; i++)
+        {
+            double dx = sp[i].pos.X - sp[i - 1].pos.X, dy = sp[i].pos.Z - sp[i - 1].pos.Z;
+            length += Math.Sqrt(dx * dx + dy * dy);
+        }
+        if (circles == null) return true;
+        clear = true;
+        foreach (PortalAvoid.Spot s in circles.Spots)
+        {
+            double need = s.R + PlainClearMargin;
+            double a0x = sp[0].pos.X, a0y = sp[0].pos.Z;
+            if (n == 1 && PortalAvoid.SegmentDistance(s.X, s.Y, a0x, a0y, a0x, a0y) < need) { clear = false; break; }
+            for (int i = 1; i < n; i++)
+                if (PortalAvoid.SegmentDistance(s.X, s.Y, sp[i - 1].pos.X, sp[i - 1].pos.Z, sp[i].pos.X, sp[i].pos.Z) < need) { clear = false; break; }
+            if (!clear) break;
+        }
+        return true;
     }
 
     /// <summary>On the mesh = inside a polygon (the nearest point on the mesh is the point itself), not merely near one.</summary>
@@ -172,8 +255,8 @@ internal static class NavPathQuery
 
         Span<long> polys = new long[MaxPolys];
         IDtQueryFilter first = avoid ? portals! : plain;
-        int pc = Corridor(q, sRef, gRef, sPt, gPt, first, plain, avoid, polys, out bool fellBack, out DtStatus st);
-        r.Polys = pc; r.FellBack = fellBack;
+        int pc = Corridor(q, sRef, gRef, sPt, gPt, first, plain, avoid, polys, out bool fellBack, out DtStatus st, out bool plainTaken);
+        r.Polys = pc; r.FellBack = fellBack; r.PlainClear = plainTaken;
         if (st.Failed() || pc == 0) return r.Fail(RynthNavPathApiV1.ResultNoPath, "no way on the navmesh");
         // Detour's partial result: the corridor ends at the polygon nearest the goal it could reach.
         bool partial = st.IsPartial() || polys[pc - 1] != gRef;
@@ -287,6 +370,8 @@ internal sealed class PathExResult
     /// <summary>From the last corner to the requested goal (3D), world units.</summary>
     public double EndDistance;
     public bool Partial, Truncated, FellBack;
+    /// <summary>The plain corridor was taken: shorter than the way round the circles, and clear of them all (NavPathQuery.Corridor).</summary>
+    public bool PlainClear;
     public int Polys, Portals, Bent, Pushed;
     public string Note = "";
 
@@ -295,7 +380,7 @@ internal sealed class PathExResult
         Code = RynthNavPathApiV1.ResultNoPath;
         Corners.Clear();
         Length = EndDistance = 0;
-        Partial = Truncated = FellBack = false;
+        Partial = Truncated = FellBack = PlainClear = false;
         Polys = Portals = Bent = Pushed = 0;
         Note = "";
     }

@@ -226,6 +226,13 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     foreach (var poly in cellGeo.Polygons)
                     {
                         if (poly.Vertices.Count < 3) continue;
+                        // A portal is an opening, never floor. Only the render-polygon fallback has any
+                        // (a cell with no physics polygons keeps its render ones, portals tagged): an
+                        // open-air cell, all openings. DreamWeave Thread 0x0169's 20 m shaft is four such
+                        // cells (0159/015A/015F/0160, open on every side, a floor portal at 0 down to the
+                        // cave 9-12 m below). Its floor portals read as floor, so the map walked straight
+                        // over the shaft and never saw the drop (2026-11-17).
+                        if (poly.IsPortal) continue;
                         var worldVerts = new Vector3[poly.Vertices.Count];
                         for (int i = 0; i < poly.Vertices.Count; i++)
                             worldVerts[i] = TransformVertex(poly.Vertices[i], envCell, gx, gy);

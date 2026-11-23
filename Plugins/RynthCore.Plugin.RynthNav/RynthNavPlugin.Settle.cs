@@ -43,9 +43,18 @@ public sealed partial class RynthNavPlugin
         if (!_settleSawPortal && now - _settleJumpMs < SettleNoPortalMs) return;
 
         _settling = false;
+        if (_settleSawPortal) ClockSpace(_settleJumpMs);   // portal space, for the trip clock (RynthNavPlugin.TripTime.cs)
         _lastLandMs = now;                    // the portal cooldown counts from the real landing
         RefreshTiles(CurrentLandblock);
         Host.Log($"[RynthNav] arrived after the teleport ({(now - _settleJumpMs) / 1000.0:F1} s{(_settleSawPortal ? ", portal space over" : "")}) — next step");
+        // Landed somewhere else (another portal's destination, a recall tied elsewhere, a dungeon): the
+        // next legs start from the wrong place, so plan the rest from here (RynthNavPlugin.Ways.cs).
+        if (!LandedWherePlanned(out string where))
+        {
+            string what = _route != null && _routeIdx < _route.Count && _route[_routeIdx].UseRecall ? "recall" : "portal";
+            ReplanTrip($"the {what} '{(_route != null && _routeIdx < _route.Count ? Trunc(_route[_routeIdx].Label) : "")}' took you to {where}");
+            return;
+        }
         AdvanceRoute();
     }
 }

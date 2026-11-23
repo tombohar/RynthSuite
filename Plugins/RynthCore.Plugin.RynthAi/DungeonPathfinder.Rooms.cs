@@ -110,6 +110,7 @@ internal static partial class DungeonPathfinder
         }
         _cachedGeometry = DungeonGeometry.Build(graph, portals, floors, walls);
         _geoLandblock   = landblockKey;
+        AddPlacedObjectsTo(landblockKey, _cachedGeometry, cellDat);
         // Doorways placed objects stand across (a spider web: DungeonPathfinder.Blocked.cs), then ledges
         // (DungeonPathfinder.Ledges.cs): closed in the cached graph, so every walk goes round them.
         if (ReferenceEquals(graph, _cachedGraph)) { CloseMapBlocksOf(landblockKey, graph, _cachedGeometry); _ledgesClosedOn = graph; }
@@ -340,6 +341,7 @@ internal static partial class DungeonPathfinder
         out int doorways,
         bool mergeSamePieces = true)
     {
+        using var holes = CountHoles();
         doorways = 0;
         var pts = new List<NavPoint>();
         if (geo == null)
@@ -396,6 +398,10 @@ internal static partial class DungeonPathfinder
         {
             if (start != null && dest != null && rooms.RoomOf.TryGetValue(startCell, out int r0))
                 CrossRoom(pts, graph, geo, rooms, r0, start, startCell, dest, destCell, revisit: false, wall);
+            // One room, start to destination: the walk across it goes round what the cells place too (it went
+            // straight on through: a stuck detour inside the room it stuck in headed back into the table).
+            KeepPointsOutOfObjects(geo, pts, closed: false, wall, graph, rooms);
+            WalkRoundObjectsOf(geo, pts, closed: false, start, dest);
             return pts;
         }
 
@@ -446,7 +452,95 @@ internal static partial class DungeonPathfinder
 
         DropCollinear(pts, closed);
         KeepLegsOffWalls(geo, pts, closed, wall);
+        // A point laid inside something the cells place goes out of it (or goes) before the legs are walked round.
+        KeepPointsOutOfObjects(geo, pts, closed, wall, graph, rooms);
+        // Round something the cells place (an altar, a statue), not through it, on every walk laid here: the
+        // patrol, the explore, a walk to somewhere, a stuck detour (2026-11-18: Thread 0x000A's walks went
+        // through altars). A corner put in by KeepLegsOffWalls can't get a leg past an object in its middle
+        // (the push out of it goes along the leg); this walks round on the floor. Holes in the floor are
+        // still the explore's own pass (a tube's floorless cells would be walked round to nowhere).
+        WalkRoundObjectsOf(geo, pts, closed, start, dest);
         return pts;
+    }
+
+    // WalkRoundHoles for placed objects only, the closing leg of a loop included. A walk that ends (a detour, a walk
+    // to somewhere) has its start and destination walked round too, then left off again (the caller has them): its
+    // first and last legs were never looked at, so a stuck detour's first leg headed straight back through the
+    // object it stuck on (0x0190 room 88's table, recovery #8: "stuck on the detour"), and of 648 walks laid past the
+    // objects of nine dungeons, 421 had an end leg through one (2026-11-18, real dats). That covers the stuck
+    // detours, dunroute, BuildingMap's end legs and each stretch of a jump walk (to its approach point).
+    private static void WalkRoundObjectsOf(DungeonGeometry geo, List<NavPoint> pts, bool closed, NavPoint? start = null, NavPoint? dest = null)
+    {
+        if (geo.PlacedCount == 0) return;
+        var laid = KindLog != null || PointLog != null ? new HashSet<NavPoint>(pts) : null;
+        if (closed)
+        {
+            if (pts.Count < 2) return;
+            pts.Add(pts[0]);
+            WalkRoundHoles(pts, geo, objectsOnly: true);
+            pts.RemoveAt(pts.Count - 1);
+        }
+        else
+        {
+            var walk = new List<NavPoint>(pts.Count + 2);
+            if (start != null) walk.Add(start);
+            walk.AddRange(pts);
+            if (dest != null) walk.Add(dest);
+            if (walk.Count < 2 || WalkRoundHoles(walk, geo, objectsOnly: true) == 0) return;
+            // WalkRoundHoles keeps the first and the last point as they are, so the ends come off as they went on.
+            int from = start != null ? 1 : 0, to = walk.Count - (dest != null ? 1 : 0);
+            pts.Clear();
+            for (int i = from; i < to; i++) pts.Add(walk[i]);
+        }
+        if (laid != null)
+            foreach (var p in pts)
+                if (!laid.Contains(p)) Tag(p, "object-round");
+    }
+
+    // How far a point laid inside a placed object may be pushed to get out (a 9 x 9 m statue's middle: 4.5 m).
+    private const double ObjectPushMax = MiddlePushMax;
+
+    /// <summary>
+    /// A point laid inside something the cells place (an approach point on a pedestal, a corner the string pull put
+    /// under a table) is moved out of it to the wall distance, at most ObjectPushMax, as RoomMiddle's middle is; one
+    /// no push gets out is dropped (nobody stands there, and the walk round goes from point to point). A loop keeps
+    /// at least three points. With <paramref name="graph"/>, the push stays on the floor of the point's room
+    /// (<paramref name="rooms"/>) or of its cell and the cells next to it: the walk round goes round objects, not
+    /// through walls, so a point must not be pushed through one into the next room. Returns how many points were
+    /// moved or dropped.
+    /// </summary>
+    internal static int KeepPointsOutOfObjects(DungeonGeometry geo, List<NavPoint> pts, bool closed, double wall = WallClearance,
+                                               Dictionary<uint, DungeonNavNode>? graph = null, DungeonRooms? rooms = null)
+    {
+        if (geo.PlacedCount == 0) return 0;
+        int changed = 0;
+        for (int i = 0; i < pts.Count; i++)
+        {
+            var p = pts[i];
+            if (!NavRouteParser.IsPlainWaypoint(p.Type)) continue;
+            double x = DungeonGeometry.NavToWorld(p.EW), y = DungeonGeometry.NavToWorld(p.NS);
+            if (!geo.TryFloorHeight(x, y, p.Z * 240.0, HoleStartBand, out double h)) continue;   // no floor: not the object's to say
+            if (!geo.InsidePlaced(x, y, h)) continue;
+            changed++;
+            IReadOnlyCollection<uint>? cells = null;
+            if (graph != null)
+            {
+                uint cell = CellAt(graph, geo, p);
+                if (rooms != null && rooms.RoomOf.ContainsKey(cell)) cells = RoomCells(rooms, cell);
+                else if (graph.TryGetValue(cell, out var node)) cells = new List<uint>(node.Neighbors) { cell };
+            }
+            geo.PushClear(ref x, ref y, h, wall, ObjectPushMax, cells);
+            if (!geo.InsidePlaced(x, y, h) && geo.OnWalkableFloor(x, y, h))
+            {
+                p.EW = DungeonGeometry.WorldToNav(x);
+                p.NS = DungeonGeometry.WorldToNav(y);
+                if (PointLog != null) Info(p).Why += Info(p).Why.Length > 0 ? ",out-of-object" : "out-of-object";
+                continue;
+            }
+            if (closed && pts.Count <= 3) continue;
+            pts.RemoveAt(i--);
+        }
+        return changed;
     }
 
     // A leg brushing a wall: its least clearance (away from its end points) under this, or under
@@ -633,11 +727,15 @@ internal static partial class DungeonPathfinder
         if (i == j)
         {
             if (!DoorwayPoints(graph, geo, rooms, steps[i].From, steps[i].To, wall, out approach, out exit, out narrow)) narrow = false;
+            OutOfPlaced(geo, rooms, approach, steps[i].From, steps[i].From, steps[i].To);
+            OutOfPlaced(geo, rooms, exit, steps[i].To, steps[i].From, steps[i].To);
             return;
         }
 
         DoorwayPoints(graph, geo, rooms, steps[i].From, steps[i].To, wall, out approach, out _, out bool n0);
         DoorwayPoints(graph, geo, rooms, steps[j].From, steps[j].To, wall, out _, out exit, out bool n1);
+        OutOfPlaced(geo, rooms, approach, steps[i].From, steps[i].From, steps[i].To);
+        OutOfPlaced(geo, rooms, exit, steps[j].To, steps[j].From, steps[j].To);
         narrow = n0 || n1;
         var doors = new List<(DungeonDoorway Door, uint From, int Step)>();
         for (int k = i; k <= j; k++)
@@ -672,6 +770,84 @@ internal static partial class DungeonPathfinder
             }
         }
         if (narrow) { approach.Doorway = true; exit.Doorway = true; }
+    }
+
+    // A doorway point inside something placed (2026-11-18: in buildings, beside a chair, a table or a bed, 20 of
+    // the survey's walk corners were) is slid along the doorway's normal, the nearest first, to where it is on the
+    // room's floor and in nothing; with no such spot, onto the opening's centre. The legs from it are then walked
+    // round what it was in (EmitSteps), which a point inside one never could be.
+    private const double OutOfPlacedStep = 0.25, OutOfPlacedSlide = 3.0, OutOfPlacedNearest = 0.5, FallbackFloorBand = 2.0;
+
+    private static void OutOfPlaced(DungeonGeometry geo, DungeonRooms rooms, NavPoint p, uint cell, uint a, uint b)
+    {
+        if (geo.PlacedCount == 0) return;
+        double x = DungeonGeometry.NavToWorld(p.EW), y = DungeonGeometry.NavToWorld(p.NS), z = p.Z * 240.0;
+        if (!InsidePlacedAt(geo, x, y, z)) return;
+        if (!geo.TryGetDoorway(a, b, out var d))
+        {
+            // No opening known (a cell-centre fallback point, which may lie between the two rooms). Its height is the
+            // two cells' centres' between, not a floor's (E74E#0: 32.6 over 0103's floor at 34.0, under the 0.45 m dais
+            // 02000117 there): first the floor under it within FallbackFloorBand; in nothing there, it is only
+            // put on that floor. Else the nearest spot round it, on any floor, that is in nothing.
+            if (geo.TryFloorHeight(x, y, z, FallbackFloorBand, out double fh) && Math.Abs(fh - z) > 1.0)
+            {
+                z = fh;
+                if (!geo.InsidePlaced(x, y, fh)) { p.Z = fh / 240.0; return; }
+            }
+            if (NearestOutOfPlaced(geo, ref x, ref y, z, OutOfPlacedSlide))
+            {
+                p.EW = DungeonGeometry.WorldToNav(x);
+                p.NS = DungeonGeometry.WorldToNav(y);
+                p.Z = z / 240.0;
+            }
+            return;
+        }
+        // Along the normal, on the point's own side of the opening, no nearer to it than OutOfPlacedNearest.
+        var (nx, ny) = d.NormalFrom(a);
+        double side = (x - d.X) * nx + (y - d.Y) * ny < 0 ? -1 : 1;
+        var cells = RoomCells(rooms, cell);
+        for (double s = OutOfPlacedStep; s <= OutOfPlacedSlide + 1e-9; s += OutOfPlacedStep)
+            foreach (double sign in new[] { 1.0, -1.0 })
+            {
+                double qx = x + nx * s * sign, qy = y + ny * s * sign;
+                if (((qx - d.X) * nx + (qy - d.Y) * ny) * side < OutOfPlacedNearest) continue;
+                if (!geo.OnFloorOfAny(cells, qx, qy, z) || InsidePlacedAt(geo, qx, qy, z)) continue;
+                if (geo.ClearanceMemo(qx, qy, z, 0.6) <= 0.05) continue;   // in or against a wall
+                p.EW = DungeonGeometry.WorldToNav(qx);
+                p.NS = DungeonGeometry.WorldToNav(qy);
+                return;
+            }
+        if (InsidePlacedAt(geo, d.X, d.Y, d.Z)) return;
+        p.EW = DungeonGeometry.WorldToNav(d.X);
+        p.NS = DungeonGeometry.WorldToNav(d.Y);
+        p.Z = d.Z / 240.0;
+    }
+
+    /// <summary>Inside something placed, for a walker on the floor at (or within a metre of) z.</summary>
+    internal static bool InsidePlacedAt(DungeonGeometry geo, double x, double y, double z)
+        => geo.InsidePlaced(x, y, geo.TryFloorHeight(x, y, z, 1.0, out double h) ? h : z);
+
+    /// <summary>
+    /// Moves (x, y), inside something placed, to the nearest spot round it (rings 0.25 m apart out to
+    /// <paramref name="maxR"/>, 16 ways; on a ring the clearest) that is on the floor (of <paramref name="cells"/> when
+    /// given), in nothing, and not against a wall. False (and the point left) when there is none.
+    /// </summary>
+    internal static bool NearestOutOfPlaced(DungeonGeometry geo, ref double x, ref double y, double z, double maxR, IReadOnlyCollection<uint>? cells = null)
+    {
+        for (double r = OutOfPlacedStep; r <= maxR + 1e-9; r += OutOfPlacedStep)
+        {
+            double bestC = 0.05, bx = 0, by = 0;
+            for (int k = 0; k < 16; k++)
+            {
+                double a = k * Math.PI / 8, qx = x + Math.Cos(a) * r, qy = y + Math.Sin(a) * r;
+                if (cells != null ? !geo.OnFloorOfAny(cells, qx, qy, z) : !geo.OnWalkableFloor(qx, qy, z)) continue;
+                if (InsidePlacedAt(geo, qx, qy, z)) continue;
+                double c = geo.ClearanceMemo(qx, qy, geo.TryFloorHeight(qx, qy, z, 1.0, out double h) ? h : z, 1.0);
+                if (c > bestC) { bestC = c; bx = qx; by = qy; }
+            }
+            if (bestC > 0.05) { x = bx; y = by; return true; }
+        }
+        return false;
     }
 
     // ── Doorway points ───────────────────────────────────────────────────────
@@ -922,6 +1098,9 @@ internal static partial class DungeonPathfinder
             : Tag(WorldPoint(DungeonGeometry.NavToWorld(nearest.EW), DungeonGeometry.NavToWorld(nearest.NS), nearest.Z, false), "room-middle-cell");
         // A one-cell dead end's origin is inside its end cap; a big room's middle can be a pillar.
         PushOffWalls(geo, mid, cells, MiddlePushMax, wall);
+        // Still inside something the cells place (Thread 0x00C1 room 81: a 9 x 9 m statue fills the middle,
+        // the explore stuck at its side): no middle to go to. A statue that big is seen past anyway.
+        if (geo.InsidePlaced(DungeonGeometry.NavToWorld(mid.EW), DungeonGeometry.NavToWorld(mid.NS), mid.Z * 240.0)) return null;
         return mid;
     }
 

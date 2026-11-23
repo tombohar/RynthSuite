@@ -34,7 +34,7 @@ public sealed partial class RynthAiPlugin
             ArmDeathRecall(s);           // before Stop Macro On Death: it reads whether the macro ran
             if (s.StopMacroOnDeath && s.IsMacroRunning)
             {
-                HandleMacroRunCommand("stop", Array.Empty<string>());
+                HandleMacroRunCommand("stop", Array.Empty<string>(), "Stop Macro On Death");
                 ChatLine("[RynthAi] You died — macro stopped (Stop Macro On Death is on).");
             }
         }
@@ -153,7 +153,7 @@ public sealed partial class RynthAiPlugin
         if (_noComponentFails.Count < NoComponentFailsToStop) return;
 
         _noComponentFails.Clear();
-        HandleMacroRunCommand("stop", Array.Empty<string>());
+        HandleMacroRunCommand("stop", Array.Empty<string>(), "Stop Macro On No Components");
         ChatLine("[RynthAi] Out of spell components — macro stopped (Stop Macro On No Components is on).");
     }
 
@@ -179,7 +179,7 @@ public sealed partial class RynthAiPlugin
             var s = _dashboard?.Settings;
             if (s != null && s.StopMacroWhenPackFull && s.IsMacroRunning)
             {
-                HandleMacroRunCommand("stop", Array.Empty<string>());
+                HandleMacroRunCommand("stop", Array.Empty<string>(), "Stop Macro When Pack Full");
                 ChatLine("[RynthAi] Your packs are full — macro stopped (Stop Macro When Pack Full is on).");
             }
             else

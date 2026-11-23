@@ -321,6 +321,7 @@ internal sealed class DashboardBridge : IDashboardHost
     public int AutoSort => _p.DashAutoSort;
     public bool AutoSortMoving => _p.DashSortMoving;
     public bool FightSelectedTarget => _p.DashboardRenderer?.Settings.FightSelectedTarget == true;
+    public bool DebuffAllBeforeAttacking => _p.DashboardRenderer?.Settings.DebuffAllBeforeAttacking == true;
     public void SetAutoSort(bool on) => Queue(() => _p.SetDashAutoSort(on));
     public void ToggleSortWindow() => Queue(() => _p.SendSortCommand(string.Empty));
     public void StartPatrol() => Queue(_p.HandleDungeonNavPatrol);

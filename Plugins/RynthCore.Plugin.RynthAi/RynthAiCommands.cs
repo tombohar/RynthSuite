@@ -74,6 +74,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra power <0-100|auto> — set attack power (auto = recklessness-aware)");
         ChatLine("[RynthAi] /ra dfheight [on|off|status|window] — Dirty Fighting rotation: attack heights by the effects on the target");
         ChatLine("[RynthAi] /ra meleewalls [on|off] — Melee through walls: melee reaches a monster within 4 m behind a wall (not a building's)");
+        ChatLine("[RynthAi] /ra debuffall [on|off] — Debuff every monster in range before attacking (toggle)");
         ChatLine("[RynthAi] /ra cast <spellId> — cast spell on current target");
         ChatLine("[RynthAi] /ra buffs         — show active buff timers");
         ChatLine("[RynthAi] /ra buffitems [list|allow|block|add|addselected|remove|repeat|open] — the buff items RynthAi may use");
@@ -117,6 +118,9 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra items fill      — add weapons, healing kits, lockpicks and pet essences from your pack");
         ChatLine("[RynthAi] /ra aetheria [status|unbox|on|off] — unbox Coalesced Aetheria with an Aetheria Mana Stone (Unbox Aetheria When Idle)");
         ChatLine("[RynthAi] /ra autoconfirm [status|on|off|<50-100>] — Yes to the craft-chance prompt at that % or better (Mini Remote > Crafting)");
+        ChatLine("[RynthAi] /ra kits [status|make [N]|stop|floor <0-100>|show] — make Plentiful Healing Kits from their ingredients, macro off (Mini Remote > Crafting > Kits)");
+        ChatLine("[RynthAi] /ra kits auto [status|on|off|below N|upto M] — Make kits when low: with the macro on and nothing around, make kits when fewer than N are carried");
+        ChatLine("[RynthAi] /ra petelement [status|any|fire|cold|acid|lightning|nether|slash|pierce|bludgeon] — the element combat pets are summoned for (Mini Remote > Pets)");
         ChatLine("[RynthAi] /ra offhand [auto|shield|weapon|none] [rule] — the off hand (shield / dual wield), global or for a Monsters rule; dual on|off");
         ChatLine("[RynthAi] /ra dunnav <NS> <EW>  — navigate to NS/EW coords through dungeon (no nav file needed)");
         ChatLine("[RynthAi] /ra dunnav-to <object id>  — walk to an object in this dungeon, any floor (a monster, say)");
@@ -141,6 +145,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra chests        — Loot Nearby Chests: on or off, what it is doing, and the chests it is leaving alone and why");
         ChatLine("[RynthAi] /ra loot why      — which loot rule takes the selected item, and why the rules above it didn't");
         ChatLine("[RynthAi] /ra loot mode [profile|rares] — loot by the loot profile, or rares and needed mana stones only");
+        ChatLine("[RynthAi] /ra loot today    — Keep # per day rules: what this character picked up in each one's window (clear <rule>|all)");
         ChatLine("[RynthAi] /ra loot add [keep|keep N|salvage|sell|read] [name|like] [preview] — add a loot rule for the selected item");
         ChatLine("[RynthAi] /ra dumpinv       — dump all inventory items (cache + direct)");
         ChatLine("[RynthAi] /ra combat        — dump combat state machine snapshot");
@@ -1302,6 +1307,14 @@ public sealed partial class RynthAiPlugin
                 var names = _dashboard.NavFileNames();
                 ChatLine(names.Count == 0 ? "[RynthAi] No navs in NavProfiles." : $"[RynthAi] Navs ({names.Count}): {string.Join(", ", names)}");
                 break;
+            case "import":
+            {
+                // VirindiTank navs put in another folder (RynthNav's NavData, the RynthAi folder...):
+                // copied into NavProfiles, as the Nav panel's button does.
+                string msg = _dashboard.CopyStrayNavs(out bool ok);
+                if (ok) ReplyOk("[RynthAi] " + msg); else ReplyFail("[RynthAi] " + msg);
+                break;
+            }
             case "new":
             case "saveas":
             case "rename":
@@ -1309,6 +1322,9 @@ public sealed partial class RynthAiPlugin
             case "folder":
                 // The Loaded files drawer's NAV buttons (RynthAiPlugin.ProfileFiles.cs).
                 TryProfileVerb(ProfileKind.Nav, sub, rest, NavUsage);
+                break;
+            case "addjump":
+                AddJumpHere(rest);
                 break;
             case "restart":
             {
@@ -1335,7 +1351,48 @@ public sealed partial class RynthAiPlugin
     }
 
     private const string NavUsage =
-        "/ra nav save [name] | /ra nav load <name> | /ra nav new <name> | /ra nav saveas <name> | /ra nav rename <name> | /ra nav delete | /ra nav folder | /ra nav list | /ra nav restart";
+        "/ra nav save [name] | /ra nav load <name> | /ra nav new <name> | /ra nav saveas <name> | /ra nav rename <name> | /ra nav delete | /ra nav folder | /ra nav list | /ra nav import | /ra nav restart | /ra nav addjump [ms] [shift]";
+
+    /// <summary>The hold a recorded jump gets when none is given: the dungeon walk's own hop.</summary>
+    internal const int AddJumpDefaultMs = DungeonPathfinder.JumpHoldMs;
+
+    /// <summary>
+    /// /ra nav addjump [ms] [shift]: a Jump step where you stand, facing the way you face, added to the end of
+    /// the loaded route (and saved to its file). Recording doesn't see a jump (the client tells a plugin
+    /// nothing of one), and some places can only be reached by one: 2026-11-18, Thread 0x00C1's pit, where the
+    /// fighting is, is dropped into from a ledge. ms is how long the jump is held (0-1000, the power; 300 by
+    /// default), shift a walking jump. While recording, the next point waits until you have landed.
+    /// </summary>
+    private void AddJumpHere(string args)
+    {
+        var settings = _dashboard?.Settings;
+        if (settings == null) { ReplyFail("[RynthAi] Settings not ready."); return; }
+        int ms = AddJumpDefaultMs;
+        bool shift = false;
+        foreach (string word in args.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (word.Equals("shift", StringComparison.OrdinalIgnoreCase)) shift = true;
+            else if (int.TryParse(word, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int n)) ms = Math.Clamp(n, 0, 1000);
+            else { ReplyFail("[RynthAi] Usage: /ra nav addjump [ms] [shift]  (ms: 0-1000, how long the jump is held)"); return; }
+        }
+        if (!NavCoordinateHelper.TryGetNavPosition(Host, out double ns, out double ew, out double z)
+            || !PlayerCompass.TryGet(Host, out float heading))
+        {
+            ReplyFail("[RynthAi] Could not read your position and heading.");
+            return;
+        }
+        var pt = new NavPoint
+        {
+            Type = NavPointType.Jump, NS = ns, EW = ew, Z = z,
+            JumpHeading = Math.Round(heading, 1), JumpMs = ms, JumpShift = shift,
+        };
+        NavRouteEditing.Apply(settings, list => { list.Add(pt); return list; });
+        if (settings.IsRecordingNav) _navBreadcrumbs?.JumpAdded();
+        _dashboard?.AutoSaveRoute();
+        string navName = string.IsNullOrEmpty(settings.CurrentNavPath) ? "(unsaved)" : System.IO.Path.GetFileName(settings.CurrentNavPath);
+        ReplyOk($"[RynthAi] Added a jump [{settings.CurrentRoute.Points.Count - 1}] facing {heading:F0}°, held {ms} ms{(shift ? ", walking" : "")}, to {navName}"
+              + (settings.IsRecordingNav ? ": jump now; recording goes on once you land." : "."));
+    }
     private const string MetaUsage =
         "/ra meta load <name> | new <name> | save | saveas <name> | rename <name> | delete | folder | list | repair";
     private const string SettingsUsage =
@@ -1692,6 +1749,9 @@ public sealed partial class RynthAiPlugin
             FirstMatchNative = FirstLootRuleFor,
             Added = OnLootRuleAdded,
             BuiltInKeep = LootBuiltInKeepFor,
+            PerDayStatus = PerDayStatusFor,
+            PerDayRevision = PerDayRevision,
+            PerDayReset = PerDayReset,
         },
     };
 
@@ -1858,6 +1918,11 @@ public sealed partial class RynthAiPlugin
             HandleLootModeCommand(parts);
             return;
         }
+        if (sub == "today")
+        {
+            HandleLootTodayCommand(parts);   // Keep # per day (RynthAiPlugin.LootPerDay.cs)
+            return;
+        }
         // The Loaded files drawer's LOOT buttons (RynthAiPlugin.ProfileFiles.cs).
         if (TryProfileVerb(ProfileKind.Loot, sub, parts.Length > 3 ? string.Join(" ", parts, 3, parts.Length - 3) : string.Empty, LootFileUsage))
             return;
@@ -1865,6 +1930,7 @@ public sealed partial class RynthAiPlugin
         {
             ChatLine("[RynthAi] /ra loot mode [profile|rares] — what is looted: the loot profile, or rares and needed mana stones only");
             ChatLine("[RynthAi] /ra loot why [window] — which loot rule takes the selected item, and why the rules above it didn't (window: in the Loot why window)");
+            ChatLine("[RynthAi] /ra loot today [clear <rule>|clear all] — Keep # per day rules: what this character picked up in each one's window");
             ChatLine("[RynthAi] /ra loot add [keep|keep N|salvage|sell|read] [name|like] [t11] [preview] — add a loot rule for the selected item to the loot profile in use");
             ChatLine("[RynthAi] " + LootFileUsage + " — the loot profile's file: a new one in the Loot Editor, a copy, rename, move to Deleted, its folder, the editor");
             ChatLine("[RynthAi]   default: exact name + class; Read for scrolls, Keep # (one full stack) for stacks, else Keep. name = name only, like = items like this. t11 = also require its T11 tier, grade and modifiers (at least this good). preview = show it, add nothing.");
@@ -2340,11 +2406,14 @@ public sealed partial class RynthAiPlugin
     /// had this via TogglePanelMacro). Routed through the same TogglePanelMacro the
     /// button and the remote use, so there's still one write path for the flag.
     /// </summary>
-    private void HandleMacroRunCommand(string verb, string[] parts)
+    private void HandleMacroRunCommand(string verb, string[] parts, string? source = null)
     {
         var dash = _dashboard;
         if (dash == null) { ReplyFail("[RynthAi] Settings not ready."); return; }
         bool running = dash.Settings.IsMacroRunning;
+        source ??= "the command /ra " + verb + (MetaCommandActive ? $" from the meta (state '{dash.Settings.CurrentState}')"
+                                                 : Reply.FromScript ? " from a script, a route or a timed command"
+                                                 : " (typed, or a hotkey or alias)");
 
         switch (verb)
         {
@@ -2353,14 +2422,14 @@ public sealed partial class RynthAiPlugin
                 _macroResumeAt = 0;
                 if (running) { ReplyOk("[RynthAi] Macro already RUNNING."); return; }
                 if (RefuseMacroStartForVTank()) return;   // one bot per client (Decal bridge)
-                dash.TogglePanelMacro();
+                dash.TogglePanelMacro(source);
                 ReplyOk("[RynthAi] Macro STARTED.");
                 return;
 
             case "stop":
                 _macroResumeAt = 0;
                 if (!running) { ReplyOk("[RynthAi] Macro already STOPPED."); return; }
-                dash.TogglePanelMacro();
+                dash.TogglePanelMacro(source);
                 // Kill autorun now rather than waiting out the nav engine's stop
                 // debounce — a /ra stop is usually issued because the box is
                 // running somewhere you don't want it to.
@@ -2375,7 +2444,7 @@ public sealed partial class RynthAiPlugin
                     sec = Math.Clamp(parsed, 1, 3600);
                 if (running)
                 {
-                    dash.TogglePanelMacro();
+                    dash.TogglePanelMacro(source);
                     _navigationEngine?.Stop();
                 }
                 _macroResumeAt = CorpseNowMs + sec * 1000L;
@@ -3172,14 +3241,16 @@ public sealed partial class RynthAiPlugin
             : $"[RynthAi] No items in inventory matched profile '{System.IO.Path.GetFileName(profilePath)}'");
     }
 
-    internal const string DunNavToUsage ="[RynthAi] Usage: /ra dunnav-to <object id>  — walk to an object in this dungeon (any floor), e.g. a monster: /ra dunnav-to 0x80123456";
+    internal const string DunNavToUsage = "[RynthAi] Usage: /ra dunnav-to <object id> [jump]  — walk to an object in this dungeon (any floor), e.g. a monster: /ra dunnav-to 0x80123456; with jump, a jump down a ledge may be taken when there's no walk (one way: no climbing back)";
 
     /// <summary>
-    /// /ra dunnav-to &lt;object id&gt; (2026-11-15): walks to an object in the dungeon the character is in,
-    /// by the dungeon map (ledges closed: DungeonPathfinder.Ledges.cs), from the player's cell to the
+    /// /ra dunnav-to &lt;object id&gt; [jump] (2026-11-15): walks to an object in the dungeon the character is
+    /// in, by the dungeon map (ledges closed: DungeonPathfinder.Ledges.cs), from the player's cell to the
     /// object's own cell, so another floor works too (/ra dunnav aims at the player's floor). For
     /// a script: after an explore, the monsters still to be killed are walked to one by
     /// one; the fight is RynthAi's, as on any route. The macro goes on; the route is a Once walk.
+    /// With "jump" (2026-11-17), when there's no walk the path may jump down ledges
+    /// (DungeonPathfinder.Jumps.cs): a Jump point at each edge. One way, so only on request.
     /// </summary>
     private void HandleDunNavToCommand(string[] parts)
     {
@@ -3225,20 +3296,41 @@ public sealed partial class RynthAiPlugin
         var hazards = _objectCache?.GetHazardCells();
         var path = startCell != 0 && goalCell != 0 ? DungeonPathfinder.FindPath(startCell, goalCell, graph, hazards) : new List<uint>();
         Host.TryGetObjectName(target, out string name);
+        bool mayJump = parts.Skip(3).Any(p => p.Trim().Equals("jump", StringComparison.OrdinalIgnoreCase));
+        NavRouteParser route;
+        string how;
         if (path.Count == 0)
         {
-            ReplyFail($"[RynthAi] DunNav-To: no walk from {startCell:X8} to '{name}' 0x{target:X8} in {goalCell:X8} on the dungeon map (behind a ledge or a hazard?).");
-            return;
+            // No walk: with "jump", down a ledge (or several) if that gets there.
+            var jumpPath = mayJump && geo != null && startCell != 0 && goalCell != 0
+                ? DungeonPathfinder.FindPathWithJumps(startCell, goalCell, graph, DungeonPathfinder.FindJumps(graph, geo), hazards)
+                : new List<(uint Cell, DungeonJump? Jump)>();
+            if (jumpPath.Count == 0)
+            {
+                ReplyFail($"[RynthAi] DunNav-To: no walk from {startCell:X8} to '{name}' 0x{target:X8} in {goalCell:X8} on the dungeon map (behind a ledge or a hazard?)"
+                          + (mayJump ? ", and no jump down gets there either." : "."));
+                return;
+            }
+            route = new NavRouteParser { RouteType = NavRouteType.Once };
+            route.Points.AddRange(DungeonPathfinder.BuildJumpPathPoints(jumpPath, graph, geo, hazards, playerNS, playerEW, playerZ, destNS, destEW, oz, out int jumps));
+            route.Points.Add(new NavPoint { Type = NavPointType.Point, NS = destNS, EW = destEW, Z = oz / 240.0 });
+            var first = jumpPath.First(p => p.Jump != null).Jump!.Value;
+            how = $"{jumpPath.Count} cells, {jumps} jump{(jumps == 1 ? "" : "s")} down (the first {first.Drop:F1} m off {first.From:X8} into {first.Land:X8})";
+            Host.Log($"[RynthAi] DunNav-To: no walk to 0x{target:X8}; jumping down: {how}.");
         }
-        var route = DungeonPathfinder.BuildNavRoute(path, graph, destNS, destEW, geo, hazards, playerNS, playerEW, playerZ, oz);
+        else
+        {
+            route = DungeonPathfinder.BuildNavRoute(path, graph, destNS, destEW, geo, hazards, playerNS, playerEW, playerZ, oz);
+            how = $"{path.Count} cells";
+        }
         if (route.Points.Count == 0) { ReplyFail($"[RynthAi] DunNav-To: no walk laid to '{name}' 0x{target:X8}."); return; }
 
         if (!settings.IsMacroRunning && RefuseMacroStartForVTank()) return;   // one bot per client (Decal bridge)
-        settings.IsMacroRunning   = true;
+        settings.SetMacroRunning(true, "/ra dunnav-to");
         settings.CurrentRoute     = route;
         settings.ActiveNavIndex   = 0;
         settings.EnableNavigation = true;
-        ReplyOk($"[RynthAi] DunNav-To: '{name}' 0x{target:X8} in {goalCell:X8}: {path.Count} cells, {route.Points.Count} points → walking there");
+        ReplyOk($"[RynthAi] DunNav-To: '{name}' 0x{target:X8} in {goalCell:X8}: {how}, {route.Points.Count} points → walking there");
     }
 
     /// <summary>
@@ -3302,7 +3394,7 @@ public sealed partial class RynthAiPlugin
         }
 
         if (!settings.IsMacroRunning && RefuseMacroStartForVTank()) return;   // one bot per client (Decal bridge)
-        settings.IsMacroRunning   = true;
+        settings.SetMacroRunning(true, "/ra dunnav");
         settings.CurrentRoute     = route;
         settings.ActiveNavIndex   = 0;
         settings.EnableNavigation = true;
@@ -3667,7 +3759,7 @@ public sealed partial class RynthAiPlugin
         // "patrol immediately runs into a wall on login" failure mode. (From where the character
         // walks out of a portal's circle to, when it stands in one.)
         // (The explore only looks a few points ahead: past those it would skip rooms, a loop comes round again.)
-        int startIdx = FindFirstLineOfSightWaypoint(route, losCell, losX, losY, losZ, explore != null ? ExploreSightLookahead : int.MaxValue);
+        int startIdx = FindFirstLineOfSightWaypoint(route, losCell, losX, losY, losZ, explore != null ? ExploreSightLookahead : int.MaxValue, walkMap: geometry);
         // The way to that waypoint: out of a portal's circle first, round any portal in between.
         if (portals.Count > 0 && route.Points.Count > 0)
         {
@@ -3738,7 +3830,7 @@ public sealed partial class RynthAiPlugin
                 _dunPatrolActive = false;
                 return;
             }
-            settings.IsMacroRunning = true;
+            settings.SetMacroRunning(true, "the dungeon patrol");
             // The patrol picked its own start (the first waypoint in sight). Starting the macro
             // here must not also trigger the macro-start "nearest waypoint" pick on the next
             // tick: on a loop that is often a waypoint near the END (it comes back to the start),
@@ -4298,10 +4390,13 @@ public sealed partial class RynthAiPlugin
     /// world position has clear line of sight from the player. Returns 0 if no LOS check
     /// is possible (no raycast subsystem / no geometry) or if no waypoint clears — at
     /// worst we behave like the old "always start at 0" code, so this is a strict win.
+    /// <paramref name="walkMap"/> (the dungeon map, in a dungeon): a waypoint in sight is taken only when the straight
+    /// walk to it passes at a body's height too (DungeonPathfinder.StraightWalkClear). In sight at chest height, a
+    /// later waypoint skipped the corners laid round an altar or a table, and the first leg went through it (2026-11-18).
     /// </summary>
     private int FindFirstLineOfSightWaypoint(NavRouteParser route, uint playerCell,
                                              float playerLocalX, float playerLocalY, float playerZ,
-                                             int lookahead = int.MaxValue)
+                                             int lookahead = int.MaxValue, DungeonGeometry? walkMap = null)
     {
         if (route?.Points == null || route.Points.Count == 0) return 0;
         var geo = _raycast?.GeometryLoader;
@@ -4316,6 +4411,11 @@ public sealed partial class RynthAiPlugin
         var origin = new Vector3(pBlockX * 192f + playerLocalX,
                                  pBlockY * 192f + playerLocalY,
                                  playerZ + 1.0f);
+        // The walk test only where the map has a floor under the character (in a dungeon's cell).
+        NavPoint? from = null;
+        if (walkMap != null && (playerCell & 0xFFFF) >= 0x0100
+            && walkMap.TryFloorHeight(origin.X, origin.Y, playerZ, 3.0, out _))
+            from = new NavPoint { Type = NavPointType.Point, EW = DungeonGeometry.WorldToNav(origin.X), NS = DungeonGeometry.WorldToNav(origin.Y), Z = playerZ / 240.0 };
 
         for (int i = 0; i < route.Points.Count && i < lookahead; i++)
         {
@@ -4333,8 +4433,9 @@ public sealed partial class RynthAiPlugin
 
             // multiRay=true matches dungeon LOS used elsewhere (TargetingFSM) so thin
             // corner walls don't slip between the center ray.
-            if (!RaycastEngine.IsLinearPathBlocked(origin, target, geometry, multiRay: true))
-                return i;
+            if (RaycastEngine.IsLinearPathBlocked(origin, target, geometry, multiRay: true)) continue;
+            if (from != null && !DungeonPathfinder.StraightWalkClear(walkMap!, from, p)) continue;
+            return i;
         }
 
         return 0;

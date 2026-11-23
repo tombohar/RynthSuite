@@ -26,6 +26,7 @@ public sealed partial class RynthNavPlugin
     // Read under _gate.
     private string _goLine = "", _goPhase = "";
     private double _goLeft = -1;
+    private double _goEta = -1;   // the trip's time left, seconds (RynthNavPlugin.TripTime.cs)
     // Rebuild only when these change (tick thread).
     private string _glPhase = "", _glNote = "";
     private int _glIdx = -2;
@@ -68,14 +69,20 @@ public sealed partial class RynthNavPlugin
                 }
             }
         }
+        RefreshClockLine();
+        double eta = TripSecondsLeft(phase, left);
+        lock (_gate) _goEta = eta < 0 ? -1 : Math.Round(eta);
         // Whole yards under 1000, tens of yards above (FmtDistance shows 0.1k there).
         long leftKey = left < 0 ? -1 : left < 1000 ? (long)left : 100000 + (long)(left / 100);
         int sub = phase == "town" ? (_hubLanded ? 1 : 0) + (HubIsWaiting ? 2 : 0) : 0;   // the hub step's line changes with these
+        bool paused = active && _paused;   // RynthNavPlugin.Pause.cs
+        if (paused) sub |= 4;
         if (active == _glActive && phase == _glPhase && idx == _glIdx && leftKey == _glLeftKey && sub == _glSub && ReferenceEquals(_goNote, _glNote))
             return;
         _glActive = active; _glPhase = phase; _glIdx = idx; _glLeftKey = leftKey; _glSub = sub; _glNote = _goNote;
 
         string line = active ? GoLine(phase, left) : _goNote;
+        if (paused) { line = "paused: " + line + " (Resume carries on)"; phase = "paused"; }
         lock (_gate) { _goLine = line; _goPhase = phase; _goLeft = left; }
     }
 
@@ -142,17 +149,19 @@ public sealed partial class RynthNavPlugin
     {
         Interlocked.Exchange(ref _lastStatusPollMs, NowMs);
         var ci = CultureInfo.InvariantCulture;
-        string line, phase; double left;
-        lock (_gate) { line = _goLine; phase = _goPhase; left = _goLeft; }
+        string line, phase; double left, eta;
+        lock (_gate) { line = _goLine; phase = _goPhase; left = _goLeft; eta = _goEta; }
         sb.Append(",\"v\":\"").Append(PluginVersion).Append('"');
         sb.Append(",\"go\":{\"line\":\"").Append(Esc(line)).Append("\",\"phase\":\"").Append(phase)
-          .Append("\",\"left\":").Append(left < 0 ? "-1" : left.ToString("F0", ci)).Append('}');
+          .Append("\",\"left\":").Append(left < 0 ? "-1" : left.ToString("F0", ci))
+          .Append(",\"eta\":").Append(eta < 0 ? "-1" : eta.ToString("F0", ci)).Append('}');
         uint cell = _cellId;
         sb.Append(",\"info\":{\"dir\":\"").Append(Esc(NavDataDir)).Append("\",\"source\":\"").Append(Esc(NavConfig.Source))
           .Append("\",\"graph\":").Append(_graph != null ? 1 : 0).Append(",\"graphStatus\":\"").Append(Esc(_graphStatus))
           .Append("\",\"tileHere\":").Append(_tileHere).Append(",\"indoors\":").Append(_hasPose && (cell & 0xFFFF) >= 0x100 ? 1 : 0)
           .Append(",\"onDisk\":").Append(_tilesOnDisk)
-          .Append(",\"townNet\":").Append(_townNet != null ? 1 : 0).Append(",\"townNetStatus\":\"").Append(Esc(_townNetStatus)).Append("\"}");
+          .Append(",\"townNet\":").Append(_townNet != null ? 1 : 0).Append(",\"townNetStatus\":\"").Append(Esc(_townNetStatus))
+          .Append("\",\"times\":\"").Append(Esc(_clockLine)).Append("\"}");   // how long trips take (RynthNavPlugin.TripTime.cs)
         // Path markers (RynthNavPlugin.Markers.cs) and "save as nav route" (RynthNavPlugin.SaveRoute.cs), 0.6.6+. The mesh view (RynthNavPlugin.MeshView.cs), 0.6.7+.
         sb.Append(",\"mesh\":{\"on\":").Append(_meshOn ? 1 : 0).Append(",\"floor\":").Append(_meshFloor ? 1 : 0)
           .Append(",\"walls\":").Append(_meshWalls ? 1 : 0).Append(",\"radius\":").Append(_meshRadius.ToString("F0", ci))

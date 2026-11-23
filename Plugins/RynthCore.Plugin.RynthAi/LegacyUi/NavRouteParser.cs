@@ -117,6 +117,13 @@ public sealed class NavRouteParser
     public bool OutdoorHuntWalk { get; set; }
 
     /// <summary>
+    /// The corners of a RynthNav navmesh path laid on the fly (a script's ai.GoTo outdoors, 2026-11-18):
+    /// like a hunt walk, a corner is turned early only where the navmesh shows a straight walk to the next
+    /// one (NavigationEngine's corner gate). Never set on a loaded route.
+    /// </summary>
+    public bool NavmeshCorners { get; set; }
+
+    /// <summary>
     /// Non-null if the last load hit an unknown waypoint type or a malformed
     /// line. The route still holds whatever points parsed cleanly before that.
     /// </summary>
@@ -227,9 +234,9 @@ public sealed class NavRouteParser
                 var pt = new NavPoint
                 {
                     Type = (NavPointType)typeRaw,
-                    EW   = double.Parse(lines[idx++], CultureInfo.InvariantCulture),
-                    NS   = double.Parse(lines[idx++], CultureInfo.InvariantCulture),
-                    Z    = double.Parse(lines[idx++], CultureInfo.InvariantCulture)
+                    EW   = ParseNumber(lines[idx++]),
+                    NS   = ParseNumber(lines[idx++]),
+                    Z    = ParseNumber(lines[idx++])
                 };
                 // Z is in nav units (metres / 240). Waypoints added from the UI before
                 // 2026-09-29 stored metres, so they drew hundreds of metres up; no real
@@ -253,18 +260,18 @@ public sealed class NavRouteParser
                         pt.TargetName = lines[idx++];
                         break;
                     case NavPointType.Jump:
-                        pt.JumpHeading = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
+                        pt.JumpHeading = ParseNumber(lines[idx++]);
                         pt.JumpShift   = lines[idx++].Trim().Equals("true", StringComparison.OrdinalIgnoreCase);
-                        pt.JumpMs      = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
+                        pt.JumpMs      = ParseNumber(lines[idx++]);
                         break;
                     case NavPointType.PortalNPC:
                     case NavPointType.Npc:
                         pt.TargetName   = lines[idx++];
                         pt.ObjectClass  = int.Parse(lines[idx++], CultureInfo.InvariantCulture);
                         pt.IsTie        = ParseTieFlag(lines[idx++]);
-                        pt.PortalExitEW = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                        pt.PortalExitNS = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
-                        pt.PortalExitZ  = double.Parse(lines[idx++], CultureInfo.InvariantCulture);
+                        pt.PortalExitEW = ParseNumber(lines[idx++]);
+                        pt.PortalExitNS = ParseNumber(lines[idx++]);
+                        pt.PortalExitZ  = ParseNumber(lines[idx++]);
                         break;
                 }
 
@@ -281,6 +288,19 @@ public sealed class NavRouteParser
         }
 
         return route;
+    }
+
+    /// <summary>
+    /// A number line of a nav (coordinates, jump heading and power). Written by VirindiTank and
+    /// RynthAi as "12.5"; a line with a comma and no dot ("12,5", a PC set to a comma-decimal
+    /// language) is read as 12.5 (it used to read as 125: the comma was taken for a thousands
+    /// separator, and the point drew far off its place). No thousands separators.
+    /// </summary>
+    internal static double ParseNumber(string s)
+    {
+        s = (s ?? string.Empty).Trim();
+        if (s.IndexOf(',') >= 0 && s.IndexOf('.') < 0) s = s.Replace(',', '.');
+        return double.Parse(s, NumberStyles.Float, CultureInfo.InvariantCulture);
     }
 
     private static bool ParseTieFlag(string s)

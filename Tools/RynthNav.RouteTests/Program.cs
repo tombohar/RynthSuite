@@ -63,6 +63,10 @@ internal static partial class Program
         RunAutoRunGate();
         RunRouteMaker();
         RunSteering();
+        RunWays();
+        RunArrival();
+        RunRealWalks();
+        RunTripTimes();
 
         Console.WriteLine();
         Console.WriteLine(_fails == 0 && _asserts > 0

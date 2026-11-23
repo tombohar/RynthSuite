@@ -107,6 +107,28 @@ internal sealed class HealLatencyTracker
         }
     }
 
+    /// <summary>
+    /// The macro is off: an open episode ends here, said once when it lasted NoHealLogMs or more. It
+    /// used to stay open, and the heal after a restart counted the whole stop (2026-11-22: "13871 ms",
+    /// of which 12 s with the macro off).
+    /// </summary>
+    public void MacroOff(DateTime now, int hp)
+    {
+        if (_open && !_healed)
+        {
+            double ms = (now - _start).TotalMilliseconds;
+            if (ms >= NoHealLogMs)
+            {
+                _noHeal++;
+                _log($"[HealLatency] no heal in {ms:0} ms: health {_startHp}% under {_line} {_lineValue}%{Where(_inCombat)}{(_followUp ? " (follow-up)" : "")}, " +
+                     $"then the macro stopped at {hp}%; held by: {Held()}{Arb()}");
+            }
+        }
+        _open = false;
+        _healed = false;
+        _followUp = false;
+    }
+
     /// <summary>Once per heartbeat, after the tick's work: why no heal went out this tick.</summary>
     public void EndTick(DateTime now, string heldBy, string detail, string arbiterActivity)
     {

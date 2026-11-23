@@ -43,6 +43,7 @@ internal static class ChestLootTests
         r.Add("chest loot: Pickup with macro off (on by default) loots an opened chest with the macro off or Looting off", PickupWithMacroOff);
         r.Add("chest loot: Pickup with macro off never takes from house storage or your own side pack", PickupWithMacroOffRefuses);
         r.Add("chest loot: Pickup with macro off leaves the chest open and says so with Leave the chest open (off by default: it closes it)", PickupLeavesChestOpen);
+        r.Add("chest loot (R-20261120-173459-ea5d): Pickup with macro off taking nothing leaves the chest open, Leave the chest open or not", PickupTakingNothingLeavesOpen);
         r.Add("chest loot: reopening the chest loots it again (never marked done)", ReopenLootsAgain);
         r.Add("chest loot: a salvage-only item is left when no UST is carried, as on corpses", SalvageWithoutUstLeft);
         r.Add("chest loot: opened mid-fight it waits for combat, then is looted if still open", ChestWaitsForCombat);
@@ -404,6 +405,27 @@ internal static class ChestLootTests
         LootGemAndFinish(b2, Gem);
         Check.Eq(FakeHost.Closes.Count, 1, "macro on: the chest is closed when done, as before");
         Check.False(FakeHost.Chat.Any(c => c.Contains("Left it open")), "macro on: no left-open line");
+    }
+
+    // 2026.11.19.1: the player opened a chest by hand to take an item the profile leaves; the pickup matched
+    // nothing and closed it about 1 ms later, every open, until the setting was turned off.
+    private static void PickupTakingNothingLeavesOpen()
+    {
+        BaseWorld();
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        bot.S.IsMacroRunning = false;
+        bot.S.LootChestsMacroOffLeaveOpen = false;   // the default
+        bot.Create(Chest, Spoon);                     // only an item the profile leaves
+
+        bot.ServerOpens(Chest);
+        bot.TickUntil(() => FakeHost.Chat.Any(c => c.Contains("Left it open")));
+        Check.Eq(FakeHost.Closes.Count, 0, "nothing taken: the chest is not closed");
+        Check.True(FakeHost.Chat.Any(c => c.Contains("Pickup with macro off: done with") && c.Contains("Left it open")),
+            $"chat says it was left open (chat: {string.Join(" | ", FakeHost.Chat)})");
+        Check.False(bot.HasLootWork(), "the looter is done with it");
+        for (int i = 0; i < 20; i++) bot.Tick();
+        Check.Eq(FakeHost.Closes.Count, 0, "and it stays open");
     }
 
     private static void PickupWithMacroOffRefuses()

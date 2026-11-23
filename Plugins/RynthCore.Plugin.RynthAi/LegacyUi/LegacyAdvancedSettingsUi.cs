@@ -813,13 +813,16 @@ internal sealed class LegacyAdvancedSettingsUi
                     ImGui.SetTooltip("Which monster to attack, among those of the highest priority inside Monster Range.\nLeast turning: the one needing the smallest turn to face. Unknown health counts as full.");
                 ImGui.Checkbox("Target Lock", ref _settings.TargetLock);
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("On: keeps the target it picked until it dies or leaves Monster Range, even when a higher-priority monster shows up.\nOff: a higher-priority monster in range takes over at once, and it switches whenever another monster is clearly better by the Targeting rule.");
+                    ImGui.SetTooltip("On: keeps the target it picked until it dies or leaves Monster Range, even when a higher-priority monster shows up.\nWith Targeting on Closest, a monster that reaches you (within 5 yd) takes over from a target more than 6.5 m off.\nOff: a higher-priority monster in range takes over at once, and it switches whenever another monster is clearly better by the Targeting rule.");
                 ImGui.Checkbox("Fight the monster I select", ref _settings.FightSelectedTarget);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip(LegacyUiSettings.FightSelectedTargetTip);
                 ImGui.Checkbox("Melee through walls", ref _settings.MeleeThroughWalls);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip(LegacyUiSettings.MeleeThroughWallsTip);
+                ImGui.Checkbox("Debuff every monster in range before attacking", ref _settings.DebuffAllBeforeAttacking);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(LegacyUiSettings.DebuffAllBeforeAttackingTip);
 
                 ImGui.Spacing();
                 ImGui.Text("Corpse Acquisition (Yards)");
@@ -1115,22 +1118,22 @@ internal sealed class LegacyAdvancedSettingsUi
                 break;
 
             case "Looting":
-                ImGui.Checkbox("Enable Looting", ref _settings.EnableLooting);
-                // The loot profile picker (the dashboard's LOOT list), and beside it Loot Mode, which
-                // decides whether that profile is used at all.
+                // The loot profile picker first (the dashboard's LOOT list, the same switch), then Loot
+                // Mode, which decides whether that profile is used at all.
                 string[]? lootFiles = LootProfiles?.Invoke();
                 if (lootFiles != null && lootFiles.Length > 0 && SelectLootProfile != null)
                 {
                     int lootIdx = Math.Clamp(_settings.LootProfileIdx, 0, lootFiles.Length - 1);
-                    ImGui.SetNextItemWidth(200);
+                    ImGui.SetNextItemWidth(240);
                     if (ImGui.Combo("Loot Profile", ref lootIdx, lootFiles, lootFiles.Length) && lootIdx != _settings.LootProfileIdx)
                         SelectLootProfile(lootIdx);
                     if (ImGui.IsItemHovered())
                         ImGui.SetTooltip(Loot.LootModes.IsRares(_settings.LootMode)
                             ? "The loot profile. Not used while Loot Mode is Rares and needed mana stones only."
-                            : "The loot profile: what corpses, chests and ground items give up.");
-                    ImGui.SameLine();
+                            : "The loot profile: what corpses, chests and ground items give up.\n" +
+                              "The same list as the dashboard's Loaded files (LOOT) and the Mini Remote's Loot row.");
                 }
+                ImGui.Checkbox("Enable Looting", ref _settings.EnableLooting);
                 _settings.LootMode = Loot.LootModes.Clamp(_settings.LootMode);
                 ImGui.SetNextItemWidth(240);
                 ImGui.Combo("Loot Mode", ref _settings.LootMode, Loot.LootModes.Labels, Loot.LootModes.Labels.Length);
@@ -1141,7 +1144,12 @@ internal sealed class LegacyAdvancedSettingsUi
                                      "nothing else (no salvage, no Learn Unknown Spells, no Mana Tap). Recover My Corpse still works.\n" +
                                      "Also /ra loot mode profile|rares, and the meta setting LootMode (0 or 1).");
                 ImGui.Checkbox("Boost Loot Priority", ref _settings.BoostLootPriority);
-                // "Loot Only Rare Corpses" is hidden: nothing reads LootOnlyRareCorpses.
+                ImGui.Checkbox("Loot Only Rare Corpses", ref _settings.LootOnlyRareCorpses);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Only a corpse that generated a rare is opened (its description says \"This corpse\n" +
+                                     "generated a rare item!\"); every other corpse is left closed, for rare farming.\n" +
+                                     "With Loot Mode \"Rares and needed mana stones only\" the rare is all it takes.\n" +
+                                     "Your own corpse (Recover My Corpse) is always recovered.");
                 ImGui.Checkbox("Learn Unknown Spells", ref _settings.ReadUnknownScrolls);
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Loots scrolls of spells you don't know and can learn (magic school trained or\nspecialized, skill high enough), and reads them when it's safe. Scrolls already\nin your pack are read too.");
@@ -1155,7 +1163,8 @@ internal sealed class LegacyAdvancedSettingsUi
                     if (ImGui.IsItemHovered())
                         ImGui.SetTooltip("When the pickup is done the chest stays open and chat says what was taken,\n" +
                                          "so you can check it and take anything your profile missed. Untick it and\n" +
-                                         "RynthAi closes the chest when it's done (some chests lock again on close).");
+                                         "RynthAi closes the chest when it's done (some chests lock again on close).\n" +
+                                         "A chest it took nothing from is always left open.");
                     ImGui.Unindent();
                 }
                 ImGui.Checkbox("Loot Nearby Chests", ref _settings.LootNearbyChests);

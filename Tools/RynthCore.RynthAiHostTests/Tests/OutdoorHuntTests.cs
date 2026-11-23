@@ -19,6 +19,9 @@ internal static class OutdoorHuntTests
         r.Add("hunt: no way to a monster (a cliff, water): left out for a while; a walk ending close enough still counts", Unreachable);
         r.Add("hunt (11-12): a walk ending under a monster on a roof or the floor above doesn't reach it; one up a slope does", AboveTheWalk);
         r.Add("hunt: it stays within Hunt Radius of where it started (0 = anywhere)", Radius);
+        r.Add("hunt fence (2026-11-17, open-world Threads): a nearer monster outside the fence is passed over; none inside: it waits, and says the fence", FenceHunt);
+        r.Add("hunt fence: /ra hunt fence x y r sets it, combat leaves a monster outside it alone, off clears it; a bad one shows the usage", FenceCommandAndCombat);
+        r.Add("hunt fence (\"here and there nav takes him outside\"): a walk round the outside is no walk; from outside, a walk back in is", FenceWalk);
         r.Add("hunt: plans again when the monster moves, the walk runs out, or a while passes; not every tick", Replan);
         r.Add("hunt: nothing in range: it waits where it is (no walk back to the start); Hunt Radius defaults to anywhere", WaitsWhereItIs);
         r.Add("hunt: /ra hunt range|radius answer and cap; status and stop don't toggle it; panel opens the window", Commands);
@@ -28,6 +31,10 @@ internal static class OutdoorHuntTests
         r.Add("hunt (test 10-23): at a wall with the monster on its far side: no 1 yd walks every half second; left out after NoFightSec", WallBetween);
         r.Add("hunt (2026-11-16): a walk ending where it stands, its corners round it, is no walk: it stands, then the monster is left out", EndsHereNoWalk);
         r.Add("hunt (2026-11-16 17:11): the walk over, under a monster on the floor above: left out, not walked again every half second", FloorApartLeftOut);
+        r.Add("hunt (2026-11-17 Thread E74E): under a monster on a building's platform: its cell's other monsters left out too, for 10 min", FloorApartCellLeftOut);
+        r.Add("hunt (2026-11-17 fort Thread 3073): a 425 yd walk to one 68 yd away is too far round", TooFarRoundForIt);
+        r.Add("hunt fence (2026-11-17 Thread 32D9): combat fights beside the character and no farther out than it, even outside the fence", FenceSkipsRule);
+        r.Add("hunt (2026-11-17 fort Thread 3073): stuck again and again at a spot: that monster left out, and no walk by the spot", SnaggedSpot);
         r.Add("hunt: a monster right beside it that combat doesn't take: stands, then leaves it out", RightHere);
         r.Add("hunt (test 10-23): in a building it walks back out the way it went in (the loops it made cut out)", WayBackOut);
         r.Add("hunt: in a building with no way in known, or the walks out ending still inside: it waits", IndoorsWaits);
@@ -339,6 +346,136 @@ internal static class OutdoorHuntTests
         Check.False(h2.IsSkipped(1, T0.AddSeconds(4)), "level with it: combat's turn, not left out");
     }
 
+    // 2026-11-17 11:13:58, the fort Thread 3073: a Threadbound Rynthid Slayer 68 yd away got a 425 yd walk, up onto
+    // the fort's wall, where the character stuck on a piece of wall and died.
+    private static void TooFarRoundForIt()
+    {
+        var me = V(1000, 1000);
+        var h = new OutdoorHunt { RangeYd = 300 };   // Hunt Range big enough that 2x it allows the walk
+        h.Start(T0, me);
+        var nav = new Nav();
+        nav.Overrides[(1068, 1000)] = new(OutdoorHunt.PathStatus.Ok, new[] { V(1000, 1150), V(1068, 1150), V(1068, 1000) }, 425, 0);
+        var d = h.Tick(T0, me, true, Sorted(C(1, 1068, 1000, me, name: "Threadbound Rynthid Slayer")), nav.Path);
+        Check.True(d.Act != OutdoorHunt.Act.Walk && h.IsSkipped(1, T0.AddSeconds(1)), $"425 yd for 68 yd away: no walk, left out ({d.Act})");
+        Check.True(string.Join(" | ", h.PendingNotes).Contains("too far round for one 68 yd away"), "says so: " + string.Join(" | ", h.PendingNotes));
+
+        // Round a river: 150 yd for one 30 yd away (3 x 30 + 60) is still a walk.
+        var h2 = new OutdoorHunt();
+        h2.Start(T0, me);
+        nav.Overrides[(1030, 1000)] = new(OutdoorHunt.PathStatus.Ok, new[] { V(1000, 1060), V(1030, 1060), V(1030, 1000) }, 150, 0);
+        d = h2.Tick(T0, me, true, Sorted(C(2, 1030, 1000, me)), nav.Path);
+        Check.True(d.Act == OutdoorHunt.Act.Walk && d.TargetId == 2, $"150 yd round for one 30 yd away: walked ({d.Act} {d.TargetId})");
+    }
+
+    // 2026-11-17 11:14, the fort Thread 3073: on the wall top a piece of wall RynthNav's map doesn't hold stuck the walk
+    // five times ("RynthNav sees a clear straight line (the snag isn't on its map)"), and the hunt planned the same
+    // walk through it every 8 s for 90 s. The plugin calls Snagged at the third stuck there.
+    private static void SnaggedSpot()
+    {
+        var me = V(1000, 1000);
+        var h = new OutdoorHunt();
+        h.Start(T0, me);
+        var nav = new Nav();
+        var d = h.Tick(T0, me, true, Sorted(C(1, 1050, 1000, me, name: "Threadbound Rynthid Slayer")), nav.Path);
+        Check.True(d.Act == OutdoorHunt.Act.Walk && d.TargetId == 1, "walks to it");
+
+        var stuck = V(1020, 1000);
+        h.Snagged(T0.AddSeconds(20), stuck);
+        Check.True(h.IsSkipped(1, T0.AddSeconds(21)) && h.TargetId == 0, "stuck there again and again: left out, no target");
+        Check.True(string.Join(" | ", h.PendingNotes).Contains("no walk goes by that spot for 10 min"), "says so: " + string.Join(" | ", h.PendingNotes));
+
+        // Back from the spot: one beyond it (the walk goes by it) left out; one another way walked to.
+        var back = V(1005, 1000);
+        var list = Sorted(C(2, 1040, 1001, back), C(3, 1005, 1045, back));
+        d = h.Tick(T0.AddSeconds(22), back, true, list, nav.Path);
+        Check.True(d.Act == OutdoorHunt.Act.Walk && d.TargetId == 3, $"the one beyond the snag left out, the other walked to ({d.Act} {d.TargetId})");
+        Check.True(h.IsSkipped(2, T0.AddSeconds(23)) && string.Join(" | ", h.PendingNotes).Contains("the walk goes by a spot it got stuck at"), "says why: " + string.Join(" | ", h.PendingNotes));
+
+        // Standing at the snag itself: walks from it aren't turned down (it would stand there).
+        var h2 = new OutdoorHunt();
+        h2.Start(T0, stuck);
+        h2.Snagged(T0, stuck);
+        d = h2.Tick(T0.AddSeconds(1), stuck, true, Sorted(C(4, 1040, 1000, stuck)), nav.Path);
+        Check.True(d.Act == OutdoorHunt.Act.Walk && d.TargetId == 4, $"at the snag: a walk away from it ({d.Act} {d.TargetId})");
+        // After 10 min the spot is forgotten.
+        var h3 = new OutdoorHunt();
+        h3.Start(T0, back);
+        h3.Snagged(T0, stuck);
+        d = h3.Tick(T0.AddSeconds(601), back, true, Sorted(C(5, 1040, 1001, back)), nav.Path);
+        Check.True(d.Act == OutdoorHunt.Act.Walk && d.TargetId == 5, $"10 min on: by the spot again ({d.Act} {d.TargetId})");
+    }
+
+    // A building whose rooms all join (the walk inside is straight to the goal), for the hunt's own rules.
+    private sealed class OneBuilding : OutdoorHunt.IBuildings
+    {
+        public int BuildingOf(uint cell) => OutdoorHunt.IsIndoorCell(cell) ? 1 : 0;
+        public IReadOnlyList<OutdoorHunt.Door> Doors(int building)
+            => new[] { new OutdoorHunt.Door(0xE74E01B8, V(1000, 990), V(1000, 989), V(1000, 988)) };
+        public OutdoorHunt.PathResult Inside(uint fromCell, OutdoorHunt.Vec from, uint toCell, OutdoorHunt.Vec to)
+            => new(OutdoorHunt.PathStatus.Ok, new[] { to }, from.DistanceTo(to), 0);
+        public string Name(int building) => "building E74E#14";
+    }
+
+    // 2026-11-17, Thread E74E: an Elite Umbral Tormentor, an Elite Penumbral Reaver and an Elite Threadbound Shadow
+    // Excruciator on one platform of E74E#14 (cell 01AD) were walked under one after another (10:15 to 10:17), and
+    // each again 120 s later ("It's still trying to chase monsters one floor up, doing circles"). A walk that
+    // ends a floor under a monster in a building's cell now leaves out the cell's other monsters too, for 10 min.
+    private static void FloorApartCellLeftOut()
+    {
+        const uint ground = 0xE74E01B3, platform = 0xE74E01AD, side = 0xE74E01AA;
+        var me = V(1000, 1000);
+        var b = new OneBuilding();
+        var h = new OutdoorHunt();
+        h.Start(T0, me);
+        var nav = new Nav();
+        var up1 = new OutdoorHunt.Vec(1006, 1000, 8.4);
+        var up2 = new OutdoorHunt.Vec(1008, 1001, 8.4);
+        var along = V(1003, 1016);
+        List<OutdoorHunt.Candidate> At(OutdoorHunt.Vec from) => Sorted(
+            new OutdoorHunt.Candidate(1, "Elite Threadbound Shadow Excruciator", up1, up1.DistanceTo(from), 1, platform),
+            new OutdoorHunt.Candidate(2, "Elite Umbral Tormentor", up2, up2.DistanceTo(from), 1, platform),
+            new OutdoorHunt.Candidate(3, "Elite Penumbral Reaver", along, along.DistanceTo(from), 1, side));
+        var d = h.Tick(T0, me, ground, true, At(me), nav.Path, b);
+        Check.True(d.Act == OutdoorHunt.Act.Walk && d.TargetId == 1, $"walks to the nearest, on the platform ({d.Act} {d.TargetId})");
+
+        var under = V(1006.2, 1000.1);
+        d = h.Tick(T0.AddSeconds(3), under, ground, true, At(under), nav.Path, b);
+        Check.True(h.IsSkipped(1, T0.AddSeconds(4)), "the walk ended under it: left out");
+        Check.True(h.CellSkipped(platform, T0.AddSeconds(4)), "and its cell");
+        Check.True(string.Join(" | ", h.PendingNotes).Contains("every monster in its cell 01AD for 10 min"), "says so: " + string.Join(" | ", h.PendingNotes));
+        Check.True(d.TargetId == 3, $"the next is the one on this floor, not the other on the platform ({d.Act} {d.TargetId})");
+        Check.False(h.CellSkipped(platform, T0.AddSeconds(3 + 601)), "the cell back after 10 min");
+
+        // Outdoors (a roof, a ledge): the landscape cell is 24 m across, so only the monster is left out.
+        var h2 = new OutdoorHunt();
+        h2.Start(T0, me);
+        var roof = new OutdoorHunt.Vec(1006, 1000, 8.4);
+        var list = Sorted(new OutdoorHunt.Candidate(1, "Elite Threadbound Shadow Excruciator", roof, roof.DistanceTo(me), 1, 0xE74E0003));
+        h2.Tick(T0, me, true, list, nav.Path);
+        h2.Tick(T0.AddSeconds(3), under, true, Sorted(new OutdoorHunt.Candidate(1, "Elite Threadbound Shadow Excruciator", roof, roof.DistanceTo(under), 1, 0xE74E0003)), nav.Path);
+        Check.True(h2.IsSkipped(1, T0.AddSeconds(4)), "outdoors: the monster left out");
+        Check.False(h2.CellSkipped(0xE74E0003, T0.AddSeconds(4)), "not its landscape cell");
+
+        // Circling (10:55:43, 16 s): it moves about up there, each walk planned again is a fresh one and never runs
+        // out. Under it for UnderItSec in all: left out all the same.
+        var h3 = new OutdoorHunt();
+        h3.Start(T0, me);
+        var plat = new OutdoorHunt.Candidate(1, "Elite Threadbound Shadow Excruciator", up1, up1.DistanceTo(me), 1, platform);
+        h3.Tick(T0, me, ground, true, Sorted(plat), nav.Path, b);
+        bool walkedAgain = false;
+        for (int i = 1; i <= 8; i++)
+        {
+            var at = T0.AddSeconds(1 + i * 0.5);
+            var mon = new OutdoorHunt.Vec(1006 + (i % 2 == 0 ? 2.5 : -2.5), 1000 + (i % 3) * 1.5, 8.4);   // moving about up there
+            var mine = new OutdoorHunt.Vec(mon.X + 1, mon.Y - 1, 0);                                       // a step behind it, below
+            var dd = h3.Tick(at, mine, ground, false, Sorted(plat with { Pos = mon, Distance = mon.DistanceTo(mine) }), nav.Path, b);
+            if (i >= 7 && dd.Act == OutdoorHunt.Act.Walk && dd.TargetId == 1) walkedAgain = true;
+        }
+        Check.True(h3.IsSkipped(1, T0.AddSeconds(6)), "circling under it 3 s: left out, the walk not over");
+        Check.True(h3.CellSkipped(platform, T0.AddSeconds(6)), "and its cell");
+        Check.False(walkedAgain, "not walked to again after");
+    }
+
     private static void WayBackOut()
     {
         var h = new OutdoorHunt();
@@ -497,6 +634,135 @@ internal static class OutdoorHuntTests
         var any = new OutdoorHunt { RadiusYd = 0, RangeYd = 100 };
         any.Start(T0, start);
         Check.Eq(any.Tick(T0, me, true, Sorted(C(1, 1070, 1000, me), C(2, 1000, 1030, me)), nav.Path).TargetId, 1, "radius 0: anywhere, the nearest walk");
+    }
+
+    // An open-world Thread's circle, its fence 50 yd round (1000, 1000): a monster past it is no pick, even nearer.
+    private static void FenceHunt()
+    {
+        var h = new OutdoorHunt { RangeYd = 100, Fence = p => (p.X - 1000) * (p.X - 1000) + (p.Y - 1000) * (p.Y - 1000) <= 50 * 50 };
+        var me = V(1040, 1000);
+        h.Start(T0, me);
+        var nav = new Nav();
+        var d = h.Tick(T0, me, true, Sorted(C(1, 1060, 1000, me), C(2, 1000, 1030, me)), nav.Path);
+        Check.Eq(d.TargetId, 2, "the one 60 yd from the middle is outside the fence (20 yd off); the one inside is walked to");
+        var h2 = new OutdoorHunt { RangeYd = 100, Fence = p => (p.X - 1000) * (p.X - 1000) + (p.Y - 1000) * (p.Y - 1000) <= 50 * 50 };
+        h2.Start(T0, me);
+        var d2 = h2.Tick(T0, me, true, Sorted(C(1, 1060, 1000, me), C(3, 1090, 1000, me)), nav.Path);
+        Check.Eq(d2.TargetId, 0, "every monster outside it: no pick");
+        Check.True(h2.Note.Contains("inside the fence") && h2.Note.Contains("waiting here"), "it waits and says the fence: " + h2.Note);
+    }
+
+    // The fence 50 yd round (1000, 1000), walks to 65. The nearer monster's walk swings out to 80 yd from the
+    // middle (round a building): no walk; the other, straight, is walked to. From 70 yd out a walk back in is.
+    private static void FenceWalk()
+    {
+        bool Fence(OutdoorHunt.Vec p) => (p.X - 1000) * (p.X - 1000) + (p.Y - 1000) * (p.Y - 1000) <= 50 * 50;
+        bool WalkFence(OutdoorHunt.Vec me, IReadOnlyList<OutdoorHunt.Vec> corners)
+        {
+            double Out(OutdoorHunt.Vec v) => Math.Sqrt((v.X - 1000) * (v.X - 1000) + (v.Y - 1000) * (v.Y - 1000));
+            return corners.All(c => Out(c) <= 65 || Out(c) <= Out(me) + 2);
+        }
+        var me = V(1030, 1000);
+        var h = new OutdoorHunt { RangeYd = 100, Fence = Fence, WalkFence = WalkFence };
+        h.Start(T0, me);
+        var nav = new Nav();
+        nav.Overrides[(1040, 1010)] = new(OutdoorHunt.PathStatus.Ok, new[] { V(1080, 1000), V(1040, 1010) }, 70, 0);
+        var d = h.Tick(T0, me, true, Sorted(C(1, 1040, 1010, me), C(2, 1000, 1040, me)), nav.Path);
+        Check.Eq(d.TargetId, 2, "the walk round the outside (80 yd out) is no walk: the other one");
+        Check.True(string.Join(" | ", h.PendingNotes).Contains("the walk goes out past the fence"), "says why: " + string.Join(" | ", h.PendingNotes));
+
+        var outside = V(1070, 1000);   // out past the walk radius already
+        var h2 = new OutdoorHunt { RangeYd = 100, Fence = Fence, WalkFence = WalkFence };
+        h2.Start(T0, outside);
+        var d2 = h2.Tick(T0, outside, true, Sorted(C(3, 1040, 1000, outside)), new Nav().Path);
+        Check.Eq(d2.TargetId, 3, "from outside, the walk back in to one inside is a walk");
+    }
+
+    private static void FenceCommandAndCombat()
+    {
+        const System.Reflection.BindingFlags Any = System.Reflection.BindingFlags.Instance
+            | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+        RynthCore.RynthAiHostTests.Fakes.FakeHost.Reset();
+        var host = RynthCore.RynthAiHostTests.Fakes.FakeHost.Create();
+        var p = new RynthAiPlugin();
+        typeof(RynthCore.PluginCore.RynthPluginBase).GetMethod("Attach", Any)!.Invoke(p, new object[] { RynthCore.RynthAiHostTests.Fakes.FakeHost.LastApi });
+        var dash = new LegacyDashboardRenderer(host);
+        typeof(RynthAiPlugin).GetField("_dashboard", Any)!.SetValue(p, dash);
+        var chat = RynthCore.RynthAiHostTests.Fakes.FakeHost.Chat;
+        void Ra(string line)
+        {
+            chat.Clear();
+            string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            typeof(RynthAiPlugin).GetMethod("DispatchRaCommand", Any)!.Invoke(p, new object[] { parts[1].ToLowerInvariant(), parts, 0 });
+        }
+        string All() => string.Join(" | ", chat);
+
+        // Landblock 0xA9B4 (x 0xA9 * 192 = 32448, y 0xB4 * 192 = 34560): a fence 80 m round (32500, 34600).
+        RynthCore.RynthAiHostTests.Fakes.FakeHost.PlayerPose = (0xA9B40020, 52f, 40f, 0f);
+        Ra("/ra hunt fence 32500 34600 80");
+        Check.True(p.HuntFence is { } f && f.X == 32500 && f.Y == 34600 && f.R == 80, "set");
+        Check.True(All().Contains("Hunt fence: 80.0 m round 32500.0, 34600.0") && All().Contains("you are 0 m from its middle"), "said: " + All());
+        const uint Inside = 0x7E7E9301, Outside = 0x7E7E9302;
+        RynthCore.RynthAiHostTests.Fakes.FakeHost.Positions[Inside] = (0xA9B40021, 100f, 70f, 0f);    // 48, 30 m from the middle
+        RynthCore.RynthAiHostTests.Fakes.FakeHost.Positions[Outside] = (0xA9B40022, 150f, 40f, 0f);   // 98 m east
+        Check.False(p.FenceSkipsTarget(unchecked((int)Inside)), "combat: the one inside is a target");
+        Check.True(p.FenceSkipsTarget(unchecked((int)Outside)), "combat: the one outside is left alone");
+        Check.True(p.InHuntFence(32500 + 79, 34600) && !p.InHuntFence(32500 + 81, 34600), "the edge at 80 m");
+
+        // 2026-11-17 16:40, Thread 32D9: the character outside the fence among the Thread's monsters, all outside it,
+        // fought none and died. Standing 85 m out now: the one beside it, and one no farther out than it (+5 m), are fought.
+        var fieldChecked = typeof(RynthAiPlugin).GetField("_fenceCheckedAt", Any)!;
+        RynthCore.RynthAiHostTests.Fakes.FakeHost.PlayerPose = (0xA9B40020, 137f, 40f, 0f);   // 85 m east of the middle
+        fieldChecked.SetValue(p, 0L);
+        const uint Beside = 0x7E7E9303, Level = 0x7E7E9304, FarOut = 0x7E7E9305;
+        RynthCore.RynthAiHostTests.Fakes.FakeHost.Positions[Beside] = (0xA9B40022, 140f, 40f, 0f);   // 3 m from it, 88 m out
+        RynthCore.RynthAiHostTests.Fakes.FakeHost.Positions[Level] = (0xA9B40022, 132f, 60f, 0f);    // 21 m from it, 82.5 m out
+        RynthCore.RynthAiHostTests.Fakes.FakeHost.Positions[FarOut] = (0xA9B40022, 137f, 80f, 0f);   // 40 m from it, 93.9 m out
+        Check.False(p.FenceSkipsTarget(unchecked((int)Beside)), "outside the fence: the one beside it is a target");
+        Check.False(p.FenceSkipsTarget(unchecked((int)Level)), "and one no farther out than it stands");
+        Check.True(p.FenceSkipsTarget(unchecked((int)FarOut)), "one farther out is still left alone");
+        Check.True(p.FenceSkipsTarget(unchecked((int)Outside)), "and one 98 m out, 13 m off");
+        RynthCore.RynthAiHostTests.Fakes.FakeHost.PlayerPose = (0xA9B40020, 52f, 40f, 0f);
+        Ra("/ra hunt fence");
+        Check.True(All().Contains("Hunt fence: 80.0 m round"), "no numbers: shows it: " + All());
+        Ra("/ra hunt fence 1 2");
+        Check.True(All().Contains("Usage: /ra hunt fence") && p.HuntFence != null, "too few numbers: the usage, the fence kept: " + All());
+        Ra("/ra hunt fence off");
+        Check.True(p.HuntFence == null && All().Contains("Hunt fence: off"), "off: cleared: " + All());
+        Check.False(p.FenceSkipsTarget(unchecked((int)Outside)), "no fence: nothing left alone for it");
+
+        // 2026-11-17 16:42: the fence outlived its Thread, and in the next one, a dungeon, every monster was outside it.
+        // In a dungeon, or far from it, the fence is lifted.
+        RynthCore.RynthAiHostTests.Fakes.FakeHost.PlayerPose = (0xA9B40020, 52f, 40f, 0f);
+        Ra("/ra hunt fence 32500 34600 80");
+        RynthCore.RynthAiHostTests.Fakes.FakeHost.PlayerPose = (0x02890206, 96f, -102f, -42f);   // a dungeon's cell
+        fieldChecked.SetValue(p, 0L);
+        Check.False(p.FenceSkipsTarget(unchecked((int)Outside)), "in a dungeon: nothing left alone for the fence");
+        Check.True(p.HuntFence == null, "and the fence lifted");
+        Ra("/ra hunt fence 32500 34600 80");
+        RynthCore.RynthAiHostTests.Fakes.FakeHost.PlayerPose = (0xADB40020, 52f, 40f, 0f);   // 768 m east, outdoors
+        fieldChecked.SetValue(p, 0L);
+        Check.True(p.InHuntFence(1, 1) && p.HuntFence == null, "768 m away outdoors: lifted (another place)");
+        Ra("/ra hunt fence 32500 34600 80");
+        RynthCore.RynthAiHostTests.Fakes.FakeHost.PlayerPose = (0xAAB40020, 52f, 40f, 0f);   // 192 m east: still the place
+        fieldChecked.SetValue(p, 0L);
+        Check.False(p.InHuntFence(1, 1), "192 m away: still fenced (the walk radius and 300 m)");
+        Check.True(p.HuntFence != null, "the fence kept 192 m away");
+    }
+
+    // The fence's combat rule on its own: fought beside the character, or no farther out than it stands (+5 m, up to
+    // the walk radius); left alone farther out.
+    private static void FenceSkipsRule()
+    {
+        var f = (X: 0.0, Y: 0.0, R: 124.4);
+        Check.False(RynthAiPlugin.FenceSkips(f, 139.4, 100, 0, true, 50, 0), "inside the fence: fought");
+        Check.True(RynthAiPlugin.FenceSkips(f, 139.4, 130, 0, true, 50, 0), "outside, the character well inside: left alone");
+        Check.False(RynthAiPlugin.FenceSkips(f, 139.4, 130, 0, true, 127, 0), "outside, beside the character (3 m): fought");
+        Check.False(RynthAiPlugin.FenceSkips(f, 139.4, 125, 30, true, 127, 0), "outside, 30 m off but no farther out (128.5 m): fought");
+        Check.True(RynthAiPlugin.FenceSkips(f, 139.4, 127, 40, true, 127, 0), "outside, 133 m out with the character at 127: left alone");
+        Check.False(RynthAiPlugin.FenceSkips(f, 139.4, 20, 137, true, 0, 136), "the character at 136 m: one at 138.4 m, 20 m off, fought");
+        Check.True(RynthAiPlugin.FenceSkips(f, 139.4, 30, 137, true, 0, 136), "but none past the walk radius (140.2 m), 30 m off");
+        Check.True(RynthAiPlugin.FenceSkips(f, 139.4, 130, 0, false, 0, 0), "no position for the character: outside is left alone");
     }
 
     private static void Replan()

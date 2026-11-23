@@ -69,6 +69,7 @@ internal static partial class DungeonPathfinder
         out ExplorePlan plan,
         IReadOnlySet<uint>? preferCells = null)
     {
+        using var holes = CountHoles();   // one build: the note's "no way round" counts every walk round of it (Holes.cs)
         LastPortalAvoidance = null;
         var o = ((options ?? DungeonPatrolOptions.Default) with { Coverage = PatrolCoverage.Everything }).Clamped();
         NavRouteParser route;
@@ -210,7 +211,8 @@ internal static partial class DungeonPathfinder
             finally { ScanMiddles = null; }
             if (mid != null) { Append(pts, Tag(mid, "explore-end")); middles.Add(mid); }
             // Round a hole in a cell's floor, not over it (DungeonPathfinder.Holes.cs): before the
-            // straightening, so its legs keep the clearance the walk round has.
+            // straightening, so its legs keep the clearance the walk round has. (EmitSteps walked its legs
+            // round placed objects already; this is the floor, and an object on the leg into the end too.)
             int holes = WalkRoundHoles(pts, geo!);
             if (holes > 0 || HolesLeft > 0)
                 MainRouteNote = (MainRouteNote == null ? "" : MainRouteNote + "; ") + $"holes: {holes} walked round" + (HolesLeft > 0 ? $", {HolesLeft} with no way round" : "");

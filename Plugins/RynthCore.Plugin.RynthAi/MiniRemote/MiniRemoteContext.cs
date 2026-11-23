@@ -95,6 +95,8 @@ internal sealed class MiniRemoteContext
         EngineServerState? st = _server.State;
         string name = st != null && st.HasActive ? st.ActiveName : string.Empty;
         _serverView = new ServerView(name, ServerSalvageView.ParseList(_server.ProfileJson), ServerTrinketRule.Parse(_server.ProfileJson));
+        // The server's own summon items that hold other summons (the combat summoner and the Pets tab).
+        PetElements.ServerSummons = ServerSummonView.ParseList(_server.ProfileJson);
     }
 
     /// <summary>Logout: forget the server; the next login polls fresh.</summary>
@@ -103,6 +105,7 @@ internal sealed class MiniRemoteContext
         _server.Clear();
         _serverRevision = -1;
         _serverView = ServerView.None;
+        PetElements.ServerSummons = Array.Empty<ServerSummonView>();
     }
 
     /// <summary>

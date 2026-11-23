@@ -90,6 +90,8 @@ internal interface IDashboardHost
     bool AutoSortMoving { get; }
     /// <summary>Fight the monster I select (combat setting), for the options menu's toggle.</summary>
     bool FightSelectedTarget { get; }
+    /// <summary>Debuff every monster in range before attacking (combat setting), for the options menu's toggle.</summary>
+    bool DebuffAllBeforeAttacking { get; }
     void SetAutoSort(bool on);
     /// <summary>RynthSort's own window, shown or hidden.</summary>
     void ToggleSortWindow();
@@ -1142,6 +1144,17 @@ internal sealed unsafe class InstrumentDashboard
             {
                 ImGui.CloseCurrentPopup();
                 _d.Command("/ra fightselected");
+            }
+            // Debuff every monster in range before attacking (also Settings > Combat > Targeting): a
+            // toggle, the command's reply says the new state.
+            bool debuffAll = _d.DebuffAllBeforeAttacking;
+            if (MenuItem(dl, ref p, w, "##m_debuffall", RynthIcons.Flask,
+                    "Debuff every monster first", debuffAll ? "ON" : "OFF",
+                    "Casts each monster's Monsters-rule debuffs on every monster in range, nearest first, before attacking any\n" +
+                    "(/ra debuffall). Click to turn it " + (debuffAll ? "off." : "on.")))
+            {
+                ImGui.CloseCurrentPopup();
+                _d.Command("/ra debuffall");
             }
             // Which worn items have their magic on (RynthAiPlugin.ActiveGear.cs): its own window, no bar button.
             if (MenuItem(dl, ref p, w, "##m_gear", RynthIcons.BatteryCharging, "Active gear", "/ra gear",

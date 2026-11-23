@@ -33,6 +33,7 @@ internal static class VitalsTests
         r.Add("vitals: low health wins the arbiter even on a busy tick; backs off when nothing can heal", HealthWinsArbiter);
         r.Add("vitals: health falling with nothing in the scan uses the fight's Heal At, not Top Off HP, for 5 s", BeingHitIsAFight);
         r.Add("vitals: 'You're too busy!' paces vital casts, and a long streak stops the character once", TooBusyVitals);
+        r.Add("vitals (R-20261120-181322-b31b): a buff run uses Get Mana At and Heal At, not the Top Off lines; the top-off comes after it", BuffRunUsesFightLines);
         r.Add("vitals: no components for the top level - the next lower level is cast, not the same one again", NoComponentsFallsBack);
         // Drakkon's death, 2026-10-05 13:43:20 (ops\overnight\2026-10-05-death-fixes.md).
         r.Add("vitals: a hot reload's login refresh trusts its first read; a real login waits for two equal reads", HotReloadRefresh);
@@ -73,6 +74,58 @@ internal static class VitalsTests
         Check.Eq(FakeHost.Stops, 1, "4 refusals in a row: one StopCompletely to clear the stuck gesture");
         for (int i = 0; i < 4; i++) b.OnChatWindowText("You're too busy!", 26);
         Check.Eq(FakeHost.Stops, 1, "only once per streak");
+    }
+
+    // 2026.11.19.1: with Top Mana 95 and Get Mana At 20, a buff run with no monster near cast Stamina to
+    // Mana ten times at 77-100% mana (the idle Top Off line), then used kits to win the stamina back.
+    private static void BuffRunUsesFightLines()
+    {
+        (BuffManager B, PlayerVitalsCache V) Rig(int healAt, int topHp, int getManaAt, int topMana, int hp, int mana)
+        {
+            FakeHost.Reset();
+            FakeHost.WeaponCalls = true;
+            FakeHost.CombatModeValue = CombatMode.Magic;
+            foreach (var row in SpellTable.Rows) FakeHost.Spellbook.Add((uint)row.Id);
+            FakeHost.Skills[(Player, STypeLife)] = (400, 2);
+            var host = FakeHost.Create();
+            var s = new LegacyUiSettings { IsMacroRunning = true, HealAt = healAt, TopOffHP = topHp, EmergencyHealAt = 0, StaminaToHealthAt = 0,
+                                           GetManaAt = getManaAt, TopOffMana = topMana, RestamAt = 0, TopOffStam = 0, UsePotions = false };
+            var skills = new CharacterSkills(host);
+            skills.SetPlayerId(Player);
+            var sm = new SpellManager(host, s);
+            sm.InitializeNatively();
+            sm.SetCharacterSkills(skills);
+            var v = new PlayerVitalsCache { MaxHealth = 500, CurrentHealth = (uint)(hp * 5), MaxStamina = 500, CurrentStamina = 500, MaxMana = 500, CurrentMana = (uint)(mana * 5) };
+            var b = new BuffManager(host, s, sm, v) { InCombatOverride = () => false };   // no monster near
+            b.SetCharacterSkills(skills);
+            return (b, v);
+        }
+
+        // Mana 80%: Get Mana At 20, Top Mana 95.
+        var idle = Rig(0, 0, 20, 95, 100, 80);
+        Check.True(idle.B.CheckVitals(), "between buff runs, 80% mana is under Top Mana 95: Stamina to Mana");
+        Check.Eq(FakeHost.Casts.Count, 1, "one cast (the top-off)");
+
+        var run = Rig(0, 0, 20, 95, 100, 80);
+        run.B.ForceFullRebuff();
+        Check.False(run.B.CheckVitals(), "in a buff run, 80% mana is over Get Mana At 20: nothing");
+        Check.Eq(FakeHost.Casts.Count, 0, "no Stamina to Mana mid-run");
+        run.V.CurrentMana = 50;   // 10%
+        Check.True(run.B.CheckVitals(), "under Get Mana At in the run: Stamina to Mana");
+        Check.Eq(FakeHost.Casts.Count, 1, "one cast");
+        run.B.CancelBuffing();
+        run.V.CurrentMana = 400;  // 80% again, the run over
+        FakeHost.Casts.Clear();
+        Check.True(run.B.CheckVitals(), "the run over: the top-off to Top Mana");
+        Check.Eq(FakeHost.Casts.Count, 1, "Stamina to Mana after the run");
+
+        // Health 80%: Heal At 60, Top HP 95.
+        var hpIdle = Rig(60, 95, 0, 0, 80, 100);
+        Check.True(hpIdle.B.CheckVitals(), "between buff runs, 80% health is under Top HP 95: a heal");
+        var hpRun = Rig(60, 95, 0, 0, 80, 100);
+        hpRun.B.ForceFullRebuff();
+        Check.False(hpRun.B.CheckVitals(), "in a buff run, 80% health is over Heal At 60: no heal");
+        Check.Eq(FakeHost.Casts.Count, 0, "nothing cast");
     }
 
     // 2026-10-08: with no components for the highest Stamina to Mana / Revitalize / Heal the
@@ -123,7 +176,7 @@ internal static class VitalsTests
         foreach (var row in SpellTable.Rows) FakeHost.Spellbook.Add((uint)row.Id);
         FakeHost.Skills[(Player, STypeLife)] = (400, 2);
         var host = FakeHost.Create();
-        var s = new LegacyUiSettings { IsMacroRunning = true, HealAt = 60, TopOffHP = 95, EmergencyHealAt = 0, StaminaToHealthAt = 0, UsePotions = false };
+        var s = new LegacyUiSettings { IsMacroRunning = true, EnableCombat = true, HealAt = 60, TopOffHP = 95, EmergencyHealAt = 0, StaminaToHealthAt = 0, UsePotions = false };
         var skills = new CharacterSkills(host);
         skills.SetPlayerId(Player);
         var sm = new SpellManager(host, s);

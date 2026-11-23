@@ -514,7 +514,7 @@ internal static class VTankHotkeyTests
         var host = FakeHost.Create();
         s = new LegacyUiSettings
         {
-            IsMacroRunning = false, HealAt = 50, TopOffHP = 90, EmergencyHealAt = 0, StaminaToHealthAt = 0,
+            IsMacroRunning = false, EnableCombat = true, HealAt = 50, TopOffHP = 90, EmergencyHealAt = 0, StaminaToHealthAt = 0,
             RestamAt = 0, TopOffStam = 0, GetManaAt = 0, TopOffMana = 0, UsePotions = false,
         };
         var skills = new CharacterSkills(host);

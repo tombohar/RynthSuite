@@ -27,8 +27,16 @@
 // when it has targets, so the hold could only ever wait on a looter that waits for the fight. The corpse
 // is looted after the fight, as every corpse is with Boost Loot off; the wait still keeps nav and the
 // hunt from walking off when no fight is left (the owner's case: running off from the last kill).
+//
+// No corpse here (2026-11-20): "in threads it shouldn't wait for the death animation since mobs don't have
+// corpses, it needs to move as fast as possible". DreamWeave's Thread monsters leave no corpse, so every kill there
+// stood the character still for the whole wait ("no corpse came in 3.5 s, carrying on"). Learned in the session,
+// per dungeon landblock and per monster: after NoCorpseSkipAfter kills in a row with no corpse, a kill there (or of
+// that monster anywhere) starts no wait. A corpse of a kill near the character puts its landblock and its monster
+// back to waiting.
 // Pump thread throughout.
 using System;
+using System.Collections.Generic;
 using RynthCore.Plugin.RynthAi.LegacyUi;
 using RynthCore.Plugin.RynthAi.Loot;
 using RynthCore.Plugin.RynthAi.MonsterStats;
@@ -57,6 +65,48 @@ public sealed partial class RynthAiPlugin
     private int _deathCorpseId;       // its corpse, once it came
     private long _deathCorpseAt;
     private bool _deathWaitHeld;      // HasLootWork's answer this tick (the arbiter's DeathWait input)
+    private uint _deathWaitLandblock; // the dungeon landblock of the kill being waited for (0 outdoors)
+
+    /// <summary>Kills in a row with no corpse after which a landblock or a monster gets no corpse wait.</summary>
+    internal const int NoCorpseSkipAfter = 2;
+    private readonly Dictionary<uint, int> _noCorpseByLandblock = new();
+    private readonly Dictionary<string, int> _noCorpseByName = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The kills here (a dungeon landblock), or of this monster, have left no corpse lately: no wait.</summary>
+    private bool NoCorpseExpected(uint landblock, string name, out string because)
+    {
+        if (landblock != 0 && _noCorpseByLandblock.TryGetValue(landblock, out int n) && n >= NoCorpseSkipAfter)
+        {
+            because = $"the last {n} kills in landblock 0x{landblock:X4} left no corpse";
+            return true;
+        }
+        if (name.Length > 0 && _noCorpseByName.TryGetValue(name, out int m) && m >= NoCorpseSkipAfter)
+        {
+            because = $"its last {m} kills left no corpse";
+            return true;
+        }
+        because = "";
+        return false;
+    }
+
+    /// <summary>The waited-for kill left no corpse: counted for its landblock and its monster (one line when either stops waiting).</summary>
+    private void NoteNoCorpse()
+    {
+        if (_deathWaitLandblock != 0)
+        {
+            int n = _noCorpseByLandblock.TryGetValue(_deathWaitLandblock, out int was) ? was + 1 : 1;
+            _noCorpseByLandblock[_deathWaitLandblock] = n;
+            if (n == NoCorpseSkipAfter)
+                Host.Log($"[RynthAi] Kill: {n} kills in a row in landblock 0x{_deathWaitLandblock:X4} left no corpse: no corpse wait here until one does.");
+        }
+        if (_deathWaitName.Length > 0)
+        {
+            int m = _noCorpseByName.TryGetValue(_deathWaitName, out int was) ? was + 1 : 1;
+            _noCorpseByName[_deathWaitName] = m;
+            if (m == NoCorpseSkipAfter)
+                Host.Log($"[RynthAi] Kill: '{_deathWaitName}' left no corpse {m} times in a row: no corpse wait for it until one comes.");
+        }
+    }
 
     /// <summary>The death wait can run: the macro and Looting on, and the looter able to loot now.</summary>
     private bool DeathWaitCanRun(LegacyUiSettings settings)
@@ -73,6 +123,14 @@ public sealed partial class RynthAiPlugin
     {
         var s = _dashboard?.Settings;
         if (s == null || !DeathWaitCanRun(s)) return;
+        uint landblock = CurrentLandblockOrZero();
+        string trimmed = name?.Trim() ?? "";
+        if (NoCorpseExpected(landblock, trimmed, out string because))
+        {
+            Host.Log($"[RynthAi] Kill: no wait for the corpse of {(trimmed.Length > 0 ? $"'{trimmed}'" : "the kill")}: {because}.");
+            return;
+        }
+        _deathWaitLandblock = landblock;
         double? learned = string.IsNullOrWhiteSpace(name) ? null : _xpTable.DeathMs(name);
         long death = learned is double d ? (long)Math.Round(Math.Clamp(d, 0, DeathWaitMaxDeathMs)) : DeathWaitDefaultMs;
         _deathWaitMs = death + DeathWaitExtraMs;
@@ -114,6 +172,7 @@ public sealed partial class RynthAiPlugin
         if (_deathCorpseId == 0)
         {
             if (since < _deathWaitMs) return true;
+            NoteNoCorpse();
             EndDeathWait($"no corpse came in {_deathWaitMs / 1000.0:0.0} s, carrying on");
             return false;
         }
@@ -156,6 +215,10 @@ public sealed partial class RynthAiPlugin
         if (!Host.HasGetObjectName || !Host.TryGetObjectName(objectId, out string name)) return;
         string? killed = CorpseTimer.KilledName(name);
         if (killed == null || !CorpseNearMe(objectId)) return;
+        // Corpses come here after all: this landblock and this monster wait for them again.
+        uint landblock = CurrentLandblockOrZero();
+        if (landblock != 0) _noCorpseByLandblock.Remove(landblock);
+        _noCorpseByName.Remove(killed);
         if (_corpseTimer.OnCorpse(name, CorpseNowMs) is var (who, ms) && ms <= DeathWaitMaxDeathMs)
         {
             _monsterStats.OnCorpseTime(who, ms, DateTime.UtcNow);

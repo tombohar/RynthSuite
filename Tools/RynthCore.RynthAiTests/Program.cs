@@ -16,6 +16,7 @@ internal static class Program
         var runner = new Runner();
         NavRouteParserTests.Register(runner);
         NavFormatTests.Register(runner);
+        NavFolderTests.Register(runner);
         CombatStallWatchdogTests.Register(runner);
         DirtyFightingHeightTests.Register(runner);
         CreatureWeaknessTests.Register(runner);
@@ -25,6 +26,8 @@ internal static class Program
         BuffItemPickerTests.Register(runner);
         GearActivationTests.Register(runner);
         ItemInfoPartColorsTests.Register(runner);
+        KitPlannerTests.Register(runner);
+        KitAutoTests.Register(runner);
         return runner.Run("RynthAi tests", args.Length > 0 ? args[0] : null);
     }
 }

@@ -18,7 +18,69 @@ public static class DashWindows
 public sealed class LegacyUiSettings
 {
     // ── Runtime-only state — never persisted ────────────────────────────────
-    [JsonIgnore] public bool IsMacroRunning;
+    // The macro switch. Every change records who made it (MacroStopSource / MacroStartSource), for the
+    // "Macro stopped" / "Macro started" log lines: a stop with no cause logged could not be told apart
+    // (the player's button, a script, a meta, the HP failsafe) (2026-11-22). A caller names itself with
+    // SetMacroRunning, or wraps its calls in MacroSource(...) (a meta's rule, a script's call); a plain
+    // write says so.
+    private bool _isMacroRunning;
+    private readonly List<string> _macroSources = new();
+    [JsonIgnore] public bool IsMacroRunning
+    {
+        get => _isMacroRunning;
+        set => SetMacroRunning(value, null);
+    }
+    /// <summary>Who turned the macro off last ("" before the first stop).</summary>
+    [JsonIgnore] public string MacroStopSource { get; private set; } = "";
+    /// <summary>Who turned the macro on last ("" before the first start).</summary>
+    [JsonIgnore] public string MacroStartSource { get; private set; } = "";
+
+    /// <summary>Turns the macro on or off, saying who did (null: only the enclosing MacroSource scopes).</summary>
+    public void SetMacroRunning(bool on, string? source)
+    {
+        if (_isMacroRunning != on)
+        {
+            string who = DescribeMacroSource(source);
+            if (on) MacroStartSource = who; else MacroStopSource = who;
+        }
+        _isMacroRunning = on;
+    }
+
+    /// <summary>Names the caller of every macro change inside the scope (nested scopes add to it).</summary>
+    public IDisposable MacroSource(string source)
+    {
+        lock (_macroSources) _macroSources.Add(source);
+        return new MacroSourceScope(this, source);
+    }
+
+    private string DescribeMacroSource(string? source)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrEmpty(source)) parts.Add(source);
+        lock (_macroSources)
+            for (int i = _macroSources.Count - 1; i >= 0; i--)
+                if (!parts.Exists(p => p.Contains(_macroSources[i], StringComparison.Ordinal))) parts.Add(_macroSources[i]);
+        if (parts.Count == 0) return "a plain write (no source named)";
+        return parts.Count == 1 ? parts[0] : parts[0] + " (from " + string.Join(", from ", parts.GetRange(1, parts.Count - 1)) + ")";
+    }
+
+    private sealed class MacroSourceScope : IDisposable
+    {
+        private LegacyUiSettings? _s;
+        private readonly string _source;
+        public MacroSourceScope(LegacyUiSettings s, string source) { _s = s; _source = source; }
+        public void Dispose()
+        {
+            var s = _s;
+            if (s == null) return;
+            _s = null;
+            lock (s._macroSources)
+            {
+                int i = s._macroSources.LastIndexOf(_source);
+                if (i >= 0) s._macroSources.RemoveAt(i);
+            }
+        }
+    }
     /// <summary>
     /// RynthSort's auto-sort is on (read from RynthSort every couple of seconds): Auto Cram stands down and
     /// its checkboxes are greyed out, as the two fought over the packs (owner, 2026-11-03). Never saved.
@@ -134,6 +196,12 @@ public sealed class LegacyUiSettings
     // own dialog as usual, never a No (engine API v97; MiniRemote/Crafting/CraftAutoConfirm.cs).
     public bool AutoConfirmCraft = false;
     public int AutoConfirmCraftPercent = 100;
+    // Make kits when low (2026-11-22; default off): with the macro on and nothing around, when fewer
+    // than MakeKitsBelow Plentiful Healing Kits are carried, make up to MakeKitsUpTo from the pack's
+    // ingredients at the Kits tab's Min chance % (MiniRemote/Crafting/KitAuto.cs, RynthAiPlugin.Kits.cs).
+    public bool MakeKitsWhenLow = false;
+    public int MakeKitsBelow = MiniRemote.Crafting.KitAuto.DefaultBelow;
+    public int MakeKitsUpTo = MiniRemote.Crafting.KitAuto.DefaultUpTo;
     public bool EnableCombineSalvage = true;
     public bool CombineBagsDuringSalvage = true;
     // Salvage (and combine bags) by sending the 0x027D salvage request straight to the server, no
@@ -326,7 +394,8 @@ public sealed class LegacyUiSettings
     public int TargetSelection;
     // Target Lock: keep the picked target until it dies or goes, leaves Monster Range, or is
     // blacklisted or skipped by a watchdog; a higher-priority monster in range doesn't take it
-    // (2026-11-07). Off: a higher priority in range takes over at once, and it switches when
+    // (2026-11-07). With Targeting on Closest, a monster within 5 yd takes it from a target more
+    // than 6.5 m off (2026-11-22). Off: a higher priority in range takes over at once, and it switches when
     // another is clearly better by Targeting. On by default; a profile saved before this setting
     // loads it as on.
     public bool TargetLock = true;
@@ -355,6 +424,14 @@ public sealed class LegacyUiSettings
         "in through a door.\n" +
         "Off: a monster behind a wall is never a melee target for being close; it is treated like any monster\n" +
         "out of sight. On by default. /ra meleewalls [on|off]";
+    // Debuff every monster in range before attacking (2026-11-22, off by default, the meta option
+    // debuffallbeforeattacking, /ra debuffall): with several monsters in Monster Range, each one's own
+    // debuffs (its Monsters rule) go on all of them, nearest first, before any attack, and the pet
+    // summon waits for it. Capped per monster and in time; a monster hitting you in melee is fought
+    // first. CombatManager.DebuffPass.cs. A profile saved before this setting loads it as off.
+    public bool DebuffAllBeforeAttacking;
+    internal const string DebuffAllBeforeAttackingTip =
+        "Casts each monster's Monsters-rule debuffs on every monster in range, nearest first, before attacking any (/ra debuffall).";
     public int RingRange = 5;
     // Obsolete since 2026-10-20 (unused here, kept so profiles still load and carry it): the Empyrean
     // Handler lethal-ring evade is Infinite Leaftide's and lives in RynthILT now (its ILT settings,
@@ -399,6 +476,10 @@ public sealed class LegacyUiSettings
     public int CustomPetRange = 5;
     public int PetMinMonsters = 1;
     public bool PetAutoRefill = true;   // auto-consume Encapsulated Spirits to recharge empty essences
+    // The element combat pets are summoned for (2026-11-22): "" = Any (the per-monster choice: the
+    // Damage-panel pick, the Monsters rule, then the monster's weakness), else Fire, Cold, ... An
+    // essence of it is summoned first unless the monster has a choice of its own (PetChoice.Order).
+    public string PetElement = string.Empty;
     public bool AdvancedOptions;
     public bool MineOnly = true;
     public bool ShowEditor;
@@ -439,8 +520,8 @@ public sealed class LegacyUiSettings
     /// on the way as usual, recover the corpse, then carry on. Off by default.
     /// </summary>
     public bool TravelToOwnCorpse;
-    /// <summary>Not read by the corpse looting (no rare-corpse check exists); kept so saved profiles
-    /// round-trip. Hidden in Advanced Settings. The meta/MagTools option of that name sets Mine Only.</summary>
+    /// <summary>Loot Only Rare Corpses (2026-11-22, VTank's option): only a corpse whose description says it
+    /// generated a rare is opened (RynthAiPlugin.RareCorpses.cs). Off by default.</summary>
     public bool LootOnlyRareCorpses;
     /// <summary>
     /// Loot Mode (Loot.LootModes): 0 = Profile (the loot profile, the default), 1 = Rares and needed
@@ -1293,6 +1374,11 @@ public sealed class NavBridgePayload
     public double            TrailYards       { get; set; }
     /// <summary>Result of the last route edit ("Route reversed."), empty once it is a few seconds old.</summary>
     public string            EditStatus       { get; set; } = string.Empty;
+    /// <summary>VirindiTank navs outside NavProfiles (StrayNavs): how many, and the line saying where
+    /// they are. The Nav panel shows it with a "Copy them into NavProfiles" button (copyStrayNavs).
+    /// 0 / empty when there are none; an engine that predates them ignores both.</summary>
+    public int               StrayNavCount    { get; set; }
+    public string            StrayNavText     { get; set; } = string.Empty;
 }
 
 /// <summary>One-shot command sent from the Avalonia NavPanel to the plugin.</summary>
@@ -1482,6 +1568,7 @@ public sealed class SettingsBridgePayload
     public bool? TargetLock { get; set; }
     public bool? FightSelectedTarget { get; set; }
     public bool? MeleeThroughWalls { get; set; }            // Melee through walls; absent (an engine without the row) = unchanged
+    public bool? DebuffAllBeforeAttacking { get; set; }     // Debuff every monster in range before attacking; absent = unchanged
     public int RingRange { get; set; }
     public int ApproachRange { get; set; }
     public double CorpseApproachRangeMax { get; set; }

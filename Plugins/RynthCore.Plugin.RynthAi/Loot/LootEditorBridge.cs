@@ -73,8 +73,9 @@ internal sealed class LootEditorBridge
         }
     }
 
-    // The session's revision plus the popup draft's: both only grow, so the sum moves when either does.
-    private long StateRevision => _session.Revision + _draftRevision;
+    // The session's revision plus the popup draft's plus the Keep # per day counts' (each only
+    // grows), so the sum moves when any does.
+    private long StateRevision => _session.Revision + _draftRevision + Items.PerDayRevision();
 
     public string StateJson()
     {
@@ -85,6 +86,12 @@ internal sealed class LootEditorBridge
             LootEditState state = _session.BuildState(inUse, ListFiles());
             state.Revision = StateRevision;
             state.ItemDraft = _draft;
+            for (int i = 0; i < state.Rules.Count; i++)
+            {
+                LootEditRow row = state.Rules[i];
+                if (row.Action == (int)VTankLootAction.KeepUpTo && row.PerDayHours > 0)
+                    row.PerDayStatus = PerDayStatus(row.Name, i, row.PerDayHours, row.KeepCount);
+            }
             return JsonSerializer.Serialize(state, LootEditJsonContext.Default.LootEditState);
         }
     }
@@ -94,8 +101,29 @@ internal sealed class LootEditorBridge
         lock (_sync)
         {
             LootEditRule? rule = _session.BuildRule(index);
-            return rule == null ? "{\"Index\":-1}" : JsonSerializer.Serialize(rule, LootEditJsonContext.Default.LootEditRule);
+            if (rule == null) return "{\"Index\":-1}";
+            if (rule.Action == (int)VTankLootAction.KeepUpTo && rule.PerDayHours is int h && h > 0)
+                rule.PerDayStatus = PerDayStatus(rule.Name, index, h, rule.KeepCount);
+            return JsonSerializer.Serialize(rule, LootEditJsonContext.Default.LootEditRule);
         }
+    }
+
+    private string PerDayStatus(string name, int index, int hours, int cap)
+    {
+        try { return Items.PerDayStatus(LootPerDay.Key(name, index), hours, cap); }
+        catch { return string.Empty; }
+    }
+
+    /// <summary>The rule view's "Reset count": forgets the pickups of the rule at cmd.Index. Under the lock.</summary>
+    private void PerDayResetCommand(LootEditCommand cmd)
+    {
+        LootEditRule? rule = _session.BuildRule(cmd.Index);
+        if (rule == null || (cmd.Expect != null && !string.Equals(cmd.Expect, rule.Name, StringComparison.Ordinal)))
+        {
+            _session.Say("That rule is no longer there. The list has been refreshed.", ok: false);
+            return;
+        }
+        _session.Say(Items.PerDayReset(LootPerDay.Key(rule.Name, cmd.Index)), ok: true);
     }
 
     public string VocabJson() =>
@@ -113,6 +141,11 @@ internal sealed class LootEditorBridge
         string? saved = null;
         lock (_sync)
         {
+            if (cmd.Op == "perday_reset")
+            {
+                PerDayResetCommand(cmd);
+                return;
+            }
             if (cmd.Op == "open")
             {
                 string inUse = InUse;
@@ -396,6 +429,12 @@ internal sealed class LootItemHooks
     /// (the looter's own classification, run as a preview), or null.
     /// </summary>
     public Func<uint, LootBuiltInKeep?> BuiltInKeep { get; set; } = _ => null;
+    /// <summary>Keep # per day: (rule key, window hours, count) to "1 of 2 picked up in the last 24 h, ...".</summary>
+    public Func<string, int, int, string> PerDayStatus { get; set; } = (_, _, _) => string.Empty;
+    /// <summary>Keep # per day: grows whenever a count changes (and each minute while any is on record).</summary>
+    public Func<long> PerDayRevision { get; set; } = () => 0;
+    /// <summary>Keep # per day: forget a rule's pickups; the reply.</summary>
+    public Func<string, string> PerDayReset { get; set; } = _ => "Not available.";
 }
 
 /// <summary>

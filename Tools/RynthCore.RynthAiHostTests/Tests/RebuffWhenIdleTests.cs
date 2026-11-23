@@ -17,8 +17,9 @@ namespace RynthCore.RynthAiHostTests.Tests;
 // was saved and shown but nothing read it. What it means (the owner, 2026-10-30): an earlier timer for
 // idle moments. With it on and the bot idle (no fight target, no monster within Monster Range, no
 // corpse to loot, no salvage), a rebuff starts once a buff has Rebuff With + the margin (default 2
-// minutes) left. The regular rebuff is unchanged, in a fight or not; an early top-off never starts in
-// a fight and stops when one begins; margin 0 adds nothing.
+// minutes) left. The regular rebuff is unchanged; an early top-off never starts in a fight and stops
+// when one begins; margin 0 adds nothing. Since 2026-11-20 no buff cast starts in a fight at all (the
+// owner: "clear the mobs nearby before we rebuff"), except a Force Buff the player asked for.
 internal static class RebuffWhenIdleTests
 {
     private const uint Player = 0x50000F01;
@@ -30,7 +31,9 @@ internal static class RebuffWhenIdleTests
     {
         r.Add("rebuff when idle: idle, a buff inside Rebuff With + the margin is rebuffed early", IdleInsideMarginRebuffed);
         r.Add("rebuff when idle: in a fight, a buff inside the margin but over Rebuff With is not rebuffed", FightInsideMarginWaits);
-        r.Add("rebuff when idle: in a fight, a buff at or under Rebuff With (or dispelled) is rebuffed as before", FightRegularRebuff);
+        r.Add("rebuff when idle: in a fight, a buff at or under Rebuff With (or dispelled) waits for the fight's end, then is rebuffed (2026-11-20)", FightRegularRebuff);
+        r.Add("rebuff when idle: a rebuff run under way when a monster comes: the cast sent resolves, the rest waits for the fight's end", RunPausesForFight);
+        r.Add("rabuffsdue[seconds]: how many buffs a rebuff with that line would cast (a dispelled one too); -1 with buffing off or no buff manager; asking casts nothing", BuffsDueCount);
         r.Add("rebuff when idle: margin 0, or the option off, adds nothing", MarginZeroAddsNothing);
         r.Add("rebuff when idle: an early top-off under way stops when a fight starts (the cast sent resolves); the regular rules take over", EarlyRunStopsForFight);
         r.Add("rebuff when idle: Force Buff in a fight is unchanged", ForceBuffUnchanged);
@@ -127,7 +130,7 @@ internal static class RebuffWhenIdleTests
         /// <summary>The arbiter's choice, from the inputs RynthAiPlugin gives it (combat wants the tick when not idle).</summary>
         public BotActivity Arbiter()
         {
-            bool wantBuff = B.PendingSpellId != 0 || B.WantsVitalRecharge || (S.EnableBuffing && B.NeedsAnyBuff());
+            bool wantBuff = B.PendingSpellId != 0 || B.WantsVitalRecharge || (S.EnableBuffing && B.NeedsAnyBuff() && !B.BuffsWaitForFight());
             return ActivityArbiter.Decide(new ArbiterInputs(true, wantBuff, wantCombat: !Idle, wantLooting: false, wantSalvaging: false, wantNav: false,
                                                             combatEngaged: !Idle));
         }
@@ -180,13 +183,20 @@ internal static class RebuffWhenIdleTests
         Check.Eq(Show(rig.Beats(5)), Strength, "the fight over: topped off then");
     }
 
+    // 2026-11-20 (Thread 0x5C47: two buffs dispelled mid-fight, recast with a Rager on him, dead 4 s later): "clear
+    // the mobs nearby before we rebuff". Due in a fight, a buff waits for the fight's end, then goes.
     private static void FightRegularRebuff()
     {
         var low = new Rig(rebuffWhenIdle: true) { Idle = false };
         low.Live((Strength, 290), (Willpower, 3000));   // under Rebuff With 300
         Check.True(low.B.NeedsAnyBuff(), "290 s left: due, fight or not");
-        Check.Eq(low.Arbiter(), BotActivity.Buffing, "buffing takes the tick, as before");
-        Check.Eq(Show(low.Beats(5)), Strength, "rebuffed in the fight");
+        Check.Eq(low.Arbiter(), BotActivity.Combat, "in a fight combat keeps the tick");
+        Check.Eq(Show(low.Beats(5)), "(none)", "nothing cast in the fight");
+        Check.Eq(low.Logged("[Buff] buffs wait: a fight; they go on once the fight is over"), 1, "the wait is logged once");
+        low.Idle = true;
+        Check.Eq(low.Arbiter(), BotActivity.Buffing, "the fight over: buffing has it");
+        Check.Eq(Show(low.Beats(5)), Strength, "and rebuffs");
+        Check.Eq(low.Logged("[Buff] buffs go on: the fight is over"), 1, "the end is logged");
         Check.Eq(low.B.IdleTopOffRuns, 0, "a regular run, not an early top-off");
 
         var dispel = new Rig(rebuffWhenIdle: true);
@@ -194,11 +204,63 @@ internal static class RebuffWhenIdleTests
         dispel.Beats(2);
         dispel.Idle = false;
         dispel.Dispel(Strength);
-        Check.Eq(Show(dispel.Beats(5)), Strength, "a buff dispelled mid-fight is recast at once, as before");
+        Check.True(dispel.B.NeedsAnyBuff(), "a buff dispelled mid-fight is due");
+        Check.Eq(dispel.Arbiter(), BotActivity.Combat, "but combat keeps the tick");
+        Check.Eq(Show(dispel.Beats(5)), "(none)", "not recast while the fight goes on");
+        dispel.Idle = true;
+        Check.Eq(Show(dispel.Beats(5)), Strength, "recast once the monsters nearby are dead");
 
         var off = new Rig(rebuffWhenIdle: false) { Idle = false };
         off.Live((Strength, 290), (Willpower, 3000));
-        Check.Eq(Show(off.Beats(5)), Strength, "the same with the option off");
+        Check.Eq(Show(off.Beats(5)), "(none)", "the same with the option off: nothing in the fight");
+        off.Idle = true;
+        Check.Eq(Show(off.Beats(5)), Strength, "then rebuffed");
+
+        // Fighting with every buff up isn't a wait: nothing is logged.
+        var up = new Rig(rebuffWhenIdle: false) { Idle = false };
+        up.Live((Strength, 3000), (Willpower, 3000));
+        up.Beats(5);
+        Check.Eq(up.Logged("[Buff] buffs wait"), 0, "no wait logged with nothing due");
+    }
+
+    // A script asks before a Thread (2026-11-20): Lua sees only the character's enchantments, not the item spells.
+    private static void BuffsDueCount()
+    {
+        var rig = new Rig(rebuffWhenIdle: false);
+        rig.Live((Strength, 400), (Willpower, 3000));
+        int casts = FakeHost.Casts.Count;
+        Check.Eq(rig.B.CountBuffsDue(300), 0, "a 300 s line: nothing due");
+        Check.Eq(rig.B.CountBuffsDue(1200), 1, "a 20 minute line: Strength (400 s left)");
+        Check.Eq(rig.B.CountBuffsDue(3600), 2, "an hour: both");
+        rig.Dispel(Willpower);
+        Check.Eq(rig.B.CountBuffsDue(0), 1, "a dispelled buff counts at any line");
+        Check.Eq(FakeHost.Casts.Count, casts, "asking casts nothing");
+
+        var m = new MetaManager(rig.S, FakeHost.Create(), new PlayerVitalsCache());
+        Check.Eq(m.Expressions.Evaluate("rabuffsdue[1200]"), "-1", "no buff manager: -1");
+        m.SetBuffManager(rig.B);
+        Check.Eq(m.Expressions.Evaluate("rabuffsdue[1200]"), "2", "rabuffsdue[1200]: Strength and the dispelled Willpower");
+        Check.Eq(m.Expressions.Evaluate("rabuffsdue[0]"), "1", "rabuffsdue[0]: the dispelled one");
+        rig.S.EnableBuffing = false;
+        Check.Eq(m.Expressions.Evaluate("rabuffsdue[1200]"), "-1", "buffing off: -1");
+    }
+
+    // A rebuff run under way when a monster comes: the cast in flight resolves, the next waits for the fight's end.
+    private static void RunPausesForFight()
+    {
+        var rig = new Rig(rebuffWhenIdle: false);
+        rig.Live((Strength, 200), (Willpower, 250));   // both under Rebuff With: one run
+        string first = rig.Beat(answer: false);
+        Check.True(first == Strength || first == Willpower, $"the run starts ('{first}', hold: {rig.B.LastBuffSkipReason})");
+        rig.Idle = false;   // a monster comes
+        Check.Eq(rig.Arbiter(), BotActivity.Buffing, "the cast in flight keeps the slot until it resolves");
+        rig.Answer(first);
+        Check.Eq(rig.Arbiter(), BotActivity.Combat, "then combat has it");
+        Check.Eq(Show(rig.Beats(10)), "(none)", "nothing more is cast in the fight");
+        Check.True(rig.Running, "the run is held, not ended");
+        rig.Idle = true;
+        Check.Eq(Show(rig.Beats(5)), first == Strength ? Willpower : Strength, "the fight over: the run carries on");
+        Check.False(rig.Running, "and ends");
     }
 
     private static void MarginZeroAddsNothing()
@@ -238,10 +300,13 @@ internal static class RebuffWhenIdleTests
         Check.Eq(Show(rig.Beats(10)), "(none)", "nothing more is cast in the fight");
         Check.Eq(rig.Logged("the early top-off stops"), 1, "logged once");
 
-        // The regular rules take over: the other buff dropping under Rebuff With is rebuffed in the fight.
+        // The regular rules take over: the other buff dropping under Rebuff With waits for the fight's end (2026-11-20).
         string other = first == Strength ? Willpower : Strength;
         rig.Live((first, 2700), (other, 290));
-        Check.Eq(Show(rig.Beats(5)), other, "under Rebuff With in the fight: rebuffed as usual");
+        Check.Eq(Show(rig.Beats(5)), "(none)", "under Rebuff With in the fight: it waits");
+        rig.Idle = true;
+        Check.Eq(Show(rig.Beats(5)), other, "the fight over: rebuffed as usual");
+        rig.Idle = false;
 
         // And an early run interrupted with the other buff still inside the margin finishes when idle again.
         var again = new Rig(rebuffWhenIdle: true);
@@ -263,6 +328,23 @@ internal static class RebuffWhenIdleTests
         var sent = rig.Beats(10);
         Check.True(sent.Contains(Strength) && sent.Contains(Willpower), "Force Buff recasts everything, in a fight too: " + Show(sent));
         Check.False(rig.Running, "and ends");
+
+        // The player's own Force Buff, hurt in the fight: it waits for Heal At, as since 2026-11-07.
+        var hurt = new Rig(rebuffWhenIdle: false) { Idle = false };
+        hurt.S.HealAt = 60;
+        hurt.Live((Strength, 3000), (Willpower, 3000));
+        hurt.B.RequestForceFullRebuff();
+        SetHealth(hurt, 50);
+        Check.Eq(Show(hurt.Beats(5)), "(none)", "50% under Heal At 60% in a fight: the Force Buff waits");
+        SetHealth(hurt, 90);
+        var after = hurt.Beats(10);
+        Check.True(after.Contains(Strength) && after.Contains(Willpower), "back over Heal At, the fight on: it goes (" + Show(after) + ")");
+    }
+
+    private static void SetHealth(Rig rig, int pct)
+    {
+        var v = (PlayerVitalsCache)typeof(BuffManager).GetField("_vitals", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(rig.B)!;
+        v.CurrentHealth = (uint)pct;   // MaxHealth 100
     }
 
     private static void Setting()

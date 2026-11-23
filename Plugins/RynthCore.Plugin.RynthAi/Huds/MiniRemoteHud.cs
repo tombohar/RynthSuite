@@ -21,6 +21,8 @@
 //   Target   the creature combat is attacking: name, health bar, distance
 //   Pet      the summon that is out (health bar, time left), else (while a server plugin is active)
 //            the next combat essence and whether it is ready
+//   Loot     the loot profile in use, a dropdown of LootProfiles that switches it (the dashboard
+//            pickers' list and path; chat says which profile is in use)
 //   Slots    5 × 6 quick-use item grid; click uses the item (an empty slot takes the selected
 //            pack item), right-click assigns / clears, and items dragged from the game's
 //            inventory or the RynthCore Inventory window drop straight into a slot. Ctrl+wheel
@@ -309,7 +311,7 @@ internal sealed class MiniRemoteHud
         if (!s.MiniRemoteHorizontal) return colW;
         int cols = 0;
         if (s.MiniShowStats || s.MiniShowTarget || s.MiniShowPet) cols++;
-        if (s.MiniShowGems || ShowToggles(s)) cols++;
+        if (s.MiniShowGems || s.MiniShowLootProfile || ShowToggles(s)) cols++;
         if (s.MiniShowRebuff || s.MiniShowTranslate || _serverEconomyDrawn) cols++;
         cols = Math.Max(1, cols);
         return cols * colW + (cols - 1) * ImGui.GetStyle().ItemSpacing.X;
@@ -390,7 +392,7 @@ internal sealed class MiniRemoteHud
             RenderStatusSections(s, remote);
             ImGui.EndChild();
         }
-        if (s.MiniShowGems || ShowToggles(s))
+        if (s.MiniShowGems || s.MiniShowLootProfile || ShowToggles(s))
         {
             BeginColumn("##mrcolactions", colW);
             RenderActionSections(s);
@@ -445,6 +447,7 @@ internal sealed class MiniRemoteHud
 
     private void RenderActionSections(HudState s)
     {
+        if (s.MiniShowLootProfile) RenderLootProfile(s);
         if (s.MiniShowGems) RenderSlots(s);
         if (ShowToggles(s)) RenderToggles(_hud.Dashboard.Settings);
     }
@@ -784,11 +787,47 @@ internal sealed class MiniRemoteHud
         ImGui.EndPopup();
     }
 
+    // The Loot row's list while its dropdown is open (a copy of the dashboard's, taken each frame it shows).
+    private string[] _lootList = Array.Empty<string>();
+
+    /// <summary>
+    /// The Loot row: the loot profile in use, and a dropdown of LootProfiles (*.utl, *.json; the
+    /// dashboard's list, which follows the folder within 3 s). A pick switches it on the pump thread
+    /// through the dashboard pickers' own path (SelectProfileAtIndex), which saves it and says so in chat.
+    /// </summary>
+    private void RenderLootProfile(HudState s)
+    {
+        var dash = _hud.Dashboard;
+        string shown = Loot.LootProfileList.ShownName(dash.Settings.CurrentLootPath);
+        SafeImGui.TextColored(ColLabel, "Loot:");
+        float labelW = ImGui.GetItemRectSize().X + ImGui.GetStyle().ItemSpacing.X;
+        ImGui.SameLine();
+        // A fixed width (the column's), so the auto-resizing window can't grow from it.
+        ImGui.SetNextItemWidth(Math.Max(80f, ColumnWidth(s) - labelW));
+        bool open = ImGui.BeginCombo("##mrloot", shown, ImGuiComboFlags.HeightLarge);
+        if (!open && ImGui.IsItemHovered())
+            SafeImGui.SetTooltip("The loot profile in use: " + shown + "\nPick another to switch to it (chat says so).\n" +
+                                 "Lists RynthAi\\LootProfiles; a file copied in shows within a few seconds.");
+        if (!open) return;
+        _lootList = dash.LootProfileNames();
+        for (int i = 0; i < _lootList.Length; i++)
+        {
+            string name = _lootList[i];
+            bool selected = string.Equals(name, shown, StringComparison.OrdinalIgnoreCase);
+            ImGui.PushID(i);
+            if (ImGui.Selectable(name, selected))
+                _hud.Post(() => dash.SelectLootProfileByName(name));
+            if (selected) ImGui.SetItemDefaultFocus();
+            ImGui.PopID();
+        }
+        ImGui.EndCombo();
+    }
+
     private void RenderToggles(LegacyUiSettings settings)
     {
         var dash = _hud.Dashboard;
         if (!ImGui.BeginTable("##mrtoggles", 3, ImGuiTableFlags.SizingStretchSame)) return;
-        Toggle("Macro", settings.IsMacroRunning, _ => dash.TogglePanelMacro());
+        Toggle("Macro", settings.IsMacroRunning, _ => dash.TogglePanelMacro("the Mini Remote's Macro toggle"));
         Toggle("Combat", settings.EnableCombat, on => dash.SetSubsystemEnabled(0, on));
         Toggle("Buff", settings.EnableBuffing, on => dash.SetSubsystemEnabled(1, on));
         Toggle("Nav", settings.EnableNavigation, on => dash.SetSubsystemEnabled(2, on));
@@ -836,6 +875,8 @@ internal sealed class MiniRemoteHud
         Flag("Session stats", ref s.MiniShowStats);
         Flag("Attack target", ref s.MiniShowTarget);
         Flag("Pet / summon", ref s.MiniShowPet);
+        Flag("Loot profile", ref s.MiniShowLootProfile);
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("A Loot row: the loot profile in use, and a dropdown to switch it.");
         Flag("Item slots", ref s.MiniShowGems);
         // The drawer's dashboard has these switches already; the setting is for the windows.
         if (!InDrawer) Flag("Toggles", ref s.MiniShowToggles);

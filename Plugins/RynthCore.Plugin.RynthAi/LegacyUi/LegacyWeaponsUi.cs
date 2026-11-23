@@ -93,7 +93,8 @@ internal sealed class LegacyWeaponsUi
             _host.WriteToChat($"[RynthAi] {wo.Name} is already in the list.", 1);
         else
         {
-            string type = DetectConsumableType(wo);
+            // A server's holder of summons ("Duo Summon Gem": no "Essence" in its name) is a Pet.
+            string type = PetElements.IsHolder(_host, unchecked((uint)wo.Id), wo.Name) ? "Pet" : DetectConsumableType(wo);
             _settings.ConsumableRules.Add(new ConsumableRule
             {
                 Id   = wo.Id,
@@ -128,6 +129,8 @@ internal sealed class LegacyWeaponsUi
                 continue;
             }
             string? type = PackConsumableType(wo);
+            // A server's holder of summons (PetElements: "Duo Summon Gem", no "Essence" in its name).
+            if (type == null && PetElements.IsHolder(_host, unchecked((uint)wo.Id), wo.Name)) type = "Pet";
             if (type == null || _settings.ConsumableRules.Any(x => x.Id == wo.Id)) continue;
             // An "...Essence" that is no combat pet device (appraised: no charges, no Summoning
             // requirement, no summoning-gem icon; PetDeviceKind) is not listed as a combat pet: a

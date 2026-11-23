@@ -24,6 +24,7 @@ public sealed partial class RynthNavPlugin
     private AvoidFilter? _avoidFilter;
     private long _nextAvoidMs;
     private bool _avoidFallbackSaid;
+    private bool _avoidPlainSaid;                      // once: the plain corridor taken over a far way round (NavPathQuery.Corridor)
     private Atlas? _avoidAtlas;
     private List<PortalAvoid.Spot> _atlasPortals = new();
     private int _avoidLogged = -1;
@@ -134,7 +135,8 @@ public sealed partial class RynthNavPlugin
             }
         if (parts.Count == 0) parts.Add($"walk {NavCoords.Distance(startNs, startEw, goalNs, goalEw):F0} yd");
         double straight = NavCoords.Distance(startNs, startEw, goalNs, goalEw);
-        return string.Join(" → ", parts) + $"; cost ~{(double.IsInfinity(est) ? "none" : est.ToString("F0"))}u; walking straight {straight:F0} yd"
+        string eta = AboutTime(_planTimes, est);
+        return string.Join(" → ", parts) + $"; cost ~{(double.IsInfinity(est) ? "none" : est.ToString("F0"))}u{(eta.Length > 0 ? ", " + eta : "")}; walking straight {straight:F0} yd"
              + (land == false ? " (not possible: another landmass)" : "");
     }
 

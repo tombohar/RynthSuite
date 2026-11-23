@@ -91,9 +91,17 @@ internal static class Program
         DunNavToTests.Register(runner);
         StraightenTests.Register(runner);
         HoleTests.Register(runner);
+        PlannerObjectTests.Register(runner);
         StuckOpeningTests.Register(runner);
         BlockedDoorwayTests.Register(runner);
+        StaticCollisionTests.Register(runner);
         StackedStepTests.Register(runner);
+        JumpDownTests.Register(runner);
+        NavJumpStepTests.Register(runner);
+        StuckLogAndCornerTests.Register(runner);
+        ObstacleMergeTests.Register(runner);
+        PlacedObjectTests.Register(runner);
+        PlacedBandTests.Register(runner);
         DunRouteTests.Register(runner);
         DunExploreTests.Register(runner);
         BuffTests.Register(runner);
@@ -111,6 +119,7 @@ internal static class Program
         HuntOnLoginTests.Register(runner);
         KeepHuntingAfterDeathTests.Register(runner);
         HuntBuildingTests.Register(runner);
+        BuildingFurnitureTests.Register(runner);
         FloodPerfTests.Register(runner);
         LootSalvageTests.Register(runner);
         LootCorpseTests.Register(runner);
@@ -119,6 +128,7 @@ internal static class Program
         BoostNavTests.Register(runner);
         NavHeadingTests.Register(runner);
         LootNothingLineTests.Register(runner);
+        LootPerDayTests.Register(runner);
         ChestLootTests.Register(runner);
         ItemToolTests.Register(runner);
         TimedCommandsTests.Register(runner);
@@ -135,6 +145,8 @@ internal static class Program
         HealLatencyTests.Register(runner);
         HealGraceTests.Register(runner);
         HealHoldTests.Register(runner);
+        HealUpSpeedTests.Register(runner);
+        MacroStopSourceTests.Register(runner);
         BlastTests.Register(runner);
         ArcWhenClearTests.Register(runner);
         WallTests.Register(runner);
@@ -157,6 +169,7 @@ internal static class Program
         PetRefillTests.Register(runner);
         PetSummonStopsTests.Register(runner);
         PetSelectionTests.Register(runner);
+        PetElementTests.Register(runner);
         AutoStackTests.Register(runner);
         AutoVendorSplitTests.Register(runner);
         AutoVendorZeroRateTests.Register(runner);
@@ -177,6 +190,7 @@ internal static class Program
         CustomDebuffTests.Register(runner);
         DebuffRenewTests.Register(runner);
         VoidDebuffTests.Register(runner);
+        DebuffPassTests.Register(runner);
         ProfileLoadTests.Register(runner);
         ActivityInterfaceTests.Register(runner);
         CastNoDamageTests.Register(runner);
@@ -224,6 +238,8 @@ internal static class Program
         MonsterProfileTests.Register(runner);
         GiveProfileTests.Register(runner);
         TinkerTests.Register(runner);
+        KitRunnerTests.Register(runner);
+        KitAutoPluginTests.Register(runner);
         LauncherSwapTests.Register(runner);
         MissileCraftingTests.Register(runner);
         SelfRatingsTests.Register(runner);
@@ -243,6 +259,7 @@ internal static class Program
         ActiveGearTests.Register(runner);
         FeatureSearchTests.Register(runner);
         FeatureCatalogTests.Register(runner);
+        LootProfilePickerTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

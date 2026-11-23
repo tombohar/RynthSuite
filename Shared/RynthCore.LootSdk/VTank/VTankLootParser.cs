@@ -129,19 +129,56 @@ public static class VTankLootParser
             profile.Rules.Add(rule);
         }
 
-        // Optional SalvageCombine block at the end.
+        // Optional blocks at the end: VTank's SalvageCombine, then RynthAi's RynthKeepPerDay (LootPerDay).
         while (idx < lines.Length)
         {
-            if (string.Equals(lines[idx].Trim(), "SalvageCombine", StringComparison.OrdinalIgnoreCase))
+            string line = lines[idx].Trim();
+            if (profile.SalvageCombine == null && string.Equals(line, "SalvageCombine", StringComparison.OrdinalIgnoreCase))
             {
                 idx++;
                 profile.SalvageCombine = ParseSalvageCombineBlock(lines, ref idx);
-                break;
+                continue;
+            }
+            if (string.Equals(line, Loot.LootPerDay.UtlBlockName, StringComparison.Ordinal))
+            {
+                idx++;
+                ParsePerDayBlock(lines, ref idx, profile);
+                continue;
             }
             idx++;
         }
 
         return profile;
+    }
+
+    /// <summary>
+    /// RynthAi's RynthKeepPerDay block (LootPerDay), from its length line on: sets PerDayHours on
+    /// each rule it names that is still a Keep # of that name at that index. Stops at a line it
+    /// can't read (the file then doesn't write back the same and opens read-only in the editor).
+    /// </summary>
+    private static void ParsePerDayBlock(string[] lines, ref int idx, VTankLootProfile profile)
+    {
+        if (idx >= lines.Length) return;
+        idx++;   // the length: VTank's, for skipping the block; the lines below are read by count
+        if (idx >= lines.Length || lines[idx].Trim() != Loot.LootPerDay.UtlBlockFormat) return;
+        idx++;
+        if (idx >= lines.Length
+            || !int.TryParse(lines[idx].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int n)
+            || n < 0)
+            return;
+        idx++;
+        for (int i = 0; i < n; i++)
+        {
+            if (idx + 2 >= lines.Length) return;
+            if (!int.TryParse(lines[idx].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int at)) return;
+            string name = lines[idx + 1];
+            if (!int.TryParse(lines[idx + 2].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int hours)) return;
+            idx += 3;
+            if (at < 0 || at >= profile.Rules.Count) continue;
+            VTankLootRule rule = profile.Rules[at];
+            if (rule.Action != VTankLootAction.KeepUpTo || !string.Equals(rule.Name, name, StringComparison.Ordinal)) continue;
+            rule.PerDayHours = Loot.LootPerDay.Clamp(hours);
+        }
     }
 
     private static SalvageCombineSettings ParseSalvageCombineBlock(string[] lines, ref int idx)

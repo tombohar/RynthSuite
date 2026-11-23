@@ -41,7 +41,7 @@ public sealed partial class RynthAiPlugin
             _vtankRefusalPending = true;
             return;
         }
-        dash.TogglePanelMacro();
+        dash.TogglePanelMacro("the panel's Run/Stop button");
     }
 
     /// <summary>

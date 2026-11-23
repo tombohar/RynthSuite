@@ -48,6 +48,10 @@ public sealed class CraftingTabState
     public int TrinketTier;
     /// <summary>Prepare a raw bag on the tier's Ammunition when no prepared bag is carried.</summary>
     public bool TrinketPrep;
+    /// <summary>Kits sub-tab ("Make kits"): never try a combine whose chance is under this percent (0 = any).</summary>
+    public int KitMinChancePercent = Crafting.KitPlanner.DefaultFloorPercent;
+    /// <summary>Kits sub-tab: how many kits one run makes (0 = as many as the pack makes).</summary>
+    public int KitMakeCount;
     // "RingRuns" (the Rings chain, now left to RynthILT) may still be in older files: it is ignored.
 }
 

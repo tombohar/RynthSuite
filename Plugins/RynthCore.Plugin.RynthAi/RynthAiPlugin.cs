@@ -521,6 +521,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _scrollLearner = null;
         _aetheriaUnboxer?.Reset();
         _aetheriaUnboxer = null;
+        ResetKitTracking();   // Make kits when low (RynthAiPlugin.Kits.cs)
         _manaStoneManager = null;
         _petManager = null;
         _buffManager?.Dispose();
@@ -611,7 +612,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _navigationEngine = new NavigationEngine(Host, _dashboard.Settings)
         {
             // A route's chat waypoint answers as a script's line: quiet when it works (CommandReply.cs).
-            ChatSubmit = line => Reply.AsScript(() => { HandleRynthChatSubmit(line); return true; }),
+            ChatSubmit = line => { using (_dashboard?.Settings.MacroSource($"a route's chat waypoint '{line}'")) Reply.AsScript(() => { HandleRynthChatSubmit(line); return true; }); },
             // Jump waypoints go through the UB-style jumper (turn, charge, jump, then
             // it hands navigation back). Forward jump; shift = walking jump.
             Jump = (heading, shift, ms) => _jumper?.Start(shift ? "ws" : "w", heading, ms),
@@ -630,12 +631,16 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             KeepWaypointAfterPause = () => _dunPatrolActive,
             // Stuck escapes keep out of portals (RynthAiPlugin.PatrolPortals.cs).
             EscapePortals = EscapePortalsNear,
+            // Hunt walks, GoTo walks and navmesh detours turn a corner early only where RynthNav's mesh
+            // shows a straight walk to the next one (RynthAiPlugin.OutdoorHunt.cs).
+            NavmeshRaycast = HuntRaycast,
         };
         // Plans the detours: the dungeon cell graph indoors, RynthNav's navmesh outdoors.
         // Reads the raycast geometry and hazards through the fields, so it follows their
         // (re)creation; dropped with the engine at teardown.
         _navPlanner = new NavRecoveryPlanner(Host, () => _raycast, () => _objectCache?.GetHazardCells());
         _navigationEngine.SetRecoveryPlanner(_navPlanner);
+        _navigationEngine.EscapeRoom = _navPlanner.EscapeRoom;   // in a dungeon, a burst turns to where the map has room
         if (_objectCache != null) _navigationEngine.SetWorldObjectCache(_objectCache);
         _navMarkerRenderer = new NavMarkerRenderer(Host, _dashboard.Settings)
         {
@@ -801,6 +806,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 || (_dashboard?.Settings?.EnableBuffing == true && _buffManager.NeedsAnyBuff()));
         _combatManager.HoldNewTarget = LootHoldsNewTarget;   // Boost Loot Priority: one kill, one loot (the death wait holds no target since 2026-11-15)
         _combatManager.HoldNewTargetWhy = LootHoldWhy;
+        _combatManager.HoldNewTargetThroughThreat = BoostLootHoldsThroughThreat;   // corpses first (RynthAiPlugin.BoostLootFirst.cs)
+        _combatManager.SkipTarget = FenceSkipsTarget;   // the hunt fence: monsters outside it are left alone
         _combatManager.ManaReserveHold = spellId => _buffManager?.OffensiveCastHold(spellId);   // the mana reserve
         _combatManager.ManaCanEverAfford = spellId => _buffManager?.CanEverAfford(spellId) ?? true;   // script hook: never-payable spells
         _combatManager.SetStaleBusyCallback(OnCombatBusyStale);
@@ -1083,7 +1090,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         {
             case "macro":
                 if (on && !dash.Settings.IsMacroRunning && RefuseMacroStartForVTank()) break;   // one bot per client
-                if (dash.Settings.IsMacroRunning != on) dash.TogglePanelMacro();
+                if (dash.Settings.IsMacroRunning != on) dash.TogglePanelMacro("a remote command (phone/web remote)");
                 break;
             case "combat":     dash.SetSubsystemEnabled(0, on); break;
             case "buffing":    dash.SetSubsystemEnabled(1, on); break;
@@ -1101,7 +1108,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "cancelrebuff": dash.RequestCancelForceRebuff(); break;
             case "clearbusy":    HandleClearBusyCommand(); break;
             case "hideui":       _hideUi = on; dash.SetUiHidden(on); break;  // applied each tick in OnTick
-            case "sendchat":     if (!string.IsNullOrEmpty(value)) RunItemToolUntrusted(() => HandleRynthChatSubmit(value)); break;   // a remote line is never the player at the keyboard
+            case "sendchat":     if (!string.IsNullOrEmpty(value)) using (dash.Settings.MacroSource($"a remote chat line '{value}'")) RunItemToolUntrusted(() => HandleRynthChatSubmit(value)); break;   // a remote line is never the player at the keyboard
             case "setsetting":   ApplyRemoteSetting(value); break;   // one advanced setting from the phone (clamped + persisted)
             case "hub":
             case "quests":
@@ -1575,7 +1582,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 var pauseDash = _dashboard;
                 if (pauseDash != null && !pauseDash.Settings.IsMacroRunning && !RefuseMacroStartForVTank())
                 {
-                    pauseDash.TogglePanelMacro();
+                    pauseDash.TogglePanelMacro("the /ra pause timer running out");
                     ChatLine("[RynthAi] Pause elapsed — macro RESUMED.");
                 }
             }
@@ -1844,7 +1851,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                         if (_buffManager != null) _buffManager.BusyCount = 0;
                         Host.Log($"[RynthAi] Macro stopped: attack cancelled, " +
                                  (halt ? "movement stopped" : $"movement left alone (nothing of RynthAi's was moving, action {settings.BotAction})") +
-                                 $", busy {busyBefore} cleared.");
+                                 $", busy {busyBefore} cleared. {MacroStopWho(settings)}");
                     }
                     catch (Exception ex) { Host.Log($"[RynthAi] Macro-stop cleanup failed: {ex.Message}"); }
                 }
@@ -1852,7 +1859,10 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 // was heading to when stopped (after a recall that can be far away).
                 // NavResumeNearest off keeps the last waypoint.
                 if (!_macroWasRunning && settings.IsMacroRunning)
+                {
+                    Host.Log($"[RynthAi] Macro started by {settings.MacroStartSource}.");
                     _navigationEngine?.ResumeFromNearestWaypoint();
+                }
                 _macroWasRunning = settings.IsMacroRunning;
                 _killClock.ObserveMacro(settings.IsMacroRunning);   // a start counts even if nothing reads the clock meanwhile
 
@@ -1894,7 +1904,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                                     && (_buffManager.PendingSpellId != 0
                                         || _buffManager.WantsVitalRecharge
                                         || (settings.EnableBuffing && _buffManager.NeedsAnyBuff()
-                                            && !_buffManager.BuffsWaitForHealth()));   // hurt in a fight: combat, not buffs
+                                            && !_buffManager.BuffsWaitForFight()));   // in a fight: combat first, buffs after (2026-11-20)
                     bool wantBuff = wantBuffRaw;
 
                     // ── Buffing-coma watchdog (STEP 5: decides, no longer falls through) ──
@@ -1967,6 +1977,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
 
                     bool wantLoot = HasLootWork(settings, nowMs);
                     _lastWantLoot = wantLoot;
+                    // Boost Loot Priority, corpses first (RynthAiPlugin.BoostLootFirst.cs): a close or fought
+                    // monster doesn't take the tick from loot work while health is at or above Heal At.
+                    if (engaged && wantLoot && BoostLootFirst(settings)) engaged = false;
                     bool wantSalvage = _salvageManager != null && _salvageManager.IsBusy;
                     bool followActive = IsFollowActive(settings);
                     bool wantNav = NavWantsTick(settings);
@@ -2011,6 +2024,11 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                         Host.Log($"[RynthAi] Arbiter inputs threw - standing idle this tick: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
                     }
                 }
+
+                // ── Make kits when low: a run stops at once on danger ─────────────
+                // After the decision, ahead of every hold below (buffing above all), so a monster, a
+                // heal or a fight ends a kit run on this tick (RynthAiPlugin.Kits.cs).
+                Guard(TickStep.AutoKits, () => CheckAutoKitsDanger(settings));
 
                 // ── Travel back to your corpse (TravelToOwnCorpse) ─────────────────
                 // After the decision, ahead of every early return below: RynthNav walks only
@@ -2096,6 +2114,20 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 // hundreds of pending CreateObjects (RL hot-reload, fresh login),
                 // the concurrent native walk has been causing intermittent crashes.
                 bool inventorySettled = (RynthClock.Now - _loginCompletedAt).TotalMilliseconds > 3000;
+
+                // Make kits when low (RynthAiPlugin.Kits.cs): while a kit run gets ready (peace mode,
+                // standing still) or goes, everything below waits, as it does for buffs: the item
+                // chores, crafting, combat, looting and navigation. A fault holds nothing.
+                if (inventorySettled && settings.IsMacroRunning
+                    && GuardHold(TickStep.AutoKits, () => TickAutoKits(settings)))
+                {
+                    StopNavFor(BotActivity.Idle);
+                    KeepThreatScanFresh(settings);
+                    FreezeCorpseTimeout(CorpseNowMs);   // a claimed corpse must not time out while held
+                    ThinkMeta();
+                    return;
+                }
+
                 if (inventorySettled)
                     TickCramStack(settings);
 
@@ -4176,6 +4208,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "find":         HandleFindCommand(parts); break;           // RynthAiPlugin.FeatureSearch.cs
             case "aetheria":     HandleAetheriaCommand(parts); break;       // RynthAiPlugin.Aetheria.cs
             case "autoconfirm":  HandleAutoConfirmCommand(parts); break;    // RynthAiPlugin.AutoConfirm.cs
+            case "kits":         HandleKitsCommand(parts); break;           // RynthAiPlugin.Kits.cs
+            case "petelement":   HandlePetElementCommand(parts); break;     // RynthAiPlugin.PetElement.cs
             case "why":          HandleWhyCommand(); break;
             case "ghost":
             case "ghosts":       HandleGhostsCommand(cmd, parts); break;

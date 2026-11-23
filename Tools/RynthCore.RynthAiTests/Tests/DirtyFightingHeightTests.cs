@@ -21,6 +21,7 @@ internal static class DirtyFightingHeightTests
         r.Add("dfheight: an effect near its end is re-applied", ExpiryReapplies);
         r.Add("dfheight: untrained or off keeps the fixed height", UntrainedFixed);
         r.Add("dfheight: other orders and bad order text", Orders);
+        r.Add("dfheight: an order of one or two heights puts on just those", SubsetOrders);
         r.Add("dfheight: landing lines are parsed, others' and chat are not", ParseLanding);
         r.Add("dfheight: chance per hit", Chance);
         r.Add("dfheight: tracker keeps targets apart and copies", Tracker);
@@ -104,7 +105,33 @@ internal static class DirtyFightingHeightTests
         Check.Eq(DF.NormalizeOrder("xyz"), "HML", "junk normalizes to HML");
         Check.Eq(DF.OrderLabel("HML"), "High, Medium, Low", "label");
         Check.Eq(DF.OrderLabel("LHM"), "Low, High, Medium", "label of LHM");
-        Check.Eq(DF.OrderChoices.Length, 6, "six orders");
+        Check.Eq(DF.OrderChoices.Length, 15, "six orders of all three, six of two, three of one");
+    }
+
+    // R-20261120-014055-59be: "pick just 1 or 2 heights instead of all 3".
+    private static void SubsetOrders()
+    {
+        Check.Eq(DF.NormalizeOrder("hm"), "HM", "two heights are an order");
+        Check.Eq(DF.NormalizeOrder("L"), "L", "so is one");
+        Check.Eq(DF.NormalizeOrder("HH"), "HML", "a repeated letter is not");
+        Check.Eq(DF.OrderLabel("HM"), "High, Medium", "label of HM");
+        Check.Eq(DF.OrderLabel("L"), "Low only", "label of L");
+
+        var fx = new DfTargetEffects();
+        Check.Eq(Pick(fx, T0, order: "HM"), DF.High, "HM, fresh: High");
+        fx.Landed(DF.High, T0);
+        Check.Eq(Pick(fx, T0.AddSeconds(1), order: "HM", def: DF.Low), DF.Medium, "HM with High on: Medium");
+        fx.Landed(DF.Medium, T0.AddSeconds(1));
+        Check.Eq(Pick(fx, T0.AddSeconds(2), order: "HM", def: DF.High), DF.High,
+            "HM with both on: the Then attack height (High), never Low for its effect");
+        Check.Eq(Pick(fx, T0.AddSeconds(2), order: "HM", fixedHeight: DF.Medium), DF.Medium, "or the Attack Height setting");
+
+        var low = new DfTargetEffects();
+        Check.Eq(Pick(low, T0, order: "L", def: DF.High), DF.Low, "L only, fresh: Low");
+        low.Landed(DF.Low, T0);
+        Check.Eq(Pick(low, T0.AddSeconds(1), order: "L", def: DF.High), DF.High, "L only, Low on: the Then attack height");
+        Check.Eq(Pick(low, T0.AddSeconds(16), order: "L", def: DF.High), DF.Low, "and back to Low before it runs out");
+        Check.Eq(low.Describe("L", T0.AddSeconds(1)), "Low 19 s", "the status names only the chosen height");
     }
 
     private static void ParseLanding()

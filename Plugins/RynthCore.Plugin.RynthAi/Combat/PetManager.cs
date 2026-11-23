@@ -193,6 +193,8 @@ internal sealed class PetManager
     private int  _landedDeviceId;
     private long _landedCheckUntil;
     private readonly HashSet<int> _passivePets = new();
+    // Holders (PetElements) skipped because they don't hold all their summons yet, each logged once.
+    private readonly HashSet<int> _holderNotReadyLogged = new();
     /// <summary>A listed essence not appraised yet waits this long for its appraisal, once.</summary>
     private const long AppraisalWaitMs = 3_000;
     /// <summary>After a summon lands, its essence is judged again this long (its appraisal may still come).</summary>
@@ -254,8 +256,9 @@ internal sealed class PetManager
             // or the summoned creature is now visible in the cache.
             if (SummonLanded() || IsPetActive())
             {
-                _summonElement = PetChoice.ElementOf(_host, unchecked((uint)_activeDeviceId),
-                    _objectCache[_activeDeviceId]?.Name ?? "");
+                // "Fire", or "Fire+Cold" for a holder of two summons (PetElements).
+                _summonElement = PetElements.Describe(_host, unchecked((uint)_activeDeviceId),
+                    _objectCache[_activeDeviceId]?.Name ?? "").ElementText;
                 _summonCooldownUntil = _actionIssuedAt + DeviceUseCooldownMs;   // every essence's, not only this one's
                 AssumePetFor(now, AssumeActiveAfterSummonMs);
                 // Judge the essence again now its pet is out: one used before its appraisal landed
@@ -472,6 +475,9 @@ internal sealed class PetManager
             return;
         }
         if (HoldSummons?.Invoke() == true) return;
+        // Debuff every monster in range before attacking: the pet comes out once the pass is done, so
+        // its first hits land on debuffed monsters (bounded by the pass's time cap; logged there).
+        if (_combat?.DebuffPassHoldsPets == true) return;
 
         // Only summon when mobs are near (the user's trigger).
         if (!MonstersNearby()) return;
@@ -836,12 +842,22 @@ internal sealed class PetManager
         {
             if (!rule.Type.Equals("Pet", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(rule.Name)) continue;
             if (PetDeviceKind.IsNotCombat(_host, unchecked((uint)rule.Id))) continue;   // a passive pet's essence names no combat pet
-            string n = rule.Name;
-            int i = n.IndexOf(" Essence", StringComparison.OrdinalIgnoreCase);
-            string b = (i > 0 ? n[..i] : n).Trim();
-            if (b.Length >= 3 && petName.Contains(b, StringComparison.OrdinalIgnoreCase)) return true;
+            if (NamedFor(petName, rule.Name)) return true;
+            // A server's holder ("Duo Summon Gem") is no pet's name: its pets are named for the
+            // summoning items it holds (PetElements), so a pet out after a reload still counts.
+            if (PetElements.IsHolder(_host, unchecked((uint)rule.Id), rule.Name))
+                foreach (string held in PetElements.Describe(_host, unchecked((uint)rule.Id), rule.Name).Held)
+                    if (NamedFor(petName, held)) return true;
         }
         return false;
+    }
+
+    /// <summary>The pet is named for the essence: "&lt;me&gt;'s Fire Moar" for "Fire Moar Essence (50)".</summary>
+    private static bool NamedFor(string petName, string essenceName)
+    {
+        int i = essenceName.IndexOf(" Essence", StringComparison.OrdinalIgnoreCase);
+        string b = (i > 0 ? essenceName[..i] : essenceName).Trim();
+        return b.Length >= 3 && petName.Contains(b, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -944,6 +960,21 @@ internal sealed class PetManager
         foreach (int id in ids)
         {
             uint uid = unchecked((uint)id);
+            // A server's holder that doesn't hold all its summons yet summons nothing (the server
+            // refuses it, and the 45 s park would follow): skipped, logged once until it is full.
+            if (PetElements.IsHolder(_host, uid, _objectCache[id]?.Name))
+            {
+                var info = PetElements.Describe(_host, uid, _objectCache[id]?.Name);
+                if (!info.Ready)
+                {
+                    if (_holderNotReadyLogged.Count > 64) _holderNotReadyLogged.Clear();
+                    if (_holderNotReadyLogged.Add(id))
+                        _host.Log($"[RynthAi] Pet: '{_objectCache[id]?.Name ?? "?"}' (0x{uid:X8}) holds {info.Held.Count} of the {info.Slots} summons " +
+                                  "it needs before it can summon; the combat summoner skips it until it holds them all.");
+                    continue;
+                }
+                _holderNotReadyLogged.Remove(id);
+            }
             var v = PetDeviceKind.IsLearned(id) ? PetDeviceKind.Verdict.NotCombat : PetDeviceKind.Judge(_host, uid);
             if (v == PetDeviceKind.Verdict.NotCombat)
             {
@@ -1042,15 +1073,19 @@ internal sealed class PetManager
         // weapon damage type. Same name match combat uses.
         var rule = _settings.MonsterRules.Find(r => r.Name.Length > 0 && !r.Name.Equals("Default", StringComparison.OrdinalIgnoreCase)
                                                    && tname.IndexOf(r.Name, StringComparison.OrdinalIgnoreCase) >= 0);
-        // No rule of its own, or one left on Auto: the Default row's pet damage, when it names one.
-        var defaultRow = _settings.MonsterRules.Find(r => r.Name.Equals("Default", StringComparison.OrdinalIgnoreCase));
-        if ((rule == null || (PetChoice.NormalizeElement(rule.PetDamage).Length == 0 && PetChoice.NormalizeElement(rule.DamageType).Length == 0))
-            && defaultRow != null && PetChoice.NormalizeElement(defaultRow.PetDamage).Length > 0)
-            rule = defaultRow;
         string ruleElem = rule == null ? "" :
             (PetChoice.NormalizeElement(rule.PetDamage).Length > 0 ? rule.PetDamage : rule.DamageType);
+        // No rule of its own, or one left on Auto: the Summons settings' Pet element, then the Default
+        // row's pet damage, when it names one (PetChoice.Order).
+        string defaultElem = "";
+        if (PetChoice.NormalizeElement(ruleElem).Length == 0)
+        {
+            ruleElem = "";
+            var defaultRow = _settings.MonsterRules.Find(r => r.Name.Equals("Default", StringComparison.OrdinalIgnoreCase));
+            if (defaultRow != null) defaultElem = defaultRow.PetDamage;
+        }
         var weak = _combat.WeaknessFor(wcid, tname, target);
-        var ordered = PetChoice.Order(_host, raw, choice, weak, out string why, ruleElem);
+        var ordered = PetChoice.Order(_host, raw, choice, weak, out string why, ruleElem, _settings.PetElement, defaultElem);
         if (target != _lastChoiceTarget || why != _lastChoiceReason)
         {
             _lastChoiceTarget = target;

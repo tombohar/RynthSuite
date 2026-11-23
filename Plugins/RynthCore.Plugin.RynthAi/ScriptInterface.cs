@@ -217,31 +217,127 @@ public sealed partial class RynthAiPlugin
     {
         if (_dashboard == null || _dashboard.Settings.IsMacroRunning == on) return;
         if (on && RefuseMacroStartForVTank()) return;   // one bot per client (Decal bridge)
-        if (on) _dashboard.TogglePanelMacro();
-        else HandleMacroRunCommand("stop", Array.Empty<string>());
+        if (on) _dashboard.TogglePanelMacro("a Lua script (ai.MacroRunning = true)");
+        else HandleMacroRunCommand("stop", Array.Empty<string>(), "a Lua script (ai.MacroRunning = false)");
     }
 
+    /// <summary>
+    /// A script's ai.GoTo(ns, ew): a Once route to the point, the macro on. A script roaming a Thread in 80 m legs
+    /// and edges back 40 m with it, and a one-point straight route walked into every tree, rock and wall on the way
+    /// (2026-11-18). So the walk is planned as /ra navheading and /ra dunnav-to plan theirs: outdoors along RynthNav's
+    /// path with the Outdoor Hunt's flags, in a dungeon by the dungeon map; when neither answers, the straight route
+    /// as before. What the script sees is the same: true, a Once route ending on the point asked for (ranav[] name ""
+    /// and finished at its end), and the character walking there.
+    /// </summary>
     internal bool ScriptGoTo(double ns, double ew)
     {
         var dash = _dashboard;
         if (dash == null) return false;
         var st = dash.Settings;
         if (!st.IsMacroRunning && RefuseMacroStartForVTank()) return false;   // one bot per client (Decal bridge)
-        float z = 0;
-        if (Host.HasGetPlayerPose) Host.TryGetPlayerPose(out _, out _, out _, out z, out _, out _, out _, out _);
-        var route = new NavRouteParser { RouteType = NavRouteType.Once };
-        route.Points.Add(new NavPoint { Type = NavPointType.Point, NS = ns, EW = ew, Z = z / 240.0 });
+        uint cell = 0;
+        float lx = 0, ly = 0, z = 0;
+        bool pose = Host.HasGetPlayerPose && Host.TryGetPlayerPose(out cell, out lx, out ly, out z, out _, out _, out _, out _);
+        NavRouteParser? route = null;
+        string how = "straight (no position)";
+        if (pose)
+        {
+            // Never worse than before: anything going wrong in planning leaves the straight route.
+            try { route = PlanGoTo(cell, lx, ly, z, ns, ew, out how); }
+            catch (Exception ex) { route = null; how = "straight (planning failed: " + ex.Message + ")"; }
+        }
+        if (route == null || route.Points.Count == 0)
+        {
+            route = new NavRouteParser { RouteType = NavRouteType.Once };
+            route.Points.Add(new NavPoint { Type = NavPointType.Point, NS = ns, EW = ew, Z = z / 240.0 });
+        }
+        Host.Log(string.Create(CultureInfo.InvariantCulture, $"[RynthAi] GoTo: NS {ns:0.0000} EW {ew:0.0000}, {how}"));
         st.CurrentRoute = route;
         st.CurrentNavPath = string.Empty;
         st.ActiveNavIndex = 0;
         st.EnableNavigation = true;
-        if (!st.IsMacroRunning) dash.TogglePanelMacro();
+        if (!st.IsMacroRunning) dash.TogglePanelMacro("a Lua script (GoTo)");
         return true;
+    }
+
+    /// <summary>The planned walk for <see cref="ScriptGoTo"/>, or null (with <paramref name="how"/> saying why) for the
+    /// straight route. The route always ends on (ns, ew).</summary>
+    private NavRouteParser? PlanGoTo(uint cell, float lx, float ly, float z, double ns, double ew, out string how)
+    {
+        if ((cell & 0xFFFF) >= 0x0100)
+        {
+            if (!InDungeon(cell)) { how = "straight (in a building's rooms: no map plans from here)"; return null; }
+            return PlanGoToDungeon(cell, lx, ly, z, ns, ew, out how);
+        }
+
+        var at = new OutdoorHunt.Vec(((cell >> 24) & 0xFF) * 192.0 + lx, ((cell >> 16) & 0xFF) * 192.0 + ly, z);
+        var goal = new OutdoorHunt.Vec(DungeonGeometry.NavToWorld(ew), DungeonGeometry.NavToWorld(ns), z);
+        var path = HuntPath(at, goal);
+        if ((path.Status != OutdoorHunt.PathStatus.Ok && path.Status != OutdoorHunt.PathStatus.Partial) || path.Corners.Count == 0)
+        {
+            how = path.Status switch
+            {
+                OutdoorHunt.PathStatus.NoMesh => "straight (no RynthNav map here)",
+                OutdoorHunt.PathStatus.Unavailable => "straight (RynthNav isn't loaded)",
+                _ => "straight (RynthNav found no way)",
+            };
+            return null;
+        }
+        var route = HeadingRoute(path.Corners);
+        route.NavmeshCorners = true;   // RynthNav's corners: turned early only where its mesh shows the next one (the corner gate)
+        // The walk ends on the point asked for, as the straight route did: the last corner is moved onto it (RynthNav
+        // put it on the mesh, its height kept), or, a way that ends short (partial, the point off the mesh), the
+        // point follows it.
+        var last = route.Points[^1];
+        double shortYd = Math.Sqrt(Sq(DungeonGeometry.NavToWorld(last.EW) - goal.X) + Sq(DungeonGeometry.NavToWorld(last.NS) - goal.Y));
+        if (shortYd <= GoToEndSnapYd) { last.NS = ns; last.EW = ew; }
+        else route.Points.Add(new NavPoint { Type = NavPointType.Point, NS = ns, EW = ew, Z = last.Z != 0 ? last.Z : z / 240.0 });
+        var inv = CultureInfo.InvariantCulture;
+        how = path.Status == OutdoorHunt.PathStatus.Ok
+            ? string.Create(inv, $"round obstacles on RynthNav's map, {route.Points.Count} point(s), {path.Length:0} yd")
+            : string.Create(inv, $"round obstacles on RynthNav's map as far as it goes ({shortYd:0} yd short), then straight, {route.Points.Count} point(s)");
+        return route;
+    }
+
+    // RynthNav's last corner this close to the point asked for is the point (it snapped it onto the mesh).
+    private const double GoToEndSnapYd = 1.0;
+    // A dungeon point this far from every room's centre isn't in this dungeon (NavRecovery's DungeonCellReachYd).
+    private const double GoToDungeonReachYd = 30.0;
+
+    private static double Sq(double v) => v * v;
+
+    /// <summary>A GoTo in a dungeon: the dungeon map's walk from the character's cell to the point's, as /ra dunnav-to.</summary>
+    private NavRouteParser? PlanGoToDungeon(uint cell, float lx, float ly, float z, double ns, double ew, out string how)
+    {
+        uint lb = cell >> 16;
+        var map = DungeonMapOverride?.Invoke(lb);
+        var cellDat = _raycast?.GeometryLoader.CellDat;
+        if (map == null && (cellDat == null || !cellDat.IsLoaded)) { how = "straight (the dungeon map isn't loaded yet)"; return null; }
+        var graph = map?.Graph ?? DungeonPathfinder.GetGraph(lb, cellDat!);
+        if (graph.Count == 0) { how = "straight (no dungeon map here)"; return null; }
+        var geo = map != null ? map.Value.Geo : DungeonPathfinder.GetGeometry(lb, cellDat!, _raycast?.GeometryLoader?.DungeonLOS);
+        double lbX = ((cell >> 24) & 0xFF) * 192.0, lbY = ((cell >> 16) & 0xFF) * 192.0;
+        double pNs = DungeonGeometry.WorldToNav(lbY + ly), pEw = DungeonGeometry.WorldToNav(lbX + lx);
+        uint start = graph.ContainsKey(cell) ? cell : DungeonPathfinder.NearestCell(graph, pNs, pEw, z);
+        // The point's room: the cell whose floor holds it at the character's height (a script gives no z), else the nearest.
+        uint goal = DungeonPathfinder.CellAt(graph, geo, new NavPoint { Type = NavPointType.Point, NS = ns, EW = ew, Z = z / 240.0 });
+        if (start == 0 || goal == 0 || !graph.TryGetValue(goal, out var goalNode)) { how = "straight (not on the dungeon map)"; return null; }
+        if (Math.Sqrt(Sq(goalNode.NS - ns) + Sq(goalNode.EW - ew)) * 240.0 > GoToDungeonReachYd)
+        {
+            how = "straight (the point isn't near any room of this dungeon)";
+            return null;
+        }
+        var hazards = _objectCache?.GetHazardCells();
+        var path = DungeonPathfinder.FindPath(start, goal, graph, hazards);
+        if (path.Count == 0) { how = $"straight (no walk from {start:X8} to {goal:X8} on the dungeon map)"; return null; }
+        var route = DungeonPathfinder.BuildNavRoute(path, graph, ns, ew, geo, hazards, pNs, pEw, z, z);
+        how = $"by the dungeon map, {path.Count} cell(s), {route.Points.Count} point(s)";
+        return route;
     }
 
     internal void ScriptStop()
     {
-        if (_dashboard?.Settings.IsMacroRunning == true) HandleMacroRunCommand("stop", Array.Empty<string>());
+        if (_dashboard?.Settings.IsMacroRunning == true) HandleMacroRunCommand("stop", Array.Empty<string>(), "a Lua script (Stop)");
         else _navigationEngine?.Stop();
     }
 
@@ -275,5 +371,8 @@ public sealed partial class RynthAiPlugin
     /// (quiet when it works, errors in chat; CommandReply.cs), and the Item Tool refuses it (a script's
     /// line is never the player at the keyboard).</summary>
     internal void ScriptSubmitCommand(string text)
-        => Reply.AsScript(() => { RunItemToolUntrusted(() => HandleRynthChatSubmit(text)); return true; });
+    {
+        using (_dashboard?.Settings.MacroSource($"a Lua script's command '{text}'"))
+            Reply.AsScript(() => { RunItemToolUntrusted(() => HandleRynthChatSubmit(text)); return true; });
+    }
 }

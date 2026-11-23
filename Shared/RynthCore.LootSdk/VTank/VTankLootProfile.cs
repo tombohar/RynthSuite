@@ -76,6 +76,14 @@ public sealed class VTankLootRule
     /// </summary>
     public int? KeepCount { get; set; }
 
+    /// <summary>
+    /// "Keep # per day" (RynthAi only): with the KeepUpTo action, at most <see cref="KeepCount"/>
+    /// picked up in any window of this many hours, counted by pickups instead of what the pack
+    /// holds; 0 = off (a plain Keep #). Saved in the file's RynthKeepPerDay block
+    /// (<see cref="LootPerDay"/>), which VTank skips, so in VTank the rule is a plain Keep #.
+    /// </summary>
+    public int PerDayHours { get; set; }
+
     /// <summary>Condition nodes; same order as the type list in the info line.</summary>
     public List<VTankLootCondition> Conditions { get; set; } = new();
 

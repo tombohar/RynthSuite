@@ -19,6 +19,9 @@
 //    chance, and refusing the spell there killed Drakkon; the surest heal goes;
 //  - Stamina to Mana never swaps in a fight (InCombatNow), potion or not; out of a fight it may, even
 //    with a mana potion carried (buffing is about to swap to the wand anyway).
+//  - out of a fight (2026-11-20), a healing kit under Kit Min Success % (KitChanceOk, the weapon-out
+//    bar included) doesn't refuse Heal Self's swap: the between-fights top-off otherwise sent a 3-19%
+//    kit again and again (3.1 s a try) as the last resort.
 //  Buffing (EnsureMagicMode forBuff) is not gated and still swaps, and so does the HP failsafe's
 //  Lifestone Recall (it calls EnsureMagicMode itself, with the macro off).
 //
@@ -89,6 +92,15 @@ public partial class BuffManager
                 // Its own line asks for the spell (2026-11-13): Stamina To Health At set over Emergency Heal At
                 // means "this is my emergency heal", kit or no kit.
                 allowed = $"health {_vitals.HealthPct}% at or under Stamina To Health At {_settings.StaminaToHealthAt}%";
+            }
+            else if (label == LabelHealing && !InCombatNow() && HealthKitUnderMinSuccess(out string kitName))
+            {
+                // The between-fights top-off (2026-11-20): with no monster within Monster Range the shield
+                // argument is gone, and a kit under Kit Min Success % (the weapon-out bar, 30%, from melee)
+                // fails most uses: an Eternal Health Kit at 3-19% on 317-346 missing, each try 3.1 s,
+                // was the "kit despite Kit Min Success" last resort until health crept up. As for stamina
+                // kits (2026-11-13), the % is respected: the wand comes out for Heal Self. In a fight, unchanged.
+                allowed = $"out of a fight, {kitName} is under Kit Min Success %";
             }
             else
             {
@@ -190,6 +202,30 @@ public partial class BuffManager
                 && IsUseOnSelfKit(wo))
                 return true;
         return HasPackKit("Healing Kit");
+    }
+
+    /// <summary>
+    /// The healing kit AttemptHealthKitUse would pick (the first listed one, else the pack's best) is under
+    /// Kit Min Success % for what is missing now (KitChanceOk, the weapon-out bar included). No kit: false.
+    /// </summary>
+    private bool HealthKitUnderMinSuccess(out string kitName)
+    {
+        kitName = "";
+        if (_worldObjectCache == null) return false;
+        WorldObject? kit = null;
+        foreach (var r in _settings.ConsumableRules)
+            if (r.Type.Equals("HealthKit", StringComparison.OrdinalIgnoreCase)
+                && !(r.Name ?? "").Contains("Stamina Kit", StringComparison.OrdinalIgnoreCase)
+                && ConsumableLookup.Resolve(_worldObjectCache, r, KitOutForGate) is WorldObject wo
+                && IsUseOnSelfKit(wo)) { kit = wo; break; }
+        kit ??= BestPackHealingKit();
+        if (kit == null || KitOutForGate(kit.Id)) return false;
+        uint missing = _vitals.MaxHealth > _vitals.CurrentHealth ? _vitals.MaxHealth - _vitals.CurrentHealth : 0;
+        if (KitChanceOk(kit.Id, kit.Name ?? "", missing, _settings.PeaceModeForKits && !_vitalsNoPeaceSwitch,
+                        _settings.KitMinSuccessPct, log: false))
+            return false;
+        kitName = kit.Name ?? "the healing kit";
+        return true;
     }
 
     /// <summary>A stamina kit AttemptStaminaKitUse could pick.</summary>

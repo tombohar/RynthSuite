@@ -224,6 +224,8 @@ internal sealed class OutdoorHunt
         Anchor = at;
         TargetId = 0;
         _skip.Clear();
+        _skipCells.Clear();
+        _snags.Clear();
         _lastPlan = _lastPick = _arrivedSince = DateTime.MinValue;
         Note = $"started at {at.X:0},{at.Y:0}";
     }
@@ -238,6 +240,24 @@ internal sealed class OutdoorHunt
 
     /// <summary>Left out of the hunt for a while (no way to it, or combat gave up on it).</summary>
     public void Skip(int id, DateTime now, double sec = -1) => _skip[id] = now.AddSeconds(sec < 0 ? SkipSec : sec);
+
+    /// <summary>A building's cell a walk ended a floor under: every monster in it is left out this long.</summary>
+    public double SkipCellSec { get; set; } = 600;
+    private readonly Dictionary<uint, DateTime> _skipCells = new();
+    /// <summary>Under the monster being walked to (this near, a floor apart) this long in all: the walk can't get up there.</summary>
+    public double UnderItSec { get; set; } = 3;
+    public double UnderItYd { get; set; } = 4;
+    private double _underSec;                               // time under the target so far (UnderItSec)
+    private DateTime _underLast = DateTime.MinValue;        // the last tick under it (MinValue: not under it)
+    private void NewTarget() { _underSec = 0; _underLast = DateTime.MinValue; }
+
+    internal bool CellSkipped(uint cell, DateTime now)
+    {
+        if (cell == 0 || !_skipCells.TryGetValue(cell, out var until)) return false;
+        if (now < until) return true;
+        _skipCells.Remove(cell);
+        return false;
+    }
 
     public bool IsSkipped(int id, DateTime now)
     {
@@ -292,16 +312,31 @@ internal sealed class OutdoorHunt
             // rooms" to one on the floor above went to the spot under it; it moved about up there, so each walk
             // planned again ended a yard or two off, and it was walked again every half second for 20 s; nav's
             // points count as reached by the flat distance).
-            bool floorApart = t is Candidate under && routeDone && !IsSkipped(under.Id, now)
-                              && me.FlatDistanceTo(_plannedTo) <= ReachYd && Math.Abs(under.Pos.Z - me.Z) > ReachRiseYd;
+            // Or, walk over or not, it has been under the monster (a floor apart) for UnderItSec in all: the
+            // monster moving about up there made each walk planned again a fresh one, so the walk never ran
+            // out and the character circled under it (2026-11-17 10:55:43, Thread E74E, 16 s: "doing circles").
+            if (t is Candidate near && me.FlatDistanceTo(near.Pos) <= UnderItYd && Math.Abs(near.Pos.Z - me.Z) > ReachRiseYd)
+            {
+                if (_underLast != DateTime.MinValue) _underSec += Math.Min(1.0, (now - _underLast).TotalSeconds);
+                _underLast = now;
+            }
+            else _underLast = DateTime.MinValue;
+            bool floorApart = t is Candidate under && !IsSkipped(under.Id, now) && Math.Abs(under.Pos.Z - me.Z) > ReachRiseYd
+                              && ((routeDone && me.FlatDistanceTo(_plannedTo) <= ReachYd) || _underSec >= UnderItSec);
             if (floorApart)
             {
                 var u = t!.Value;
                 Skip(u.Id, now);
+                // The spot too (a building's cell): the others up there are no nearer (2026-11-17, Thread
+                // E74E: a Tormentor, a Reaver and an Excruciator on one platform were walked under one after
+                // another, 10:15 to 10:17, and each again 120 s later).
+                bool spot = IsIndoorCell(u.Cell);
+                if (spot) _skipCells[u.Cell] = now.AddSeconds(SkipCellSec);
                 Note = $"'{u.Name}': the walk to it ended {Math.Abs(u.Pos.Z - me.Z):0} yd {(u.Pos.Z > me.Z ? "below" : "above")} it "
-                     + $"(another floor, no way there found): left out for {SkipSec:0} s";
+                     + $"(another floor, no way there found): left out for {SkipSec:0} s"
+                     + (spot ? $", and every monster in its cell {u.Cell & 0xFFFF:X4} for {SkipCellSec / 60:0} min" : "");
             }
-            else if (t is Candidate target && InArea(target.Pos) && !IsSkipped(target.Id, now) && Plannable(target))
+            else if (t is Candidate target && InArea(target.Pos) && !IsSkipped(target.Id, now) && !CellSkipped(target.Cell, now) && Plannable(target))
             {
                 double since = (now - _lastPlan).TotalSeconds;
                 bool moved = target.Pos.DistanceTo(_plannedTo) > ReplanMovedYd && since >= ReplanMinSec;
@@ -334,6 +369,7 @@ internal sealed class OutdoorHunt
             }
             TargetId = 0;
             _arrivedSince = DateTime.MinValue;
+            NewTarget();
         }
 
         // Choosing (at most once every PickEverySec): the few nearest, by the walk to them.
@@ -347,7 +383,7 @@ internal sealed class OutdoorHunt
         {
             if (asked >= PickCandidates) break;
             if (c.Distance > RangeYd) break;   // nearest first
-            if (!InArea(c.Pos) || IsSkipped(c.Id, now) || !Plannable(c)) continue;
+            if (!InArea(c.Pos) || IsSkipped(c.Id, now) || CellSkipped(c.Cell, now) || !Plannable(c)) continue;
             asked++;
             var w = PlanWalk(me, meCell, c.Pos, c.Cell);
             var p = w.P;
@@ -377,7 +413,9 @@ internal sealed class OutdoorHunt
     /// <summary>The chosen monster becomes the target: walked to, or stood by when the walk's end is already here.</summary>
     private Decision Go(DateTime now, Candidate c, HuntWalk w, string pack = "")
     {
+        if (TargetId != c.Id) NewTarget();
         TargetId = c.Id;
+        _targetName = c.Name;
         _plannedTo = c.Pos;
         _lastPlan = now;
         Note = NextNote(c, w, pack);
@@ -393,7 +431,7 @@ internal sealed class OutdoorHunt
     /// <summary>Nothing to hunt: wait where it is (no walk back to the start: Tom 10-23, "it shouldn't bother").</summary>
     private Decision Waiting()
     {
-        string wait = $"nothing within Hunt Range ({RangeYd:0} yd){(RadiusYd > 0 ? $" inside Hunt Radius ({RadiusYd:0} yd)" : "")}: waiting here";
+        string wait = $"nothing within Hunt Range ({RangeYd:0} yd){(RadiusYd > 0 ? $" inside Hunt Radius ({RadiusYd:0} yd)" : "")}{(Fence != null ? " inside the fence" : "")}: waiting here";
         if (_note != wait) Note = wait;
         return new Decision(Act.Idle);
     }
@@ -415,7 +453,7 @@ internal sealed class OutdoorHunt
         foreach (var c in candidates)
         {
             if (c.Distance > RangeYd) break;   // nearest first
-            if (!InArea(c.Pos) || IsSkipped(c.Id, now) || !Plannable(c)) continue;
+            if (!InArea(c.Pos) || IsSkipped(c.Id, now) || CellSkipped(c.Cell, now) || !Plannable(c)) continue;
             _eligible.Add(c);
             if (_eligible.Count >= MaxPackCandidates) break;
         }
@@ -621,7 +659,10 @@ internal sealed class OutdoorHunt
         return new Decision(Act.Walk, way, TargetId, Note);
     }
 
-    private bool InArea(Vec p) => RadiusYd <= 0 || p.FlatDistanceTo(Anchor) <= RadiusYd;
+    private bool InArea(Vec p) => (RadiusYd <= 0 || p.FlatDistanceTo(Anchor) <= RadiusYd) && (Fence == null || Fence(p));
+
+    /// <summary>The hunt fence (RynthAiPlugin.HuntFence.cs): a monster it says no to is left out of the picks. Null: no fence.</summary>
+    public Func<Vec, bool>? Fence { get; set; }
 
     /// <summary>
     /// The walk ends where the character stands already (within ArrivedYd, across): nothing to walk, whatever
@@ -632,7 +673,75 @@ internal sealed class OutdoorHunt
 
     private bool Reaches(PathResult p, Vec goal) =>
         p.Corners.Count > 0 && (p.Status == PathStatus.Ok || (p.Status == PathStatus.Partial && p.Gap <= ReachYd))
-        && p.Length <= RangeYd * MaxWalkFactor && Math.Abs(EndRise(p, goal)) <= ReachRiseYd;
+        && p.Length <= RangeYd * MaxWalkFactor && !TooFarRound(p, goal) && Math.Abs(EndRise(p, goal)) <= ReachRiseYd
+        && WalkInFence(p) && !BySnag(p);
+
+    /// <summary>
+    /// A walk longer than DetourFactor times the straight line to the monster, plus DetourSlackYd, is too far
+    /// round for it. 2026-11-17 11:13:58, the fort Thread 3073: a Threadbound Rynthid Slayer 68 yd away got a
+    /// 425 yd walk, up onto the fort's wall, where the character stuck on a piece of wall for 90 s and then died
+    /// ("It's running into a small piece of fort wall, it did climb the wall to find a monster").
+    /// </summary>
+    public double DetourFactor { get; set; } = 3;
+    public double DetourSlackYd { get; set; } = 60;
+    private bool TooFarRound(PathResult p, Vec goal) => p.Length > DetourFactor * _meNow.DistanceTo(goal) + DetourSlackYd;
+
+    // ── Snags: where navigation stuck on a hunt walk again and again ───────────────────────────────
+    // RynthNav's map doesn't hold every obstacle (a piece of the fort wall in Thread 3073: "RynthNav sees a
+    // clear straight line (the snag isn't on its map)"), and the hunt planned the same walk through it again
+    // every 8 s while navigation's stuck escapes went round for 90 s. The plugin tells the hunt (Snagged) when
+    // a spot has stuck the walk StuckSpotRepeat times: the monster walked to is left out, and no walk passes
+    // within SnagYd of the spot for SnagSec.
+
+    public double SnagYd { get; set; } = 4;
+    public double SnagSec { get; set; } = 600;
+    private readonly List<(Vec At, DateTime Until)> _snags = new();
+    private string _targetName = "";
+    internal int SnagCount => _snags.Count;
+
+    /// <summary>Navigation stuck at <paramref name="at"/> again and again on the hunt's walk.</summary>
+    public void Snagged(DateTime now, Vec at)
+    {
+        _snags.RemoveAll(s => s.Until <= now);
+        int i = _snags.FindIndex(s => s.At.FlatDistanceTo(at) <= SnagYd && Math.Abs(s.At.Z - at.Z) <= ReachRiseYd);
+        if (i >= 0) _snags[i] = (_snags[i].At, now.AddSeconds(SnagSec));
+        else _snags.Add((at, now.AddSeconds(SnagSec)));
+        if (TargetId == 0) return;
+        Skip(TargetId, now);
+        Note = $"stuck at {at.X:0},{at.Y:0} again and again on the walk to '{_targetName}': it is left out for {SkipSec:0} s, "
+             + $"and no walk goes by that spot for {SnagSec / 60:0} min";
+        TargetId = 0;
+        _arrivedSince = DateTime.MinValue;
+        NewTarget();
+    }
+
+    /// <summary>
+    /// The walk passes within SnagYd of a snag (at its height). Not one at the walk's start: standing at a
+    /// snag, every walk would start "by" it, and the hunt would stand there.
+    /// </summary>
+    private bool BySnag(PathResult p)
+    {
+        if (_snags.Count == 0) return false;
+        Vec a = _meNow;
+        foreach (var b in p.Corners)
+        {
+            foreach (var (s, until) in _snags)
+            {
+                if (until <= _now || s.FlatDistanceTo(_meNow) <= SnagYd) continue;
+                double dx = b.X - a.X, dy = b.Y - a.Y, l2 = dx * dx + dy * dy;
+                double t = l2 < 1e-9 ? 0 : Math.Clamp(((s.X - a.X) * dx + (s.Y - a.Y) * dy) / l2, 0, 1);
+                var q = new Vec(a.X + dx * t, a.Y + dy * t, a.Z + (b.Z - a.Z) * t);
+                if (q.FlatDistanceTo(s) <= SnagYd && Math.Abs(q.Z - s.Z) <= ReachRiseYd) return true;
+            }
+            a = b;
+        }
+        return false;
+    }
+
+    /// <summary>The hunt fence's walk test (RynthAiPlugin.HuntFence.cs): false when the walk's corners go out past
+    /// what it allows (a monster inside the fence with the way to it round the outside). Null: any walk.</summary>
+    public Func<Vec, IReadOnlyList<Vec>, bool>? WalkFence { get; set; }
+    private bool WalkInFence(PathResult p) => WalkFence == null || WalkFence(_meNow, p.Corners);
 
     /// <summary>How far the monster is above (+) or below (-) the walk's end.</summary>
     private static double EndRise(PathResult p, Vec goal) => p.Corners.Count > 0 ? goal.Z - p.Corners[^1].Z : 0;
@@ -645,6 +754,12 @@ internal sealed class OutdoorHunt
                                                    : $"{-EndRise(p, goal):0} yd below the walk's end",
         _ when p.Corners.Count > 0 && p.Length > RangeYd * MaxWalkFactor
                            && (p.Status == PathStatus.Ok || p.Status == PathStatus.Partial) => $"a {p.Length:0} yd walk, too far round",
+        _ when p.Corners.Count > 0 && TooFarRound(p, goal)
+                           && (p.Status == PathStatus.Ok || p.Status == PathStatus.Partial) => $"a {p.Length:0} yd walk, too far round for one {_meNow.DistanceTo(goal):0} yd away",
+        _ when p.Corners.Count > 0 && !WalkInFence(p)
+                           && (p.Status == PathStatus.Ok || p.Status == PathStatus.Partial) => "the walk goes out past the fence",
+        _ when p.Corners.Count > 0 && BySnag(p)
+                           && (p.Status == PathStatus.Ok || p.Status == PathStatus.Partial) => "the walk goes by a spot it got stuck at",
         _ when why.Length > 0 => why,
         PathStatus.Partial => $"the walk ends {p.Gap:0} yd short",
         PathStatus.NoPath => "no walkable way",

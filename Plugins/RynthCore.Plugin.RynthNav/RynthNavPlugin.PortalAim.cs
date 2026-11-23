@@ -25,6 +25,7 @@ public sealed partial class RynthNavPlugin
     {
         _portalTryStartMs = NowMs; _portalBackoffUntilMs = 0; _nextPortalSnapMs = 0;
         _portalTries = 1; _portalSnapped = false; _portalLiveId = 0; _portalLastUseMs = 0;
+        _portalWaitBeganMs = NowMs; _portalLiveZ = double.NaN;
     }
 
     /// <summary>The name the step's portal goes by (route step label, or the dungeon's entrance).</summary>
@@ -42,11 +43,11 @@ public sealed partial class RynthNavPlugin
         _nextPortalSnapMs = now + 500;
         string want = PortalStepName();
         double bestNamed = double.MaxValue, bestAny = double.MaxValue;
-        double nx = 0, ny = 0, ax = 0, ay = 0; string nName = "", aName = ""; uint nId = 0, aId = 0;
+        double nx = 0, ny = 0, ax = 0, ay = 0, nz = double.NaN, az = double.NaN; string nName = "", aName = ""; uint nId = 0, aId = 0;
         foreach (uint id in Host.GetLiveObjectIds())
         {
             if (!Host.TryGetItemType(id, out uint type) || (type & ItemTypePortal) == 0) continue;
-            if (!Host.TryGetObjectPosition(id, out uint cell, out float x, out float y, out _) || cell == 0) continue;
+            if (!Host.TryGetObjectPosition(id, out uint cell, out float x, out float y, out float z) || cell == 0) continue;
             double wx = ((cell >> 24) & 0xFF) * 192.0 + x, wy = ((cell >> 16) & 0xFF) * 192.0 + y;
             double d = Math.Sqrt((wx - _gotoTew) * (wx - _gotoTew) + (wy - _gotoTns) * (wy - _gotoTns));
             if (d > PortalSnapUnits) continue;
@@ -54,8 +55,8 @@ public sealed partial class RynthNavPlugin
             name ??= "";
             bool named = want.Length > 0 && name.Length > 0
                 && (name.IndexOf(want, StringComparison.OrdinalIgnoreCase) >= 0 || want.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0);
-            if (named && d < bestNamed) { bestNamed = d; nx = wx; ny = wy; nName = name; nId = id; }
-            if (d < bestAny) { bestAny = d; ax = wx; ay = wy; aName = name; aId = id; }
+            if (named && d < bestNamed) { bestNamed = d; nx = wx; ny = wy; nz = z; nName = name; nId = id; }
+            if (d < bestAny) { bestAny = d; ax = wx; ay = wy; az = z; aName = name; aId = id; }
         }
         bool haveNamed = bestNamed < double.MaxValue;
         if (!haveNamed && !(bestAny < 12.0)) return;   // an unnamed match only when it's clearly the one
@@ -63,6 +64,7 @@ public sealed partial class RynthNavPlugin
         double shift = Math.Sqrt((tx - _gotoTew) * (tx - _gotoTew) + (ty - _gotoTns) * (ty - _gotoTns));
         _gotoTew = tx; _gotoTns = ty;
         _portalLiveId = haveNamed ? nId : aId;
+        _portalLiveZ = haveNamed ? nz : az;   // its height: on another level, StepPortalWait doesn't circle it for ever
         if (!_portalSnapped)
         {
             _portalSnapped = true;
@@ -90,8 +92,17 @@ public sealed partial class RynthNavPlugin
         {
             if (_portalTries >= PortalMaxTries)
             {
-                Host.Log($"[RynthNav] portal did not fire after {_portalTries} tries — stopping");
                 bool entrance = _enterName.Length > 0 && _route != null && _routeIdx >= _route.Count - 1;
+                string? via = _route != null && _routeIdx < _route.Count ? _route[_routeIdx].Via : null;
+                if (!entrance && via != null)
+                {
+                    // A portal on the way that won't take you: another way there (RynthNavPlugin.Ways.cs).
+                    Host.Log($"[RynthNav] portal did not fire after {_portalTries} tries — leaving it out and planning again");
+                    _refused[via] = (PortalStepName(), $"didn't take you after {_portalTries} tries", NowMs);
+                    ReplanTrip($"the portal '{PortalStepName()}' didn't take you after {_portalTries} tries");
+                    return true;
+                }
+                Host.Log($"[RynthNav] portal did not fire after {_portalTries} tries — stopping");
                 FinishGoto(entrance ? Entrance.NoTeleportText(_enterName) : $"stopped: the portal '{PortalStepName()}' didn't take you after {_portalTries} tries");
                 return true;
             }

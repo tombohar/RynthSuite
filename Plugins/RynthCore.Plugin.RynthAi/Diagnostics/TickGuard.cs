@@ -47,6 +47,7 @@ internal enum TickStep
     AutoVendor,
     AutoTrade,
     WeaponElements,
+    AutoKits,
     CramStack,
     InventoryStatus,
     CombatTelemetry,
@@ -138,6 +139,7 @@ internal sealed class TickGuard
         Add(TickStep.AutoVendor,        "AutoVendor",               LogCat.Vendor);
         Add(TickStep.AutoTrade,         "AutoTrade",                LogCat.Vendor);
         Add(TickStep.WeaponElements,    "weapon elements",          LogCat.Combat);
+        Add(TickStep.AutoKits,          "make kits when low",       LogCat.Crafting);
         Add(TickStep.CramStack,         "AutoCram/AutoStack",       LogCat.Inventory);
         Add(TickStep.InventoryStatus,   "inventory status",         LogCat.Inventory);
         Add(TickStep.CombatTelemetry,   "combat telemetry",         LogCat.Combat);

@@ -39,6 +39,8 @@ public sealed class HudState
     /// <summary>Pet row: the summon that is out (health, time left), else the next combat essence.</summary>
     public bool MiniShowPet = true;
     public bool MiniShowGems = true;
+    /// <summary>Loot row: the loot profile in use, a dropdown of LootProfiles that switches it.</summary>
+    public bool MiniShowLootProfile = true;
     public bool MiniShowToggles = true;
     /// <summary>Obsolete since 2026-10-20 (kept so huds.json loads): the Bank section's switch is RynthILT's (copied once).</summary>
     public bool MiniShowBank = true;

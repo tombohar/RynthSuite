@@ -309,11 +309,19 @@ public partial class CombatManager : IDisposable
     /// <summary>
     /// True = don't lock a new target yet. RynthAi answers true with Boost Loot Priority on while
     /// our kill's corpse forms or is looted (RynthAiPlugin.BoostLootHoldsNewTarget): one kill, one
-    /// loot. A monster within CloseAttackYards is still fought at once. Null = never hold.
+    /// loot. A monster within CloseAttackYards, or one in the scan hitting us, is still fought at
+    /// once. Null = never hold.
     /// </summary>
     public Func<bool>? HoldNewTarget { get; set; }
     /// <summary>Why HoldNewTarget holds, for its one log line (null: Boost Loot Priority's words).</summary>
     public Func<string>? HoldNewTargetWhy { get; set; }
+
+    /// <summary>
+    /// True = leave this monster (its id) out of the scan. The hunt fence answers true for a monster
+    /// outside its circle (RynthAiPlugin.FenceSkipsTarget). The target being fought and a forced one
+    /// are never asked. Null = never skip.
+    /// </summary>
+    public Func<int, bool>? SkipTarget { get; set; }
     private bool _newTargetHeldLogged;
 
     /// <summary>
@@ -901,16 +909,95 @@ public partial class CombatManager : IDisposable
     /// scan always runs and has no side effects, so a close-range scanned mob
     /// is the non-circular signal.
     /// </summary>
-    public bool IsUnderCloseAttack => IsActivelyEngaged || HasCloseThreat(CloseAttackYards);
+    public bool IsUnderCloseAttack => IsActivelyEngaged || HasCloseThreat(CloseAttackYards) || IsBeingHitByScanned;
 
     /// <summary>
-    /// HoldNewTarget says wait (Boost Loot Priority, a kill's corpse to loot) and no monster is
-    /// within CloseAttackYards. One log line per hold.
+    /// A monster in the scan (inside Monster Range, in sight, attackable) hit us, or swung and
+    /// missed, within HitTakenRecentMs (2026-11-22). "On top of me" was distance only: a monster
+    /// beyond CloseAttackYards that is hitting the character (an archer, a caster, a big monster
+    /// whose middle stands more than 5 yd off) counted as no fight, so with Boost Loot Priority the
+    /// looter kept the tick and combat locked nothing while it hit (#rynthsuite 11-15: "a mob
+    /// spawns and approaches me ... I just stand there and take hits"). A hit line names the monster,
+    /// not its object: any scanned monster of that name counts. No side effects (the arbiter's path).
+    /// </summary>
+    public bool IsBeingHitByScanned
+    {
+        get
+        {
+            if (_hitTakenAt.Count == 0 || _scannedTargets.Count == 0) return false;
+            DateTime now = TargetClock();
+            for (int i = 0; i < _scannedTargets.Count; i++)
+            {
+                string? name = _scannedTargets[i].Name;
+                if (!string.IsNullOrEmpty(name) && _hitTakenAt.TryGetValue(name, out DateTime at)
+                    && (now - at).TotalMilliseconds <= HitTakenRecentMs)
+                    return true;
+            }
+            return false;
+        }
+    }
+
+    /// <summary>A monster's hit or miss on us counts as "on me" this long (a swing every 1-3 s; a
+    /// bow or a spell a little slower).</summary>
+    internal const double HitTakenRecentMs = 4000;
+
+    // Monster name -> when its last hit or miss on us came (NoteHitTaken). Names are the hit lines'.
+    private readonly Dictionary<string, DateTime> _hitTakenAt = new(StringComparer.OrdinalIgnoreCase);
+
+    // "You evaded Olthoi Warrior!": the monster swung at us and missed.
+    private static readonly System.Text.RegularExpressions.Regex EvadedIncoming = new(
+        @"^You evaded (?:the )?(?<name>.+?)!",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>A combat chat line: a monster's hit on us ("X slashes your leg for N points of ...")
+    /// or its miss ("You evaded X!") is noted for <see cref="IsBeingHitByScanned"/>.</summary>
+    internal void NoteHitTaken(string text)
+    {
+        string? name = null;
+        if (text.StartsWith("You ", StringComparison.Ordinal))
+        {
+            var e = EvadedIncoming.Match(text);
+            if (e.Success) name = e.Groups["name"].Value.Trim();
+        }
+        else
+        {
+            var m = IncomingDamage.Match(text);
+            if (m.Success) name = m.Groups["name"].Value.Trim();
+        }
+        if (string.IsNullOrEmpty(name)) return;
+        DateTime now = TargetClock();
+        if (_hitTakenAt.Count >= 64)
+        {
+            _hitTakenPruneScratch.Clear();
+            foreach (var kv in _hitTakenAt)
+                if ((now - kv.Value).TotalMilliseconds > HitTakenRecentMs) _hitTakenPruneScratch.Add(kv.Key);
+            foreach (string k in _hitTakenPruneScratch) _hitTakenAt.Remove(k);
+        }
+        _hitTakenAt[name] = now;
+    }
+    private readonly List<string> _hitTakenPruneScratch = new();
+
+    /// <summary>
+    /// Boost Loot Priority's "corpses first" (2026-11-22, RynthAiPlugin.BoostLootFirst.cs): true while the
+    /// hold below applies with a monster within CloseAttackYards too. Null or false: the old rule (a close
+    /// monster is fought at once).
+    /// </summary>
+    public Func<bool>? HoldNewTargetThroughThreat { get; set; }
+
+    /// <summary>
+    /// HoldNewTarget says wait (Boost Loot Priority, a kill's corpse to loot), no monster is
+    /// within CloseAttackYards and none in the scan is hitting us (IsBeingHitByScanned). One log
+    /// line per hold.
+    /// HoldNewTargetThroughThreat (Boost Loot Priority, corpses first) holds it through both.
     /// </summary>
     private bool NewTargetHeldForLoot()
     {
         bool held;
-        try { held = HoldNewTarget?.Invoke() == true && !HasCloseThreat(CloseAttackYards); }
+        try
+        {
+            held = HoldNewTarget?.Invoke() == true
+                   && ((!HasCloseThreat(CloseAttackYards) && !IsBeingHitByScanned) || HoldNewTargetThroughThreat?.Invoke() == true);
+        }
         catch { held = false; }
         if (!held)
         {
@@ -1198,6 +1285,9 @@ public partial class CombatManager : IDisposable
                     _beyondRange.Add(new PassedOverMonster { Id = wo.Id, Distance = dist, Why = "" });
                 continue;
             }
+            // The hunt fence (RynthAiPlugin.HuntFence.cs): a monster outside it is left alone. The one
+            // being fought is kept.
+            if (!isEngaged && !isForced && SkipTarget != null && SkipTarget(wo.Id)) continue;
             // Left out below for a reason that can hide a monster worth fighting: noted for the
             // lock line's "passed over" (CombatManager.PassedOver.cs). In range, not the target.
             bool notePassed = !isEngaged && dist <= maxDist;
@@ -1303,6 +1393,17 @@ public partial class CombatManager : IDisposable
                 losBlocked = false;
             }
 
+            // Through a window (2026-11-17: "it tries to run through windows as if they are openings"): one of
+            // the two in a building's rooms and the other outside, the line clear (a window, an opening the raycast
+            // sees through) and farther than melee reaches across a doorway: melee ran straight at the wall under the
+            // window. Left to the hunt, which walks in by a door; not counted as out of sight (the walk isn't held).
+            if (!losBlocked && hasPlayerPos && dist > MeleeAcrossDoorwayM && MeleeIsTheAttackOn(wo, attackType)
+                && AcrossBuildingWall(meCell, (uint)wo.Id))
+            {
+                if (notePassed) NotePassedOver(wo.Id, dist, PassedOverWindow);
+                continue;
+            }
+
             // Don't blacklist from scan — just exclude from this result.
             // Blacklisting only happens when an active target fails LOS during attack.
             if (losBlocked)
@@ -1342,6 +1443,8 @@ public partial class CombatManager : IDisposable
         LastScanInRing = scanRing;
         LastScanPossible = _scannedTargets.Count;
         LastScanLosBlocked = _nearbyNoLos;
+
+        ObserveDebuffPass();   // who is in range, for "Debuff every monster in range before attacking"
     }
 
     public CombatManager(RynthCoreHost host, LegacyUiSettings settings, WorldObjectCache worldFilter, SpellManager? spellManager = null)
@@ -1394,6 +1497,7 @@ public partial class CombatManager : IDisposable
             _pendingDebuffTargetId = 0;
         }
         _debuffs.Forget(id);
+        _passState?.Forget(id);
     }
     public void SetPlayerId(uint playerId)
     {
@@ -1729,6 +1833,7 @@ public partial class CombatManager : IDisposable
         var m = IncomingDamage.Match(text);
         if (!m.Success) return;
         string name = m.Groups["name"].Value.Trim();
+        NoteHitOnMe(name);   // "on you" for the debuff pass
         uint src = WcidForName(name);
         if (src == 0) return;
         if (int.TryParse(m.Groups["n"].Value, out int amount))
@@ -1751,6 +1856,7 @@ public partial class CombatManager : IDisposable
         if (text.IndexOf(" evaded your attack", StringComparison.OrdinalIgnoreCase) > 0)
             NoteSwingEvidence("miss");
         NoteAttackReachedFromChat(text);
+        try { NoteHitTaken(text); } catch { }   // a monster hitting us is a fight (IsBeingHitByScanned)
         if (_damageStore == null) return;
         try { LearnFromCombatChat(text); } catch { }
 
@@ -2125,6 +2231,7 @@ public partial class CombatManager : IDisposable
     /// </summary>
     private void NoteDebuffFailed(string what)
     {
+        NotePassDebuffResult(failed: true);   // the debuff pass's own count (CombatManager.DebuffPass.cs)
         if (_debuffs.Failed(_pendingDebuffTargetId, _pendingDebuffKey ?? ""))   // skip it for this target
         {
             _host.WriteToChat($"[RynthAi] {what}: {_pendingDebuffKey} — {DebuffTimers.MaxFailures} tries on this target, skipping it", 2);
@@ -2145,6 +2252,7 @@ public partial class CombatManager : IDisposable
     /// </summary>
     private void NoteDebuffLanded()
     {
+        NotePassDebuffResult(failed: false);
         int seconds = SpellDatabase.DurationSeconds(_pendingDebuffSpellId);
         _debuffs.Landed(_pendingDebuffTargetId, _pendingDebuffKey ?? "", seconds, RynthClock.Now);
         if (seconds > 0)
@@ -4215,7 +4323,8 @@ public partial class CombatManager : IDisposable
                 {
                     var rule2 = GetRuleForTarget(targetObj);
                     string elem2 = GetPreferredElement(targetObj, rule2);
-                    if (rule2 != null && !HasPendingDebuffs(rule2, elem2))
+                    // The debuff pass (DebuffAllBeforeAttacking) keeps the wand out until it is done too.
+                    if (rule2 != null && !HasPendingDebuffs(rule2, elem2) && !PassWantsDebuff())
                     {
                         _returnToPhysicalCombat = false;
                         if (_savedWeaponId != 0
@@ -4235,7 +4344,8 @@ public partial class CombatManager : IDisposable
                 if (rule != null && _spellManager != null && !_returnToPhysicalCombat)
                 {
                     string elem = GetPreferredElement(targetObj, rule);
-                    if (HasPendingDebuffs(rule, elem))
+                    bool ownPending = HasPendingDebuffs(rule, elem);
+                    if (ownPending || _settings.DebuffAllBeforeAttacking)
                     {
                         int wandId = FindWandInItems();
                         // This quick swap (UseObject wand + Magic in one go) can't work with a
@@ -4245,16 +4355,19 @@ public partial class CombatManager : IDisposable
                         // It only cost each new target a refused swap, a lost attack cycle and
                         // the swap gate. Skip it then; it still runs when the hands are empty.
                         // A shield or an off-hand weapon blocks the wand the same way (ACE refuses a caster beside it).
-                        if (wandId != 0 && (FindWieldedNonWandWeapon(wandId) != 0 || OffhandInSlot() != 0))
+                        // The debuff pass (DebuffAllBeforeAttacking) only takes the wand when the hands
+                        // are free; with a weapon in hand it doesn't run (no debuffs are cast there).
+                        bool handsBlocked = wandId != 0 && (FindWieldedNonWandWeapon(wandId) != 0 || OffhandInSlot() != 0);
+                        if (handsBlocked)
                         {
-                            if (!_physicalDebuffSkipWarned)
+                            if (ownPending && !_physicalDebuffSkipWarned)
                             {
                                 _physicalDebuffSkipWarned = true;
                                 _host.Log($"[CombatCast] debuffs for '{rule.Name}' skipped in {CombatModeName(CurrentCombatMode)} mode — can't swap to the wand with a weapon in hand");
                                 _host.WriteToChat($"[RynthAi] Debuffs aren't cast in melee/missile mode with a weapon in hand (the wand swap doesn't work there). Fighting without them.", 2);
                             }
                         }
-                        else if (wandId != 0
+                        else if (wandId != 0 && (ownPending || PassWantsDebuff())
                             && (_weaponSwapGate == null || _weaponSwapGate.TryBeginSwap("combat-debuff-wand")))
                         {
                             // TODO: Save current equipped weapon when inventory API is available.
@@ -4275,7 +4388,7 @@ public partial class CombatManager : IDisposable
                 // Physical combat always attacks — spell shape flags (UseArc/Bolt/Ring/Streak)
                 // are only relevant in magic mode and must not gate melee/missile attacks.
                 physicalSent = AttackTarget();
-                if (physicalSent) _attackedThisTick = true;
+                if (physicalSent) { _attackedThisTick = true; NotePassAttack(); }
             }
 
             // Ring spells hit an area — no per-target damage feedback is generated,
@@ -4666,7 +4779,7 @@ public partial class CombatManager : IDisposable
         }
         else
         {
-            int pack = WorldObjectCache.FindPackFor(_host, _worldFilter, includeMainPack: true, requireFree: 1);
+            int pack = WorldObjectCache.FindPackFor(_host, _worldFilter, includeMainPack: true, requireFree: 1, new[] { unchecked((int)wid) });
             if (pack == 0 || !_host.HasMoveItemInternal)
             {
                 _host.Log($"{head} re-wield: skipped — no pack with room to put 0x{wid:X8} '{wo.Name}' in");
@@ -5066,31 +5179,41 @@ public partial class CombatManager : IDisposable
         {
             // Target Lock on: keep it until it is no longer valid. A higher priority it holds off is
             // logged once per pair, so a report shows the lock, not a priority ignored.
+            // Closest is the one exception (2026-11-22): a monster on you takes the lock from one
+            // that isn't (LockGivesWayToMonsterOnYou).
             if (_settings.TargetLock)
             {
-                if (_lockedPriority < topPriority && best.Id != _lockedTargetId
-                    && _lockHeldOverLogged != (_lockedTargetId, best.Id))
+                string? onYou = LockGivesWayToMonsterOnYou(scheme, inc, incInScan != null, best);
+                if (onYou == null)
                 {
-                    _lockHeldOverLogged = (_lockedTargetId, best.Id);
-                    _host.Log($"[CombatTarget] Target Lock keeps 0x{_lockedTargetId:X8} '{_worldFilter[_lockedTargetId]?.Name}' priority {_lockedPriority} " +
-                              $"over 0x{best.Id:X8} '{_worldFilter[best.Id]?.Name}' priority {PriorityOf(best.Id)} (it holds until the target dies or leaves Monster Range)");
+                    if (_lockedPriority < topPriority && best.Id != _lockedTargetId
+                        && _lockHeldOverLogged != (_lockedTargetId, best.Id))
+                    {
+                        _lockHeldOverLogged = (_lockedTargetId, best.Id);
+                        _host.Log($"[CombatTarget] Target Lock keeps 0x{_lockedTargetId:X8} '{_worldFilter[_lockedTargetId]?.Name}' priority {_lockedPriority} " +
+                                  $"over 0x{best.Id:X8} '{_worldFilter[best.Id]?.Name}' priority {PriorityOf(best.Id)} (it holds until the target dies or leaves Monster Range)");
+                    }
+                    return;
                 }
-                return;
+                switchWhy = onYou;
             }
-            if (best.Id == _lockedTargetId) return;
+            else
+            {
+                if (best.Id == _lockedTargetId) return;
 
-            // Target Lock off: switch only to a clearly better one, and never with an attack
-            // at the incumbent still on its way.
-            // Not while the incumbent is out of this tick's scan (inside the scan grace): its
-            // values are the last ones seen, and judging fresh candidates against them switched
-            // away from a monster closing in. R-20261031-201214-8be7: a Brier Wasp Swarm last
-            // scanned at 4.3 m, live at 1.9 m, lost to a wasp at 2.4 m as "clearly better",
-            // 124 ms after a bolt went out at it.
-            if (incInScan == null) return;
-            double incKey = SchemeKey(scheme, inc);
-            if (incKey - bestKey < SchemeMargin(scheme)) return;
-            if (AttackInFlightAtLocked(now)) return;
-            switchWhy = $"{SchemeName(scheme)}: {DescribeSchemeValue(scheme, inc)}, another is clearly better";
+                // Target Lock off: switch only to a clearly better one, and never with an attack
+                // at the incumbent still on its way.
+                // Not while the incumbent is out of this tick's scan (inside the scan grace): its
+                // values are the last ones seen, and judging fresh candidates against them switched
+                // away from a monster closing in. R-20261031-201214-8be7: a Brier Wasp Swarm last
+                // scanned at 4.3 m, live at 1.9 m, lost to a wasp at 2.4 m as "clearly better",
+                // 124 ms after a bolt went out at it.
+                if (incInScan == null) return;
+                double incKey = SchemeKey(scheme, inc);
+                if (incKey - bestKey < SchemeMargin(scheme)) return;
+                if (AttackInFlightAtLocked(now)) return;
+                switchWhy = $"{SchemeName(scheme)}: {DescribeSchemeValue(scheme, inc)}, another is clearly better";
+            }
         }
         else if (_lockedTargetId != 0)
         {
@@ -5104,6 +5227,30 @@ public partial class CombatManager : IDisposable
         int bestPriority = PriorityOf(best.Id);
         LockTarget(best, bestPriority, $"{SchemeName(scheme)}: {DescribeSchemeValue(scheme, best)}, priority {bestPriority}, {DescribeTargetPos(best.Id)}", switchWhy);
     }
+
+    /// <summary>
+    /// Target Lock with Targeting "Closest" (2026-11-22, #rynthsuite 11-15: "surrounded by mobs and
+    /// watched it target mobs 40 yds out"). The lock held a far monster while others walked up and
+    /// hit the character: on the PC (pid 1792, 11-20 19:41:45) a missile character locked an Obsidian
+    /// Hurler at 24.5 m, the only one in sight; an Obsidian Gigas came up and landed 16 hits for 476
+    /// damage in 32 s, and the bot kept shooting the Hurler for 59 s, locking the Gigas (1.6 m) only
+    /// when the Hurler died. Now a candidate within CloseAttackYards (on you) takes the lock from a
+    /// target more than LockYieldFarM off. The other schemes keep the lock as before (Farthest picks
+    /// far ones on purpose), and so does a lock the player picked. Returns the switch's reason, or
+    /// null to keep the lock.
+    /// </summary>
+    private string? LockGivesWayToMonsterOnYou(TargetScheme scheme, in ScannedTarget inc, bool incFresh, in ScannedTarget best)
+    {
+        if (scheme != TargetScheme.Closest || _lockByPlayer || !incFresh) return null;
+        if (best.Id == 0 || best.Id == _lockedTargetId) return null;
+        if (best.Distance > CloseAttackYards || inc.Distance <= LockYieldFarM) return null;
+        return $"Target Lock: a monster is on you at {best.Distance:0.0} m and the target is {inc.Distance:0.0} m off";
+    }
+
+    /// <summary>A locked target farther than this gives way to a monster within CloseAttackYards
+    /// (Target Lock, Closest). The 1.5 m over CloseAttackYards keeps two monsters near you from
+    /// trading the lock.</summary>
+    private const double LockYieldFarM = CloseAttackYards + CloserFartherMarginM;
 
     /// <summary>Makes <paramref name="best"/> the fight target (one log line; the switch says why).</summary>
     private void LockTarget(ScannedTarget best, int bestPriority, string picked, string? switchWhy)
@@ -5840,7 +5987,7 @@ public partial class CombatManager : IDisposable
 
             case HandSwapSequence.Act.MoveToPack:
             {
-                int pack = OpenPackOverride?.Invoke() ?? WorldObjectCache.FindPackFor(_host, _worldFilter, includeMainPack: true, requireFree: 1);
+                int pack = OpenPackOverride?.Invoke() ?? WorldObjectCache.FindPackFor(_host, _worldFilter, includeMainPack: true, requireFree: 1, new[] { step.Id });
                 if (pack == 0)
                 {
                     WorldObjectCache.WarnPackFull(_host, "can't put the wand away to put the weapons back");
@@ -5946,7 +6093,7 @@ public partial class CombatManager : IDisposable
         int pack = 0;
         if (moves.Count > 0)
         {
-            pack = OpenPackOverride?.Invoke() ?? WorldObjectCache.FindPackFor(_host, _worldFilter, includeMainPack: true, requireFree: moves.Count);
+            pack = OpenPackOverride?.Invoke() ?? WorldObjectCache.FindPackFor(_host, _worldFilter, includeMainPack: true, requireFree: moves.Count, moves);
             if (pack == 0) return 0;
         }
         if (!_host.ChangeCombatModeFor(CombatMode.NonCombat, "Combat", $"{HandsSwapLabel} burst: peace, the wand out and the weapons on at once")) return 1;
@@ -6998,7 +7145,7 @@ public partial class CombatManager : IDisposable
 
         if (IsWieldedLive(bowId))
         {
-            int openPack = OpenPackOverride?.Invoke() ?? WorldObjectCache.FindPackFor(_host, _worldFilter, includeMainPack: true, requireFree: 1);
+            int openPack = OpenPackOverride?.Invoke() ?? WorldObjectCache.FindPackFor(_host, _worldFilter, includeMainPack: true, requireFree: 1, new[] { bowId });
             if (openPack == 0 || _combatBowDequipAttempts >= CombatBowDequipMaxAttempts)
             {
                 // No verified-open pack to receive the bow, or repeated failures — the swap
@@ -7167,6 +7314,10 @@ public partial class CombatManager : IDisposable
     /// </summary>
     /// <summary>The line-of-sight check is skipped for melee within this (same units as Monster Range).</summary>
     internal const double MeleeIgnoresLosWithin = 4.0;
+
+    /// <summary>Melee hits across a doorway this far (one inside a building, the other on the step outside); farther,
+    /// across the building's wall, it goes in by a door (the hunt's walk), not at the wall under a window.</summary>
+    internal const double MeleeAcrossDoorwayM = 3.5;
 
     /// <summary>Melee leaves out a monster more than this above or below the character...</summary>
     internal const double MeleeMaxRiseM = 3.0;
@@ -7896,48 +8047,18 @@ public partial class CombatManager : IDisposable
         var rule = GetRuleForTarget(target);
         string element = GetPreferredElement(target, rule);
 
-        if (rule != null)
+        BeginDebuffPass();   // Debuff every monster in range before attacking: the fight's first cast begins it
+        if (rule != null
+            && NextDebuffFor(activeTargetId, rule, element, RynthClock.Now, out string debuffKey, out int debuffSpellId, out int castTier, out bool renewal))
         {
-            var pendingDebuffs = BuildDebuffList(rule, element);
-            DateTime now = RynthClock.Now;
-            foreach (var debuffKey in pendingDebuffs)
-            {
-                if (_debuffs.IsOn(activeTargetId, debuffKey, now)) continue;
-                bool renewal = _debuffs.RenewAt(activeTargetId, debuffKey) != null;
-
-                int spellId = 0;
-                int castTier = 0;
-                if (debuffKey.StartsWith("Vuln:"))
-                    spellId = FindBestVulnSpellWithTier(debuffKey.Substring(5), out castTier);
-                else if (debuffKey.StartsWith("Custom:"))
-                    spellId = FindBestCustomDebuffWithTier(debuffKey.Substring(7), out castTier);
-                else if (debuffKey.StartsWith("Void:"))
-                    spellId = FindBestVoidDebuffWithTier(debuffKey.Substring(5), out castTier);
-                else
-                    spellId = FindBestDebuffSpellWithTier(debuffKey, out castTier);
-
-                if (spellId == 0) continue;
-                if (ManaHoldsCast(spellId)) return;   // mana reserve: Stamina to Mana first, or regenerate
-
-                try
-                {
-                    _host.CastSpellFor((uint)activeTargetId, spellId, "Combat", SpellTableStub.GetById(spellId)?.Name ?? $"spell {spellId}");
-                    MarkCombatCastIssued();
-                    StartCastChatTrace(spellId, activeTargetId);
-                    _lastSpellCast = RynthClock.Now;
-                    _lastCastWasRing = false;
-                    _pendingDebuffKey = debuffKey;
-                    _pendingDebuffTargetId = activeTargetId;
-                    _pendingDebuffSpellId = spellId;
-                    _pendingDebuffTier = castTier;
-                    _waitingForDebuffResult = true;
-                    _pendingDebuffCastTime = RynthClock.Now;
-                    _host.WriteToChat($"[RynthAi] {(renewal ? "Renewing" : "Casting")}: {debuffKey} (T{castTier}) on {target.Name}", 5);
-                }
-                catch { }
-                return;
-            }
+            if (ManaHoldsCast(debuffSpellId)) return;   // mana reserve: Stamina to Mana first, or regenerate
+            CastDebuffAt(activeTargetId, target.Name, debuffKey, debuffSpellId, castTier, renewal);
+            return;
         }
+
+        // Debuff every monster in range before attacking (CombatManager.DebuffPass.cs): the next
+        // monster's debuff instead of the attack, while the pass has one.
+        if (_settings.DebuffAllBeforeAttacking && TryDebuffPassCast()) return;
 
         // A rule with no attack shape on means no offensive cast at this monster: a script's choice
         // is no exception (it used to be asked first, and cast at a monster the owner turned casting off for).
@@ -8008,6 +8129,7 @@ public partial class CombatManager : IDisposable
                 MarkCombatCastIssued();
                 StartCastChatTrace(offensiveSpellId, activeTargetId);
                 SessionAttackCasts++;      // D6: offensive attack-cast tally for the casts-per-kill signal
+                NotePassAttack();          // the debuff pass: an arrival may get the next cast
                 CastsSinceLastKill++;      //     reset in OnKillNotification when a kill lands
                 _lastSpellCast = RynthClock.Now;
                 _lastCastWasRing = multiTarget;   // walls too: area casts (2026-10-08)
@@ -8164,6 +8286,60 @@ public partial class CombatManager : IDisposable
             if (!SpellShapes.ContainsKey(element)) return false;
         }
         return FindBestShapedSpell(element, rule, out _) != 0;
+    }
+
+    /// <summary>
+    /// The first of the rule's debuffs that isn't on <paramref name="targetId"/> and that this
+    /// character can cast (a debuff with no castable spell is passed over), or false.
+    /// </summary>
+    private bool NextDebuffFor(int targetId, MonsterRule rule, string element, DateTime now,
+        out string key, out int spellId, out int tier, out bool renewal)
+    {
+        foreach (var debuffKey in BuildDebuffList(rule, element))
+        {
+            if (_debuffs.IsOn(targetId, debuffKey, now)) continue;
+            int id;
+            int castTier;
+            if (debuffKey.StartsWith("Vuln:"))
+                id = FindBestVulnSpellWithTier(debuffKey.Substring(5), out castTier);
+            else if (debuffKey.StartsWith("Custom:"))
+                id = FindBestCustomDebuffWithTier(debuffKey.Substring(7), out castTier);
+            else if (debuffKey.StartsWith("Void:"))
+                id = FindBestVoidDebuffWithTier(debuffKey.Substring(5), out castTier);
+            else
+                id = FindBestDebuffSpellWithTier(debuffKey, out castTier);
+            if (id == 0) continue;
+            key = debuffKey;
+            spellId = id;
+            tier = castTier;
+            renewal = _debuffs.RenewAt(targetId, debuffKey) != null;
+            return true;
+        }
+        key = ""; spellId = 0; tier = 0; renewal = false;
+        return false;
+    }
+
+    /// <summary>One debuff cast at <paramref name="targetId"/>; its result is read from chat (HandleChatForDebuffs).</summary>
+    private bool CastDebuffAt(int targetId, string targetName, string debuffKey, int spellId, int castTier, bool renewal)
+    {
+        try
+        {
+            _host.CastSpellFor((uint)targetId, spellId, "Combat", SpellTableStub.GetById(spellId)?.Name ?? $"spell {spellId}");
+            MarkCombatCastIssued();
+            StartCastChatTrace(spellId, targetId);
+            _lastSpellCast = RynthClock.Now;
+            _lastCastWasRing = false;
+            _pendingDebuffKey = debuffKey;
+            _pendingDebuffTargetId = targetId;
+            _pendingDebuffSpellId = spellId;
+            _pendingDebuffTier = castTier;
+            _pendingDebuffFromPass = false;
+            _waitingForDebuffResult = true;
+            _pendingDebuffCastTime = RynthClock.Now;
+            _host.WriteToChat($"[RynthAi] {(renewal ? "Renewing" : "Casting")}: {debuffKey} (T{castTier}) on {targetName}", 5);
+            return true;
+        }
+        catch { return false; }
     }
 
     private bool HasPendingDebuffs(MonsterRule rule, string element)
@@ -8693,6 +8869,7 @@ public partial class CombatManager : IDisposable
     /// <summary>"ceiling 2.1 m out", "wall in the straight line": why an arc verdict is blocked.</summary>
     internal static string DescribeArcBlock(in TargetingFSM.LosDetail d)
     {
+        if (d.TerrainBlocked) return $"a hill {d.TerrainAlong:0} m out";
         if (d.LineBlocked) return "wall in the straight line";
         if (d.Arc.OutOfReach) return "out of reach";
         if (d.Arc.Blocked)

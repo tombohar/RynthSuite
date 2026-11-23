@@ -50,7 +50,7 @@ internal static class LootSalvageTests
         r.Add("salvage without the panel: one request with every item, the panel never opens", DirectOneRequest);
         r.Add("salvage without the panel: setting off, or an engine without it -> the panel", DirectNotChosenWhenOffOrUnsupported);
         r.Add("salvage without the panel: batches of up to 50 items, the rest in the next request", DirectBatching);
-        r.Add("salvage without the panel: worn, retained, Items-list items and the UST never go in", DirectFiltersStillApply);
+        r.Add("salvage without the panel: worn, retained, Items-list items, the UST and Foolproof materials never go in", DirectFiltersStillApply);
         r.Add("salvage without the panel: matching under-full bags ride along and merge", DirectBagsRideAlong);
         r.Add("salvage without the panel: a request that changes nothing is tried once through the panel", DirectFallsBackToPanelOnce);
         r.Add("salvage without the panel: an unbound sender -> the panel, and off for the session", DirectUnboundSenderFallsBack);
@@ -516,9 +516,10 @@ internal static class LootSalvageTests
 
     private static void DirectFiltersStillApply()
     {
-        uint good = ItemBase + 1, retained = ItemBase + 2, listed = ItemBase + 3;
-        var w = new World(new[] { good, retained, listed, Ring }, direct: true, beforeCreate: () =>
+        uint good = ItemBase + 1, retained = ItemBase + 2, listed = ItemBase + 3, foolproof = ItemBase + 4;
+        var w = new World(new[] { good, retained, listed, Ring, foolproof }, direct: true, beforeCreate: () =>
         {
+            FakeHost.Names[foolproof] = "Foolproof";   // R-20261122-193822-831d: material Red Garnet, a salvage rule matched it
             FakeHost.Names[good] = "Iron Breastplate";
             FakeHost.Names[retained] = "Heirloom Coat";
             FakeHost.Bools[(retained, 91)] = true;
@@ -528,12 +529,16 @@ internal static class LootSalvageTests
             FakeHost.Wielded[Ring] = 0x40000;
         });
         w.Settings.ItemRules.Add(new ItemRule { Id = unchecked((int)listed), Name = "Favourite Sword" });
-        foreach (uint id in new[] { good, retained, listed, Ring, Ust }) w.Mgr.EnqueueItem(id);
+        foreach (uint id in new[] { good, retained, listed, Ring, Ust, foolproof }) w.Mgr.EnqueueItem(id);
+        w.Mgr.NoteLootedForSalvage(foolproof, "Foolproof");   // the looter's own note: not tracked either
         w.Run(5_000);
 
         Check.Eq(FakeHost.SalvageDirects.Count, 1, "one request");
         Check.Eq(string.Join(",", FakeHost.SalvageDirects[0].Ids), good.ToString(), "only the good item went in");
         Check.True(w.InWorld(retained) && w.InWorld(listed) && w.InWorld(Ring) && w.InWorld(Ust), "the skipped items are untouched");
+        Check.True(w.InWorld(foolproof) && !FakeHost.SalvageDirects[0].Ids.Contains(foolproof), "a Foolproof material is never salvaged");
+        Check.True(w.SalvageLogs.Any(l => l.Contains("Foolproof tinkering material", StringComparison.Ordinal)), "and the log says why");
+        Check.True(SalvageManager.IsFoolproof("Foolproof Red Garnet") && !SalvageManager.IsFoolproof("Red Garnet Salvage (33)"), "the name test");
         string line = w.SalvageLogs.FirstOrDefault(l => l.Contains("Batch 1", StringComparison.Ordinal)) ?? "";
         Check.True(line.Contains("retained: Heirloom Coat", StringComparison.Ordinal), "the retained item and why");
         Check.True(line.Contains("on the Items list: Favourite Sword", StringComparison.Ordinal), "the Items-list item and why");

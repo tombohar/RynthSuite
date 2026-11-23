@@ -337,7 +337,7 @@ public partial class CombatManager
             _host.Log($"[EquipDiag] off hand 0x{(uint)offId:X8} '{name}' didn't come off after {OffDequipMaxTries} tries — leaving the hands as they are for 2 min");
             return OffPrep.Blocked;
         }
-        int packId = OpenPackOverride?.Invoke() ?? WorldObjectCache.FindPackFor(_host, _worldFilter, includeMainPack: true, requireFree: 1);
+        int packId = OpenPackOverride?.Invoke() ?? WorldObjectCache.FindPackFor(_host, _worldFilter, includeMainPack: true, requireFree: 1, new[] { offId });
         if (packId == 0 || !_host.HasMoveItemInternal)
         {
             if (packId == 0) WorldObjectCache.WarnPackFull(_host, "can't put the shield away to change weapons");

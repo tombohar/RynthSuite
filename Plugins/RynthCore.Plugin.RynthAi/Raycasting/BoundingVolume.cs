@@ -36,6 +36,9 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         public Vector3 Max { get; set; } // Maximum bounds
         public bool IsDoor { get; set; } // Whether this is a door (passable)
         public bool NoAabbFallback { get; set; } // If true, only count actual triangle hits (no AABB fallback)
+        // A cylinder's or a sphere's solid the loader made (GeometryLoader.PlaceCollision), not a model's own polygons:
+        // round, so never a stair, whatever its ring faces look like (BuildingMap.FurnitureFilter).
+        public bool Round { get; set; }
 
         public BoundingVolume()
         {

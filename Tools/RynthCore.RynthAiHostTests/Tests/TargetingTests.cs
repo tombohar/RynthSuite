@@ -89,6 +89,26 @@ internal static class TargetingTests
         FakeHost.CombatModeValue = CombatMode.Melee;
         Check.Eq(unblocked.Tick(), A, "in the building's doorway with a clear line: the target as before");
 
+        // 2026-11-17 ("it tries to run through windows as if they are openings"): 8 yd into the building,
+        // seen through a window (the line clear): melee leaves it to the hunt; magic still casts through it.
+        var window = new ScanPick(20);
+        window.Place(A, "Mob A", north: 8);
+        FakeHost.Positions[A] = (Lb | 0x01C9, FakeHost.Positions[A].Item2, FakeHost.Positions[A].Item3, FakeHost.Positions[A].Item4);
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Melee;
+        Check.Eq(window.Tick(), 0u, "melee outside, 8 yd into a building through a window: not the target (the hunt goes in by a door)");
+        var windowMagic = new ScanPick(20);
+        windowMagic.Place(A, "Mob A", north: 8);
+        FakeHost.Positions[A] = (Lb | 0x01C9, FakeHost.Positions[A].Item2, FakeHost.Positions[A].Item3, FakeHost.Positions[A].Item4);
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Magic;
+        Check.Eq(windowMagic.Tick(), A, "magic through the window: the target");
+        var outdoorsBoth = new ScanPick(20);
+        outdoorsBoth.Place(A, "Mob A", north: 8);
+        FakeHost.WeaponCalls = true;
+        FakeHost.CombatModeValue = CombatMode.Melee;
+        Check.Eq(outdoorsBoth.Tick(), A, "melee, 8 yd, both outdoors: the target as before");
+
         Check.True(CombatManager.InsideVersusOutside(0xE74E0023, 0xE74E01C9), "Drakkon's case: outside 0x0023, the sorcerer in 0x01C9");
         Check.False(CombatManager.InsideVersusOutside(0xE74E0023, 0xE74E001B), "both outside");
     }
@@ -298,6 +318,7 @@ internal static class TargetingTests
         r.Add("targeting: Target Lock keeps the target when a better one of its tier appears", LockKeeps);
         r.Add("targeting: Target Lock lets go when the target goes (after the scan grace)", LockReleasesWhenGone);
         r.Add("targeting: Target Lock lets go when the target leaves Monster Range", LockReleasesOutOfRange);
+        r.Add("targeting (11-22): Target Lock on Closest gives a far target up for a monster on you; other schemes keep it", LockGivesWayToMonsterOnYou);
         r.Add("targeting: lock off, a higher-priority monster in range takes over", HigherPriorityWins);
         r.Add("targeting: Target Lock holds over a higher priority until the target dies or leaves Monster Range", LockHoldsOverPriority);
         r.Add("targeting: lock off switches only past each scheme's margin", LockOffMargins);
@@ -524,6 +545,41 @@ internal static class TargetingTests
         Check.True(FakeHost.Logs.Any(l => l.Contains("[CombatTarget] switch 0x80000401") && l.Contains("out of Monster Range, 6.5 m")),
             "the switch says why: out of Monster Range");
         Check.Eq(t.Pick((A, 3, 0), (B, 4.8, 0)), B, "A coming back closer doesn't take it back (B is locked now)");
+    }
+
+    // 2026-11-22 (#rynthsuite 11-15, "surrounded by mobs and watched it target mobs 40 yds out"; the
+    // PC, pid 1792, 11-20 19:41: a Hurler locked at 24.5 m was shot for 59 s while a Gigas at melee
+    // range hit 16 times). With Targeting on Closest, a monster within 5 yd takes the lock from a
+    // target more than 6.5 m off. Nothing else about the lock changes.
+    private static void LockGivesWayToMonsterOnYou()
+    {
+        var t = new Rig(Closest, true, monsterRange: 40);
+        Check.Eq(t.Pick((A, 24.5, 0)), A, "A, the only one in sight, is locked at 24.5 m");
+        Check.Eq(t.Pick((A, 24.5, 0), (B, 8, 0)), A, "B walks up to 8 m: not on you, the lock keeps A");
+        Check.Eq(t.Pick((A, 24.5, 0), (B, 1.6, 0)), B, "B reaches you (1.6 m): B");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("[CombatTarget] switch 0x80000401")
+                                          && l.Contains("Target Lock: a monster is on you at 1.6 m and the target is 24.5 m off")),
+            "the switch says why");
+        Check.Eq(t.Pick((A, 3, 0), (B, 1.6, 0)), B, "A coming close doesn't take it back (B is locked now)");
+        Check.Eq(t.Pick((A, 3, 0), (B, 1.6, 0), (C, 0.8, 0)), B, "nor does C, closer still: B is on you too");
+
+        // The lock's own target near you: kept, whoever else walks up.
+        t = new Rig(Closest, true, monsterRange: 40);
+        Check.Eq(t.Pick((A, 6, 0)), A, "A locked at 6 m");
+        Check.Eq(t.Pick((A, 6, 0), (B, 1, 0)), A, "B at 1 m, A only 6 m off (within 6.5): the lock keeps A");
+
+        // Just out of the scan (inside the grace, its values stale): no switch on them.
+        t = new Rig(Closest, true, monsterRange: 40);
+        t.Pick((A, 24.5, 0));
+        Check.Eq(t.Pick((B, 1.6, 0)), A, "A blinks out of the scan: kept within the grace");
+
+        // The other schemes keep the lock as before.
+        foreach (int scheme in new[] { LowestHealth, Farthest, LeastTurning })
+        {
+            t = new Rig(scheme, true, monsterRange: 40);
+            Check.Eq(t.Pick((A, 24.5, 0)), A, $"scheme {scheme}: A locked");
+            Check.Eq(t.Pick((A, 24.5, 0), (B, 1.6, 0)), A, $"scheme {scheme}: B on you, the lock keeps A");
+        }
     }
 
     // Target Lock holds until the target dies or leaves Monster Range, a higher priority or not

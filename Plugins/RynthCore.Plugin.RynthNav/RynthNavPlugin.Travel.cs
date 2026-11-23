@@ -164,6 +164,7 @@ public sealed partial class RynthNavPlugin
     private void OnLogoutTravel()
     {
         _recallWait = false;
+        _refused.Clear();   // another character may be let through
         _trkHaveLast = false; _trkPortaling = false;
         _known = null; _charKey = "";
         SaveStores(force: true);
@@ -461,6 +462,7 @@ public sealed partial class RynthNavPlugin
         if (!Host.HasGetLastWeenieError || !Host.TryGetLastWeenieError(out int seq, out uint error, out _, out _)) return;
         if (_weenieSeq < 0 || seq == _weenieSeq) { _weenieSeq = seq; return; }   // the first look only notes where the count stands
         _weenieSeq = seq;
+        if (OnPortalRefused(error)) return;   // a portal on the route won't take you (RynthNavPlugin.Ways.cs)
         int cast = _castRecallSpell != 0 && NowMs - _castRecallMs < RecallCastWindowMs ? _castRecallSpell : 0;
         if (RecallPlanner.SlotUnlinked(error, cast) is not RecallSlot slot || _charKey.Length == 0) return;
         bool had = _memory.Get(_charKey, slot) != null;
@@ -733,6 +735,7 @@ public sealed partial class RynthNavPlugin
         _recallLastCastMs = 0; _recallLastStanceMs = 0;
         _recallWandTried = false; _recallChangedStance = false; _recallSent = false; _recallWasPortaling = false;
         _recallPreLb = CurrentLandblock; _recallPreWx = _wx; _recallPreWy = _wy;
+        ResetTeleportJump();
         BeginWand();
         AutoRun.Stop();
         RecallOption? o = CurrentRecallOption();
@@ -761,9 +764,11 @@ public sealed partial class RynthNavPlugin
         bool portaling = Host.HasIsPortaling && Host.IsPortaling();
         if (portaling) _recallWasPortaling = true;
         double moved = Math.Sqrt((_wx - _recallPreWx) * (_wx - _recallPreWx) + (_wy - _recallPreWy) * (_wy - _recallPreWy));
-        if ((_recallWasPortaling && !portaling) || CurrentLandblock != _recallPreLb || moved > PortalJumpUnits)
+        bool jumped = TeleportJump(out _);
+        if ((_recallWasPortaling && !portaling) || CurrentLandblock != _recallPreLb || moved > PortalJumpUnits || jumped)
         {
             Host.Log($"[RynthNav] recall {o.Name}: teleported (moved {moved:F0}u)");
+            ClockRecall(o);
             _lastLandMs = NowMs;
             EndRecall();
             AutoRun.Stop();
@@ -953,7 +958,12 @@ public sealed partial class RynthNavPlugin
         {
             sb.Append("{\"for\":\"").Append(Esc(_shownRouteFor)).Append("\",\"est\":").Append(_shownRouteEst.ToString("F0", ci))
               .Append(",\"active\":").Append(_gotoActive && _shownRouteLive ? 1 : 0)
-              .Append(",\"idx\":").Append(_gotoActive && _shownRouteLive ? (_route != null ? routeIdx : 0) : -1).Append(",\"steps\":[");
+              .Append(",\"idx\":").Append(_gotoActive && _shownRouteLive ? (_route != null ? routeIdx : 0) : -1);
+            // How long the trip takes, in seconds (RynthNavPlugin.TripTime.cs; -1 = not known).
+            double secs = double.IsFinite(_shownRouteEst) ? _planTimes.Seconds(_shownRouteEst) : -1;
+            sb.Append(",\"secs\":").Append(secs.ToString("F0", ci));
+            AppendWayJson(sb);   // which of the ways there (RynthNavPlugin.Ways.cs)
+            sb.Append(",\"steps\":[");
             for (int i = 0; i < _shownRoute.Count; i++)
             {
                 RouteStep s = _shownRoute[i];
@@ -1016,8 +1026,11 @@ public sealed partial class RynthNavPlugin
         "/rnav arrow <place|coords> | arrow off | arrow route <place> — the arrow\n" +
         "/rnav go <place|coords> — walk there (route with portals/recalls when /rnav portals on)\n" +
         "/rnav route <place|coords> — plan a route (portals and recalls), no walking\n" +
+        "/rnav route next — another way to the same place (switches a running goto) | route go — walk the way shown\n" +
         "/rnav atlas <search> — find places | fav [place] — favorite | recalls [on|off] | tie 1|2|lifestone\n" +
         "/rnav goto <coords> | preview <coords> | portals on|off | stop | here | load | test | navdata\n" +
+        "/rnav pause — stop walking, keep the trip on the map (drive by hand meanwhile) | resume — carry on\n" +
+        "/rnav times — how long this character's trips take (run speed, portals, recalls, portal space)\n" +
         "/rnav avoid — show; avoid portals on|off|<m> | walls on|off|<m> | corners <m>\n" +
         "/rnav markers on|off | markers labels on|off | markers guide on|off — the trip on the ground\n" +
         "/rnav mesh on|off | floor on|off | walls on|off | radius <m> | triangles <n> — draw the navmesh: green floor, red walls\n" +
@@ -1060,6 +1073,9 @@ public sealed partial class RynthNavPlugin
                 Say($"portal and recall routing {(_portalsEnabled ? "ON" : "OFF")} for walking (go/goto)");
                 break;
             case "stop": DoMove(5); Say("stopped"); break;
+            case "pause": CmdPause(); break;     // RynthNavPlugin.Pause.cs
+            case "times": CmdTimes(); break;     // RynthNavPlugin.TripTime.cs
+            case "resume": CmdResume(); break;
             case "goto":
             case "go":
                 CmdGo(rest);
@@ -1180,27 +1196,12 @@ public sealed partial class RynthNavPlugin
 
     private void CmdRoute(string rest)
     {
-        if (!ResolveTarget(rest, out string name, out _, out double ns, out double ew, out string error)) { Note(error); return; }
+        // "route next": another way to the last place planned for; "route go": walk the way shown.
+        if (rest.Equals("next", StringComparison.OrdinalIgnoreCase) || rest.Equals("another", StringComparison.OrdinalIgnoreCase)) { CmdRouteNext(); return; }
+        if (rest.Equals("go", StringComparison.OrdinalIgnoreCase)) { CmdRouteGo(); return; }
+        if (!ResolveTarget(rest, out string name, out string type, out double ns, out double ew, out string error)) { Note(error); return; }
         if (!_hasPose) { Note("no player pose yet"); return; }
-        List<RouteStep>? steps = PlanAndShow(name, ns, ew, out int used, out double est, out string refusal);
-        if (refusal.Length > 0) { Note($"route to {name}: {refusal}"); return; }
-        if (steps == null || used == 0)
-        {
-            Note(_portalsEnabled
-                ? $"route to {name}: walk ({NavCoords.FmtDistance(est)}; no portal or recall helps)"
-                : $"route to {name}: walk ({NavCoords.FmtDistance(est)}; portals and recalls are off)");
-            return;
-        }
-        _goNote = $"route to {name}: {used} teleport(s), {steps.Count} step(s)";
-        Say($"route to {name} {NavCoords.Fmt(ns, ew)}: ~{est:F0} yd-equivalent, {used} teleport(s):");
-        for (int i = 0; i < steps.Count; i++)
-        {
-            RouteStep s = steps[i];
-            string act = s.UseRecall ? $"recall: {s.Label}"
-                : s.IsHub ? $"in the Town Network, walk to the {s.Label} and take it to {NavCoords.Fmt(s.LandNs, s.LandEw)}"
-                : s.UsePortal ? $"walk to {NavCoords.Fmt(s.Ns, s.Ew)}, take '{Trunc(s.Label)}'" : $"walk to {NavCoords.Fmt(s.Ns, s.Ew)}";
-            Say($"  {i + 1}. {act}");
-        }
+        ShowRoute(name, type, ns, ew);
     }
 
     private void CmdAtlas(string rest)

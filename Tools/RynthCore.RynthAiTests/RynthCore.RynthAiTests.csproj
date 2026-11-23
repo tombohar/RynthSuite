@@ -19,6 +19,9 @@
   <ItemGroup>
     <!-- Nav: .nav route parsing / writing (LegacyUi/NavRouteParser.cs has no dependencies). -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\LegacyUi\NavRouteParser.cs" Link="Linked\NavRouteParser.cs" />
+    <!-- Nav folders: the picker's list with subfolders, and VirindiTank navs in the wrong folder (System only). -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\LegacyUi\NavFileList.cs" Link="Linked\NavFileList.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\LegacyUi\StrayNavs.cs" Link="Linked\StrayNavs.cs" />
     <!-- Combat: the melee/missile stall ladder (pure timing state, time passed in). -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Combat\CombatStallWatchdog.cs" Link="Linked\CombatStallWatchdog.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Combat\PointBlankFacing.cs" Link="Linked\PointBlankFacing.cs" />
@@ -39,8 +42,15 @@
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\ActiveGear\GearActivation.cs" Link="Linked\GearActivation.cs" />
     <!-- RynthChat: the channel classifier (no dependencies). -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthChat\ChatClassifier.cs" Link="Linked\ChatClassifier.cs" />
+    <!-- RynthChat: the scrollback ring and its player-chat ring (0.4.0; no dependencies). -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthChat\ChatBuffer.cs" Link="Linked\ChatBuffer.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthChat\ChatLine.cs" Link="Linked\ChatLine.cs" />
     <!-- Item info: per-part colours of the one-line layout (System only). -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\ItemInfo\ItemInfoPartColors.cs" Link="Linked\ItemInfoPartColors.cs" />
+    <!-- Make kits: the kit recipes and the pack-to-combine planner (System only). -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\MiniRemote\Crafting\KitPlanner.cs" Link="Linked\KitPlanner.cs" />
+    <!-- Make kits when low: when a run may start, what stops one, the waits (System only). -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\MiniRemote\Crafting\KitAuto.cs" Link="Linked\KitAuto.cs" />
   </ItemGroup>
 
   <ItemGroup>

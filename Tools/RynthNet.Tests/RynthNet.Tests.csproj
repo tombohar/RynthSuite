@@ -24,6 +24,7 @@
 
   <ItemGroup>
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\Characters\CharactersModel.cs" Link="RynthNet\CharactersModel.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\Transport\FlapBackoff.cs" Link="RynthNet\FlapBackoff.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\Characters\CharactersRows.cs" Link="RynthNet\CharactersRows.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\Characters\AtlasNames.cs" Link="RynthNet\AtlasNames.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNet\Characters\CharactersManifest.cs" Link="RynthNet\CharactersManifest.cs" />

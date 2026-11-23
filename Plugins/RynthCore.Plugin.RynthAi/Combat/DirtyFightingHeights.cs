@@ -51,8 +51,18 @@ internal static class DirtyFightingHeights
 
     public const string DefaultOrder = "HML";
 
-    /// <summary>Every order the setting can hold, in the order the UI lists them.</summary>
-    public static readonly string[] OrderChoices = { "HML", "HLM", "MHL", "MLH", "LHM", "LMH" };
+    /// <summary>
+    /// Every order the setting can hold, in the order the UI lists them: all three heights, then two,
+    /// then one (R-20261120-014055-59be: "pick just 1 or 2 heights"). A height left out is never aimed
+    /// at for its effect; the Then attack height still applies once the chosen ones are on. The engine's
+    /// Settings window lists the same (SettingsData.DfOrders).
+    /// </summary>
+    public static readonly string[] OrderChoices =
+    {
+        "HML", "HLM", "MHL", "MLH", "LHM", "LMH",
+        "HM", "HL", "MH", "ML", "LH", "LM",
+        "H", "M", "L",
+    };
 
     public static readonly string[] HeightNames = { "Low", "Medium", "High" };
 
@@ -70,7 +80,7 @@ internal static class DirtyFightingHeights
     public static string HeightName(int height) =>
         height >= 0 && height < HeightNames.Length ? HeightNames[height] : "?";
 
-    /// <summary>A valid order ("HML" and the like: H, M and L once each), else <see cref="DefaultOrder"/>.</summary>
+    /// <summary>A valid order ("HML", "HM", "L" and the like: one to three of H, M and L, each at most once), else <see cref="DefaultOrder"/>.</summary>
     public static string NormalizeOrder(string? order)
     {
         if (string.IsNullOrWhiteSpace(order)) return DefaultOrder;
@@ -84,17 +94,17 @@ internal static class DirtyFightingHeights
     public static int[] ParseOrder(string? order)
     {
         string o = NormalizeOrder(order);
-        var heights = new int[3];
-        for (int i = 0; i < 3; i++)
+        var heights = new int[o.Length];
+        for (int i = 0; i < o.Length; i++)
             heights[i] = o[i] switch { 'H' => High, 'M' => Medium, _ => Low };
         return heights;
     }
 
-    /// <summary>"High, Medium, Low".</summary>
+    /// <summary>"High, Medium, Low"; "High, Medium"; "Low only".</summary>
     public static string OrderLabel(string? order)
     {
         int[] h = ParseOrder(order);
-        return $"{HeightName(h[0])}, {HeightName(h[1])}, {HeightName(h[2])}";
+        return h.Length == 1 ? HeightName(h[0]) + " only" : string.Join(", ", Array.ConvertAll(h, HeightName));
     }
 
     /// <summary>
@@ -147,7 +157,7 @@ internal static class DirtyFightingHeights
     /// The height for the next attack. The fixed height (the Melee/Missile Attack Height setting)
     /// when the rotation is off or Dirty Fighting isn't trained. Otherwise the first height in
     /// <paramref name="order"/> whose effect is missing or due to run out within
-    /// <see cref="RenewLeadSeconds"/>; with all three on, <paramref name="defaultHeight"/>
+    /// <see cref="RenewLeadSeconds"/>; with every height in the order on, <paramref name="defaultHeight"/>
     /// (<see cref="DefaultIsFixedHeight"/> = the fixed height).
     /// <paramref name="effects"/> may be null (nothing known about this target: a fresh one).
     /// </summary>

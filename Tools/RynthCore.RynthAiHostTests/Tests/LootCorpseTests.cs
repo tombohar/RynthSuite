@@ -51,12 +51,14 @@ internal static class LootCorpseTests
         r.Add("loot starvation (R-20261115-165857-1de7): a starved open waits for combat's first attack at a fresh lock, at most 3 s", StarvedOpenWaitsForFirstAttack);
         r.Add("loot logging: a corpse held by combat is logged once, with the reason", HeldByCombatLoggedOnce);
         r.Add("boost loot: our kill holds the next target until its corpse is looted (one kill, one loot)", BoostLootOneKillOneLoot);
-        r.Add("boost loot: the wait ends after BoostLootKillWaitMs, for a close monster, and with Boost Loot off", BoostLootHoldLimits);
+        r.Add("boost loot: the wait ends after BoostLootKillWaitMs, and with Boost Loot off; a close monster waits for the corpse unless health is under Heal At", BoostLootHoldLimits);
         r.Add("boost loot: looting the kill's corpse ends the wait; an older corpse does not", BoostLootWaitEndsOnKillCorpse);
+        r.Add("boost loot / starved loot (11-22): a monster in range hitting us from beyond 5 yd is fought; the corpse waits", HitFromAfarIsAFight);
         r.Add("death wait (11-08, R-20261115-165857-1de7): the learned death + 1 s keeps nav off; a monster in range is locked at once", DeathWaitUsesLearnedTime);
         r.Add("death wait (11-08): not learned yet: 2.5 s + 1 s; the corpse's coming is timed and learned", DeathWaitDefaultAndLearns);
         r.Add("death wait (11-08): looting the kill's corpse ends it at once; a corpse the rules don't take ends it soon after it came", DeathWaitEndsOnLoot);
         r.Add("death wait (11-08): no corpse in the time: it carries on; a close attacker is fought; Looting off changes nothing", DeathWaitLimits);
+        r.Add("death wait (11-20, Threads leave no corpses): two kills in a row with no corpse in a dungeon landblock, or of one monster, and no more waits there; a corpse brings them back", DeathWaitNoCorpseHere);
         r.Add("monster ignore: a close Priority 0 monster neither holds combat nor starves the corpse", IgnoredMonsterDoesNotHoldLoot);
         r.Add("loot gate (R-20261025 727b): a predicted kill still alive holds the corpse; after its window combat has it again", PredictedKillHoldsCorpse);
         r.Add("loot gate (R-20261025 727b): the kill notice, health 0 or a hit after the swap settle a predicted kill at once", PredictedKillSettled);
@@ -576,6 +578,51 @@ internal static class LootCorpseTests
         return bot;
     }
 
+    // 2026-11-22 (#rynthsuite 11-15: "I clear a mob and start looting and a mob spawns and approaches
+    // me ... I just stand there and take hits"). "A monster on you" was distance only (5 yd), so one
+    // hitting from farther off (a bow, a spell, a big monster's middle past 5 yd) was no fight: with
+    // Boost Loot the looter kept the tick and no target was locked. Its hit lines now count.
+    private static void HitFromAfarIsAFight()
+    {
+        DateTime now = new(2026, 11, 22, 12, 0, 0);
+        const string Hit = "Ancient Water Elemental bites your arm for 30 points of piercing damage!";
+
+        var bot = BoostWorld(15f, withCorpse: true, out var combat);
+        combat.TargetClock = () => now;
+        Check.True(bot.HasLootWork(), "a lootable corpse in range");
+        combat.HandleCombatTrigger();
+        Check.Eq(combat.activeTargetId, 0, "Boost Loot: the monster at 15 m isn't locked while the corpse waits");
+        Check.False(combat.IsUnderCloseAttack, "nothing within 5 yd, no hits: not engaged");
+
+        combat.HandleChatForDamage("Some Other Monster slashes your leg for 12 points of slashing damage!");
+        Check.False(combat.IsBeingHitByScanned, "a hit from a monster not in the scan changes nothing");
+
+        combat.HandleChatForDamage(Hit);
+        Check.True(combat.IsBeingHitByScanned, "the monster at 15 m hits us");
+        Check.True(combat.IsUnderCloseAttack, "so a fight is on us");
+        var hit = new ArbiterInputs(true, false, combat.HasEngageableTarget, true, false, true,
+                                    combatEngaged: combat.IsUnderCloseAttack, boostLoot: true);
+        Check.Eq(ActivityArbiter.Decide(in hit), BotActivity.Combat, "the arbiter gives Combat the tick, Boost Loot or not");
+        combat.HandleCombatTrigger();
+        Check.Eq(combat.activeTargetId, unchecked((int)Monster), "and the monster is locked");
+
+        now = now.AddMilliseconds(CombatManager.HitTakenRecentMs + 1);
+        Check.False(combat.IsBeingHitByScanned, "no hit for over 4 s: no longer counts");
+
+        // A miss is an attack too.
+        combat.HandleChatForDamage("You evaded Ancient Water Elemental!");
+        Check.True(combat.IsBeingHitByScanned, "'You evaded X!' counts as X attacking");
+
+        // The starved loot turn (Boost Loot off) gives way to it the same way.
+        var starved = StarvationWorld(15f, out var combat2);
+        combat2.TargetClock = () => now;
+        AgeCorpse(starved, RynthAiPlugin.LootStarveMs + 1000);
+        Check.True(starved.HasLootWork(), "a starved corpse");
+        Check.True((bool)starved.Call("IsLootStarvedTurn", true, true)!, "no hits, nothing within 5 yd: a loot turn");
+        combat2.HandleChatForDamage(Hit);
+        Check.False((bool)starved.Call("IsLootStarvedTurn", true, true)!, "hit from 15 m: no loot turn, combat keeps the tick");
+    }
+
     private static void BoostLootOneKillOneLoot()
     {
         var bot = BoostWorld(15f, withCorpse: false, out var combat);
@@ -613,11 +660,23 @@ internal static class LootCorpseTests
         combat.HandleCombatTrigger();
         Check.Eq(combat.activeTargetId, unchecked((int)Monster), "the next monster is locked");
 
-        // A monster within 5 yd is fought at once.
+        // A monster within 5 yd (2026-11-22: "loot any new corpse available and hunt after looting is
+        // complete"): with health at or above Heal At the corpse still comes first...
         var close = BoostWorld(2f, withCorpse: false, out var combat2);
+        combat2.HoldNewTargetThroughThreat = () => (bool)close.Call("BoostLootHoldsThroughThreat")!;
+        close.Set("_vitals", new PlayerVitalsCache { MaxHealth = 100, CurrentHealth = 90 });
         close.Call("NoteBoostLootKill");
         combat2.HandleCombatTrigger();
-        Check.Eq(combat2.activeTargetId, unchecked((int)Monster), "a monster at 2 m: locked, the corpse waits");
+        Check.Eq(combat2.activeTargetId, 0, "a monster at 2 m, health 90%: not locked, the corpse first");
+        // ...under Heal At, a monster on you is fought at once, as before.
+        close.Set("_vitals", new PlayerVitalsCache { MaxHealth = 100, CurrentHealth = 30 });
+        combat2.HandleCombatTrigger();
+        Check.Eq(combat2.activeTargetId, unchecked((int)Monster), "health 30% (under Heal At): locked, the corpse waits");
+        // Without the corpses-first hook (an engine host that doesn't wire it): the old rule.
+        var plain = BoostWorld(2f, withCorpse: false, out var combatPlain);
+        plain.Call("NoteBoostLootKill");
+        combatPlain.HandleCombatTrigger();
+        Check.Eq(combatPlain.activeTargetId, unchecked((int)Monster), "no hook: a monster at 2 m is locked");
 
         // Boost Loot off: the old order (combat first) is unchanged.
         var off = BoostWorld(15f, withCorpse: false, out var combat3, boost: false);
@@ -843,6 +902,59 @@ internal static class LootCorpseTests
             rare.S.LootOnlyRareCorpses = true;
             rare.Call("StartDeathWait", Elemental);
             Check.Eq(rare.Get<long>("_deathWaitAt"), 0L, "Loot Only Rare Corpses: no wait");
+        }
+        finally { RestoreCorpseClock(); }
+    }
+
+    // 2026-11-20: "in threads it shouldn't wait for the death animation since mobs don't have corpses, it needs
+    // to move as fast as possible" (Thread 0x5C47: every kill "no corpse came in 3.5 s, carrying on").
+    private static void DeathWaitNoCorpseHere()
+    {
+        long now = 5_000_000;
+        const string Rager = "Threadbound Corrupt Rager";
+        var thread = (Cell: 0x5C47017Bu, X: 100f, Y: 100f, Z: 0f);
+        try
+        {
+            var bot = DeathWorld(15f, out _, () => now);
+            FakeHost.PlayerPose = thread;
+            void KillWithNoCorpse(string who)
+            {
+                bot.Call("StartDeathWait", who);
+                Check.True(bot.Get<long>("_deathWaitAt") != 0, $"{who}: waited for");
+                now += RynthAiPlugin.DeathWaitDefaultMs + RynthAiPlugin.DeathWaitExtraMs;
+                bot.HasLootWork();
+                Check.Eq(bot.Get<long>("_deathWaitAt"), 0L, $"{who}: no corpse, the wait ends");
+            }
+            KillWithNoCorpse(Rager);
+            KillWithNoCorpse(Elemental);
+            Check.Eq(FakeHost.Logs.Count(l => l.Contains("2 kills in a row in landblock 0x5C47 left no corpse")), 1, "the landblock stops waiting, said once");
+
+            bot.Call("StartDeathWait", "Threadbound Rynthid Slayer");
+            Check.Eq(bot.Get<long>("_deathWaitAt"), 0L, "a third kill there, a new monster: no wait");
+            Check.False(bot.HasLootWork() && bot.Get<bool>("_deathWaitHeld"), "nothing holds the character");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("no wait for the corpse of 'Threadbound Rynthid Slayer': the last 2 kills in landblock 0x5C47 left no corpse")), "and says why");
+
+            // Outdoors no landblock counts; a monster whose last two kills left no corpse gets none.
+            FakeHost.PlayerPose = Me0;
+            KillWithNoCorpse(Rager);   // its second in a row, outdoors
+            Check.Eq(FakeHost.Logs.Count(l => l.Contains($"'{Rager}' left no corpse 2 times in a row")), 1, "the monster stops waiting, said once");
+            bot.Call("StartDeathWait", Rager);
+            Check.Eq(bot.Get<long>("_deathWaitAt"), 0L, "outdoors, the Rager: no wait (its last 2 kills left no corpse)");
+            bot.Call("StartDeathWait", "Mosswart");
+            Check.True(bot.Get<long>("_deathWaitAt") != 0, "outdoors, another monster: waited for as before");
+            now += RynthAiPlugin.DeathWaitDefaultMs + RynthAiPlugin.DeathWaitExtraMs;
+            bot.HasLootWork();
+
+            // A corpse in the Thread's landblock: it waits there again (and for that monster).
+            FakeHost.PlayerPose = thread;
+            bot.Set("_loginComplete", true);
+            bot.Call("NoteMonsterStatsKill", $"You killed {Elemental}!");   // the corpse timer expects its corpse
+            FakeHost.Positions[Corpse] = (thread.Cell, 101f, 100f, 0f);
+            bot.Cache.OnCreateObject(Corpse);
+            bot.Cache.Tick();
+            bot.Call("NoteCorpseCreated", Corpse);
+            bot.Call("StartDeathWait", "Threadbound Rynthid Slayer");
+            Check.True(bot.Get<long>("_deathWaitAt") != 0, "a corpse came in 0x5C47: kills there are waited for again");
         }
         finally { RestoreCorpseClock(); }
     }

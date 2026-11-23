@@ -66,6 +66,13 @@ public sealed class LootEditRow
     /// <summary>Conditions in words (ASCII), shortened.</summary>
     public string Summary { get; set; } = string.Empty;
     public int Conditions { get; set; }
+    /// <summary>
+    /// Keep # per day (LootPerDay, added 2026-11-22): the window in hours, 0 = a plain Keep #.
+    /// An older engine ignores it.
+    /// </summary>
+    public int PerDayHours { get; set; }
+    /// <summary>Keep # per day: "1 of 2 picked up in the last 24 h, next frees in 5 h 10 min" (empty otherwise).</summary>
+    public string PerDayStatus { get; set; } = string.Empty;
 }
 
 /// <summary>A whole rule: what the rule view edits and sends back with "update_rule".</summary>
@@ -82,6 +89,13 @@ public sealed class LootEditRule
     public string? CustomExpression { get; set; }
     /// <summary>Every condition node in file order, DisabledRule (9999) nodes included.</summary>
     public List<LootEditCondition> Conditions { get; set; } = new();
+    /// <summary>
+    /// Keep # per day (LootPerDay, added 2026-11-22): the window in hours, 0 = off. In an
+    /// update_rule, null (an older engine, which doesn't send it) keeps the rule's own.
+    /// </summary>
+    public int? PerDayHours { get; set; }
+    /// <summary>Keep # per day: today's count in words (empty otherwise). Not read back.</summary>
+    public string PerDayStatus { get; set; } = string.Empty;
 }
 
 public sealed class LootEditCondition
@@ -97,7 +111,10 @@ public sealed class LootEditCondition
 /// <summary>An edit from the face. Commands that target a rule carry the name the face saw (Expect).</summary>
 public sealed class LootEditCommand
 {
-    /// <summary>open, reload, save, set_enabled, move, add, duplicate, delete, rename, update_rule.</summary>
+    /// <summary>
+    /// open, reload, save, set_enabled, move, add, duplicate, delete, rename, update_rule;
+    /// perday_reset (added 2026-11-22: forget the Keep # per day pickups of the rule at Index).
+    /// </summary>
     public string Op { get; set; } = string.Empty;
     public int Index { get; set; } = -1;
     /// <summary>move: the index the rule ends up at.</summary>

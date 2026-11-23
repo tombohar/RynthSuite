@@ -42,6 +42,12 @@ internal sealed class NavRecoveryPlan
     public string Planner = string.Empty;
     /// <summary>Doorways (dungeon portals) the path goes through.</summary>
     public int Doorways;
+    /// <summary>The points are RynthNav navmesh corners: the engine turns a corner early only where the
+    /// navmesh shows a straight walk to the next one (NavigationEngine's corner gate).</summary>
+    public bool NavmeshCorners;
+    /// <summary>The route waypoint stands inside something placed (a statue's middle): the last point is the nearest
+    /// spot clear of it, and reaching that reaches the waypoint (nobody gets nearer).</summary>
+    public bool TargetMoved;
 }
 
 /// <summary>Result of <see cref="NavRecoveryPlanner.CheckArea"/>.</summary>
@@ -76,6 +82,8 @@ internal sealed class NavRecoveryPlanner : INavRecoveryPlanner
     // when it is this close to one of its cells.
     internal const double AreaCellReachYd    = 60.0;
     private const int    MaxNavmeshCorners   = 128;
+    // A partial navmesh way must end at least this far from the character to be worth walking.
+    private const double PartialMinGainYd    = 2.0;
 
     private readonly RynthCoreHost _host;
     private readonly Func<MainLogic?> _raycast;
@@ -181,7 +189,18 @@ internal sealed class NavRecoveryPlanner : INavRecoveryPlanner
         applicable = true;
         uint start = graph.ContainsKey(playerCell) ? playerCell : DungeonPathfinder.NearestCell(graph, pNs, pEw, pz);
         if (start == 0) { why = "can't place you on the dungeon map"; return null; }
-        if (start == goal) { why = "already in the waypoint's room, the map has no way around"; return null; }
+        var geo = DungeonPathfinder.GetGeometry(lb, cellDat, _raycast()?.GeometryLoader?.DungeonLOS);
+        if (start == goal)
+        {
+            // The same cell: what it stuck on is in the room with it (a table, a statue), and the cell graph has
+            // nothing to say. The dungeon map walks round it.
+            string roomWhy = string.Empty;
+            var inRoom = geo != null ? PlanInRoom(geo, pNs, pEw, pz, tNs, tEw, tz, out roomWhy) : null;
+            if (inRoom != null) return inRoom;
+            why = geo == null ? "already in the waypoint's room, the map has no way around"
+                              : $"already in the waypoint's room, the map has no way around ({roomWhy})";
+            return null;
+        }
 
         var path = DungeonPathfinder.FindPath(start, goal, graph, _hazards());
         if (path.Count < 2) { why = "no walkable way on the dungeon map"; return null; }
@@ -190,12 +209,130 @@ internal sealed class NavRecoveryPlanner : INavRecoveryPlanner
         // every narrow opening (flagged, so the engine goes through straight), rooms crossed
         // directly. Without the map geometry, cell-centre midpoints.
         var plan = new NavRecoveryPlan { Planner = "dungeon map" };
-        var geo = DungeonPathfinder.GetGeometry(lb, cellDat, _raycast()?.GeometryLoader?.DungeonLOS);
         plan.Points = DungeonPathfinder.BuildPathPoints(path, graph, geo, _hazards(), pNs, pEw, pz, tNs, tEw, tz, out int doorways);
         plan.Doorways = doorways;
         if (plan.Points.Count == 0) { why = "empty path"; return null; }
         plan.LengthYd = PathLengthYd(pNs, pEw, plan.Points, tNs, tEw);
         return plan;
+    }
+
+    // ── In one room (2026-11-18) ────────────────────────────────────────────
+    // 9 of the 29 logged "no plan" recoveries were "already in the waypoint's room": the character and the
+    // waypoint in one cell, with a table (0x0190 room 88, 0x020002FB), a statue (0x00C1 room 81, 0x020014A3: the
+    // waypoint in its middle), an altar (0x000A) or a slab (0x01F5) between them, and the stuck escapes ran blind
+    // until they gave up (about 3 minutes in 0x00C1). The dungeon map knows those objects now.
+
+    /// <summary>A waypoint inside something placed is moved out to this much room ...</summary>
+    internal const double InRoomTargetClearance = 1.0;
+    /// <summary>... at most this far (0x00C1's statue is 9 x 9 m: its waypoint came 2.5 m out).</summary>
+    internal const double InRoomTargetPushMax = 8.0;
+
+    /// <summary>
+    /// The walk from the character (pNs, pEw, pz) to the waypoint (tNs, tEw, tz) within one room, on the dungeon map:
+    /// a waypoint inside a placed object is moved out of it first (PushClear to InRoomTargetClearance, at most
+    /// InRoomTargetPushMax), then the straight walk is walked round the placed objects on the floor
+    /// (DungeonPathfinder.WalkRoundHoles, objects only). A "dungeon map (room)" plan when that put points in (the
+    /// moved waypoint is its last point, and <see cref="NavRecoveryPlan.TargetMoved"/> is set); null, with
+    /// <paramref name="why"/>, when the straight walk is clear (the snag isn't on the map) or there is no way round.
+    /// Only an obstacle's waypoint is moved: one up on something placed (at its own height <paramref name="tz"/>), or in a
+    /// step-over or a connector, gets no plan.
+    /// </summary>
+    internal static NavRecoveryPlan? PlanInRoom(DungeonGeometry geo, double pNs, double pEw, double pz,
+                                                double tNs, double tEw, double tz, out string why)
+    {
+        why = string.Empty;
+        double px = DungeonGeometry.NavToWorld(pEw), py = DungeonGeometry.NavToWorld(pNs);
+        double tx = DungeonGeometry.NavToWorld(tEw), ty = DungeonGeometry.NavToWorld(tNs);
+        if (!geo.TryFloorHeight(px, py, pz, 3.0, out double ph)) ph = pz;
+        if (!geo.TryFloorHeight(tx, ty, tz, 3.0, out double th)) th = tz;
+
+        bool moved = false;
+        if (geo.InsidePlaced(tx, ty, th))
+        {
+            // Inside it at the map's floor is not inside it for a waypoint up on it: one recorded on a dais's top, half way
+            // up a ramp or on a platform. Moved down beside the object and taken as reached (TargetMoved), it was skipped,
+            // and the next waypoint, up there too, ran the character into the object's side again, stuck after stuck. Nor
+            // is a step or a ramp (a step-over, a connector) something to move a waypoint out of: it is the way on. Both are
+            // left to the escapes, as before the room planner (review of wf/obst-int).
+            if (geo.OnTopOfPlaced(tx, ty, tz, th))
+            {
+                why = "the waypoint is up on something placed (the map has no floor on its top)";
+                return null;
+            }
+            if (geo.InsidePlaced(tx, ty, Math.Max(th, tz), c => c is PlacedClass.StepOver or PlacedClass.Connector))
+            {
+                why = "the waypoint is in a step or a ramp placed there (climbed, not walked round)";
+                return null;
+            }
+            double ox = tx, oy = ty;
+            geo.PushClear(ref tx, ref ty, th, InRoomTargetClearance, InRoomTargetPushMax);
+            if (geo.InsidePlaced(tx, ty, th) || !geo.OnWalkableFloor(tx, ty, th))
+            {
+                why = "the waypoint is inside something placed, with no floor clear of it within " + InRoomTargetPushMax.ToString("0", System.Globalization.CultureInfo.InvariantCulture) + " m";
+                return null;
+            }
+            moved = Math.Abs(tx - ox) > 1e-6 || Math.Abs(ty - oy) > 1e-6;
+        }
+
+        var target = new NavPoint { Type = NavPointType.Point, NS = DungeonGeometry.WorldToNav(ty), EW = DungeonGeometry.WorldToNav(tx), Z = th / 240.0 };
+        var pts = new List<NavPoint>
+        {
+            new NavPoint { Type = NavPointType.Point, NS = pNs, EW = pEw, Z = ph / 240.0 },
+            target,
+        };
+        using var count = DungeonPathfinder.CountHoles();
+        int left0 = DungeonPathfinder.HolesLeft;
+        int round = DungeonPathfinder.WalkRoundHoles(pts, geo, objectsOnly: true);
+        if (round == 0 && DungeonPathfinder.HolesLeft > left0) { why = "no way round what is placed there"; return null; }
+        if (round == 0 && !moved) { why = "the straight walk is clear on the map (the snag isn't on it)"; return null; }
+
+        var plan = new NavRecoveryPlan { Planner = moved ? "dungeon map (room, waypoint moved out of an object)" : "dungeon map (room)", TargetMoved = moved };
+        // The character's own spot is not walked to; the waypoint is the engine's, unless it was moved.
+        for (int i = 1; i < pts.Count; i++)
+            if (i + 1 < pts.Count || moved) plan.Points.Add(pts[i]);
+        plan.LengthYd = PathLengthYd(pNs, pEw, plan.Points, tNs, tEw);
+        return plan;
+    }
+
+    /// <summary>
+    /// NavigationEngine.EscapeRoom: on the dungeon map, how far (metres, up to 2) the character at (wx, wy, wz) (world
+    /// metres, in <paramref name="cell"/>) gets along a compass heading (0 north, clockwise) before it runs into
+    /// something; NaN outside a dungeon's cell, without the map, or with no floor under the character on it.
+    /// </summary>
+    internal double EscapeRoom(uint cell, double wx, double wy, double wz, double headingDeg)
+    {
+        try
+        {
+            if ((cell & 0xFFFF) < 0x0100) return double.NaN;
+            var cellDat = CellDat;
+            if (cellDat == null || !IsDungeonLandblock(cell >> 16, cellDat)) return double.NaN;
+            var geo = DungeonPathfinder.GetGeometry(cell >> 16, cellDat, _raycast()?.GeometryLoader?.DungeonLOS);
+            return geo == null ? double.NaN : EscapeRoomOn(geo, wx, wy, wz, headingDeg);
+        }
+        catch { return double.NaN; }
+    }
+
+    /// <summary>Along an escape heading, the character has run into something where it comes this near a wall, a floor's
+    /// edge or something placed (half its 0.48 m body over it): a burst sliding along a face it stuck on gets on, one
+    /// head-on into it doesn't.</summary>
+    internal const double EscapeTouchMeters = 0.25;
+    internal const double EscapeLookMeters = 2.0;
+
+    /// <summary>The map half of <see cref="EscapeRoom"/>: looked at every 0.1 m, following the floor.</summary>
+    internal static double EscapeRoomOn(DungeonGeometry geo, double wx, double wy, double wz, double headingDeg)
+    {
+        if (!geo.TryFloorHeight(wx, wy, wz, 3.0, out double h)) return double.NaN;
+        double a = headingDeg * Math.PI / 180.0, ux = Math.Sin(a), uy = Math.Cos(a);
+        const double step = 0.1;
+        for (double d = step; d <= EscapeLookMeters + 1e-9; d += step)
+        {
+            double x = wx + ux * d, y = wy + uy * d;
+            if (!geo.TryFloorHeight(x, y, h, 0.6, out double hh) || !geo.OnWalkableFloor(x, y, hh)
+                || geo.ClearanceMemo(x, y, hh, EscapeTouchMeters + 0.1) < EscapeTouchMeters)
+                return d - step;
+            h = hh;
+        }
+        return EscapeLookMeters;
     }
 
     private NavRecoveryPlan? PlanOutdoor(uint cell, float lx, float ly, float lz,
@@ -212,10 +349,11 @@ internal sealed class NavRecoveryPlanner : INavRecoveryPlanner
         int result;
         int count = 0;
         double[] buf = new double[MaxNavmeshCorners * 3];
+        double[] info = new double[RynthNavPathApiV1.InfoLength];
+        bool ex;
         unsafe
         {
             // Resolved on every call: RynthNav may be missing, or reloaded since last time.
-            // Version 1 (FindPath is all this needs): a RynthNav from before v2 answers it too.
             IntPtr p = _host.GetPluginInterface(RynthNavPathApiV1.PluginName, RynthNavPathApiV1.InterfaceName, 1);
             var t = (RynthNavPathApiV1*)p;
             if (t == null || t->Version < 1 || t->StructSize < RynthNavPathApiV1.SizeV1 || t->FindPath == null)
@@ -223,16 +361,42 @@ internal sealed class NavRecoveryPlanner : INavRecoveryPlanner
                 why = "RynthNav isn't loaded";
                 return null;
             }
+            // Version 2: FindPathEx with the Outdoor Hunt's flags, so the way back keeps out of portals and
+            // 1 m off the walls as the hunt's walks do (v1 FindPath does neither: a detour could run along a
+            // building's wall or through a portal's circle). No PathStartOutdoors: the start is where the
+            // character stands, so from inside a building RynthNav refuses it as before. A RynthNav from
+            // before v2: FindPath.
+            ex = t->Version >= 2 && t->StructSize >= (uint)sizeof(RynthNavPathApiV1) && t->FindPathEx != null;
             fixed (double* pts = buf)
-                result = t->FindPath(sx, sy, lz, gx, gy, tz, pts, MaxNavmeshCorners, &count);
+            fixed (double* inf = info)
+                result = ex
+                    ? t->FindPathEx(sx, sy, lz, gx, gy, tz, RynthAiPlugin.HuntPathFlags, 0, pts, MaxNavmeshCorners, &count, inf)
+                    : t->FindPath(sx, sy, lz, gx, gy, tz, pts, MaxNavmeshCorners, &count);
         }
 
         if (result == RynthNavPathApiV1.ResultNoMesh) { why = "no RynthNav navmesh here"; return null; }
-        if (result != RynthNavPathApiV1.ResultOk || count < 2) { why = "RynthNav found no walkable way"; return null; }
+        // A partial way (the waypoint off the mesh, or past a seam between two tiles that don't link) ends at
+        // the reachable point nearest the waypoint: that point is walked to as well, then the route's own leg
+        // from there, as RynthNav's own walks push straight on over a seam.
+        bool partial = ex && result == RynthNavPathApiV1.ResultPartial;
+        if ((result != RynthNavPathApiV1.ResultOk && !partial) || count < 2) { why = "RynthNav found no walkable way"; return null; }
+        // A partial way that ends where the character stands gets it nowhere: no detour, the escapes (as v1 said).
+        double endX = buf[(count - 1) * 3] - sx, endY = buf[(count - 1) * 3 + 1] - sy;
+        if (partial && endX * endX + endY * endY < PartialMinGainYd * PartialMinGainYd)
+        {
+            why = "RynthNav's way ends where you stand (the waypoint isn't reachable on its map)";
+            return null;
+        }
 
-        var plan = new NavRecoveryPlan { Planner = "RynthNav navmesh" };
-        // Corners 1..count-2 are the turns; the first is our position and the last the waypoint.
-        for (int i = 1; i < count - 1; i++)
+        var plan = new NavRecoveryPlan
+        {
+            Planner = partial ? string.Create(System.Globalization.CultureInfo.InvariantCulture, $"RynthNav navmesh (partial, ends {info[5]:F0}yd short)") : "RynthNav navmesh",
+            NavmeshCorners = true,
+        };
+        // Corners 1..count-2 are the turns; the first is our position and the last the waypoint (for a
+        // partial way the last is where it ends, a point of the detour too).
+        int last = partial ? count : count - 1;
+        for (int i = 1; i < last; i++)
         {
             double wx = buf[i * 3], wy = buf[i * 3 + 1], wz = buf[i * 3 + 2];
             plan.Points.Add(new NavPoint

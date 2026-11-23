@@ -168,6 +168,17 @@ internal sealed class UseRefusalWatch
         return wasStuck ? Verdict.Recovered : Verdict.None;
     }
 
+    /// <summary>
+    /// <paramref name="corpseId"/>'s opens say nothing about the server (a wall was in the way,
+    /// RynthAiPlugin.CorpseBehindWall.cs): its pending open is dropped and its refusals are taken back.
+    /// </summary>
+    public void Forget(int corpseId)
+    {
+        if (_pending && _pendingId == corpseId) { _pending = false; _answeredAt = 0; }
+        if (_refused.Remove(corpseId) && Refusals > 0 && State == Phase.Normal) Refusals--;
+        if (LastRefusedCorpse == corpseId) LastRefusedCorpse = 0;
+    }
+
     /// <summary>Back to normal: a relog, a login, a successful open.</summary>
     public void Reset()
     {

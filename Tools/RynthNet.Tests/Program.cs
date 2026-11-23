@@ -30,6 +30,7 @@ internal static partial class Program
         WindowChecks();
         Replies();
         LookChecks();
+        FlapChecks();
 
         Console.WriteLine($"{_checks} checks, {_failed} failed");
         return _failed == 0 ? 0 : 1;

@@ -406,6 +406,7 @@ public class MainViewModel : INotifyPropertyChanged
                     _                   => VTankLootAction.Keep,
                 },
                 KeepCount = rule.Action == LootAction.KeepUpTo ? rule.KeepCount : (int?)null,
+                PerDayHours = rule.Action == LootAction.KeepUpTo ? rule.PerDayHours : 0,
             };
             // Best-effort condition mapping — typed editor will surface anything
             // we couldn't map as raw lines.
@@ -511,6 +512,7 @@ public class MainViewModel : INotifyPropertyChanged
                     _ => LootAction.Keep,
                 },
                 KeepCount = vr.KeepCount ?? 0,
+                PerDayHours = vr.Action == VTankLootAction.KeepUpTo ? vr.PerDayHours : 0,
             };
             jp.Rules.Add(jr);
         }
@@ -540,6 +542,7 @@ public class MainViewModel : INotifyPropertyChanged
             Priority         = src.Priority,
             Action           = src.Action,
             KeepCount        = src.KeepCount,
+            PerDayHours      = src.PerDayHours,
         };
         foreach (var c in src.Conditions)
             copy.Conditions.Add(new VTankLootCondition(c.NodeType, c.LengthCode, c.DataLines));

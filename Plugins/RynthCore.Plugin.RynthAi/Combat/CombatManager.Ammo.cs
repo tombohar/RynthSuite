@@ -324,6 +324,43 @@ public partial class CombatManager
 
     private static string LabelOf(AmmoCandidate a) => a.Untyped ? "ammo" : MissileAmmo.Label(a.AmmoType);
 
+    // ── Ammo by element (R-20261121-163725-da49, 2026.11.19.1) ────────────────────────────────────
+    // "Bows will swap correctly but not ammo": the ammo step chose a stack only for an empty slot or
+    // ammo of another type, so after a bow-to-bow swap for a monster weak to Fire, the Cold arrows
+    // the last bow shot stayed on. Now, with ammo the launcher can shoot already on, the stack
+    // MissileAmmo.Choose would pick for this target is wielded instead when its element ranks
+    // strictly better (the Monsters rule's damage type, then the target's weaknesses). Choose's own
+    // order still comes first (the listed ammo, then infinite ammo), so this only moves between
+    // stacks the player would be given anyway. At most one such swap per launcher every
+    // AmmoElementSwapRestSec, so a target with two equal weaknesses can't flip it back and forth.
+    internal const double AmmoElementSwapRestSec = 15;
+    private readonly Dictionary<int, DateTime> _ammoElementSwapAt = new();
+
+    /// <summary>The stack to put on instead of <paramref name="wielded"/> for <paramref name="target"/>, or null.</summary>
+    private AmmoCandidate? BetterAmmoFor(int launcherId, WorldObject wo, int lt, IReadOnlyList<AmmoCandidate> pack,
+        AmmoCandidate wielded, WorldObject? target, MonsterRule? rule, DateTime now)
+    {
+        if (target == null || AmmoTracker.PendingId != 0 || _ammoDequipPendingId != 0) return null;
+        if (_ammoElementSwapAt.TryGetValue(launcherId, out var last) && (now - last).TotalSeconds < AmmoElementSwapRestSec) return null;
+        var rank = AmmoRank(RuleElementOf(rule), WeaknessFor(target));
+        string launcherElement = LauncherElement(launcherId, wo);
+        var usable = pack.Where(a => a.Id == wielded.Id || !AmmoTracker.Resting(a.Id, now)).ToList();
+        var pick = MissileAmmo.Choose(lt, launcherElement, usable, rank);
+        if (pick == null || pick.Id == wielded.Id) return null;
+        if (rank(ElementOrPierce(pick, launcherElement)) >= rank(ElementOrPierce(wielded, launcherElement))) return null;
+        _ammoElementSwapAt[launcherId] = now;
+        _host.Log($"[EquipDiag] ammo by element: '{target.Name}' takes {ElementOrPierce(pick, launcherElement)} better than " +
+                  $"{ElementOrPierce(wielded, launcherElement)}: 0x{(uint)wielded.Id:X8} '{wielded.Name}' -> 0x{(uint)pick.Id:X8} '{pick.Name}' " +
+                  $"for 0x{(uint)launcherId:X8} '{wo.Name}'");
+        return pick;
+    }
+
+    private static string ElementOrPierce(AmmoCandidate a, string launcherElement)
+    {
+        string e = MissileAmmo.EffectiveElement(a, launcherElement);
+        return e.Length > 0 ? e : "Pierce";
+    }
+
     private void ArmAmmoFollowUp(int launcherId, DateTime now)
     {
         if (_ammoFollowUpFor == launcherId && now < _ammoFollowUpUntil) return;
@@ -390,6 +427,14 @@ public partial class CombatManager
             EndAmmoFollowUp();
             ClearAmmoDequip();
             _noAmmoSaid.Remove(launcherId);
+            // A stack with a better element for this target (CombatManager.Ammo.cs, "Ammo by element"):
+            // this one goes into the pack, and the empty slot's step below wields that one.
+            if (BetterAmmoFor(launcherId, wo, lt, pack, wielded, target, rule, now) is { } better)
+            {
+                var prep = PutAmmoAway(wielded, launcherId,
+                    $"for '{better.Name}' ({ElementOrPierce(better, LauncherElement(launcherId, wo))}, a better element for '{target.Name}')", now);
+                if (prep != AmmoPrep.Blocked) return true;   // the slot empties, then the better stack goes on
+            }
             canShoot = true;
             return false;
         }

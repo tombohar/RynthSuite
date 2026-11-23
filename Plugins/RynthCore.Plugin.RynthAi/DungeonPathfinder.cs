@@ -365,6 +365,7 @@ internal static partial class DungeonPathfinder
         DungeonGeometry? geo = null, IReadOnlySet<uint>? hazardCells = null,
         double startNS = double.NaN, double startEW = double.NaN, double startZ = 0, double destZ = 0)
     {
+        using var holes = CountHoles();
         var route = new NavRouteParser { RouteType = NavRouteType.Once };
 
         // With the dungeon map geometry: straight on through doorways, straight across rooms.
@@ -855,6 +856,25 @@ internal static partial class DungeonPathfinder
         IReadOnlyList<PatrolPortal>? portals = null,
         (double X, double Y, double Z)? startAt = null)
     {
+        // One build: every walk round of it counts (HolesWalkedRound / HolesLeft), and the patrol's notes say so.
+        using var holes = CountHoles();
+        bool outermost = _holeCountDepth == 1;
+        var route = BuildPatrolRouteCore(graph, startCell, hazardCells, geo, options, portals, startAt);
+        if (outermost && PointLog != null && (HolesWalkedRound > 0 || HolesLeft > 0))
+            MainRouteNote = (MainRouteNote == null ? "" : MainRouteNote + "; ")
+                          + $"objects and holes: {HolesWalkedRound} leg(s) walked round" + (HolesLeft > 0 ? $", {HolesLeft} with no way round" : "");
+        return route;
+    }
+
+    private static NavRouteParser BuildPatrolRouteCore(
+        Dictionary<uint, DungeonNavNode> graph,
+        uint startCell,
+        IReadOnlySet<uint>? hazardCells,
+        DungeonGeometry? geo,
+        DungeonPatrolOptions? options,
+        IReadOnlyList<PatrolPortal>? portals,
+        (double X, double Y, double Z)? startAt)
+    {
         LastPortalAvoidance = null;
         var o = (options ?? DungeonPatrolOptions.Default).Clamped();
         if (portals is { Count: > 0 }) return BuildPatrolRouteAroundPortals(graph, startCell, hazardCells, geo, o, portals, startAt);
@@ -959,9 +979,93 @@ internal static partial class DungeonPathfinder
         // The map geometry is there but the room patrol found nothing to walk (the start is cut
         // off from every doorway): the cell walk's points still keep off the walls.
         if (geo != null)
+        {
             foreach (var p in route.Points)
                 PushOffWalls(geo, Tag(p, "cell-walk"), null, CornerPushMax, o.WallClearance);
+            // And round what the cells place, as the room patrol's walks are (EmitSteps): with the loader's posts,
+            // pillars and spheres on the map (2026-11-18), Thread 0x0169's cell walk went through 20 of them, every
+            // one with a way round on the floor. A cell's centre under one (a pillar in the middle of a room) goes
+            // out of it first: the walk round goes from point to point.
+            KeepPointsOutOfObjects(geo, route.Points, closed: true, o.WallClearance, graph);
+            WalkRoundObjectsOf(geo, route.Points, closed: true);
+        }
         return route;
+    }
+
+    /// <summary>
+    /// The straight walk a-b at a body's height on the dungeon map: on the floor all the way (LegOnFloor, the hole
+    /// rule's test, which also stops at a placed object on the floor it follows) and through nothing the cells place
+    /// (ThroughPlaced). A sight line at eye height doesn't say that: one that raises the eye 1.2 m and looks from
+    /// 1.45 m up, so a 1 m altar or a 0.9 m table (0x0190's 0x020002FB) never blocked it, and the line of sight to a
+    /// later waypoint skipped the corners laid round one (2026-11-18). The patrol's first
+    /// waypoint go by it. An end up on something placed is judged from where the leg leaves it; an end the map can't
+    /// place clear of what is there leaves the walk to the sight line (true).
+    /// </summary>
+    internal static bool StraightWalkClear(DungeonGeometry geo, NavPoint a, NavPoint b)
+    {
+        if (geo.PlacedCount > 0 && !(FromWhereItStands(geo, ref a, b) && FromWhereItStands(geo, ref b, a))) return true;
+        return LegOnFloor(geo, a, b) && !LegMeetsPlaced(geo, X(a), Y(a), a.Z * 240.0, X(b), Y(b), b.Z * 240.0);
+    }
+
+    // One end of the walk test. The leg tests measure from the map's floor under a point, so a character standing on a
+    // dais, half way up a ramp or on a platform read as inside it, and every leg failed at its first sample: a patrol
+    // started from there went for waypoint 0, across the room behind a pillar maybe (the "runs into a wall on login" the
+    // first-waypoint pick is there for) (review of wf/obst-int). An end up
+    // on something placed (DungeonGeometry.OnTopOfPlaced) is moved along the leg to where it leaves what is under it: that
+    // stretch is the walk across its top. False, the walk not judged, for an end inside something at its own height too
+    // (wedged against it where the footprint is a little big), or a leg that never leaves what it stands on.
+    private static bool FromWhereItStands(DungeonGeometry geo, ref NavPoint end, NavPoint other)
+    {
+        double ex = X(end), ey = Y(end), ez = end.Z * 240.0;
+        if (!geo.TryFloorHeight(ex, ey, ez, HoleStartBand, out double zf)) zf = ez;
+        if (!geo.InsidePlaced(ex, ey, zf)) return true;
+        if (!geo.OnTopOfPlaced(ex, ey, ez, zf)) return false;
+        double ox = X(other), oy = Y(other), oz = other.Z * 240.0;
+        double dx = ox - ex, dy = oy - ey, len = Math.Sqrt(dx * dx + dy * dy);
+        int n = (int)Math.Ceiling(len / PlacedFineStep);
+        for (int s = 1; s <= n; s++)
+        {
+            double t = (double)s / n, x = ex + dx * t, y = ey + dy * t;
+            if (geo.TryFloorHeight(x, y, zf, HoleStep, out double h) || geo.TryFloorHeight(x, y, ez + (oz - ez) * t, HoleStep, out h)) zf = h;
+            if (geo.InsidePlaced(x, y, zf)) continue;
+            end = new NavPoint { Type = NavPointType.Point, EW = DungeonGeometry.WorldToNav(x), NS = DungeonGeometry.WorldToNav(y), Z = zf / 240.0 };
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>The straight walk a-b goes through something the cells place, on the floor it follows: ThroughPlaced,
+    /// or a crossing between its samples (CrossesPlaced).</summary>
+    internal static bool LegMeetsPlaced(DungeonGeometry geo, double ax, double ay, double az, double bx, double by, double bz)
+        => ThroughPlaced(geo, ax, ay, az, bx, by, bz) || CrossesPlaced(geo, ax, ay, az, bx, by, bz);
+
+    // ThroughPlaced looks every 0.5 m, and a rail (0x020003B3 is 0.13 m across), a post or a narrow end of a bench fits
+    // between two looks: a leg across one was taken as clear and went on as laid. This looks at the solid models' own
+    // spacing (0.1 m); the floor is found every HoleSample as ThroughPlaced finds it, the looks between at the last
+    // floor found. Samples with no floor are left out as there.
+    private const double PlacedFineStep = 0.1;
+
+    internal static bool CrossesPlaced(DungeonGeometry geo, double ax, double ay, double az, double bx, double by, double bz)
+    {
+        if (geo.PlacedCount == 0) return false;
+        double dx = bx - ax, dy = by - ay, len = Math.Sqrt(dx * dx + dy * dy);
+        if (len < 2 * PlacedFineStep) return false;
+        if (!geo.TryFloorHeight(ax, ay, az, HoleStartBand, out double zf)) zf = az;
+        int n = (int)Math.Ceiling(len / PlacedFineStep);
+        bool floor = true;
+        double nextFloorAt = 0;
+        for (int s = 1; s < n; s++)
+        {
+            double t = (double)s / n, d = t * len, x = ax + dx * t, y = ay + dy * t;
+            if (d >= nextFloorAt)
+            {
+                floor = geo.TryFloorHeight(x, y, zf, HoleStep, out double h) || geo.TryFloorHeight(x, y, az + (bz - az) * t, HoleStep, out h);
+                if (floor) zf = h;
+                nextFloorAt = d + HoleSample;
+            }
+            if (floor && geo.InsidePlaced(x, y, zf)) return true;
+        }
+        return false;
     }
 
     // Canonical undirected-edge key (order-independent).

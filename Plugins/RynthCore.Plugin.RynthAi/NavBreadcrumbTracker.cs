@@ -50,6 +50,43 @@ internal sealed class NavBreadcrumbTracker
     private int _recAdded, _recSinceSave;
     private (string Name, int Cls, double NS, double EW, double NavZ, long At)? _portalCandidate;
 
+    // ── A jump step added while recording (/ra nav addjump) ──
+    /// <summary>After a jump step, no point is recorded for at least this long (you are in the air).</summary>
+    internal const long JumpHoldMinMs = 1200;
+    /// <summary>Nor until your height has held still this long (landed), or this much time has gone by.</summary>
+    internal const long JumpLandStillMs = 500, JumpHoldMaxMs = 6000;
+    /// <summary>Height change per tick under this is "still", metres.</summary>
+    internal const float JumpLandStillM = 0.05f;
+    private long _jumpAt = -1, _jumpStillSince;
+    private float _jumpLastZ;
+
+    /// <summary>
+    /// A Jump step went onto the route here (tick thread, from /ra nav addjump): the recording holds its next
+    /// point until you have jumped and landed, so no point is laid in the air or on the edge you jumped from.
+    /// </summary>
+    public void JumpAdded()
+    {
+        _jumpAt = Environment.TickCount64;
+        _jumpStillSince = 0;
+        _jumpLastZ = float.NaN;
+    }
+
+    /// <summary>True while a jump just added holds the recording (see <see cref="JumpAdded"/>).</summary>
+    internal bool HoldingForJump(float z, long now)
+    {
+        if (_jumpAt < 0) return false;
+        long since = now - _jumpAt;
+        bool still = !float.IsNaN(_jumpLastZ) && Math.Abs(z - _jumpLastZ) < JumpLandStillM;
+        _jumpLastZ = z;
+        if (!still) _jumpStillSince = 0;
+        else if (_jumpStillSince == 0) _jumpStillSince = now;
+        bool landed = since >= JumpHoldMinMs && _jumpStillSince != 0 && now - _jumpStillSince >= JumpLandStillMs;
+        if (!landed && since < JumpHoldMaxMs) return true;
+        _jumpAt = -1;
+        _recNS = double.NaN;   // the landing spot is recorded straight away
+        return false;
+    }
+
     public NavBreadcrumbTracker(RynthCoreHost host, LegacyUiSettings settings,
         Func<uint, (string Name, int ObjectClass)?> describePortal, Action<string> chat)
     {
@@ -223,6 +260,8 @@ internal sealed class NavBreadcrumbTracker
             _portalCandidate = null;
             _recNS = double.NaN;
         }
+
+        if (HoldingForJump(z, Environment.TickCount64)) return;
 
         if (!double.IsNaN(_recNS) && NavRouteEditing.DistanceYards(_recNS, _recEW, ns, ew) < o.RecordSpacingYards)
             return;

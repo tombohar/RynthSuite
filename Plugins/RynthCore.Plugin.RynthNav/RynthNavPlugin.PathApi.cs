@@ -118,7 +118,7 @@ public sealed partial class RynthNavPlugin
                 _ => $"no path: {r.Note}",
             };
             string extras = "";
-            if (r.Portals > 0) extras += $"; {r.Portals} portal(s) avoided{(r.FellBack ? " (no way round them: plain path)" : "")}{(r.Bent > 0 ? $", bent round {r.Bent}" : "")}";
+            if (r.Portals > 0) extras += $"; {r.Portals} portal(s) avoided{(r.FellBack ? " (no way round them: plain path)" : r.PlainClear ? " (the plain path, shorter and clear of them)" : "")}{(r.Bent > 0 ? $", bent round {r.Bent}" : "")}";
             if (r.Pushed > 0) extras += $"; {r.Pushed} corner(s) {_wallClearance:0.#} m off the walls";
             Host.Log($"[RynthNav] path request ex (flags 0x{flags:X}): {what}{extras}; ({sx:F0},{sy:F0}) -> ({gx:F0},{gy:F0}), {_tileCount} tiles, {ms:F1} ms");
         }

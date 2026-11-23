@@ -34,6 +34,8 @@ internal static class HuntBuildingTests
         r.Add("building map: a portal inside: walks bend round it, one to a monster in its circle stops at its edge, a door it stands at isn't offered", PortalInside);
         r.Add("building map (real dats): Holtburg A9B4/A9B3: doors found, each step out off every floor and each step in on one, a walk from a door to every room", RealHoltburg);
         r.Add("building map (real dats): DF61 (a test hunt's): openings shared by two cell groups joined, doors onto the wall tops left out, walks through", RealDf61);
+        r.Add("building map (real dats, 2026-11-17 Thread BA17#4): the walk out to the door is the short one by doorways, and no leg of it crosses a wall", RealBa17);
+        r.Add("building map (real dats, 2026-11-17 Thread E74E#14): a walk upstairs climbs the stairs, not back to the ground floor's middle", RealE74E);
         r.Add("hunt buildings (real dats): into Holtburg's A9B4#0 from outdoors and back out, a portal in its rooms kept out of", RealHuntHoltburg);
     }
 
@@ -576,6 +578,85 @@ internal static class HuntBuildingTests
         CheckDoorsAndWalks(g, blk, "DF61", out int doors, out int rooms, out int walks);
         Check.True(doors >= 8 && walks == rooms && rooms >= 15, $"DF61: {doors} doors, {walks}/{rooms} rooms walked to");
         Console.WriteLine($"          DF61: {blk.Graph.Count} cells, {blk.SharedOpenings} shared openings joined, {blk.Buildings.Count} buildings, {doors} doors, {wallTops} wall-top openings left out, {walks}/{rooms} rooms walked to");
+    }
+
+    // DreamWeave Thread BA17 (2026-11-17): in BA17#4 the character ran at a wall for two minutes on the walk out to
+    // its front door (0122, at 35772,4457.5). Every cell sits at the building's origin, so the old cell path was any
+    // path (from 012C five rooms round, through the raised 012D), and its last leg (012D's doorway to the door) went
+    // through the wall. Now: from 012C two rooms to the door; from 012D and 0127 bent through 012B's middle.
+    private static void RealBa17()
+    {
+        var g = Dats();
+        if (g == null) { Check.True(true, "no dats on this PC: skipped"); return; }
+        var blk = BuildingMap.Load(0xBA17, g.CellDat, g.DungeonLOS);
+        var map = new BuildingMap(null, null);
+        map.Add(blk);
+        var b4 = blk.Buildings.First(b => b.Doors.Any(d => d.Cell == 0xBA170122));
+        var door = b4.Doors.First(d => d.Cell == 0xBA170122);
+        var geo = blk.Geo!;
+        foreach (uint c in new uint[] { 0xBA17012C, 0xBA17012D, 0xBA170127, 0xBA17012B })
+        {
+            Check.True(geo.TryCellFloorCentre(c, out double x, out double y, out double z), $"{c:X8}: a floor");
+            var from = new Vec(x, y, z);
+            var cells = BuildingMap.WalkCells(blk, c, from, door.Cell, door.Inner);
+            var p = map.Inside(c, from, door.Cell, door.Inner);
+            Check.True(p.Status == OutdoorHunt.PathStatus.Ok && p.Corners.Count > 0, $"{c:X8}: a walk to the door ({p.Status})");
+            var prev = from;
+            int blocked = 0;
+            foreach (var v in p.Corners)
+            {
+                if (!geo.SegmentClear(b4.Cells, prev.X, prev.Y, prev.Z, v.X, v.Y, v.Z, 0.3)) blocked++;
+                prev = v;
+            }
+            Check.Eq(blocked, 0, $"{c:X8}: no leg crosses a wall ({Pts(p.Corners)})");
+            if (c == 0xBA17012C)
+            {
+                Check.True(cells.Count <= 4 && !cells.Contains(0xBA17012Du), $"012C: the short way, not round by 012D ({string.Join(" ", cells.Select(x => (x & 0xFFFF).ToString("X4")))})");
+                Check.True(p.Length < 20, $"012C: {p.Length:F1} m (it was 26)");
+            }
+        }
+    }
+
+    // DreamWeave Thread E74E (2026-11-17), building E74E#14: a ground floor (32 m) and a second floor (37.6 m) up two
+    // pairs of stairs (and a top platform the hunt walked under and circled: OutdoorHuntTests FloorApartCellLeftOut).
+    // A walk to the second floor goes up the stairs. Before, the point at a stair's top (a floor opening, not a
+    // doorway) fell back to the building's origin on the ground floor, so the walk went from the stair's foot back
+    // to the middle of the ground floor and ended under its goal; and small cells' floors had no area (floats at world
+    // coordinates), so 01B2 and the west stairs 01BE and 01C0 read as floorless.
+    private static void RealE74E()
+    {
+        var g = Dats();
+        if (g == null) { Check.True(true, "no dats on this PC: skipped"); return; }
+        var blk = BuildingMap.Load(0xE74E, g.CellDat, g.DungeonLOS);
+        var map = new BuildingMap(null, null);
+        map.Add(blk);
+        var geo = blk.Geo!;
+        var b14 = blk.ByCell[0xE74E01AD];
+        var ground = b14.Doors.Where(d => d.At.Z < 33).ToList();
+        Check.True(ground.Count >= 2, $"E74E#14: its ground floor doors ({ground.Count})");
+        foreach (uint c in new uint[] { 0xE74E01B2, 0xE74E01BE, 0xE74E01C0 })
+            Check.True(geo.TryCellFloorCentre(c, out _, out _, out double z) && z > 34, $"{c & 0xFFFF:X4}: its floor ({z:F1} m)");
+        foreach (uint up in new uint[] { 0xE74E01B1, 0xE74E01A9 })
+        {
+            Check.True(geo.TryCellFloorCentre(up, out double ux, out double uy, out double uz), $"{up & 0xFFFF:X4}: a floor");
+            var to = new Vec(ux, uy, uz);
+            foreach (var door in ground)
+            {
+                var cells = BuildingMap.WalkCells(blk, door.Cell, door.Inner, up, to);
+                Check.False(cells.Contains(0xE74E01AEu) || cells.Contains(0xE74E01ADu), $"{door.Cell & 0xFFFF:X4} to {up & 0xFFFF:X4}: by the stairs, not up through the air under the platform ({string.Join(" ", cells.Select(x => (x & 0xFFFF).ToString("X4")))})");
+                var p = map.Inside(door.Cell, door.Inner, up, to);
+                Check.True(p.Status == OutdoorHunt.PathStatus.Ok && p.Corners.Count > 0, $"{door.Cell & 0xFFFF:X4} to {up & 0xFFFF:X4}: a walk ({p.Status})");
+                // Once on the stairs, never back down to the ground floor.
+                bool climbing = false, backDown = false;
+                foreach (var v in p.Corners)
+                {
+                    if (v.Z >= 33.5) climbing = true;
+                    else if (climbing) backDown = true;
+                }
+                Check.True(climbing && !backDown, $"{door.Cell & 0xFFFF:X4} to {up & 0xFFFF:X4}: up the stairs, not back to the ground floor ({Pts(p.Corners)})");
+                Check.True(p.Length < 35, $"{door.Cell & 0xFFFF:X4} to {up & 0xFFFF:X4}: {p.Length:F1} m");
+            }
+        }
     }
 
     private static void RealHuntHoltburg()

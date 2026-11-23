@@ -41,6 +41,38 @@ internal sealed class DungeonDoorway
     public (double Nx, double Ny) NormalFrom(uint fromCell) => fromCell == CellA ? (Nx, Ny) : (-Nx, -Ny);
 }
 
+/// <summary>What a placed object is to a body on the floor it stands on (DungeonGeometry's placed objects).</summary>
+internal enum PlacedClass
+{
+    /// <summary>In the body band, and nothing else here: walked round.</summary>
+    Obstacle,
+    /// <summary>Its top no more than the step-up (0.60 m) over its floor, with somewhere to stand on it.</summary>
+    StepOver,
+    /// <summary>Walkable faces climbed onto from its floor reaching 1 m and more (stairs, ramps, platforms), or a slab that is a floor the map lacks.</summary>
+    Connector,
+    /// <summary>All of it under the band (under its floor + 0.45 m).</summary>
+    Low,
+    /// <summary>All of it over the band (over its floor + 1.83 m).</summary>
+    Overhead,
+    /// <summary>Nothing of it in the band, though it reaches both under and over it (an arch's beam with no posts).</summary>
+    Clear,
+}
+
+/// <summary>One placed object as the map took it: model, cell, class, whether it went on the map, world box, its floor (L),
+/// whether that floor is the map's, its footprint at L (m2), and where it came from.</summary>
+internal readonly record struct PlacedInfo(uint Setup, uint Cell, PlacedClass Class, bool OnMap,
+                                           double MinX, double MinY, double MinZ, double MaxX, double MaxY, double MaxZ,
+                                           double Floor, bool FloorFound, double FootprintArea, string Source);
+
+/// <summary>Which placed objects go on the map, and the tag their layer gets.</summary>
+internal sealed record PlacedObjectOptions
+{
+    /// <summary>Null: obstacles, step-overs and connectors (whatever is in the body band at its floor).</summary>
+    public Func<PlacedInfo, bool>? Keep { get; init; }
+    /// <summary>Where the objects came from ("dats" for the base layer by default).</summary>
+    public string? Source { get; init; }
+}
+
 internal sealed class DungeonGeometry
 {
     /// <summary>An opening at least this wide joins two cells of one room (a 10 m cell side is
@@ -126,7 +158,7 @@ internal sealed class DungeonGeometry
             if (!IsUpwardFloor(v)) continue;   // the "floor" list holds ceilings too
             if (!g._floors.TryGetValue(cell, out var list)) g._floors[cell] = list = new List<Vector3[]>();
             list.Add(v);
-            g.AddFloorToGrid(v);
+            g.AddFloorToGrid(v, cell);
         }
 
         foreach (var (cell, v) in wallPolys)
@@ -297,6 +329,9 @@ internal sealed class DungeonGeometry
 
     public bool TryGetDoorway(uint a, uint b, out DungeonDoorway door) => _doorways.TryGetValue(EdgeKey(a, b), out door!);
 
+    /// <summary>Every opening paired between two cells (the jump-downs look at them all: a closed ledge is gone from the graph, not from here).</summary>
+    internal IEnumerable<DungeonDoorway> AllDoorways => _doorways.Values;
+
     /// <summary>Openings whose centre is within r (horizontally) of (x, y) and <paramref name="dz"/> of height z.</summary>
     public IEnumerable<DungeonDoorway> DoorwaysNear(double x, double y, double z, double r, double dz = 2.0)
     {
@@ -401,20 +436,25 @@ internal sealed class DungeonGeometry
             }
         }
 
-        // Walls.
+        // Walls (the cells' own and the placed objects' filed under them; an overlay's too).
         double zLo = Math.Min(z0, z1) + WallBandLow, zHi = Math.Max(z0, z1) + WallBandHigh;
-        foreach (uint c in cells)
+        bool Crossed(Dictionary<uint, List<WallSeg>> byCell)
         {
-            if (!_walls.TryGetValue(c, out var list)) continue;
-            foreach (var w in list)
+            foreach (uint c in cells)
             {
-                if (w.ZMax < zLo || w.ZMin > zHi) continue;
-                if (SegmentsCross(x0, y0, x1, y1, w.X0, w.Y0, w.X1, w.Y1)) return false;
-                if (SegmentsCross(x0 + ox, y0 + oy, x1 + ox, y1 + oy, w.X0, w.Y0, w.X1, w.Y1)) return false;
-                if (SegmentsCross(x0 - ox, y0 - oy, x1 - ox, y1 - oy, w.X0, w.Y0, w.X1, w.Y1)) return false;
+                if (!byCell.TryGetValue(c, out var list)) continue;
+                foreach (var w in list)
+                {
+                    if (w.ZMax < zLo || w.ZMin > zHi) continue;
+                    if (SegmentsCross(x0, y0, x1, y1, w.X0, w.Y0, w.X1, w.Y1)) return true;
+                    if (SegmentsCross(x0 + ox, y0 + oy, x1 + ox, y1 + oy, w.X0, w.Y0, w.X1, w.Y1)) return true;
+                    if (SegmentsCross(x0 - ox, y0 - oy, x1 - ox, y1 - oy, w.X0, w.Y0, w.X1, w.Y1)) return true;
+                }
             }
+            return false;
         }
-        return true;
+        if (Crossed(_walls)) return false;
+        return _placedOverlay == null || !Crossed(_placedOverlay.CellWalls);
     }
 
     // ── Clearance from walls ────────────────────────────────────────────────
@@ -446,18 +486,19 @@ internal sealed class DungeonGeometry
         public double Nx, Ny, Nz, Px, Py, Pz;     // unit normal and a point on the plane
         public double MinX, MinY, MaxX, MaxY;
         public bool Walkable;
+        public uint Cell;                          // the cell it is the floor of (a placed object's walls go to it too)
         public double HeightAt(double x, double y) => Pz - (Nx * (x - Px) + Ny * (y - Py)) / Nz;
     }
 
     private static long GridKey(int gx, int gy) => ((long)gx << 32) ^ (uint)gy;
     private static int GridOf(double v) => (int)Math.Floor(v / GridCell);
 
-    private void AddFloorToGrid(Vector3[] v)
+    private void AddFloorToGrid(Vector3[] v, uint cell)
     {
         NewellNormal(v, out double nx, out double ny, out double nz);
         double len = Math.Sqrt(nx * nx + ny * ny + nz * nz);
         if (len < 1e-9 || nz <= 1e-9) return;
-        var f = new FloorPoly { V = v, Nx = nx / len, Ny = ny / len, Nz = nz / len, MinX = double.MaxValue, MinY = double.MaxValue, MaxX = double.MinValue, MaxY = double.MinValue };
+        var f = new FloorPoly { V = v, Cell = cell, Nx = nx / len, Ny = ny / len, Nz = nz / len, MinX = double.MaxValue, MinY = double.MaxValue, MaxX = double.MinValue, MaxY = double.MinValue };
         double sx = 0, sy = 0, sz = 0;
         foreach (var p in v)
         {
@@ -478,15 +519,17 @@ internal sealed class DungeonGeometry
             }
     }
 
-    private void AddWallToGrid(WallSeg w)
+    private void AddWallToGrid(WallSeg w) => AddWallTo(_wallAll, _wallGrid, w);
+
+    private static void AddWallTo(List<WallSeg> all, Dictionary<long, List<int>> grid, WallSeg w)
     {
-        int idx = _wallAll.Count;
-        _wallAll.Add(w);
+        int idx = all.Count;
+        all.Add(w);
         for (int gx = GridOf(Math.Min(w.X0, w.X1)); gx <= GridOf(Math.Max(w.X0, w.X1)); gx++)
             for (int gy = GridOf(Math.Min(w.Y0, w.Y1)); gy <= GridOf(Math.Max(w.Y0, w.Y1)); gy++)
             {
                 long k = GridKey(gx, gy);
-                if (!_wallGrid.TryGetValue(k, out var list)) _wallGrid[k] = list = new List<int>();
+                if (!grid.TryGetValue(k, out var list)) grid[k] = list = new List<int>();
                 list.Add(idx);
             }
     }
@@ -537,6 +580,7 @@ internal sealed class DungeonGeometry
             if (FloorNear(x, y, z)) return 0;   // past the floor's edge: in or behind a wall
             h0 = z;
         }
+        if (InsidePlaced(x, y, h0)) return 0;   // inside an altar or a statue: its middle is far from its sides
         double best = maxR;
         for (int k = 0; k < ProbeDirs && best > 0; k++)
         {
@@ -544,6 +588,371 @@ internal sealed class DungeonGeometry
             best = Math.Min(best, FreeRun(x, y, h0, Math.Cos(a), Math.Sin(a), best, floorKnown));
         }
         return Math.Min(best, WallDistance(x, y, h0 + ClearWallLow, h0 + ClearWallHigh, best));
+    }
+
+    // ── Placed objects (2026-11-18) ─────────────────────────────────────────
+    //
+    // What a dungeon's cells place (an altar, a statue, a pillar: the EnvCells' stabs) isn't in the cells'
+    // walls and floors, so walks went through them. Thread 0x000A ("It also still doesn't see world
+    // objects such as this altar it tried to run through"): an explore leg ran straight through a 1 m altar
+    // in a hall, the character stuck there in a fight and died, four times in one run. Thread 0x00C1: a
+    // room's middle (a look-in point) inside a 9 x 9 m statue.
+    //
+    // Each object is a solid model (PlacedSolid: 0.1 m columns, each with the heights where it is solid),
+    // measured against a body: from the feet + PlacedBandLow (the map's step) to the top of the human setup's
+    // upper sphere (PlacedBandHigh, 1.83 m). At the floor it stands on (L) that gives its footprint. The
+    // footprint's outline is walls from L + 0.45 to L + 1.83 (within the object's own height): every clearance
+    // measure sees them, so the corner put into a leg brushing a wall, the straightener, the walk round a hole
+    // and the stuck detours go round. They are filed under every cell whose floor the footprint covers, so a
+    // straight line over the next cell sees an object reaching into it. A point is
+    // inside an object when, for a walker on the floor there, something of it is between that floor + 0.45 and
+    // + 1.83: a table's top counts all over (not only at its legs), a rail at 0.8 m closes, an arch's beam
+    // overhead and a block whose top is the floor walked on (a door sill's) don't, nor does anything on a floor
+    // 4 m up or down. An open plane (a fence, a web) is its line, never a filled area.
+    //
+    // Classes, at L: LOW (all of it under the band), OVERHEAD (all of it over), CLEAR (nothing of it in the
+    // band either way: an arch with no posts), STEP-OVER (top no more than the step-up, 0.60 m, over L, with a
+    // top to stand on), CONNECTOR (walkable faces a body could climb onto, 0.6 m at most at a time, from L and
+    // across other objects, reaching 1 m and more over L: stairs, ramps, platforms; or a slab that is a floor
+    // the map lacks), OBSTACLE (the rest). Only what is in the band at L goes on the map. Step-overs and
+    // connectors still do in this wave (the 0.60 m step-up isn't proven in game; taking a ramp's sides out was
+    // measured wrong in 0x0174), but they are tagged, for a map that leaves them out (AddPlacedObjects' options).
+    //
+    // The dats' objects sit in the base layer. A second, replaceable layer (objects found at run time, tagged
+    // with where they came from) joins it through SetPlacedOverlay and leaves through ClearPlacedOverlay, with
+    // walls of its own, without the base being built again.
+
+    /// <summary>The body a placed object is measured against, over the floor a walker stands on: from the map's
+    /// own step (ClearWallLow) to the top of the human setup 0x02000001's upper sphere (1.35 + 0.48).</summary>
+    internal const double PlacedBandLow = 0.45, PlacedBandHigh = 1.83;
+    /// <summary>The human setup's step-up height: an object no taller over its floor, with a top to stand on, is a step-over.</summary>
+    internal const double StepOverTop = 0.60;
+    // Connector chain: a step up at most this high between walkable faces at most this far apart (a step down
+    // any small drop), reaching at least this high over the object's floor.
+    private const double ConnectorRise = 0.6, ConnectorGap = 0.3, ConnectorDrop = 1.5, ConnectorReach = 1.0;
+    // A slab: walkable faces this big (m2), raised this far over its floor (or no floor under it), and the map
+    // has no floor within SlabFloorNear of most of them.
+    private const double SlabArea = 1.0, SlabRaised = 1.0, SlabFloorNear = 0.3;
+    // The floor an object stands on is looked for this far over and under its lowest point.
+    private const double PlacedFloorSearchUp = 2.0, PlacedFloorSearchDown = 3.0;
+    // A cell's floor this near an object's floor, under its footprint, gets the object's walls too.
+    private const double PlacedCellFloorBand = 2.0;
+
+    private sealed class PlacedObj
+    {
+        public uint Setup, Cell;
+        public PlacedShape Shape = null!;
+        public PlacedBand Band = null!;
+        public double Floor, ReachHigh = double.NegativeInfinity;
+        public bool FloorFound, OnMap;
+        public PlacedClass Class;
+        public string Source = "";
+
+        public PlacedInfo Info => new(Setup, Cell, Class, OnMap, Shape.MinX, Shape.MinY, Shape.MinZ, Shape.MaxX, Shape.MaxY, Shape.MaxZ,
+                                      Floor, FloorFound, Band.Area, Source);
+    }
+
+    // One list of placed objects with its grid. The base layer's walls are the map's walls; an overlay keeps its own.
+    private sealed class PlacedLayer
+    {
+        public readonly string Source;
+        public readonly bool OwnWalls;
+        public readonly List<PlacedObj> All = new();
+        public readonly List<PlacedObj> OnMap = new();
+        public readonly Dictionary<long, List<int>> Grid = new();
+        public readonly List<WallSeg> Walls = new();
+        public readonly Dictionary<long, List<int>> WallGrid = new();
+        public readonly Dictionary<uint, List<WallSeg>> CellWalls = new();
+        public PlacedLayer(string source, bool ownWalls) { Source = source; OwnWalls = ownWalls; }
+    }
+
+    private readonly PlacedLayer _placedBase = new("dats", ownWalls: false);
+    private PlacedLayer? _placedOverlay;
+
+    /// <summary>How many placed objects stand in the way at body height (on the map, both layers).</summary>
+    public int PlacedCount => _placedBase.OnMap.Count + (_placedOverlay?.OnMap.Count ?? 0);
+
+    /// <summary>Every placed object given to the map (both layers), with its class, whether it went on the map, its box and floor.</summary>
+    internal IReadOnlyList<PlacedInfo> PlacedObjects
+    {
+        get
+        {
+            var list = new List<PlacedInfo>(_placedBase.All.Count + (_placedOverlay?.All.Count ?? 0));
+            foreach (var layer in PlacedLayers())
+                foreach (var p in layer.All) list.Add(p.Info);
+            return list;
+        }
+    }
+
+    /// <summary>
+    /// Adds the objects the cells place, each as its triangles in world metres (three vertices a triangle, closed or
+    /// open), to the base layer: each one's footprint in the body band at its floor becomes walls, and inside it is no
+    /// room. What isn't in the band there (or what <paramref name="options"/> leaves out) goes on the list only.
+    /// Returns how many went on the map.
+    /// </summary>
+    internal int AddPlacedObjects(IEnumerable<(uint SetupId, uint CellId, Vector3[] Triangles)> objects, PlacedObjectOptions? options = null)
+        => AddPlacedTo(_placedBase, objects, options);
+
+    /// <summary>
+    /// Replaces the overlay layer (objects found at run time) with <paramref name="objects"/>, classified and walled
+    /// the same way, its walls kept apart from the map's so it can go again. Returns how many went on the map.
+    /// </summary>
+    internal int SetPlacedOverlay(IEnumerable<(uint SetupId, uint CellId, Vector3[] Triangles)> objects, PlacedObjectOptions? options = null)
+    {
+        var layer = new PlacedLayer(options?.Source ?? "overlay", ownWalls: true);
+        int n = AddPlacedTo(layer, objects, options);
+        _placedOverlay = layer;
+        InvalidateClearance();
+        return n;
+    }
+
+    /// <summary>Drops the overlay layer: the map is the cells and the dats' objects again.</summary>
+    internal void ClearPlacedOverlay()
+    {
+        if (_placedOverlay == null) return;
+        _placedOverlay = null;
+        InvalidateClearance();
+    }
+
+    /// <summary>Forgets every clearance worked out so far (after the map's walls or objects change).</summary>
+    internal void InvalidateClearance() => _clearanceMemo.Clear();
+
+    private static bool KeepByDefault(PlacedInfo p) => p.Class is PlacedClass.Obstacle or PlacedClass.StepOver or PlacedClass.Connector;
+
+    private int AddPlacedTo(PlacedLayer layer, IEnumerable<(uint SetupId, uint CellId, Vector3[] Triangles)> objects, PlacedObjectOptions? options)
+    {
+        var keep = options?.Keep ?? KeepByDefault;
+        string source = options?.Source ?? layer.Source;
+        var batch = new List<PlacedObj>();
+        foreach (var (setup, cell, tris) in objects)
+        {
+            var shape = PlacedSolid.Place(setup, tris);
+            if (shape == null) continue;
+            // The floor it stands on: under its middle, near its lowest point (none there: its lowest point).
+            // (A statue's mesh can reach 1 m and more under the floor: Thread 0x00C1's 020014A3 1.1 m.)
+            bool found = FloorUnder((shape.MinX + shape.MaxX) / 2, (shape.MinY + shape.MaxY) / 2, shape.MinZ, PlacedFloorSearchUp, PlacedFloorSearchDown, out double f, out _);
+            double floor = found ? f : shape.MinZ;
+            batch.Add(new PlacedObj
+            {
+                Setup = setup, Cell = cell, Shape = shape, Floor = floor, FloorFound = found, Source = source,
+                Band = shape.Band(floor + PlacedBandLow, floor + PlacedBandHigh),
+            });
+        }
+        ReachUp(batch);
+        int added = 0;
+        foreach (var p in batch)
+        {
+            p.Class = Classify(p);
+            layer.All.Add(p);
+            if (p.Band.Empty || !keep(p.Info)) continue;
+            p.OnMap = true;
+            PutOnMap(layer, p);
+            added++;
+        }
+        if (added > 0) InvalidateClearance();
+        return added;
+    }
+
+    private PlacedClass Classify(PlacedObj p)
+    {
+        double top = p.Shape.MaxZ - p.Floor, bottom = p.Shape.MinZ - p.Floor;
+        if (p.Band.Empty)
+        {
+            if (IsSlab(p, bottom)) return PlacedClass.Connector;
+            return top < PlacedBandLow ? PlacedClass.Low : bottom > PlacedBandHigh ? PlacedClass.Overhead : PlacedClass.Clear;
+        }
+        if (p.ReachHigh >= ConnectorReach) return PlacedClass.Connector;
+        if (top <= StepOverTop && p.Shape.Model.WalkableTop) return PlacedClass.StepOver;
+        return PlacedClass.Obstacle;
+    }
+
+    // A slab that is a floor the map doesn't have (stepping stones over a pit, a raised platform's floor plate).
+    private bool IsSlab(PlacedObj p, double bottom)
+    {
+        if (p.FloorFound && bottom <= SlabRaised) return false;
+        var m = p.Shape.Model;
+        double area = 0, missing = 0;
+        for (int k = 0; k < m.WalkFaceCount; k++)
+        {
+            double a = m.WalkFaceArea(k);
+            area += a;
+            p.Shape.WalkFaceCentre(k, out double x, out double y, out double z);
+            if (!TryFloorHeight(x, y, z, SlabFloorNear, out _)) missing += a;
+        }
+        return area >= SlabArea && missing >= area / 2;
+    }
+
+    // The connector chain: walkable faces reached from each object's floor, a step up at a time, across every object
+    // of the batch; each object's highest reached face over its own floor.
+    private static void ReachUp(List<PlacedObj> batch)
+    {
+        var faces = new List<(int Obj, double MinX, double MinY, double MaxX, double MaxY, double Z0, double Z1)>();
+        for (int o = 0; o < batch.Count; o++)
+        {
+            var s = batch[o].Shape;
+            for (int k = 0; k < s.Model.WalkFaceCount; k++)
+            {
+                s.WalkFace(k, out double x0, out double y0, out double x1, out double y1, out double z0, out double z1);
+                faces.Add((o, x0, y0, x1, y1, z0, z1));
+            }
+        }
+        if (faces.Count == 0) return;
+        const double bucket = 2.0;
+        static int B(double v) => (int)Math.Floor(v / bucket);
+        var grid = new Dictionary<long, List<int>>();
+        for (int f = 0; f < faces.Count; f++)
+            for (int gx = B(faces[f].MinX); gx <= B(faces[f].MaxX); gx++)
+                for (int gy = B(faces[f].MinY); gy <= B(faces[f].MaxY); gy++)
+                {
+                    long key = GridKey(gx, gy);
+                    if (!grid.TryGetValue(key, out var l)) grid[key] = l = new List<int>();
+                    l.Add(f);
+                }
+        var reached = new bool[faces.Count];
+        var queue = new Queue<int>();
+        for (int f = 0; f < faces.Count; f++)
+        {
+            double fl = batch[faces[f].Obj].Floor;
+            if (faces[f].Z0 - fl <= ConnectorRise && faces[f].Z1 - fl >= -ConnectorRise) { reached[f] = true; queue.Enqueue(f); }
+        }
+        while (queue.Count > 0)
+        {
+            var f = faces[queue.Dequeue()];
+            for (int gx = B(f.MinX - ConnectorGap); gx <= B(f.MaxX + ConnectorGap); gx++)
+                for (int gy = B(f.MinY - ConnectorGap); gy <= B(f.MaxY + ConnectorGap); gy++)
+                {
+                    if (!grid.TryGetValue(GridKey(gx, gy), out var l)) continue;
+                    foreach (int g in l)
+                    {
+                        if (reached[g]) continue;
+                        var h = faces[g];
+                        if (h.MinX > f.MaxX + ConnectorGap || h.MaxX < f.MinX - ConnectorGap || h.MinY > f.MaxY + ConnectorGap || h.MaxY < f.MinY - ConnectorGap) continue;
+                        if (h.Z0 > f.Z1 + ConnectorRise || h.Z1 < f.Z0 - ConnectorDrop) continue;
+                        reached[g] = true;
+                        queue.Enqueue(g);
+                    }
+                }
+        }
+        for (int f = 0; f < faces.Count; f++)
+        {
+            if (!reached[f]) continue;
+            var p = batch[faces[f].Obj];
+            p.ReachHigh = Math.Max(p.ReachHigh, faces[f].Z1 - p.Floor);
+        }
+    }
+
+    private void PutOnMap(PlacedLayer layer, PlacedObj p)
+    {
+        var s = p.Shape;
+        int idx = layer.OnMap.Count;
+        layer.OnMap.Add(p);
+        for (int gx = GridOf(s.MinX - 0.1); gx <= GridOf(s.MaxX + 0.1); gx++)
+            for (int gy = GridOf(s.MinY - 0.1); gy <= GridOf(s.MaxY + 0.1); gy++)
+            {
+                long key = GridKey(gx, gy);
+                if (!layer.Grid.TryGetValue(key, out var list)) layer.Grid[key] = list = new List<int>();
+                list.Add(idx);
+            }
+        var cells = CellsUnder(p);
+        // The band at its floor, no higher or lower than the object itself: a walker on the floor over a block under a
+        // door sill (E74E: its top the floor walked on, 1.2 m over its own) is above its sides, not beside them.
+        double zLo = Math.Max(p.Floor + PlacedBandLow, s.MinZ), zHi = Math.Min(p.Floor + PlacedBandHigh, s.MaxZ);
+        var byCell = layer.OwnWalls ? layer.CellWalls : _walls;
+        var o = p.Band.Outline;
+        for (int k = 0; k + 3 < o.Length; k += 4)
+        {
+            s.ToWorld(o[k], o[k + 1], out double x0, out double y0);
+            s.ToWorld(o[k + 2], o[k + 3], out double x1, out double y1);
+            var w = new WallSeg(x0, y0, x1, y1, zLo, zHi);
+            if (layer.OwnWalls) AddWallTo(layer.Walls, layer.WallGrid, w);
+            else AddWallToGrid(w);
+            foreach (uint c in cells)
+            {
+                if (!byCell.TryGetValue(c, out var wl)) byCell[c] = wl = new List<WallSeg>();
+                wl.Add(w);
+            }
+        }
+    }
+
+    // The object's own cell, and every cell with a floor under its footprint near its floor's height.
+    private List<uint> CellsUnder(PlacedObj p)
+    {
+        var cells = new List<uint> { p.Cell };
+        var s = p.Shape;
+        var tested = new HashSet<int>();
+        double[]? centres = null;
+        for (int gx = GridOf(s.MinX); gx <= GridOf(s.MaxX); gx++)
+            for (int gy = GridOf(s.MinY); gy <= GridOf(s.MaxY); gy++)
+            {
+                if (!_floorGrid.TryGetValue(GridKey(gx, gy), out var list)) continue;
+                foreach (int fi in list)
+                {
+                    var f = _floorAll[fi];
+                    if (!tested.Add(fi) || cells.Contains(f.Cell)) continue;
+                    if (f.MaxX < s.MinX || f.MinX > s.MaxX || f.MaxY < s.MinY || f.MinY > s.MaxY) continue;
+                    if (centres == null)
+                    {
+                        centres = new double[p.Band.Cells.Length * 2];
+                        for (int k = 0; k < p.Band.Cells.Length; k++) s.CellCentre(p.Band.Cells[k], out centres[2 * k], out centres[2 * k + 1]);
+                    }
+                    for (int k = 0; k < centres.Length; k += 2)
+                    {
+                        double x = centres[k], y = centres[k + 1];
+                        if (x < f.MinX || x > f.MaxX || y < f.MinY || y > f.MaxY || !InsidePolygon2D(f.V, x, y)) continue;
+                        if (Math.Abs(f.HeightAt(x, y) - p.Floor) > PlacedCellFloorBand) continue;
+                        cells.Add(f.Cell);
+                        break;
+                    }
+                }
+            }
+        return cells;
+    }
+
+    /// <summary>True when a walker at (x, y), on a floor at <paramref name="floorZ"/>, is inside a placed object:
+    /// something of one there between that floor + <see cref="PlacedBandLow"/> and + <see cref="PlacedBandHigh"/>.</summary>
+    internal bool InsidePlaced(double x, double y, double floorZ)
+        => InsideLayer(_placedBase, x, y, floorZ, null) || (_placedOverlay != null && InsideLayer(_placedOverlay, x, y, floorZ, null));
+
+    /// <summary>InsidePlaced, counting only the objects whose class <paramref name="which"/> takes (a step-over, a connector).</summary>
+    internal bool InsidePlaced(double x, double y, double floorZ, Func<PlacedClass, bool> which)
+        => InsideLayer(_placedBase, x, y, floorZ, which) || (_placedOverlay != null && InsideLayer(_placedOverlay, x, y, floorZ, which));
+
+    /// <summary>
+    /// A spot at height <paramref name="z"/> (where a character stands, a recorded waypoint) is up on something placed: it
+    /// reads as inside one for a walker on the map's floor under it (<paramref name="floorZ"/>), and not at its own height,
+    /// which is over that object's top (a dais, a ramp, a platform). The map has no floor on an object's top, so every test
+    /// from the floor under such a spot takes it for one inside the object.
+    /// </summary>
+    internal bool OnTopOfPlaced(double x, double y, double z, double floorZ)
+        => z > floorZ && InsidePlaced(x, y, floorZ) && !InsidePlaced(x, y, z);
+
+    private static bool InsideLayer(PlacedLayer layer, double x, double y, double h, Func<PlacedClass, bool>? which = null)
+    {
+        if (layer.OnMap.Count == 0 || !layer.Grid.TryGetValue(GridKey(GridOf(x), GridOf(y)), out var list)) return false;
+        double lo = h + PlacedBandLow, hi = h + PlacedBandHigh;
+        foreach (int i in list)
+            if ((which == null || which(layer.OnMap[i].Class)) && layer.OnMap[i].Shape.SolidIn(x, y, lo, hi)) return true;
+        return false;
+    }
+
+    /// <summary>The placed objects on the map near (x, y) within r, for offline inspection: model, cell, box, floor.</summary>
+    internal List<(uint Setup, uint Cell, double MinX, double MinY, double MaxX, double MaxY, double Floor)> PlacedNear(double x, double y, double r)
+    {
+        var outList = new List<(uint, uint, double, double, double, double, double)>();
+        foreach (var layer in PlacedLayers())
+            foreach (var p in layer.OnMap)
+            {
+                var s = p.Shape;
+                if (s.MaxX >= x - r && s.MinX <= x + r && s.MaxY >= y - r && s.MinY <= y + r)
+                    outList.Add((p.Setup, p.Cell, s.MinX, s.MinY, s.MaxX, s.MaxY, p.Floor));
+            }
+        return outList;
+    }
+
+    private IEnumerable<PlacedLayer> PlacedLayers()
+    {
+        yield return _placedBase;
+        if (_placedOverlay != null) yield return _placedOverlay;
     }
 
     // Clearance is asked again and again for the same spots (a patrol passes a doorway several
@@ -728,16 +1137,27 @@ internal sealed class DungeonGeometry
     private bool WallHit(double x0, double y0, double x1, double y1, double zLo, double zHi, out double t)
     {
         t = 1;
+        bool hit = WallHitIn(_wallAll, _wallGrid, x0, y0, x1, y1, zLo, zHi, ref t);
+        if (_placedOverlay is { Walls.Count: > 0 } ov) hit |= WallHitIn(ov.Walls, ov.WallGrid, x0, y0, x1, y1, zLo, zHi, ref t);
+        return hit;
+    }
+
+    private static bool WallHitIn(List<WallSeg> all, Dictionary<long, List<int>> grid, double x0, double y0, double x1, double y1, double zLo, double zHi, ref double t)
+    {
         bool hit = false;
+        double bx0 = Math.Min(x0, x1), bx1 = Math.Max(x0, x1), by0 = Math.Min(y0, y1), by1 = Math.Max(y0, y1);
+        var span = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(all);
         // Every bucket the step touches (a wall is in every bucket its own box touches).
-        for (int gx = GridOf(Math.Min(x0, x1)); gx <= GridOf(Math.Max(x0, x1)); gx++)
-            for (int gy = GridOf(Math.Min(y0, y1)); gy <= GridOf(Math.Max(y0, y1)); gy++)
+        for (int gx = GridOf(bx0); gx <= GridOf(bx1); gx++)
+            for (int gy = GridOf(by0); gy <= GridOf(by1); gy++)
             {
-                if (!_wallGrid.TryGetValue(GridKey(gx, gy), out var list)) continue;
+                if (!grid.TryGetValue(GridKey(gx, gy), out var list)) continue;
                 foreach (int i in list)
                 {
-                    var w = _wallAll[i];
+                    ref readonly var w = ref span[i];
                     if (w.ZMax < zLo || w.ZMin > zHi) continue;
+                    // Boxes apart: no crossing (a 0.1 m probe step against a 4 m bucket's walls, mostly).
+                    if ((w.X0 < bx0 && w.X1 < bx0) || (w.X0 > bx1 && w.X1 > bx1) || (w.Y0 < by0 && w.Y1 < by0) || (w.Y0 > by1 && w.Y1 > by1)) continue;
                     if (!SegmentParam(x0, y0, x1, y1, w.X0, w.Y0, w.X1, w.Y1, out double s) || s >= t) continue;
                     var (lo, hi) = w.ZRangeAt(x0 + (x1 - x0) * s, y0 + (y1 - y0) * s);
                     if (hi < zLo || lo > zHi) continue;
@@ -766,11 +1186,14 @@ internal sealed class DungeonGeometry
         foreach (var v in list)
         {
             if (v.Length < 3) continue;
-            double area = 0, cx = 0, cy = 0, cz = 0;
+            // In doubles, from the first corner: a.X * b.Y in floats at world coordinates (44388 * 15006)
+            // keeps about 40 m² of 6.7e8, so a small cell's floor came out with no area and the cell read
+            // as floorless (building E74E#14, 2026-11-17: 01B2, the west stairs 01BE and 01C0, its doorway cells).
+            double area = 0, cx = 0, cy = 0, cz = 0, ox = v[0].X, oy = v[0].Y;
             for (int i = 0; i < v.Length; i++)
             {
                 var a = v[i]; var b = v[(i + 1) % v.Length];
-                area += a.X * b.Y - b.X * a.Y;
+                area += (a.X - ox) * (b.Y - oy) - (b.X - ox) * (a.Y - oy);
                 cx += a.X; cy += a.Y; cz += a.Z;
             }
             area = Math.Abs(area) * 0.5;
@@ -785,35 +1208,50 @@ internal sealed class DungeonGeometry
     internal List<(double X0, double Y0, double X1, double Y1, double ZMin, double ZMax, double Dist)> WallsNear(double x, double y, double r)
     {
         var res = new List<(double, double, double, double, double, double, double)>();
-        var seen = new HashSet<int>();
-        for (int gx = GridOf(x - r); gx <= GridOf(x + r); gx++)
-            for (int gy = GridOf(y - r); gy <= GridOf(y + r); gy++)
-            {
-                if (!_wallGrid.TryGetValue(GridKey(gx, gy), out var list)) continue;
-                foreach (int i in list)
+        void From(List<WallSeg> all, Dictionary<long, List<int>> grid)
+        {
+            var seen = new HashSet<int>();
+            for (int gx = GridOf(x - r); gx <= GridOf(x + r); gx++)
+                for (int gy = GridOf(y - r); gy <= GridOf(y + r); gy++)
                 {
-                    if (!seen.Add(i)) continue;
-                    var w = _wallAll[i];
-                    double d = PointSegDist(x, y, w.X0, w.Y0, w.X1, w.Y1, out double cx, out double cy);
-                    var (lo, hi) = w.ZRangeAt(cx, cy);   // its height range at the nearest point
-                    if (d <= r) res.Add((w.X0, w.Y0, w.X1, w.Y1, lo, hi, d));
+                    if (!grid.TryGetValue(GridKey(gx, gy), out var list)) continue;
+                    foreach (int i in list)
+                    {
+                        if (!seen.Add(i)) continue;
+                        var w = all[i];
+                        double d = PointSegDist(x, y, w.X0, w.Y0, w.X1, w.Y1, out double cx, out double cy);
+                        var (lo, hi) = w.ZRangeAt(cx, cy);   // its height range at the nearest point
+                        if (d <= r) res.Add((w.X0, w.Y0, w.X1, w.Y1, lo, hi, d));
+                    }
                 }
-            }
+        }
+        From(_wallAll, _wallGrid);
+        if (_placedOverlay != null) From(_placedOverlay.Walls, _placedOverlay.WallGrid);
         return res;
     }
 
     // Exact distance from (x, y) to the nearest wall reaching into zLo..zHi, up to maxR.
     private double WallDistance(double x, double y, double zLo, double zHi, double maxR)
     {
+        double best = WallDistanceIn(_wallAll, _wallGrid, x, y, zLo, zHi, maxR);
+        if (_placedOverlay is { Walls.Count: > 0 } ov) best = WallDistanceIn(ov.Walls, ov.WallGrid, x, y, zLo, zHi, best);
+        return best;
+    }
+
+    private static double WallDistanceIn(List<WallSeg> all, Dictionary<long, List<int>> grid, double x, double y, double zLo, double zHi, double maxR)
+    {
         double best = maxR;
+        var span = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(all);
         for (int gx = GridOf(x - maxR); gx <= GridOf(x + maxR); gx++)
             for (int gy = GridOf(y - maxR); gy <= GridOf(y + maxR); gy++)
             {
-                if (!_wallGrid.TryGetValue(GridKey(gx, gy), out var list)) continue;
+                if (!grid.TryGetValue(GridKey(gx, gy), out var list)) continue;
                 foreach (int i in list)
                 {
-                    var w = _wallAll[i];
+                    ref readonly var w = ref span[i];
                     if (w.ZMax < zLo || w.ZMin > zHi) continue;
+                    // Its box farther off than the best so far: no nearer point on it.
+                    if ((w.X0 < x - best && w.X1 < x - best) || (w.X0 > x + best && w.X1 > x + best) || (w.Y0 < y - best && w.Y1 < y - best) || (w.Y0 > y + best && w.Y1 > y + best)) continue;
                     double d = PointSegDist(x, y, w.X0, w.Y0, w.X1, w.Y1, out double cx, out double cy);
                     if (d >= best) continue;
                     var (lo, hi) = w.ZRangeAt(cx, cy);

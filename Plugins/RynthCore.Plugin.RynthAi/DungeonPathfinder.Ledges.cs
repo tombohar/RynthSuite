@@ -37,7 +37,7 @@ internal static partial class DungeonPathfinder
     // ... at these heights from the opening's lowest vertex (a floor 6 m below a ledge's opening, say).
     private static readonly double[] LedgeZRefs = { 0, 3, -3, 6, -6, 12, -12 };
     // ... and, for a cell with no floor there, below the opening only.
-    private static readonly double[] LedgeDownRefs = { 0, -3, -6, -9, -12, -18 };
+    private static readonly double[] LedgeDownRefs = { 0, -3, -6, -9, -12, -15, -18 };
 
     /// <summary>What closing the ledges did in the last dungeon (one line, for the build log), or null.</summary>
     internal static string? LedgeNote;
@@ -49,20 +49,30 @@ internal static partial class DungeonPathfinder
     {
         var list = new List<DungeonLedge>();
         var seen = new HashSet<ulong>();
+        double lowest = LowestLook(graph);
         foreach (var n in graph.Values)
             foreach (uint nb in n.Neighbors)
             {
                 if (!graph.ContainsKey(nb) || !seen.Add(EdgeKey(n.CellId, nb))) continue;
                 if (!geo.TryGetDoorway(n.CellId, nb, out var d)) continue;
                 var (nx, ny) = d.NormalFrom(n.CellId);   // out of n, into nb
-                double? ha = FloorInside(geo, n.CellId, d, -nx, -ny), hb = FloorInside(geo, nb, d, nx, ny);
+                double? ha = FloorInside(geo, n.CellId, d, -nx, -ny, lowest), hb = FloorInside(geo, nb, d, nx, ny, lowest);
                 if (ha is not { } a || hb is not { } b || Math.Abs(a - b) <= LedgeMeters) continue;
                 list.Add(a > b ? new DungeonLedge(n.CellId, nb, a - b, d.X, d.Y, d.Z) : new DungeonLedge(nb, n.CellId, b - a, d.X, d.Y, d.Z));
             }
         return list;
     }
 
-    private static double? FloorInside(DungeonGeometry geo, uint cell, DungeonDoorway d, double ux, double uy)
+    /// <summary>Under every cell of the graph: as deep as a look for a floor under an opening goes.</summary>
+    internal static double LowestLook(Dictionary<uint, DungeonNavNode> graph)
+        => graph.Count == 0 ? 0 : graph.Values.Min(n => (double)n.Z) - 2 * JumpDownStep;
+
+    // The floor just inside the opening on the cell's side, its own or (none) any under it, looked for as
+    // deep as `lowest` (NaN: the LedgeDownRefs' 18 m). It went no deeper than 18 m (+1.5) before 2026-11-18:
+    // Thread 0x000A's hall has a 30 x 20 m hole in its middle down to a floor 24 m below, no ledge was seen
+    // round it, and its six floorless cells were walked across ("It tries to navigate over an opening
+    // in the floor which is impossible").
+    private static double? FloorInside(DungeonGeometry geo, uint cell, DungeonDoorway d, double ux, double uy, double lowest = double.NaN)
     {
         foreach (double inset in LedgeInsets)
         {
@@ -75,20 +85,38 @@ internal static partial class DungeonPathfinder
         // 0x039B's corridor at -6 opens through 0143 into a round room whose floor, at -12, is its other
         // cells'): the floor UNDER that side, whichever cell it is. Only under it: a level above is no
         // floor to land on (Tiny Hive's floorless tube cells found the next level's floor 5 m up).
+        // Each height looked at covers LedgeDownBand either side, so together they leave no gap (at
+        // 0.6 m round heights 3 m apart, a floor 9.7 m down was between two: Thread 0x0169's shaft, whose
+        // cave floor slopes from -9 to -12, had two of its eight openings found as no ledge).
         foreach (double inset in LedgeInsets)
         {
             double x = d.X + ux * inset, y = d.Y + uy * inset;
             foreach (double dz in LedgeDownRefs)
-                if (geo.TryFloorHeight(x, y, d.Z + dz, 0.6, out double h) && h <= d.Z + 0.6) return h;
+                if (geo.TryFloorHeight(x, y, d.Z + dz, LedgeDownBand, out double h) && h <= d.Z + 0.6) return h;
+        }
+        if (double.IsNaN(lowest)) return null;
+        // Nothing within 18 m at any inset: deeper (only then, so the floors found before are found as before).
+        foreach (double inset in LedgeInsets)
+        {
+            double x = d.X + ux * inset, y = d.Y + uy * inset;
+            for (double z = d.Z + LedgeDownRefs[^1] - JumpDownStep; z >= lowest; z -= JumpDownStep)
+                if (geo.TryFloorHeight(x, y, z, LedgeDownBand, out double h) && h <= d.Z + 0.6) return h;
         }
         return null;
     }
 
+    /// <summary>Half the 3 m between two LedgeDownRefs: every height below the opening is looked at.</summary>
+    private const double LedgeDownBand = 1.5;
+
     /// <summary>
     /// Closes each ledge in <paramref name="graph"/> (both ways) unless that leaves its two cells with no
     /// other way between them; those are returned (the only way on). The graph is changed in place.
+    /// With <paramref name="hasFloor"/>, a ledge into air is closed even then: when nothing it alone
+    /// leads to has a floor of its own (Thread 0x0169's shaft, four open-air cells over a cave), it
+    /// leads nowhere to walk, and keeping it open had the walks step off into the shaft.
     /// </summary>
-    internal static List<DungeonLedge> CloseLedges(Dictionary<uint, DungeonNavNode> graph, IReadOnlyList<DungeonLedge> ledges, out int closed)
+    internal static List<DungeonLedge> CloseLedges(Dictionary<uint, DungeonNavNode> graph, IReadOnlyList<DungeonLedge> ledges, out int closed,
+                                                   Func<uint, bool>? hasFloor = null)
     {
         closed = 0;
         var kept = new List<DungeonLedge>();
@@ -99,12 +127,28 @@ internal static partial class DungeonPathfinder
             int loLinks = lo.Neighbors.RemoveAll(c => c == l.High);
             if (hiLinks + loLinks == 0) continue;
             if (Linked(graph, l.High, l.Low)) { closed++; continue; }
+            if (hasFloor != null && !Walked(graph, l.Low).Any(hasFloor)) { closed++; continue; }   // only air beyond it
             // The only way between them: put it back.
             for (int i = 0; i < Math.Max(1, hiLinks); i++) hi.Neighbors.Add(l.Low);
             for (int i = 0; i < Math.Max(1, loLinks); i++) lo.Neighbors.Add(l.High);
             kept.Add(l);
         }
         return kept;
+    }
+
+    // Every cell a walk (no drop edges) reaches from a, a included.
+    private static HashSet<uint> Walked(Dictionary<uint, DungeonNavNode> graph, uint a)
+    {
+        var seen = new HashSet<uint> { a };
+        var queue = new Queue<uint>();
+        queue.Enqueue(a);
+        while (queue.Count > 0)
+        {
+            if (!graph.TryGetValue(queue.Dequeue(), out var n)) continue;
+            foreach (uint nb in n.Neighbors)
+                if (graph.TryGetValue(nb, out var o) && !IsDropEdge(n, o) && seen.Add(nb)) queue.Enqueue(nb);
+        }
+        return seen;
     }
 
     // a and b joined by a walk (no drop edges).
@@ -132,7 +176,7 @@ internal static partial class DungeonPathfinder
             var ledges = FindLedges(graph, geo);
             LedgeNoteLandblock = landblockKey;
             if (ledges.Count == 0) { LedgeNote = null; return; }
-            var kept = CloseLedges(graph, ledges, out int closed);
+            var kept = CloseLedges(graph, ledges, out int closed, geo.HasFloor);
             var inv = CultureInfo.InvariantCulture;
             LedgeNote = string.Format(inv, "{0} ledge(s) (floors over {1:0.#} m apart across an opening): {2} closed, walked round",
                 ledges.Count, LedgeMeters, closed)

@@ -65,7 +65,37 @@ public static class VTankLootWriter
             sb.Append("0\n"); // terminator
         }
 
+        // Last: VTank skips a block it doesn't know by its length (LootPerDay).
+        AppendPerDayBlock(sb, profile);
+
         return sb.ToString();
+    }
+
+    /// <summary>The RynthKeepPerDay block (LootPerDay), when any Keep # rule has the option on.</summary>
+    private static void AppendPerDayBlock(StringBuilder sb, VTankLootProfile profile)
+    {
+        var data = new List<string>();
+        for (int i = 0; i < profile.Rules.Count; i++)
+        {
+            VTankLootRule r = profile.Rules[i];
+            int hours = Loot.LootPerDay.Clamp(r.PerDayHours);
+            if (r.Action != VTankLootAction.KeepUpTo || hours == 0) continue;
+            data.Add(i.ToString(CultureInfo.InvariantCulture));
+            data.Add(r.Name ?? string.Empty);
+            data.Add(hours.ToString(CultureInfo.InvariantCulture));
+        }
+        if (data.Count == 0) return;
+        data.Insert(0, (data.Count / 3).ToString(CultureInfo.InvariantCulture));
+        data.Insert(0, Loot.LootPerDay.UtlBlockFormat);
+
+        // VTank reads the block's length in characters, each line ending in CRLF as its own
+        // writer counts them. A file saved with LF is shorter than that; as the last block, the
+        // skip then stops at the end of the file, which VTank's reader allows.
+        int length = 0;
+        foreach (string line in data) length += line.Length + 2;
+        sb.Append(Loot.LootPerDay.UtlBlockName).Append('\n');
+        sb.Append(length.ToString(CultureInfo.InvariantCulture)).Append('\n');
+        foreach (string line in data) sb.Append(line).Append('\n');
     }
 
     private static string BuildInfoLine(VTankLootRule rule)

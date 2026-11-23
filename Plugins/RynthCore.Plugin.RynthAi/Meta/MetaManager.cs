@@ -384,6 +384,7 @@ internal sealed partial class MetaManager
         engine.LastChestLooted = _lastChestLooted;
         engine.DunExploreStatus = _dunExploreStatus;
         engine.DunExploreInfo = _dunExploreInfo;
+        engine.BuffsDue = sec => _buffManager?.CountBuffsDue(sec) ?? -1;   // the buff manager may come later
         // vtsetsetting[] / vtgetsetting[] take VTank names and units, as '/vt opt set|get' does.
         engine.VtOptionSetter = TrySetVtOption;
         engine.VtOptionGetter = GetVtOption;
@@ -1001,6 +1002,8 @@ internal sealed partial class MetaManager
     private void ExecuteAction(MetaRule rule)
     {
         _actionDepth++;
+        // A macro stop or start an action makes names the meta (LegacyUiSettings.MacroSource).
+        using var source = _settings.MacroSource($"the meta (state '{_settings.CurrentState}')");
         try { ExecuteActionCore(rule); }
         finally { _actionDepth--; }
     }
@@ -1626,6 +1629,7 @@ internal sealed partial class MetaManager
         ["pickupmacrooff"]            = "LootChestsMacroOff",   // Settings > Looting > Pickup with macro off
         ["lootchestsmacrooff"]        = "LootChestsMacroOff",
         ["meleethroughwalls"]         = "MeleeThroughWalls",    // Settings > Combat > Targeting > Melee through walls
+        ["debuffallbeforeattacking"]  = "DebuffAllBeforeAttacking",   // Settings > Combat > Targeting > Debuff every monster in range before attacking
         ["lootnearbychests"]          = "LootNearbyChests",     // Settings > Looting > Loot Nearby Chests
         ["dooropenrange"]             = "OpenDoorRange",
         ["autofellowmanagement"]      = "AutoFellowMgmt",

@@ -562,7 +562,7 @@ public sealed partial class RynthAiPlugin
         {
             _processedCorpseItems.Clear();
             _corpseItemAttempts.Clear();
-            _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear(); _pendingKeepUpTo.Clear();
+            _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear(); _pendingKeepUpTo.Clear(); _pendingPerDay.Clear();
         }
         LootDiag($"[RynthAi] Corpse loot: opened container 0x{objectId:X8}.");
         _consecutiveLootTimeouts = 0; // a successful open proves AC is responsive again
@@ -760,6 +760,7 @@ public sealed partial class RynthAiPlugin
 
         SyncCorpseContainerState();
         WatchLateLandings(CorpseNowMs);
+        PrunePerDay();
         TickDeferredClose(settings);
         TakeLootThisRequest(settings);   // /ra lootthis (RynthAiPlugin.VTankHotkeys.cs)
         TakeChestKeyRequest();           // the Item Tool's chest looter (RynthAiPlugin.ItemTool.cs)
@@ -1226,6 +1227,8 @@ public sealed partial class RynthAiPlugin
 
                 _corpseCooldownUntil.Remove(candidate.Id);
             }
+            if (StillBehindWall(candidate.Id, now))   // set aside behind a wall, and the wall is still there
+                continue;
 
             CorpseLootDecision decision = EvaluateCorpseLootDecision(candidate);
             if (!decision.ShouldLoot)
@@ -1385,6 +1388,23 @@ public sealed partial class RynthAiPlugin
                     KillerIsFellow = killerIsFellow
                 };
             }
+        }
+
+        // Loot Only Rare Corpses: only a corpse that generated a rare is opened (VTank's option). The
+        // ownership rules below still apply to it.
+        if (settings.LootOnlyRareCorpses && RareCorpseRefusal(longDesc) is { } notRare)
+        {
+            return new CorpseLootDecision
+            {
+                ShouldLoot = false,
+                ModeName = modeName,
+                Reason = notRare,
+                KillerName = killerName,
+                PlayerName = myName,
+                LongDesc = longDesc,
+                InFellowship = inFellowship,
+                KillerIsFellow = killerIsFellow
+            };
         }
 
         if (lootOwnership >= 2)
@@ -1555,6 +1575,13 @@ public sealed partial class RynthAiPlugin
         int lineEnd = remainder.IndexOfAny(new[] { '\r', '\n' });
         if (lineEnd >= 0)
             remainder = remainder[..lineEnd];
+        // A corpse that generated a rare reads "Killed by <name>. This corpse generated a rare item!"
+        // (ACE appends the sentence on the same line). Read whole, the killer was "<name>. This corpse
+        // generated a rare item!", so My Kills Only never matched the player and every rare corpse of
+        // their own kills was left unopened (2026-11-22).
+        int rare = remainder.IndexOf(RareCorpseText, StringComparison.OrdinalIgnoreCase);
+        if (rare >= 0)
+            remainder = remainder[..rare];
         remainder = remainder.Trim().TrimEnd('.').Trim();
         return remainder.Length == 0 ? null : remainder;
     }
@@ -2033,6 +2060,8 @@ public sealed partial class RynthAiPlugin
             // is in the pack. Noted on send for the same reason as salvage above.
             if (matchActionLabel == ScrollLearner.ReadAction)
                 _scrollLearner?.NoteLooted(firstMatchId, matchItemName, fromProfile: matchRuleLabel != ScrollLearner.RuleLabel);
+            // Keep # per day: on its way, so it counts until it lands (then it is recorded).
+            NotePerDaySent(firstMatchId);
             _currentLootItemMovePending      = true;
             _currentLootItemMoveRequestedAt  = now;
             // A queued move that the client or server turned away (the client's one-request
@@ -2458,6 +2487,7 @@ public sealed partial class RynthAiPlugin
             {
                 bool wasMarked = _packRefusals.IsRefused(container, now);
                 _packRefusals.Accepted(container);
+                NotePerDayPickedUp(kv.Key);   // a Keep # per day item that landed late still counts
                 LootDiag($"[RynthAi] {LootTag}: 0x{(uint)kv.Key:X8} landed in {LootPackName(container)} {now - kv.Value.SentAt} ms after its last send, after it was given up" +
                          (wasMarked ? $"; {LootPackName(container)} has room after all and is no longer treated as full." : "."));
                 (done ??= new()).Add(kv.Key);
@@ -3093,6 +3123,7 @@ public sealed partial class RynthAiPlugin
         if (answered) _currentLootItemDestsTried.Clear();   // landed: nothing to watch for (ResetCurrentLootItem)
         _processedCorpseItems.Add(_currentLootItemId);
         _corpseItemsLooted++;
+        NotePerDayPickedUp(itemId);   // Keep # per day: it left the corpse into the pack
         bool noMotion = answered && JumpPickupHadNoMotion();
         long jumpSentAt = _currentLootItemMoveRequestedAt;
         LootDiag($"[RynthAi] {LootTag}: pickup confirmed for 0x{(uint)_currentLootItemId:X8}; {reason}" +
@@ -3419,6 +3450,8 @@ public sealed partial class RynthAiPlugin
                 continue;
             if (_corpseCooldownUntil.TryGetValue(candidate.Id, out long blockedUntil) && blockedUntil > now)
                 continue;
+            if (StillBehindWall(candidate.Id, now))   // set aside behind a wall, and the wall is still there
+                continue;
             CorpseLootDecision decision = EvaluateCorpseLootDecision(candidate);
             if (!decision.ShouldLoot)
                 continue;
@@ -3448,11 +3481,13 @@ public sealed partial class RynthAiPlugin
     /// <summary>
     /// The arbiter's LootStarved input: looting wants the tick, combat wants it too, a corpse
     /// has waited LootStarveMs (HasLootWork set _lootStarved this tick), and no monster is
-    /// within LootStarveCloseYards. Melee fights keep combat in charge (the mob is on you).
+    /// within LootStarveCloseYards. Melee fights keep combat in charge (the mob is on you), and so
+    /// does a monster in the scan that is hitting us from farther off (2026-11-22, IsBeingHitByScanned).
     /// </summary>
     private bool IsLootStarvedTurn(bool wantLoot, bool wantCombat)
         => wantLoot && wantCombat && _lootStarved
-           && _combatManager?.HasCloseThreat(LootStarveCloseYards) != true;
+           && _combatManager?.HasCloseThreat(LootStarveCloseYards) != true
+           && _combatManager?.IsBeingHitByScanned != true;
 
     // -- Boost Loot Priority: one kill, one loot (2026-10-14) --------------------------------
     // Combat locked its next target a few ms after each kill, and ACE creates the corpse 1-3 s
@@ -3634,7 +3669,14 @@ public sealed partial class RynthAiPlugin
             if (nativeAction == LootAction.KeepUpTo)
             {
                 var rule = nativeRule;
-                if (!UnderKeepCap("n:" + ruleLabel, ruleLabel, item, rule.KeepCount,
+                int perDay = LootPerDay.Clamp(rule.PerDayHours);
+                if (perDay > 0)
+                {
+                    // Keep # per day: counted by pickups in the window, not by the pack.
+                    if (!UnderDailyCap(LootPerDay.Key(rule.Name, nativeProfile.Rules.IndexOf(rule)), ruleLabel, item, rule.KeepCount, perDay, preview))
+                        return false;
+                }
+                else if (!UnderKeepCap("n:" + ruleLabel, ruleLabel, item, rule.KeepCount,
                         inv => LootEvaluator.Matches(rule, inv, _charSkills), preview))
                     return false;
             }
@@ -3670,7 +3712,14 @@ public sealed partial class RynthAiPlugin
         if (matchedRule.Action == VTankLootAction.KeepUpTo)
         {
             var rule = matchedRule;
-            if (!UnderKeepCap("v:" + matchedRuleIndex + ":" + ruleLabel, ruleLabel, item, rule.KeepCount ?? 0,
+            int perDay = LootPerDay.Clamp(rule.PerDayHours);
+            if (perDay > 0)
+            {
+                // Keep # per day: counted by pickups in the window, not by the pack.
+                if (!UnderDailyCap(LootPerDay.Key(rule.Name, matchedRuleIndex), ruleLabel, item, rule.KeepCount ?? 0, perDay, preview))
+                    return false;
+            }
+            else if (!UnderKeepCap("v:" + matchedRuleIndex + ":" + ruleLabel, ruleLabel, item, rule.KeepCount ?? 0,
                     inv => VTankLootEvaluator.Match(rule, inv, lootCtx), preview))
                 return false;
         }
@@ -4132,7 +4181,7 @@ public sealed partial class RynthAiPlugin
         _corpseItemAttempts.Clear();
         _corpseIdsRequested = false;
         _corpseItemIdReaskedAt.Clear();
-        _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear(); _pendingKeepUpTo.Clear();
+        _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear(); _pendingKeepUpTo.Clear(); _pendingPerDay.Clear();
         ResetCurrentLootItem();
 
         // Close the loot window (CloseCorpseContainer: the client's own close packet, which
@@ -4317,6 +4366,9 @@ public sealed partial class RynthAiPlugin
     private bool AttemptOpenCorpse(int corpseId)
     {
         long now = CorpseNowMs;
+        // A re-send for a corpse that didn't open, with a wall in the way: set aside (RynthAiPlugin.CorpseBehindWall.cs).
+        if (SetAsideBehindWall(corpseId, now))
+            return false;
         bool watch = Host.HasUseDoneSeq;
         if (watch)
         {
@@ -4592,7 +4644,7 @@ public sealed partial class RynthAiPlugin
             {
                 _processedCorpseItems.Clear();
                 _corpseItemAttempts.Clear();
-                _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear(); _pendingKeepUpTo.Clear();
+                _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear(); _pendingKeepUpTo.Clear(); _pendingPerDay.Clear();
             }
 
             _targetCorpseId = rawOpen;
@@ -4632,7 +4684,7 @@ public sealed partial class RynthAiPlugin
         ResetCurrentLootItem();
         _processedCorpseItems.Clear();
         _corpseItemAttempts.Clear();
-        _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear(); _pendingKeepUpTo.Clear();
+        _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear(); _pendingKeepUpTo.Clear(); _pendingPerDay.Clear();
     }
 
     private void HandleCorpseObjectDeleted(uint objectId)

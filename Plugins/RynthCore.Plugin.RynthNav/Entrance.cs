@@ -72,13 +72,17 @@ internal static class Entrance
     public static List<RouteStep> EndingInPortal(List<RouteStep>? route, double ns, double ew, string label)
     {
         var steps = route == null ? new List<RouteStep>() : new List<RouteStep>(route);
+        double estAfter = 0;   // the walk's cost, kept for the trip's time left (RouteStep.EstAfter)
         if (steps.Count > 0)
         {
             RouteStep last = steps[^1];
             if (!last.UsePortal && !last.UseRecall && !last.IsHub && NavCoords.Distance(last.Ns, last.Ew, ns, ew) < 1.0)
+            {
+                estAfter = last.EstAfter;
                 steps.RemoveAt(steps.Count - 1);
+            }
         }
-        steps.Add(new RouteStep(ns, ew, usePortal: true, useRecall: false, label));
+        steps.Add(new RouteStep(ns, ew, usePortal: true, useRecall: false, label) { EstAfter = estAfter });
         return steps;
     }
 

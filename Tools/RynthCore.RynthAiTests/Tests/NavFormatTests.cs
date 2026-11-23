@@ -38,7 +38,7 @@ internal static class NavFormatTests
         r.Add("nav format: truncated file keeps the points before the cut and warns", Truncated);
         r.Add("nav format: a bad number stops at that point and warns", BadNumber);
         r.Add("nav format: an unreadable file warns instead of throwing", UnreadableFile);
-        r.Add("nav format: pinned oddities (short count, bad route type, comma decimals)", PinnedOddities);
+        r.Add("nav format: pinned oddities (short count, bad route type) and comma decimals", PinnedOddities);
     }
 
     private static void CircularFile()
@@ -337,10 +337,11 @@ internal static class NavFormatTests
         Check.Eq((int)type5.RouteType, 5, "route type 5 kept as 5");
         Check.Null(type5.LoadWarning, "route type 5: no warning (pinned)");
 
-        // A comma decimal is read with the comma as a thousands separator: 33,6 becomes 336.
+        // A comma decimal (a PC set to a comma-decimal language) is read as the decimal since
+        // 2026-11-22: 33,6 is 33.6 (it was 336, the comma taken for a thousands separator).
         var comma = NavRouteParser.LoadFromLines(new[] { "uTank2 NAV 1.2", "1", "1", "0", "33,6", "42,5", "0", "0" });
         Check.Eq(comma.Points.Count, 1, "comma decimals: the point loads");
-        if (comma.Points.Count == 1) Check.Near(comma.Points[0].EW, 336, 1e-9, "33,6 reads as 336 (pinned)");
-        Check.Null(comma.LoadWarning, "comma decimals: no warning (pinned)");
+        if (comma.Points.Count == 1) Check.Near(comma.Points[0].EW, 33.6, 1e-9, "33,6 reads as 33.6");
+        Check.Null(comma.LoadWarning, "comma decimals: no warning");
     }
 }

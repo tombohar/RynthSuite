@@ -155,16 +155,22 @@ internal static partial class DungeonPathfinder
         var closed = PortalClosedOpenings(graph, geo, hazardCells, portals, startCell, startAt, reports);
         double splitMs = clock.Elapsed.TotalMilliseconds;
         int laid = 0;
+        // The walk-round counts are the last laying's (each round lays the whole walk again).
+        using var holes = CountHoles();
+        int walked0 = HolesWalkedRound, left0 = HolesLeft;
 
         NavRouteParser route;
         Dictionary<uint, DungeonNavNode> g;
         for (int round = 0; ; round++)
         {
+            HolesWalkedRound = walked0; HolesLeft = left0;
             g = WithoutOpenings(graph, closed, startCell);
             route = lay(g);
             laid++;
             foreach (var r in reports) r.Moved = r.Dropped = r.Bent = 0;   // the last laying's
+            var asLaid = geo != null && geo.PlacedCount > 0 ? LegsOf(route.Points, loop) : null;
             var unresolved = KeepOutOfPortals(route.Points, closed: loop, g, geo, portals, reports, wall);
+            if (asLaid != null) WalkPortalLegsRoundObjects(route.Points, loop, geo!, portals, asLaid);
             if (unresolved.Count == 0 || round >= PortalMaxRounds) break;
 
             // Legs no bend gets round: cut off the cell there (never the start), and lay it again.
@@ -561,6 +567,58 @@ internal static partial class DungeonPathfinder
             unresolved.Add((worst, CellAt(graph, geo, spot)));
         }
         return unresolved;
+    }
+
+    // ── The portal step's legs and the placed objects (2026-11-18) ───────────────
+    // KeepOutOfPortals runs on the finished walk, after EmitSteps walked it round what the cells place. Its bend
+    // corners and moved points keep clear of objects (ClearanceMemo and LegClearance see their walls), but the leg
+    // a dropped point leaves (its neighbours joined) is never looked at, and a bend's legs are judged walkable at
+    // 0.25 m: with an object near the portal, a bent leg could cut into it. Every Thread has its exit portal, so
+    // every Thread patrol and explore takes this step. Each leg the step changed is checked again
+    // (ThroughPlaced) and walked round on the floor; a walk round that would go into a portal's circle is not
+    // taken: the portal keep-out wins (touching a portal takes the character through), and the leg counts in
+    // HolesLeft.
+
+    /// <summary>The legs of the walk as laid (by the points' identity), each with its two ends' positions.</summary>
+    private static Dictionary<(NavPoint, NavPoint), (double, double, double, double, double, double)> LegsOf(List<NavPoint> pts, bool loop)
+    {
+        var legs = new Dictionary<(NavPoint, NavPoint), (double, double, double, double, double, double)>(pts.Count);
+        for (int i = 0; i < pts.Count; i++)
+        {
+            if (i + 1 >= pts.Count && !loop) break;
+            var a = pts[i]; var b = pts[(i + 1) % pts.Count];
+            legs[(a, b)] = (a.EW, a.NS, a.Z, b.EW, b.NS, b.Z);
+        }
+        return legs;
+    }
+
+    /// <summary>
+    /// Walks round the placed objects every leg of <paramref name="pts"/> that is not in <paramref name="asLaid"/>
+    /// as it was (a leg KeepOutOfPortals bent, or whose end it moved, or that a dropped point left), keeping every
+    /// new leg out of the portals' circles; a leg with no such way round stays as it is (HolesLeft). Returns how
+    /// many legs were walked round.
+    /// </summary>
+    internal static int WalkPortalLegsRoundObjects(List<NavPoint> pts, bool loop, DungeonGeometry geo, IReadOnlyList<PatrolPortal> portals,
+                                                   Dictionary<(NavPoint, NavPoint), (double, double, double, double, double, double)> asLaid)
+    {
+        if (geo.PlacedCount == 0 || pts.Count < 2) return 0;
+        int walked = 0;
+        bool Keeps(NavPoint p, NavPoint q) => PortalLegClear(null, portals, p, q);
+        for (int i = 0; i < pts.Count; i++)
+        {
+            if (i + 1 >= pts.Count && !loop) break;
+            var a = pts[i]; var b = pts[(i + 1) % pts.Count];
+            if (asLaid.TryGetValue((a, b), out var was) && was == (a.EW, a.NS, a.Z, b.EW, b.NS, b.Z)) continue;
+            if (!LegMeetsPlaced(geo, X(a), Y(a), a.Z * 240.0, X(b), Y(b), b.Z * 240.0)) continue;
+            var leg = new List<NavPoint> { a, b };
+            if (WalkRoundHoles(leg, geo, objectsOnly: true, accept: Keeps) == 0) continue;
+            var corners = leg.GetRange(1, leg.Count - 2);
+            foreach (var c in corners) { Tag(c, "object-round"); NotePortal(c, "round-object-by-portal"); }
+            pts.InsertRange(i + 1, corners);
+            i += corners.Count;
+            walked++;
+        }
+        return walked;
     }
 
     /// <summary>

@@ -633,105 +633,20 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         }
 
         /// <summary>
-        /// Loads static objects from dungeon/interior cells in cell.dat.
-        /// Indoor cells are numbered 0xXXYY0100 through 0xXXYYFFFD.
-        /// Uses ACE's EnvCell format for correct parsing.
+        /// Adds the static objects of a landblock's dungeon/interior cells (0xXXYY0100 and up) to the LOS
+        /// volumes: GetStaticCollision's cell stabs, as AC collides with them.
         /// </summary>
         private void LoadIndoorCells(uint landblockKey, List<BoundingVolume> volumes)
         {
-            float globalOffsetX = ((landblockKey >> 8) & 0xFF) * 192.0f;
-            float globalOffsetY = (landblockKey & 0xFF) * 192.0f;
-
-            // Use dat index to find ALL cells — no sequential scan with gap cutoff
-            var cellIds = _cellDat.GetLandblockCellIds(landblockKey);
-
-            foreach (uint cellId in cellIds)
-            {
-                byte[] data = _cellDat.GetFileData(cellId);
-                if (data == null || data.Length < 20) continue;
-
-                try
-                {
-                    using (var ms = new MemoryStream(data))
-                    using (var reader = new BinaryReader(ms))
-                    {
-                        uint id = reader.ReadUInt32();
-                        uint flags = reader.ReadUInt32();
-                        reader.ReadUInt32(); // duplicate CellId
-
-                        byte numSurfaces = reader.ReadByte();
-                        byte numPortals = reader.ReadByte();
-                        ushort numVisibleCells = reader.ReadUInt16();
-
-                        // Skip surfaces
-                        for (int i = 0; i < numSurfaces; i++)
-                            reader.ReadUInt16();
-
-                        ushort envId = reader.ReadUInt16();
-                        ushort cellStructure = reader.ReadUInt16();
-
-                        // Cell Position (Frame)
-                        float cellX = reader.ReadSingle();
-                        float cellY = reader.ReadSingle();
-                        float cellZ = reader.ReadSingle();
-                        reader.ReadSingle(); reader.ReadSingle(); reader.ReadSingle(); reader.ReadSingle(); // rotation
-
-                        // Skip portals (8 bytes each)
-                        for (int i = 0; i < numPortals; i++)
-                        {
-                            if (ms.Position + 8 > ms.Length) break;
-                            reader.ReadUInt64(); // 4 × ushort
-                        }
-
-                        // Skip visible cells
-                        for (int i = 0; i < numVisibleCells; i++)
-                        {
-                            if (ms.Position + 2 > ms.Length) break;
-                            reader.ReadUInt16();
-                        }
-
-                        // Read static objects if present (flag 0x02 = HasStaticObjs)
-                        if ((flags & 0x02) != 0 && ms.Position + 4 <= ms.Length)
-                        {
-                            uint numStabs = reader.ReadUInt32();
-                            if (numStabs > 500) numStabs = 500;
-
-                            for (uint i = 0; i < numStabs; i++)
-                            {
-                                if (ms.Position + 32 > ms.Length) break;
-
-                                uint setupId = reader.ReadUInt32();
-                                float px = reader.ReadSingle();
-                                float py = reader.ReadSingle();
-                                float pz = reader.ReadSingle();
-                                float rw = reader.ReadSingle();
-                                float rx = reader.ReadSingle();
-                                float ry = reader.ReadSingle();
-                                float rz = reader.ReadSingle();
-
-                                var frame = new Frame
-                                {
-                                    // Static object position is in cell-local space
-                                    // Cell position is already in landblock-local space
-                                    OriginX = px + cellX,
-                                    OriginY = py + cellY,
-                                    OriginZ = pz + cellZ,
-                                    RotW = rw, RotX = rx, RotY = ry, RotZ = rz
-                                };
-
-                                var objVolumes = GetSetupBoundingVolumes(setupId);
-                                foreach (var vol in objVolumes)
-                                {
-                                    var transformed = TransformVolume(vol, frame, globalOffsetX, globalOffsetY);
-                                    if (transformed != null)
-                                        volumes.Add(transformed);
-                                }
-                            }
-                        }
-                    }
-                }
-                catch { }
-            }
+            // A stab's frame is already in the landblock's space; this added its cell's origin to it, so
+            // combat LOS had nothing at 0x0190's table, 0x00C1's statue or 0x000A's altar, and blockers a
+            // cell's offset away from where anything stands (2026-11-18). The volumes are now the shapes AC
+            // collides with (physics polygons, else cylinders, else spheres, triangle hits only), not a
+            // bounding sphere or box round the model: a shot over a 0.9 m table is clear, and a light or a
+            // banner with no collision at all no longer stops one.
+            foreach (var s in GetStaticCollision(landblockKey))
+                if (s.Source == StaticSource.CellStab)
+                    volumes.AddRange(s.Parts);
         }
 
         /// <summary>
@@ -1017,7 +932,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
 
                 foreach (var face in mesh.Faces)
                 {
-                    TriangulateAndTransform(face, mesh.Vertices, setup.PartFrames[i], triangles);
+                    TriangulateAndTransform(face, mesh.Vertices, setup, i, triangles);
                     if (triangles.Count / 3 >= MAX_BUILDING_TRIANGLES) break;
                 }
                 meshParts++;
@@ -1080,7 +995,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
 
                 foreach (var corner in corners)
                 {
-                    Vector3 t = setup.PartFrames[i].TransformPoint(corner);
+                    Vector3 t = setup.PartToSetup(i, corner);
                     if (t.X < cMinX) cMinX = t.X; if (t.X > cMaxX) cMaxX = t.X;
                     if (t.Y < cMinY) cMinY = t.Y; if (t.Y > cMaxY) cMaxY = t.Y;
                     if (t.Z < cMinZ) cMinZ = t.Z; if (t.Z > cMaxZ) cMaxZ = t.Z;
@@ -1115,6 +1030,18 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             if ((modelId & 0xFF000000) == 0x01000000)
             {
                 var gfxVol = GetGfxObjBounds(modelId);
+                // A big GfxObj placed on its own (Neftet's rock spires and mesas, R-20261120-203229-771e):
+                // its sorting sphere, 9-75 m round, is its render bound. A character and a monster 50 m
+                // apart both stood inside one, so the line between them crossed no surface and read as
+                // clear, and every cast went into the rock. Its physics polygons are what AC collides with;
+                // with none (no HasPhysics) nothing stops a spell there. As a setup's part spheres are
+                // (GetSetupCollision: a GfxObj on its own is one part at the object's origin, size 1).
+                if (gfxVol != null && gfxVol.Type == BoundingVolume.VolumeType.Sphere && gfxVol.Dimensions.X > LargePartSphereRadius)
+                {
+                    var collision = GetSetupCollision(modelId);
+                    if (collision.Kind == StaticCollisionKind.Polygons) { result.Add(MeshOf(collision.Triangles)); return result; }
+                    if (GfxObjDrawingOnly(modelId)) return result;
+                }
                 if (gfxVol != null)
                 {
                     result.Add(gfxVol);
@@ -1172,7 +1099,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     // Even if parse failed, try GfxObj from Parts if we got them
                     if (setup.PartIds != null && setup.PartIds.Length > 0)
                     {
-                        var gfxVol = GetGfxObjBounds(setup.PartIds[0]);
+                        var gfxVol = GetPartBounds(setup, 0);
                         if (gfxVol != null)
                             result.Add(gfxVol);
                     }
@@ -1276,7 +1203,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             // Priority 5: Fall back to GfxObj bounding data from first part
             if (setup.PartIds != null && setup.PartIds.Length > 0)
             {
-                var gfxVol = GetGfxObjBounds(setup.PartIds[0]);
+                var gfxVol = GetPartBounds(setup, 0);
                 // A big object's first-part sphere is its render bound, not a wall (R-20261119-114214-b9ed,
                 // landblock 0xB64A): wall panel 0x02001C33 is 24 x 0.4 m but its part sphere 28 m round,
                 // and 0x02001C39 (29 parts, not one with physics polygons) got a 13 m sphere. They stand
@@ -1288,9 +1215,10 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 // Tools/RynthCore.LosProof checks this spot.
                 if (gfxVol != null && gfxVol.Type == BoundingVolume.VolumeType.Sphere && gfxVol.Dimensions.X > LargePartSphereRadius)
                 {
-                    var mesh = PartsPhysicsMesh(setup, out bool drawingOnly);
-                    if (mesh != null) { result.Add(mesh); return result; }
-                    if (drawingOnly) return result;
+                    // GetSetupCollision: the parts' physics polygons, posed and scaled as AC places them.
+                    var collision = GetSetupCollision(modelId);
+                    if (collision.Kind == StaticCollisionKind.Polygons) { result.Add(MeshOf(collision.Triangles)); return result; }
+                    if (NoPartHasPhysics(setup)) return result;
                 }
                 if (gfxVol != null)
                     result.Add(gfxVol);
@@ -1299,68 +1227,69 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             return result;
         }
 
-        /// <summary>Past this radius a part's sorting sphere is too coarse to stand for the object (meters).</summary>
-        internal const float LargePartSphereRadius = 4.0f;
-
-        /// <summary>
-        /// The physics polygons of every part of <paramref name="setup"/>, placed by its part frames, as one
-        /// triangle mesh (null when there are none or a part couldn't be read). <paramref name="drawingOnly"/>:
-        /// every part was read and none has physics polygons (the GfxObj's HasPhysics flag, 0x01), so nothing
-        /// in the object collides.
-        /// </summary>
-        private BoundingVolume PartsPhysicsMesh(SetupInfo setup, out bool drawingOnly)
+        // A part's GfxObj bounds where the setup puts that part: scaled by its DefaultScale and posed by its
+        // frame in the Resting/Default placement (SetupInfo.PartToSetup). They were the GfxObj's own,
+        // as if every part sat at the setup's origin at size 1.
+        private BoundingVolume GetPartBounds(SetupInfo setup, int part)
         {
-            drawingOnly = false;
-            int count = setup.PartIds.Length;
-            bool anyPhysics = false, allRead = true;
-            for (int i = 0; i < count; i++)
+            var vol = GetGfxObjBounds(setup.PartIds[part]);
+            if (vol == null || (setup.PartFrames == null && setup.DefaultScale == null)) return vol;
+            if (vol.Type == BoundingVolume.VolumeType.Sphere)
             {
-                byte[] head = _portalDat.GetFileData(setup.PartIds[i]);
-                if (head == null || head.Length < 8) { allRead = false; continue; }
-                if ((BitConverter.ToUInt32(head, 4) & 0x01) != 0) anyPhysics = true;
-            }
-            if (!anyPhysics)
-            {
-                drawingOnly = allRead;
-                return null;
-            }
-            if (setup.PartFrames == null || setup.PartFrames.Length < count) return null;
-
-            var triangles = new List<Vector3>();
-            for (int i = 0; i < count && triangles.Count / 3 < MAX_BUILDING_TRIANGLES; i++)
-            {
-                if (setup.PartFrames[i] == null) return null;
-                var mesh = LoadGfxObjMesh(setup.PartIds[i]);
-                if (mesh == null) continue;   // a drawing-only part (or unreadable: the rest still stand)
-                foreach (var face in mesh.Faces)
+                var sc = setup.PartScale(part);
+                float r = vol.Dimensions.X * Math.Max(Math.Abs(sc.X), Math.Max(Math.Abs(sc.Y), Math.Abs(sc.Z)));
+                var c = setup.PartToSetup(part, vol.Center);
+                return new BoundingVolume
                 {
-                    TriangulateAndTransform(face, mesh.Vertices, setup.PartFrames[i], triangles);
-                    if (triangles.Count / 3 >= MAX_BUILDING_TRIANGLES) break;
-                }
+                    Type = BoundingVolume.VolumeType.Sphere,
+                    Center = c,
+                    Dimensions = new Vector3(r, r, r),
+                    Min = c - new Vector3(r, r, r),
+                    Max = c + new Vector3(r, r, r),
+                    IsDoor = vol.IsDoor
+                };
             }
-            if (triangles.Count < 3) return null;
-
-            float minX = float.MaxValue, minY = float.MaxValue, minZ = float.MaxValue;
-            float maxX = float.MinValue, maxY = float.MinValue, maxZ = float.MinValue;
-            foreach (var v in triangles)
+            Vector3 min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+            Vector3 max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+            for (int k = 0; k < 8; k++)
             {
-                if (v.X < minX) minX = v.X; if (v.X > maxX) maxX = v.X;
-                if (v.Y < minY) minY = v.Y; if (v.Y > maxY) maxY = v.Y;
-                if (v.Z < minZ) minZ = v.Z; if (v.Z > maxZ) maxZ = v.Z;
+                var corner = new Vector3((k & 1) == 0 ? vol.Min.X : vol.Max.X, (k & 2) == 0 ? vol.Min.Y : vol.Max.Y, (k & 4) == 0 ? vol.Min.Z : vol.Max.Z);
+                var t = setup.PartToSetup(part, corner);
+                min = Vector3.Min(min, t);
+                max = Vector3.Max(max, t);
             }
             return new BoundingVolume
             {
-                Type = BoundingVolume.VolumeType.TriangleMesh,
-                Center = new Vector3((minX + maxX) * 0.5f, (minY + maxY) * 0.5f, (minZ + maxZ) * 0.5f),
-                Dimensions = new Vector3(maxX - minX, maxY - minY, maxZ - minZ),
-                Min = new Vector3(minX, minY, minZ),
-                Max = new Vector3(maxX, maxY, maxZ),
-                MeshTriangles = triangles.ToArray(),
-                IsDoor = false,
-                // Physics polygons only, so no box stands in for missing walls (and a thin panel turned
-                // on the landblock would make a big one).
-                NoAabbFallback = true
+                Type = BoundingVolume.VolumeType.AxisAlignedBox,
+                Center = (min + max) * 0.5f,
+                Dimensions = max - min,
+                Min = min,
+                Max = max,
+                IsDoor = vol.IsDoor
             };
+        }
+
+        /// <summary>Past this radius a part's sorting sphere is too coarse to stand for the object (meters).</summary>
+        internal const float LargePartSphereRadius = 4.0f;
+
+        /// <summary>Every part of <paramref name="setup"/> was read and none has physics polygons (the GfxObj's
+        /// HasPhysics flag, 0x01): nothing in the object collides. False when a part couldn't be read.</summary>
+        private bool NoPartHasPhysics(SetupInfo setup)
+        {
+            foreach (uint part in setup.PartIds)
+            {
+                byte[] head = _portalDat.GetFileData(part);
+                if (head == null || head.Length < 8) return false;
+                if ((BitConverter.ToUInt32(head, 4) & 0x01) != 0) return false;
+            }
+            return true;
+        }
+
+        /// <summary>The GfxObj was read and has no physics polygons (no HasPhysics flag, 0x01).</summary>
+        private bool GfxObjDrawingOnly(uint gfxObjId)
+        {
+            byte[] head = _portalDat.GetFileData(gfxObjId);
+            return head != null && head.Length >= 8 && (BitConverter.ToUInt32(head, 4) & 0x01) == 0;
         }
 
         // ── Triangle mesh loading ───────────────────────────────────────────
@@ -1568,6 +1497,31 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         /// by the given frame, appending the resulting triangles to the output list.
         /// Returns the number of triangles added.
         /// </summary>
+        // A setup's part: its GfxObj's vertices scaled by the part's DefaultScale, then posed by its frame
+        // (SetupInfo.PartToSetup), as ACE PartArray poses the parts of a placed object.
+        private static int TriangulateAndTransform(
+            int[] faceIndices,
+            Dictionary<int, Vector3> vertices,
+            SetupInfo setup,
+            int part,
+            List<Vector3> outTriangles)
+        {
+            if (faceIndices.Length < 3) return 0;
+            if (!vertices.TryGetValue(faceIndices[0], out var v0)) return 0;
+            Vector3 tv0 = setup.PartToSetup(part, v0);
+            int added = 0;
+            for (int i = 1; i < faceIndices.Length - 1; i++)
+            {
+                if (!vertices.TryGetValue(faceIndices[i], out var v1)) continue;
+                if (!vertices.TryGetValue(faceIndices[i + 1], out var v2)) continue;
+                outTriangles.Add(tv0);
+                outTriangles.Add(setup.PartToSetup(part, v1));
+                outTriangles.Add(setup.PartToSetup(part, v2));
+                added++;
+            }
+            return added;
+        }
+
         private static int TriangulateAndTransform(
             int[] faceIndices,
             Dictionary<int, Vector3> vertices,
@@ -1632,17 +1586,121 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             };
         }
 
+        // ── Static collision: what AC itself collides with ─────────────────────────────────────────────
+        //
+        // AC's rule for a placed object (ACE PhysicsObj.FindObjCollisions, Physics/PhysicsObj.cs:412-450, and
+        // PartArray.CacheHasPhysicsBSP): when any of its parts has physics polygons, those, posed by the
+        // Resting placement and scaled by DefaultScale (SetupInfo.PartToSetup); else its CylSpheres; else its
+        // Spheres; else nothing at all (lights, banners, decals). This kept the polygons only, so 60,289
+        // cylinder and sphere objects at body height in the dungeons were nowhere on the map: 0x6346's
+        // pillars (0x0200028D), 0x0190's round tables (0x020000CE), 0x00FE's 0x02001055 (2026-11-18 survey).
+        // The map, the blocked-doorway rays and combat LOS all take triangles, so cylinders and spheres are
+        // handed over as closed solids (AppendCylinderSolid, AppendSphereSolid) and every consumer sees them
+        // as it sees a statue. No box stands for anything (NoAabbFallback):
+        // the box round an arch, a web or 0x039B's spiral stair is no wall, and the fallback reported 4,172
+        // hits where no triangle was in 54,000 fan rays.
+
+        /// <summary>The most physics triangles one placed object keeps (a sanity bound, not a cut: the
+        /// largest setup any cell or landblock places has far fewer). Buildings keep MAX_BUILDING_TRIANGLES.</summary>
+        internal const int MAX_STATIC_TRIANGLES = 200000;
+        private const int MAX_STATIC_CACHE = 12;
+        private const int MAX_COLLISION_CACHE = 4000;
+
+        // The body band over a floor: the dungeon map's ClearWallLow (0.45 m) up to the top of AC's human
+        // (setup 0x02000001: spheres at 0.475 and 1.35 m, radius 0.48, so 1.83 m).
+        private const float BodyBandLow = 0.45f, BodyBandHigh = 1.83f;
+
+        // A setup's (or GfxObj's) collision in its own space, as AC picks it.
+        private sealed class SetupCollision
+        {
+            public StaticCollisionKind Kind;
+            public Vector3[] Triangles = Array.Empty<Vector3>();
+            public CollisionCylinder[] Cylinders = Array.Empty<CollisionCylinder>();
+            public CollisionSphere[] Spheres = Array.Empty<CollisionSphere>();
+            public int TriangleCount;      // physics triangles found (before MAX_STATIC_TRIANGLES)
+            public bool Capped;
+        }
+
+        private readonly Dictionary<uint, SetupCollision> _collisionCache = new Dictionary<uint, SetupCollision>();
+        private readonly Dictionary<uint, StaticCollision[]> _staticCache = new Dictionary<uint, StaticCollision[]>();
+        private readonly List<uint> _staticOrder = new List<uint>();
+
         /// <summary>
-        /// The physics polygons of every static object a dungeon's cells place (the EnvCells' stabs: a spider
-        /// web across a doorway, a pillar), in world metres, one TriangleMesh each. A stab's frame is in the
-        /// landblock's space (its z is the floor's: DreamWeave Thread 0x5456's webs stand at z -24 on a -24
-        /// floor). Objects with no physics polygons (nothing to walk into) are left out.
+        /// Every placed static of <paramref name="landblockKey"/> that AC collides with, in world metres: each
+        /// EnvCell's stabs (a web, an altar, a pillar, a table), and the landblock's own objects (0xXXYYFFFE,
+        /// not its buildings) that stand over an EnvCell's floor at body height (tagged with that cell).
+        /// Built once per landblock and kept (two threads asking at once get the same list); the list and its
+        /// meshes are shared, so callers read them and never change them.
+        /// </summary>
+        public IReadOnlyList<StaticCollision> GetStaticCollision(uint landblockKey)
+        {
+            lock (_cacheGate)
+            {
+                if (_staticCache.TryGetValue(landblockKey, out var have)) return have;
+            }
+            var built = BuildStaticCollision(landblockKey);
+            lock (_cacheGate)
+            {
+                // Another thread built it meanwhile: everyone keeps the first one.
+                if (_staticCache.TryGetValue(landblockKey, out var first)) return first;
+                if (_staticCache.Count >= MAX_STATIC_CACHE && _staticOrder.Count > 0)
+                {
+                    _staticCache.Remove(_staticOrder[0]);
+                    _staticOrder.RemoveAt(0);
+                }
+                _staticCache[landblockKey] = built;
+                _staticOrder.Add(landblockKey);
+            }
+            return built;
+        }
+
+        /// <summary>
+        /// The placed statics of a landblock (GetStaticCollision) as (model, cell, mesh), in world metres, triangle
+        /// hits only: physics polygons, or each cylinder and sphere as a closed solid of its own. A stab's frame is in
+        /// the landblock's space (its z is the floor's: DreamWeave Thread 0x5456's webs stand at z -24 on a -24
+        /// floor). Objects AC doesn't collide with are left out. A new list each call over the shared meshes.
         /// </summary>
         public List<(uint SetupId, uint CellId, BoundingVolume Mesh)> GetDungeonStaticMeshes(uint landblockKey)
         {
-            var list = new List<(uint, uint, BoundingVolume)>();
-            if (_cellDat == null) return list;
+            var all = GetStaticCollision(landblockKey);
+            var list = new List<(uint, uint, BoundingVolume)>(all.Count);
+            foreach (var s in all)
+                foreach (var part in s.Parts) list.Add((s.SetupId, s.CellId, part));
+            return list;
+        }
+
+        private StaticCollision[] BuildStaticCollision(uint landblockKey)
+        {
+            var list = new List<StaticCollision>();
+            if (_cellDat == null || _portalDat == null) return list.ToArray();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             float gx = ((landblockKey >> 8) & 0xFF) * 192.0f, gy = (landblockKey & 0xFF) * 192.0f;
+            int stabs = 0;
+            foreach (var (cellId, setupId, frame) in ReadCellStabs(landblockKey))
+            {
+                stabs++;
+                var c = GetSetupCollision(setupId);
+                if (c.Kind == StaticCollisionKind.None) continue;
+                list.Add(PlaceCollision(setupId, cellId, StaticSource.CellStab, c, frame, gx, gy));
+            }
+            int fromCells = list.Count;
+            AddLandblockObjectsOnFloors(landblockKey, gx, gy, list);
+            int poly = 0, cyl = 0, sph = 0;
+            foreach (var s in list)
+            {
+                if (s.Kind == StaticCollisionKind.Polygons) poly++;
+                else if (s.Kind == StaticCollisionKind.Cylinders) cyl++;
+                else if (s.Kind == StaticCollisionKind.Spheres) sph++;
+            }
+            Log($"Statics 0x{landblockKey:X4}: {stabs} cell stabs, {fromCells} collide; {list.Count - fromCells} landblock objects over a cell's floor; " +
+                $"{poly} polygons, {cyl} cylinders, {sph} spheres in all, {sw.Elapsed.TotalMilliseconds:F1} ms");
+            return list.ToArray();
+        }
+
+        // Every EnvCell stab of the landblock: (cell, model, frame in the landblock's space).
+        private List<(uint CellId, uint SetupId, Frame Frame)> ReadCellStabs(uint landblockKey)
+        {
+            var list = new List<(uint, uint, Frame)>();
             foreach (uint cellId in _cellDat.GetLandblockCellIds(landblockKey))
             {
                 byte[] data = _cellDat.GetFileData(cellId);
@@ -1667,22 +1725,410 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     for (uint i = 0; i < numStabs && ms.Position + 32 <= ms.Length; i++)
                     {
                         uint setupId = reader.ReadUInt32();
-                        var frame = new Frame
-                        {
-                            OriginX = reader.ReadSingle(), OriginY = reader.ReadSingle(), OriginZ = reader.ReadSingle(),
-                            RotW = reader.ReadSingle(), RotX = reader.ReadSingle(), RotY = reader.ReadSingle(), RotZ = reader.ReadSingle()
-                        };
-                        foreach (var vol in GetBuildingCompositeVolumes(setupId))
-                        {
-                            if (vol.Type != BoundingVolume.VolumeType.TriangleMesh) continue;
-                            var placed = TransformVolume(vol, frame, gx, gy);
-                            if (placed != null) list.Add((setupId, cellId, placed));
-                        }
+                        var frame = new Frame();
+                        frame.Unpack(reader);
+                        list.Add((cellId, setupId, frame));
                     }
                 }
                 catch (Exception) { }
             }
             return list;
+        }
+
+        // The landblock's own objects (LandBlockInfo 0xXXYYFFFE's stab list; its buildings are not looked at)
+        // that collide and stand over an EnvCell's floor with something in the body band above it: chairs
+        // the outdoor list puts on a building's upper floor (0x7D64 at z 15.6, two at A9B4: 581 such objects
+        // stand on building floors world-wide, 133 with physics). Each is filed under the cell whose floor
+        // it overlaps most.
+        private void AddLandblockObjectsOnFloors(uint landblockKey, float gx, float gy, List<StaticCollision> into)
+        {
+            byte[] info = _cellDat.GetFileData((landblockKey << 16) | 0xFFFE);
+            if (info == null || info.Length < 12) return;
+            uint n = Math.Min(BitConverter.ToUInt32(info, 8), 5000u);
+            var placed = new List<StaticCollision>();
+            using (var ms = new MemoryStream(info))
+            using (var reader = new BinaryReader(ms))
+            {
+                ms.Position = 12;
+                for (uint i = 0; i < n && ms.Position + 32 <= ms.Length; i++)
+                {
+                    uint setupId = reader.ReadUInt32();
+                    var frame = new Frame();
+                    frame.Unpack(reader);
+                    if (float.IsNaN(frame.OriginX) || Math.Abs(frame.OriginX) > 50000) continue;
+                    var c = GetSetupCollision(setupId);
+                    if (c.Kind == StaticCollisionKind.None) continue;
+                    placed.Add(PlaceCollision(setupId, 0, StaticSource.LandblockObject, c, frame, gx, gy));
+                }
+            }
+            if (placed.Count == 0 || _dungeonLOS == null) return;
+            var floors = _dungeonLOS.GetDungeonMapFloorPolygons(landblockKey);
+            if (floors == null || floors.Count == 0) return;
+
+            var boxes = new (float MinX, float MinY, float MinZ, float MaxX, float MaxY, float MaxZ)[floors.Count];
+            for (int f = 0; f < floors.Count; f++)
+            {
+                float x0 = float.MaxValue, y0 = float.MaxValue, z0 = float.MaxValue, x1 = float.MinValue, y1 = float.MinValue, z1 = float.MinValue;
+                foreach (var p in floors[f].Vertices)
+                {
+                    x0 = Math.Min(x0, p.X); y0 = Math.Min(y0, p.Y); z0 = Math.Min(z0, p.Z);
+                    x1 = Math.Max(x1, p.X); y1 = Math.Max(y1, p.Y); z1 = Math.Max(z1, p.Z);
+                }
+                boxes[f] = (x0, y0, z0, x1, y1, z1);
+            }
+            foreach (var s in placed)
+            {
+                Vector3 mMin = s.Min, mMax = s.Max;
+                uint bestCell = 0;
+                double bestArea = 0.01;   // m2: a sliver along a wall's foot doesn't count
+                for (int f = 0; f < floors.Count; f++)
+                {
+                    var b = boxes[f];
+                    if (b.MaxX < mMin.X || b.MinX > mMax.X || b.MaxY < mMin.Y || b.MinY > mMax.Y) continue;
+                    // Something of it in the body band over this floor (a fence on the ground under a floor
+                    // 5 m up, or a beam over a walker's head, isn't in this cell's way).
+                    if (mMax.Z <= b.MinZ + BodyBandLow || mMin.Z >= b.MaxZ + BodyBandHigh) continue;
+                    double area = ClippedArea(floors[f].Vertices, mMin.X, mMin.Y, mMax.X, mMax.Y);
+                    if (area > bestArea) { bestArea = area; bestCell = floors[f].CellId; }
+                }
+                if (bestCell == 0) continue;
+                s.CellId = bestCell;
+                into.Add(s);
+            }
+        }
+
+        // The area of a polygon (its x, y) inside the box [x0, x1] x [y0, y1]: Sutherland-Hodgman against
+        // the box's four sides (right for a concave floor too, as the box is convex).
+        internal static double ClippedArea(Vector3[] poly, double x0, double y0, double x1, double y1)
+        {
+            var pts = new List<(double X, double Y)>(poly.Length);
+            foreach (var p in poly) pts.Add((p.X, p.Y));
+            for (int side = 0; side < 4 && pts.Count >= 3; side++)
+            {
+                var outPts = new List<(double X, double Y)>(pts.Count + 4);
+                for (int i = 0; i < pts.Count; i++)
+                {
+                    var cur = pts[i];
+                    var prev = pts[(i + pts.Count - 1) % pts.Count];
+                    bool ci = InsideSide(side, cur, x0, y0, x1, y1), pi = InsideSide(side, prev, x0, y0, x1, y1);
+                    if (ci)
+                    {
+                        if (!pi) outPts.Add(CrossSide(side, prev, cur, x0, y0, x1, y1));
+                        outPts.Add(cur);
+                    }
+                    else if (pi) outPts.Add(CrossSide(side, prev, cur, x0, y0, x1, y1));
+                }
+                pts = outPts;
+            }
+            if (pts.Count < 3) return 0;
+            double a2 = 0;
+            for (int i = 0; i < pts.Count; i++)
+            {
+                var p = pts[i];
+                var q = pts[(i + 1) % pts.Count];
+                a2 += p.X * q.Y - q.X * p.Y;
+            }
+            return Math.Abs(a2) / 2;
+        }
+
+        private static bool InsideSide(int side, (double X, double Y) q, double x0, double y0, double x1, double y1) =>
+            side switch { 0 => q.X >= x0, 1 => q.X <= x1, 2 => q.Y >= y0, _ => q.Y <= y1 };
+
+        private static (double X, double Y) CrossSide(int side, (double X, double Y) a, (double X, double Y) b, double x0, double y0, double x1, double y1)
+        {
+            double t = side switch
+            {
+                0 => (x0 - a.X) / (b.X - a.X),
+                1 => (x1 - a.X) / (b.X - a.X),
+                2 => (y0 - a.Y) / (b.Y - a.Y),
+                _ => (y1 - a.Y) / (b.Y - a.Y),
+            };
+            return (a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t);
+        }
+
+        // A setup, read once and kept (shared, never changed). Null when portal.dat has no such file or
+        // even the fallback parse found no parts.
+        private SetupInfo GetSetupInfo(uint modelId)
+        {
+            lock (_cacheGate)
+            {
+                if (_setupCache.TryGetValue(modelId, out var have)) return have;
+            }
+            byte[] data = _portalDat.GetFileData(modelId);
+            if (data == null) return null;
+            var setup = new SetupInfo();
+            setup.Unpack(data);
+            if (setup.PartIds == null) return null;
+            lock (_cacheGate)
+            {
+                if (_setupCache.Count >= MAX_SETUP_CACHE) _setupCache.Clear();
+                _setupCache[modelId] = setup;
+            }
+            return setup;
+        }
+
+        private SetupCollision GetSetupCollision(uint modelId)
+        {
+            lock (_cacheGate)
+            {
+                if (_collisionCache.TryGetValue(modelId, out var have)) return have;
+            }
+            var c = BuildSetupCollision(modelId);
+            lock (_cacheGate)
+            {
+                if (_collisionCache.Count >= MAX_COLLISION_CACHE) _collisionCache.Clear();
+                _collisionCache[modelId] = c;
+            }
+            return c;
+        }
+
+        private SetupCollision BuildSetupCollision(uint modelId)
+        {
+            var c = new SetupCollision();
+            var tris = new List<Vector3>();
+            uint kind = modelId & 0xFF000000;
+            if (kind == 0x01000000)
+            {
+                // A GfxObj placed on its own: one part at the object's origin, size 1. Cylinders and spheres
+                // belong to setups, so with no physics polygons AC has nothing to collide with. (This fell back
+                // to a box under 3 triangles or on a failed parse, and the box was then dropped; a one- or
+                // two-triangle panel is kept now.)
+                var mesh = LoadGfxObjMesh(modelId);
+                if (mesh != null) c.TriangleCount += AddFaces(mesh, null, 0, tris, ref c.Capped);
+            }
+            else if (kind == 0x02000000)
+            {
+                var setup = GetSetupInfo(modelId);
+                if (setup == null) return c;
+                for (int i = 0; i < setup.PartIds.Length; i++)
+                {
+                    var mesh = LoadGfxObjMesh(setup.PartIds[i]);
+                    if (mesh != null) c.TriangleCount += AddFaces(mesh, setup, i, tris, ref c.Capped);
+                }
+                if (tris.Count == 0)
+                {
+                    c.Cylinders = setup.Cylinders.ToArray();
+                    c.Spheres = setup.Spheres.ToArray();
+                }
+            }
+            if (tris.Count >= 3)
+            {
+                c.Kind = StaticCollisionKind.Polygons;
+                c.Triangles = tris.ToArray();
+                c.Cylinders = Array.Empty<CollisionCylinder>();
+                c.Spheres = Array.Empty<CollisionSphere>();
+            }
+            else if (c.Cylinders.Length > 0)
+            {
+                c.Kind = StaticCollisionKind.Cylinders;
+                c.Spheres = Array.Empty<CollisionSphere>();
+            }
+            else if (c.Spheres.Length > 0) c.Kind = StaticCollisionKind.Spheres;
+            if (c.Capped) Log($"[STATIC] 0x{modelId:X8}: {c.TriangleCount} physics triangles, kept {MAX_STATIC_TRIANGLES}");
+            return c;
+        }
+
+        // One part's physics polygons as triangles in its setup's space (no setup: as they are). Returns
+        // how many triangles the part has, kept or not.
+        private static int AddFaces(GfxObjMeshData mesh, SetupInfo setup, int part, List<Vector3> into, ref bool capped)
+        {
+            int count = 0;
+            var identity = new Frame();
+            foreach (var face in mesh.Faces)
+            {
+                if (into.Count / 3 >= MAX_STATIC_TRIANGLES)
+                {
+                    capped = true;
+                    count += Math.Max(0, face.Length - 2);
+                    continue;
+                }
+                count += setup != null ? TriangulateAndTransform(face, mesh.Vertices, setup, part, into)
+                                       : TriangulateAndTransform(face, mesh.Vertices, identity, into);
+            }
+            return count;
+        }
+
+        // A setup's collision placed by a stab's frame, in world metres. Cylinders stay upright (AC moves
+        // only a CylSphere's low point with the object: ACE CylSphere.IntersectsSphere). Each cylinder and
+        // sphere is a closed piece of its own: where two of an object's spheres overlap (0x0200104E's pair,
+        // 5,447 placed), one mesh of both would read the overlap as outside to an even-odd inside test, and
+        // a ray only looks at the triangles of the pieces whose box it crosses.
+        private static StaticCollision PlaceCollision(uint setupId, uint cellId, StaticSource source, SetupCollision c, Frame f, float gx, float gy)
+        {
+            Vector3 W(Vector3 local)
+            {
+                var w = f.TransformPoint(local);
+                return new Vector3(w.X + gx, w.Y + gy, w.Z);
+            }
+            var parts = new List<BoundingVolume>();
+            var cyls = Array.Empty<(Vector3 Low, float Radius, float Height)>();
+            var sphs = Array.Empty<(Vector3 Center, float Radius)>();
+            if (c.Kind == StaticCollisionKind.Polygons)
+            {
+                var tris = new Vector3[c.Triangles.Length];
+                for (int i = 0; i < tris.Length; i++) tris[i] = W(c.Triangles[i]);
+                parts.Add(MeshOf(tris));
+            }
+            else if (c.Kind == StaticCollisionKind.Cylinders)
+            {
+                cyls = new (Vector3, float, float)[c.Cylinders.Length];
+                for (int i = 0; i < cyls.Length; i++)
+                {
+                    var low = W(c.Cylinders[i].BottomCenter);
+                    cyls[i] = (low, c.Cylinders[i].Radius, c.Cylinders[i].Height);
+                    var list = new List<Vector3>(SolidSlices * 12);
+                    AppendCylinderSolid(list, low, c.Cylinders[i].Radius, c.Cylinders[i].Height);
+                    if (list.Count > 0) parts.Add(RoundMesh(list));
+                }
+            }
+            else if (c.Kind == StaticCollisionKind.Spheres)
+            {
+                sphs = new (Vector3, float)[c.Spheres.Length];
+                for (int i = 0; i < sphs.Length; i++)
+                {
+                    var centre = W(c.Spheres[i].Center);
+                    sphs[i] = (centre, c.Spheres[i].Radius);
+                    var list = new List<Vector3>(SolidSlices * SphereStacks * 6);
+                    AppendSphereSolid(list, centre, c.Spheres[i].Radius);
+                    if (list.Count > 0) parts.Add(RoundMesh(list));
+                }
+            }
+            if (parts.Count == 0) parts.Add(MeshOf(new[] { W(new Vector3(0, 0, 0)) }));
+            return new StaticCollision(setupId, cellId, source, c.Kind, parts.ToArray(), cyls, sphs, c.TriangleCount, c.Capped);
+        }
+
+        // A cylinder's or a sphere's solid as a mesh, marked round: its ring faces are walkable at many heights, and the
+        // building map's stair test took a 1 m ball chained to a dais for steps (8090012A's 0x0200035E: off the map).
+        private static BoundingVolume RoundMesh(List<Vector3> tris)
+        {
+            var m = MeshOf(tris.ToArray());
+            m.Round = true;
+            return m;
+        }
+
+        // A world-space triangle list as a mesh volume: its box is the triangles' own, and only real triangle
+        // hits count.
+        internal static BoundingVolume MeshOf(Vector3[] tris)
+        {
+            var min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+            var max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+            foreach (var v in tris)
+            {
+                min = Vector3.Min(min, v);
+                max = Vector3.Max(max, v);
+            }
+            return new BoundingVolume
+            {
+                Type = BoundingVolume.VolumeType.TriangleMesh,
+                Center = (min + max) * 0.5f,
+                Dimensions = max - min,
+                Min = min,
+                Max = max,
+                MeshTriangles = tris,
+                IsDoor = false,
+                NoAabbFallback = true
+            };
+        }
+
+        /// <summary>For offline checks: which shapes AC collides with for a model, and how many physics
+        /// triangles, cylinders and spheres it has (triangles before MAX_STATIC_TRIANGLES).</summary>
+        internal StaticCollisionKind DescribeCollision(uint modelId, out int triangles, out int cylinders, out int spheres)
+        {
+            var c = GetSetupCollision(modelId);
+            triangles = c.TriangleCount;
+            cylinders = c.Cylinders.Length;
+            spheres = c.Spheres.Length;
+            return c.Kind;
+        }
+
+        /// <summary>For offline checks: a model's physics triangles in its own space, posed and scaled as AC
+        /// places it (a copy; empty unless its kind is Polygons).</summary>
+        internal Vector3[] SetupCollisionTriangles(uint modelId) => (Vector3[])GetSetupCollision(modelId).Triangles.Clone();
+
+        // ── Closed solids for cylinders and spheres ────────────────────────────────────────────────────
+        // Everything downstream cuts the triangles level (the map's walls) or casts rays at them, so a
+        // CylSphere becomes a 12-sided prism over its height and a Sphere a 12-slice, 8-stack closed solid.
+        // Their corners sit out by PolyAreaScale, so a level cut has the circle's area (its mid-edges 1.2 %
+        // inside the radius, its corners 2.3 % outside); a sphere's rings are pushed out by SphereRingScale
+        // so its side straddles the true surface (within 1 % of the radius both ways). A level cut through
+        // the sphere up to 0.9 of the radius from its middle is within 1 % of the radius of the true circle
+        // there (5 % at the very top and bottom). A sphere under SmallSphereRadius (a cup or a candle on a
+        // table: 0x8804 has some 600 of 0.1 m) is 8 x 4, 48 triangles not 168, within 6 mm of its surface.
+        internal const int SolidSlices = 12, SphereStacks = 8;
+        internal const int SmallSphereSlices = 8, SmallSphereStacks = 4;
+        internal const float SmallSphereRadius = 0.25f;
+        internal static readonly double PolyAreaScale = AreaScale(SolidSlices);
+        internal static readonly double SphereRingScale = RingScale(SphereStacks);
+
+        // An n-gon's corner radius over the radius of the circle with its area.
+        internal static double AreaScale(int n) => Math.Sqrt(Math.PI / (n / 2.0 * Math.Sin(2 * Math.PI / n)));
+        // How far out a sphere's rings go so its side's chords straddle the true surface.
+        internal static double RingScale(int stacks) => 2 / (1 + Math.Cos(Math.PI / (2 * stacks)));
+
+        /// <summary>A closed upright prism round (low, radius, height), as triangles appended to <paramref name="into"/>.</summary>
+        internal static void AppendCylinderSolid(List<Vector3> into, Vector3 low, float radius, float height)
+        {
+            if (!(radius > 0.001f) || !(height > 0.001f)) return;
+            int n = SolidSlices;
+            double r = radius * PolyAreaScale;
+            var bot = new Vector3[n];
+            var top = new Vector3[n];
+            for (int k = 0; k < n; k++)
+            {
+                double a = 2 * Math.PI * k / n;
+                float x = (float)(low.X + r * Math.Cos(a)), y = (float)(low.Y + r * Math.Sin(a));
+                bot[k] = new Vector3(x, y, low.Z);
+                top[k] = new Vector3(x, y, low.Z + height);
+            }
+            for (int k = 0; k < n; k++)
+            {
+                int k1 = (k + 1) % n;
+                into.Add(bot[k]); into.Add(bot[k1]); into.Add(top[k1]);
+                into.Add(bot[k]); into.Add(top[k1]); into.Add(top[k]);
+            }
+            for (int k = 1; k + 1 < n; k++)
+            {
+                into.Add(bot[0]); into.Add(bot[k + 1]); into.Add(bot[k]);
+                into.Add(top[0]); into.Add(top[k]); into.Add(top[k + 1]);
+            }
+        }
+
+        /// <summary>A closed solid round the sphere (centre, radius), as triangles appended to <paramref name="into"/>.</summary>
+        internal static void AppendSphereSolid(List<Vector3> into, Vector3 centre, float radius)
+        {
+            if (!(radius > 0.001f)) return;
+            bool small = radius < SmallSphereRadius;
+            int n = small ? SmallSphereSlices : SolidSlices, stacks = small ? SmallSphereStacks : SphereStacks;
+            double rr = radius * RingScale(stacks), areaScale = AreaScale(n);
+            var rings = new Vector3[stacks - 1][];
+            for (int j = 1; j < stacks; j++)
+            {
+                double phi = -Math.PI / 2 + Math.PI * j / stacks;
+                double rho = rr * Math.Cos(phi) * areaScale;
+                float z = (float)(centre.Z + rr * Math.Sin(phi));
+                var ring = new Vector3[n];
+                for (int k = 0; k < n; k++)
+                {
+                    double a = 2 * Math.PI * k / n;
+                    ring[k] = new Vector3((float)(centre.X + rho * Math.Cos(a)), (float)(centre.Y + rho * Math.Sin(a)), z);
+                }
+                rings[j - 1] = ring;
+            }
+            var south = new Vector3(centre.X, centre.Y, (float)(centre.Z - rr));
+            var north = new Vector3(centre.X, centre.Y, (float)(centre.Z + rr));
+            for (int k = 0; k < n; k++)
+            {
+                int k1 = (k + 1) % n;
+                into.Add(south); into.Add(rings[0][k1]); into.Add(rings[0][k]);
+                for (int j = 0; j + 1 < rings.Length; j++)
+                {
+                    var lo = rings[j];
+                    var hi = rings[j + 1];
+                    into.Add(lo[k]); into.Add(lo[k1]); into.Add(hi[k1]);
+                    into.Add(lo[k]); into.Add(hi[k1]); into.Add(hi[k]);
+                }
+                into.Add(north); into.Add(rings[rings.Length - 1][k]); into.Add(rings[rings.Length - 1][k1]);
+            }
         }
 
         /// <summary>
@@ -1758,7 +2204,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                         Max = worldMax,
                         MeshTriangles = tris,
                         IsDoor = localVol.IsDoor,
-                        NoAabbFallback = localVol.NoAabbFallback   // a parts mesh (PartsPhysicsMesh): its triangles are all of it
+                        NoAabbFallback = localVol.NoAabbFallback   // a collision mesh (MeshOf): its triangles are all of it
                     };
                 }
 
@@ -1892,6 +2338,9 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             {
                 _landblockCache.Clear();
                 _setupCache.Clear();
+                _collisionCache.Clear();
+                _staticCache.Clear();
+                _staticOrder.Clear();
             }
             Log("All caches flushed");
         }
@@ -1902,6 +2351,8 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             {
                 _landblockCache.Remove(landblockKey);
                 _landblockCache.Remove(landblockKey | 0x80000000u);
+                _staticCache.Remove(landblockKey);
+                _staticOrder.Remove(landblockKey);
             }
         }
 
@@ -1913,6 +2364,9 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             {
                 _landblockCache.Clear();
                 _setupCache.Clear();
+                _collisionCache.Clear();
+                _staticCache.Clear();
+                _staticOrder.Clear();
             }
             _initialized = false;
         }
@@ -1922,7 +2376,90 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             string line = $"[GeoLoader] {msg}";
             System.Diagnostics.Debug.WriteLine(line);
             RynthLog.Trace(LogCat.Raycast, line); // visible via /ra trace raycast
-            if (DiagLog.Count < 200) DiagLog.Add(msg);
+            // Statics can be built on more than one thread (the tick's map, a UI inspect).
+            lock (DiagLog)
+            {
+                if (DiagLog.Count < 200) DiagLog.Add(msg);
+            }
         }
+    }
+
+    /// <summary>Which of a placed object's collision shapes AC collides with (ACE PhysicsObj.FindObjCollisions):
+    /// its parts' physics polygons when any part has some, else its CylSpheres, else its Spheres, else none.</summary>
+    public enum StaticCollisionKind { None = 0, Polygons = 1, Cylinders = 2, Spheres = 3 }
+
+    /// <summary>Where a placed static comes from.</summary>
+    public enum StaticSource
+    {
+        /// <summary>An EnvCell's stab list (a dungeon's or a building's cells).</summary>
+        CellStab = 0,
+        /// <summary>The landblock's own object list (LandBlockInfo 0xXXYYFFFE), standing over a cell's floor.</summary>
+        LandblockObject = 1,
+    }
+
+    /// <summary>One placed static object as AC collides with it, in world metres (GeometryLoader.GetStaticCollision).
+    /// Shared between callers: read it, never change it.</summary>
+    public sealed class StaticCollision
+    {
+        private BoundingVolume _union;
+
+        internal StaticCollision(uint setupId, uint cellId, StaticSource source, StaticCollisionKind kind, BoundingVolume[] parts,
+                                 IReadOnlyList<(Vector3 Low, float Radius, float Height)> cylinders, IReadOnlyList<(Vector3 Center, float Radius)> spheres,
+                                 int triangleCount, bool capped)
+        {
+            SetupId = setupId;
+            CellId = cellId;
+            Source = source;
+            Kind = kind;
+            Parts = parts;
+            Cylinders = cylinders;
+            Spheres = spheres;
+            PhysicsTriangles = triangleCount;
+            Capped = capped;
+            var min = parts[0].Min;
+            var max = parts[0].Max;
+            foreach (var p in parts)
+            {
+                min = Vector3.Min(min, p.Min);
+                max = Vector3.Max(max, p.Max);
+            }
+            Min = min;
+            Max = max;
+        }
+
+        /// <summary>The model (a 0x02 setup or a 0x01 GfxObj).</summary>
+        public uint SetupId { get; }
+        /// <summary>The EnvCell it stands in: its stab's cell, or for a landblock object the cell whose floor it is over most.</summary>
+        public uint CellId { get; internal set; }
+        public StaticSource Source { get; }
+        public StaticCollisionKind Kind { get; }
+        /// <summary>Its closed pieces as triangle meshes, world metres, triangle hits only: the physics polygons as one,
+        /// or each cylinder and sphere as a solid of its own.</summary>
+        public IReadOnlyList<BoundingVolume> Parts { get; }
+        /// <summary>The box round all its pieces.</summary>
+        public Vector3 Min { get; }
+        public Vector3 Max { get; }
+        /// <summary>All of it as one mesh (its only piece, or the pieces' triangles together, made when first asked).</summary>
+        public BoundingVolume Mesh
+        {
+            get
+            {
+                if (Parts.Count == 1) return Parts[0];
+                var u = System.Threading.Volatile.Read(ref _union);
+                if (u != null) return u;
+                var all = new List<Vector3>();
+                foreach (var p in Parts) all.AddRange(p.MeshTriangles);
+                u = GeometryLoader.MeshOf(all.ToArray());
+                return System.Threading.Interlocked.CompareExchange(ref _union, u, null) ?? u;
+            }
+        }
+        /// <summary>Kind Cylinders: each upright cylinder, its low point in world metres.</summary>
+        public IReadOnlyList<(Vector3 Low, float Radius, float Height)> Cylinders { get; }
+        /// <summary>Kind Spheres: each sphere, its centre in world metres.</summary>
+        public IReadOnlyList<(Vector3 Center, float Radius)> Spheres { get; }
+        /// <summary>Kind Polygons: how many physics triangles the model has.</summary>
+        public int PhysicsTriangles { get; }
+        /// <summary>The model has more than GeometryLoader.MAX_STATIC_TRIANGLES physics triangles (not all kept).</summary>
+        public bool Capped { get; }
     }
 }

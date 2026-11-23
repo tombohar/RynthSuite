@@ -59,7 +59,8 @@ public sealed partial class RynthAiPlugin
     {
         Host.Log($"[RynthAi] Timed command ({TimedCommandSet.ScopeName(scope)}, {why}): {command}");
         // As a script's line (a nav route's chat waypoint does the same): quiet when it works.
-        Reply.AsScript(() => { HandleRynthChatSubmit(command); return true; });
+        using (_dashboard?.Settings.MacroSource($"the timed command '{command}'"))
+            Reply.AsScript(() => { HandleRynthChatSubmit(command); return true; });
     }
 
     private void SaveTimedCommands()

@@ -8,8 +8,8 @@
 //
 //  Kit picks read the client's live pack walk (ConsumableLookup.Resolve, BestPackHealingKit,
 //  BestPackStaminaKit: WorldObjectCache.GetDirectInventory), which drops a removed kit, but a walk is
-//  reused for up to a second (DirectInventoryCooldownMs) and the next kit goes out KitLandGraceMs
-//  (700 ms) after the line, inside that reuse. An engine without GetContainerContents has no walk at
+//  reused for up to a second (DirectInventoryCooldownMs) and the next kit goes out at most
+//  KitVitalsCatchUpMs (300 ms; 700 ms before 2026-11-20) after the line, inside that reuse. An engine without GetContainerContents has no walk at
 //  all: its inventory view is the object cache, which can keep a removed kit for good.
 //
 //  So: the line names the kit in flight -> every kit pick skips that kit. With the live walk the skip

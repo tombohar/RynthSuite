@@ -454,7 +454,7 @@ internal sealed partial class LegacyDashboardRenderer
         _settings.SelectedProfile = activeProfile;
         ApplyUiStateFromSettings();
 
-        _settings.IsMacroRunning = _settings.StartMacroOnLogin;
+        _settings.SetMacroRunning(_settings.StartMacroOnLogin, "Start Macro On Login (profile load)");
         _settings.CurrentState   = "Default";
         _settings.BotAction      = "Default";
 
@@ -542,7 +542,7 @@ internal sealed partial class LegacyDashboardRenderer
         _charFolder       = string.Empty;
         _settingsFilePath = string.Empty;
         _lastSavedJson    = string.Empty;
-        _settings.IsMacroRunning = false;
+        _settings.SetMacroRunning(false, "the character session ending (logout or character change)");
         _settings.CurrentState   = "Default";
         _settings.BotAction      = "Default";
     }
@@ -1427,6 +1427,7 @@ internal sealed partial class LegacyDashboardRenderer
                 TargetLock                 = s.TargetLock,
                 FightSelectedTarget        = s.FightSelectedTarget,
                 MeleeThroughWalls          = s.MeleeThroughWalls,
+                DebuffAllBeforeAttacking   = s.DebuffAllBeforeAttacking,
                 RingRange                  = s.RingRange,
                 ApproachRange              = s.ApproachRange,
                 CorpseApproachRangeMax     = s.CorpseApproachRangeMax,
@@ -1721,6 +1722,7 @@ internal sealed partial class LegacyDashboardRenderer
             if (p.TargetLock is bool targetLock) s.TargetLock = targetLock;                           // absent = unchanged
             if (p.FightSelectedTarget is bool fightSel) s.FightSelectedTarget = fightSel;             // absent = unchanged
             if (p.MeleeThroughWalls is bool meleeWalls) s.MeleeThroughWalls = meleeWalls;               // absent = unchanged
+            if (p.DebuffAllBeforeAttacking is bool debuffAll) s.DebuffAllBeforeAttacking = debuffAll;  // absent = unchanged
             s.RingRange                  = p.RingRange;
             s.ApproachRange              = p.ApproachRange;
             s.CorpseApproachRangeMax     = p.CorpseApproachRangeMax;
@@ -2183,6 +2185,9 @@ internal sealed partial class LegacyDashboardRenderer
         dst.UnboxAetheriaWhenIdle    = tmp.UnboxAetheriaWhenIdle;
         dst.AutoConfirmCraft         = tmp.AutoConfirmCraft;
         dst.AutoConfirmCraftPercent  = tmp.AutoConfirmCraftPercent;
+        dst.MakeKitsWhenLow          = tmp.MakeKitsWhenLow;
+        dst.MakeKitsBelow            = Math.Clamp(tmp.MakeKitsBelow, 1, MiniRemote.Crafting.KitAuto.MaxBelow);
+        dst.MakeKitsUpTo             = Math.Clamp(tmp.MakeKitsUpTo, 1, MiniRemote.Crafting.KitAuto.MaxUpTo);
         dst.EnableCombineSalvage     = tmp.EnableCombineSalvage;
         dst.CombineBagsDuringSalvage = tmp.CombineBagsDuringSalvage;
         dst.SalvageWithoutPanel      = tmp.SalvageWithoutPanel;
@@ -2257,6 +2262,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.TargetLock               = tmp.TargetLock;
         dst.FightSelectedTarget      = tmp.FightSelectedTarget;
         dst.MeleeThroughWalls        = tmp.MeleeThroughWalls;
+        dst.DebuffAllBeforeAttacking = tmp.DebuffAllBeforeAttacking;
         dst.RingRange                = tmp.RingRange;
         dst.HandlerRingEvade         = tmp.HandlerRingEvade;   // obsolete (RynthILT's now): carried so the profile keeps it for RynthILT's one-time import
         dst.ApproachRange            = tmp.ApproachRange;
@@ -2275,6 +2281,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.CustomPetRange           = tmp.CustomPetRange;
         dst.PetMinMonsters           = tmp.PetMinMonsters;
         dst.PetAutoRefill            = tmp.PetAutoRefill;
+        dst.PetElement               = tmp.PetElement ?? string.Empty;   // read through PetChoice.NormalizeElement
         dst.AdvancedOptions          = tmp.AdvancedOptions;
         dst.MineOnly                 = tmp.MineOnly;
         dst.ShowEditor               = tmp.ShowEditor;
@@ -2791,20 +2798,100 @@ internal sealed partial class LegacyDashboardRenderer
 
     private void RefreshNavFiles()
     {
+        // The top of NavProfiles, then its subfolders as "Folder\Name" (NavFileList, 2026-11-22:
+        // VirindiTank navs dropped in as a folder never showed).
         var list = new List<string> { "None" };
         int sel = 0;
-        if (Directory.Exists(_navFolder))
-            foreach (string file in Directory.GetFiles(_navFolder, "*.nav"))
-            {
-                list.Add(Path.GetFileNameWithoutExtension(file));
-                if (file.Equals(_settings.CurrentNavPath, StringComparison.OrdinalIgnoreCase)) sel = list.Count - 1;
-            }
+        foreach (string name in NavFileList.List(_navFolder))
+        {
+            list.Add(name);
+            if (Path.Combine(_navFolder, name + ".nav").Equals(_settings.CurrentNavPath, StringComparison.OrdinalIgnoreCase)) sel = list.Count - 1;
+        }
         lock (_profileListsLock) { _navFiles.Clear(); _navFiles.AddRange(list); }
         _selectedNavIdx = sel;
     }
 
     private DateTime _navFolderStamp, _lootFolderStamp, _metaFolderStamp, _profileFolderStamp;
     private long _nextNavFolderCheckMs;
+
+    // ── VirindiTank navs in the wrong folder (StrayNavs) ──────────────────
+    // Null-safe where read: the host tests build the dashboard without its constructor.
+    private List<StrayNav>? _strayNavs = new();
+    private string? _strayNavText = string.Empty;
+    private DateTime _strayStamp;
+    private bool _strayLooked;
+    private int _strayNoticeCount;      // how many the last chat line was about (a new one only for more)
+    private string? _strayChatPending = string.Empty;
+    private List<string>? _strayFolders;
+
+    /// <summary>The folders the stray-nav check looks in (the host tests point it at scratch folders).</summary>
+    internal List<string> StrayFolders { set => _strayFolders = value; }
+
+    private static List<string> StrayCandidateFolders() => StrayNavs.CandidateFolders(
+        RynthCore.Install.RynthInstallPaths.CoreDir,
+        RynthCore.Install.RynthInstallPaths.SuiteDir,
+        RynthCore.Install.RynthInstallPaths.RynthAiDir,
+        Environment.GetEnvironmentVariable("RYNTHNAV_NAVDATA"),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RynthCore", "rynthnav.json"));
+
+    /// <summary>
+    /// Looks again for VirindiTank navs outside NavProfiles when one of the folders worth a look
+    /// changed (or the first time). Sets the Nav panel's line and queues one chat line when there
+    /// are more than the last line was about. Plugin tick, from <see cref="TickNavFolder"/>.
+    /// </summary>
+    private void RefreshStrayNavs(DateTime navStamp, bool force = false)
+    {
+        try
+        {
+            List<string> folders = _strayFolders ??= StrayCandidateFolders();   // once a session
+            DateTime stamp = navStamp;   // a nav copied into NavProfiles settles one too
+            foreach (string f in folders)
+            {
+                try { DateTime t = Directory.GetLastWriteTimeUtc(f); if (t > stamp) stamp = t; }   // a missing folder: 1601
+                catch { }
+            }
+            if (!force && _strayLooked && stamp == _strayStamp) return;
+            _strayLooked = true;
+            _strayStamp = stamp;
+
+            _strayNavs = StrayNavs.Find(folders, _navFolder);
+            _strayNavText = StrayNavs.Notice(_strayNavs, _navFolder);
+            if (_strayNavs.Count > _strayNoticeCount)
+            {
+                _strayNoticeCount = _strayNavs.Count;
+                _strayChatPending = _strayNavText + " Nav panel: Copy them into NavProfiles (or /ra nav import).";
+                _host.Log("[RynthAi] " + _strayChatPending);
+            }
+            else if (_strayNavs.Count == 0) _strayNoticeCount = 0;
+        }
+        catch (Exception ex) { _host.Log($"[RynthAi] Stray nav check failed: {ex.Message}"); }
+    }
+
+    /// <summary>Posts the stray-navs line waiting for chat (plugin tick, in game).</summary>
+    public void DrainStrayNavNotice(Func<string, bool> write)
+    {
+        if (string.IsNullOrEmpty(_strayChatPending)) return;
+        if (write("[RynthAi] " + _strayChatPending)) _strayChatPending = string.Empty;
+    }
+
+    /// <summary>
+    /// /ra nav import and the Nav panel's button: copies the VirindiTank navs found outside
+    /// NavProfiles into it (never over a nav of that name; the originals stay). Returns the line
+    /// to show; <paramref name="ok"/> false when nothing could be copied.
+    /// </summary>
+    public string CopyStrayNavs(out bool ok)
+    {
+        RefreshStrayNavs(NavFileList.Stamp(_navFolder), force: true);
+        List<StrayNav> strays = _strayNavs ?? new List<StrayNav>();
+        StrayCopyResult r = StrayNavs.CopyInto(strays, _navFolder, (from, to) =>
+            RynthCore.Plugin.Shared.DataWriteGuard.TrySave("the nav", to, () => File.Copy(from, to, overwrite: false), out string why, callerShows: true)
+                ? null : why);
+        ok = r.Failed == 0;
+        RefreshNavFiles();
+        RefreshStrayNavs(NavFileList.Stamp(_navFolder), force: true);
+        _strayChatPending = string.Empty;
+        return StrayNavs.CopyReply(r, _navFolder);
+    }
 
     /// <summary>
     /// Lists a folder again when it changed since the last look (a file added, removed or renamed:
@@ -2819,7 +2906,9 @@ internal sealed partial class LegacyDashboardRenderer
         long now = Environment.TickCount64;
         if (now < _nextNavFolderCheckMs) return;
         _nextNavFolderCheckMs = now + 3000;
-        if (FolderChanged(_navFolder, ref _navFolderStamp)) RefreshNavFiles();
+        DateTime navStamp = NavFileList.Stamp(_navFolder);   // NavProfiles and its subfolders
+        if (StampChanged(navStamp, ref _navFolderStamp)) RefreshNavFiles();
+        RefreshStrayNavs(navStamp);
         if (FolderChanged(_lootFolder, ref _lootFolderStamp)) RefreshLootFiles();
         if (FolderChanged(_metaFolder, ref _metaFolderStamp)) RefreshMetaFiles();
         if (FolderChanged(_charFolder, ref _profileFolderStamp)) RefreshProfilesList();
@@ -2832,12 +2921,18 @@ internal sealed partial class LegacyDashboardRenderer
         try
         {
             DateTime now = !string.IsNullOrEmpty(folder) && Directory.Exists(folder) ? Directory.GetLastWriteTimeUtc(folder) : DateTime.MinValue;
-            if (now == stamp) return false;
-            bool first = stamp == default;
-            stamp = now;
-            return !first;
+            return StampChanged(now, ref stamp);
         }
         catch { return false; }
+    }
+
+    /// <summary>FolderChanged for a time worked out by the caller (NavFileList.Stamp).</summary>
+    private static bool StampChanged(DateTime now, ref DateTime stamp)
+    {
+        if (now == stamp) return false;
+        bool first = stamp == default;
+        stamp = now;
+        return !first;
     }
 
     /// <summary>Save button and /ra nav save [name]. Returns the chat line.</summary>
@@ -2859,6 +2954,32 @@ internal sealed partial class LegacyDashboardRenderer
     /// </summary>
     public string LoadNavByName(string name)
     {
+        // A nav in a subfolder ("VirindiTank\Hunt", or just "Hunt" when only one subfolder has it):
+        // loaded from the list. A name at the top, or no such nav, goes on as before (a new one is made).
+        string typed = NewProfileFiles.Tidy(name, NewProfileFiles.NavExtensions, out _);
+        if (!File.Exists(Path.Combine(_navFolder, typed.Replace('/', '\\') + ".nav")) || typed.Contains('\\') || typed.Contains('/'))
+        {
+            RefreshNavFiles();
+            string? listed;
+            int matches;
+            List<string> same;
+            lock (_profileListsLock)
+            {
+                listed = NavFileList.Find(_navFiles, typed, out matches);
+                same = matches > 1 ? NavFileList.SameName(_navFiles, typed) : new List<string>();
+            }
+            if (listed != null && !listed.Equals("None", StringComparison.OrdinalIgnoreCase))
+            {
+                lock (_profileListsLock) _selectedNavIdx = _navFiles.IndexOf(listed);
+                LoadSelectedNav();
+                SaveSettings();
+                return $"[RynthAi] Loaded {listed} ({_settings.CurrentRoute.Points.Count} waypoints).";
+            }
+            if (matches > 1)
+                return $"[RynthAi] {matches} navs are named '{typed}': {string.Join(", ", same)}. /ra nav load <folder>\\<name> picks one.";
+            // Not listed: on as before (a name with a folder in it is refused there; nothing is made in a subfolder).
+        }
+
         ProfileFileResult r = NewProfileFiles.FindOrCreateNav(_navFolder, name, out string want, out _, out string error);
         if (r == ProfileFileResult.Rejected)
             return $"[RynthAi] Can't use '{want}' as a nav name: {error}.";
@@ -2952,24 +3073,34 @@ internal sealed partial class LegacyDashboardRenderer
 
     private void RefreshLootFiles()
     {
-        var list = new System.Collections.Generic.List<string> { "None" };
-        int idx = _settings.LootProfileIdx;
-        if (Directory.Exists(_lootFolder))
-        {
-            var files = new System.Collections.Generic.List<string>();
-            files.AddRange(Directory.GetFiles(_lootFolder, "*.utl"));
-            files.AddRange(Directory.GetFiles(_lootFolder, "*.json"));
-            files.Sort(StringComparer.OrdinalIgnoreCase);
-
-            foreach (string file in files)
-            {
-                list.Add(Path.GetFileName(file));
-                if (file.Equals(_settings.CurrentLootPath, StringComparison.OrdinalIgnoreCase))
-                    idx = list.Count - 1;
-            }
-        }
+        // One list for every loot profile picker (Loot.LootProfileList).
+        List<string> list = Loot.LootProfileList.Build(_lootFolder);
+        int idx = Loot.LootProfileList.SelectedIndex(list, _lootFolder, _settings.CurrentLootPath, _settings.LootProfileIdx);
         lock (_profileListsLock) { _lootFiles.Clear(); _lootFiles.AddRange(list); }
         _settings.LootProfileIdx = idx;
+    }
+
+    /// <summary>The loot profile pickers' list ("None", then LootProfiles' *.utl and *.json), a copy. Any thread.</summary>
+    public string[] LootProfileNames()
+    {
+        lock (_profileListsLock) return _lootFiles.ToArray();
+    }
+
+    /// <summary>
+    /// The Mini Remote's Loot row: picks <paramref name="fileName"/> from the list by name (the list can
+    /// change between the click and this call) through the pickers' one path, SelectProfileAtIndex.
+    /// Pump thread.
+    /// </summary>
+    public void SelectLootProfileByName(string fileName)
+    {
+        int idx;
+        lock (_profileListsLock) idx = Loot.LootProfileList.IndexOf(_lootFiles, fileName);
+        if (idx < 0)
+        {
+            _host.WriteToChat($"[RynthAi] Loot profile {fileName} is no longer in LootProfiles.", 4);
+            return;
+        }
+        SelectProfileAtIndex(1, idx);
     }
 
     private void RefreshMetaFiles()
@@ -3118,7 +3249,7 @@ internal sealed partial class LegacyDashboardRenderer
                                         ? "None (Unsaved)"
                                         : _settings.CurrentNavPath.StartsWith("<embedded:", StringComparison.Ordinal)
                                             ? _settings.CurrentNavPath.Substring(10).TrimEnd('>') + " (in meta)"
-                                            : Path.GetFileNameWithoutExtension(_settings.CurrentNavPath),
+                                            : NavListName(_settings.CurrentNavPath),
                 NavStatusLine     = _settings.NavStatusLine ?? string.Empty,
                 NavIsStuck        = _settings.NavIsStuck,
                 MacroRunning      = _settings.IsMacroRunning,
@@ -3134,10 +3265,29 @@ internal sealed partial class LegacyDashboardRenderer
                 TrailPoints       = NavBreadcrumbs?.Trail.Length ?? 0,
                 TrailYards        = NavBreadcrumbs?.TrailYards ?? 0,
                 EditStatus        = CurrentNavEditStatus(),
+                StrayNavCount     = _strayNavs?.Count ?? 0,
+                StrayNavText      = _strayNavText ?? string.Empty,
             };
             return JsonSerializer.Serialize(payload, RynthAiJsonContext.Default.NavBridgePayload);
         }
         catch { return "{}"; }
+    }
+
+    /// <summary>
+    /// The nav list's name for a nav file: "Folder\Name" for one in a NavProfiles subfolder (so the
+    /// Nav panel's picker shows it as the one loaded), else the file name without ".nav".
+    /// </summary>
+    private string NavListName(string path)
+    {
+        try
+        {
+            string rel = Path.GetRelativePath(_navFolder, path);
+            if (!rel.StartsWith("..", StringComparison.Ordinal) && !Path.IsPathRooted(rel)
+                && rel.EndsWith(".nav", StringComparison.OrdinalIgnoreCase) && rel.Contains('\\'))
+                return rel[..^4];
+        }
+        catch { }
+        return Path.GetFileNameWithoutExtension(path);
     }
 
     public void HandleNavCommand(string json)
@@ -3152,7 +3302,7 @@ internal sealed partial class LegacyDashboardRenderer
             {
                 case "startNav":
                     _settings.RearmFinishedNavRoute();   // the player's Start Navigation re-runs a finished Once route
-                    _settings.IsMacroRunning  = true;
+                    _settings.SetMacroRunning(true, "the remote's Start Navigation");
                     _settings.EnableNavigation = true;
                     if (_settings.BotAction != "Navigating")
                         _settings.BotAction = "Default";
@@ -3251,6 +3401,13 @@ internal sealed partial class LegacyDashboardRenderer
                 case "loadNav":
                     int ni = _navFiles.IndexOf(cmd.NavName);
                     if (ni >= 0) { _selectedNavIdx = ni; LoadSelectedNav(); SaveSettings(); }
+                    break;
+
+                case "copyStrayNavs":
+                    // Nav panel: "Copy them into NavProfiles" under the stray-navs line.
+                    string copied = CopyStrayNavs(out bool copyOk);
+                    SetNavEditStatus(copied);
+                    _host.WriteToChat("[RynthAi] " + copied, copyOk ? CommandReply.OkColor : CommandReply.FailColor);
                     break;
 
                 default:
@@ -3480,7 +3637,7 @@ internal sealed partial class LegacyDashboardRenderer
         return sb.ToString();
     }
 
-    public void TogglePanelMacro() => _settings.IsMacroRunning = !_settings.IsMacroRunning;
+    public void TogglePanelMacro(string source = "the panel's macro toggle") => _settings.SetMacroRunning(!_settings.IsMacroRunning, source);
 
     public void SetSubsystemEnabled(int id, bool enabled)
     {
@@ -3533,9 +3690,14 @@ internal sealed partial class LegacyDashboardRenderer
             case 1:
                 if (lootFile != null)
                 {
+                    string before = _settings.CurrentLootPath ?? string.Empty;
                     _settings.LootProfileIdx = index;
                     _settings.CurrentLootPath = index == 0 ? string.Empty : Path.Combine(_lootFolder, lootFile);
                     SaveSettings();
+                    // Every picker (Loaded files, Classic Loot tab, Settings > Looting, the Mini Remote) says
+                    // what it switched to; the profile itself loads when looting next reads it.
+                    if (!string.Equals(before, _settings.CurrentLootPath, StringComparison.OrdinalIgnoreCase))
+                        _host.WriteToChat(Loot.LootProfileList.SwitchedLine(_settings.CurrentLootPath), 1);
                 }
                 break;
             case 2:

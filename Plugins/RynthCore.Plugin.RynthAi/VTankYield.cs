@@ -65,7 +65,7 @@ internal sealed class VTankYield
         Verdict v = Tick(settings.IsMacroRunning, macroWasRunning, settings.YieldToVTank);
         if (v == Verdict.None)
             return v;
-        settings.IsMacroRunning = false;
+        settings.SetMacroRunning(false, "VTank yield (VTank's macro runs: one bot per client)");
         onStop?.Invoke();
         if (v == Verdict.StopForVTankStart) chat(StoppedForStartLine);
         else if (v == Verdict.StopWhileVTankRuns) chat(StoppedWhileRunningLine);

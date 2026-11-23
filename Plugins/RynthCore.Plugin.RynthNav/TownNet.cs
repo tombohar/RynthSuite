@@ -38,26 +38,26 @@ internal sealed class TownNetRules
     /// <summary>
     /// Why this character can't use the portal ("" = it can). Level 0 = not known yet: a portal with a
     /// level rule is then left out, since it can't be shown to be open. Rules the plugin can't check
-    /// (quests, player killer status, vitae) leave the portal out too.
+    /// (quests, player killer status or vitae not known yet) leave the portal out too.
     /// </summary>
-    public string Blocks(int level, bool olthoi)
+    public string Blocks(int level, bool olthoi) => Blocks(new Traveller(level, 0, olthoi, null));
+
+    /// <summary>As above, for a character whose PK status and vitae may be known (PortalRules).</summary>
+    public string Blocks(in Traveller t)
     {
         if (Closed) return "closed";
         if (AdvocateOnly) return "advocates only";
         if (Quest.Length > 0) return "needs a quest flag";
-        if (olthoi && NoOlthoi) return "no Olthoi";
-        if (!olthoi && OnlyOlthoi) return "Olthoi only";
-        if (MinLevel > 0 || MaxLevel > 0)
-        {
-            if (level <= 0) return MinLevel > 0 ? $"needs level {MinLevel} (your level isn't known yet)" : $"level {MaxLevel} or lower (your level isn't known yet)";
-            if (MinLevel > 0 && level < MinLevel) return $"needs level {MinLevel}";
-            if (MaxLevel > 0 && level > MaxLevel) return $"level {MaxLevel} or lower";
-        }
-        if (NoPk || NoPkLite || NoNpk) return "player killer rules";
-        if (NoVitae) return "no vitae";
-        if (NoNewAccounts || AccountRequirements > 1) return "account rules";
-        return "";
+        if (AccountRequirements > 1) return "account rules";
+        string why = PortalRules.Refusal(MinLevel, MaxLevel, Bitmask, t);
+        return why;
     }
+
+    /// <summary>These rules as a PortalBitmask (PortalRules), for the shared check.</summary>
+    private int Bitmask =>
+        PortalRules.Unrestricted | (NoPk ? PortalRules.NoPk : 0) | (NoPkLite ? PortalRules.NoPkLite : 0) | (NoNpk ? PortalRules.NoNpk : 0)
+        | (OnlyOlthoi ? PortalRules.OnlyOlthoi : 0) | (NoOlthoi ? PortalRules.NoOlthoi : 0) | (NoVitae ? PortalRules.NoVitae : 0)
+        | (NoNewAccounts ? PortalRules.NoNewAccounts : 0);
 }
 
 internal sealed class TownNetEntry
@@ -241,7 +241,10 @@ internal sealed class TownNet
     /// and exits in dungeons have no map position and are left out too (silently: they never could
     /// be on a map route). <see cref="HubExit.Id"/> is the index into <see cref="Exits"/>.
     /// </summary>
-    public HubLinks Links(int level, bool olthoi, List<string>? notes)
+    public HubLinks Links(int level, bool olthoi, List<string>? notes) => Links(new Traveller(level, 0, olthoi, null), notes);
+
+    /// <summary>As above, for a character whose PK status and vitae may be known.</summary>
+    public HubLinks Links(in Traveller t, List<string>? notes)
     {
         var hub = new HubLinks { Name = "Town Network", Arrivals = Arrivals.Count };
         int entriesBlocked = 0;
@@ -249,7 +252,7 @@ internal sealed class TownNet
         foreach (TownNetEntry e in Entries)
         {
             if (!e.OnMap || e.Arrival < 0) continue;
-            string why = e.Rules.Blocks(level, olthoi);
+            string why = e.Rules.Blocks(t);
             if (why.Length > 0) { entriesBlocked++; entryWhy = why; continue; }
             hub.Entries.Add(new HubEntry(e.Ns, e.Ew, e.Arrival, e.Name));
         }
@@ -259,7 +262,7 @@ internal sealed class TownNet
         {
             TownNetExit ex = Exits[x];
             if (!ex.DestOnMap) continue;
-            string why = ex.Rules.Blocks(level, olthoi);
+            string why = ex.Rules.Blocks(t);
             if (why.Length > 0) { notes?.Add($"Town Network: {ex.Name} left out ({why})."); continue; }
             var walk = new double[Arrivals.Count];
             bool any = false;

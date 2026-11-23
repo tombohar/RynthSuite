@@ -240,7 +240,7 @@ public sealed partial class RynthAiPlugin
         ResetCurrentLootItem();
         _processedCorpseItems.Clear();
         _corpseItemAttempts.Clear();
-        _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear(); _pendingKeepUpTo.Clear();
+        _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear(); _pendingKeepUpTo.Clear(); _pendingPerDay.Clear();
         _targetCorpseId = id;
         _corpseTargetSince = now;
         _lastCorpseOpenAttemptAt = 0;
@@ -261,7 +261,11 @@ public sealed partial class RynthAiPlugin
         if (why == "completed")
             _lastChestLootedId = unchecked((uint)chestId);   // ralastchestlooted[]
         // Pickup with macro off > Leave the chest open: a chest the player opened stays open, and chat says so.
-        bool leaveOpen = close && chestId == _manualChestLootId && (_dashboard?.Settings?.LootChestsMacroOffLeaveOpen ?? false);
+        // So does one the pickup took nothing from (R-20261120-173459-ea5d): it was closed about 1 ms after
+        // the player opened it, before they could take what the profile leaves, and some chests lock on close.
+        bool manual = chestId == _manualChestLootId;
+        bool leaveOpen = close && manual
+            && ((_dashboard?.Settings?.LootChestsMacroOffLeaveOpen ?? false) || _corpseItemsLooted == 0);
         if (chestId == _manualChestLootId)
             _manualChestLootId = 0;
         if (close && !leaveOpen)
@@ -281,7 +285,7 @@ public sealed partial class RynthAiPlugin
 
         _processedCorpseItems.Clear();
         _corpseItemAttempts.Clear();
-        _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear(); _pendingKeepUpTo.Clear();
+        _pendingManaStoneIds.Clear(); _pendingManaTapIds.Clear(); _pendingKeepUpTo.Clear(); _pendingPerDay.Clear();
         _corpseIdsRequested = false;
         ResetCurrentLootItem();
         if (_openedContainerId == chestId)

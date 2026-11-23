@@ -276,9 +276,11 @@ internal sealed class NavCoarse
     /// <summary>
     /// <see cref="ProbeFile(NavGraph, string, double, double, double, float)"/>; with a
     /// <paramref name="startRegion"/> (not -1) it picks ground a walk from there can end on
-    /// (<see cref="ProbeReachable"/>).
+    /// (<see cref="ProbeReachable"/>). <paramref name="fromBottom"/>: the height isn't known, so the
+    /// ground nearest the tile's lowest point (the land, not a roof above it); <paramref name="up"/> unused.
     /// </summary>
-    public static Probe? ProbeFile(NavGraph g, string navDataDir, double ew, double up, double ns, float reach, int startRegion, out bool moved)
+    public static Probe? ProbeFile(NavGraph g, string navDataDir, double ew, double up, double ns, float reach, int startRegion, out bool moved,
+                                   bool fromBottom = false)
     {
         moved = false;
         int x = (int)Math.Floor(ew / 192.0), y = (int)Math.Floor(ns / 192.0);
@@ -295,7 +297,7 @@ internal sealed class NavCoarse
         var prm = new DtNavMeshParams { orig = new RcVec3f(0, 0, 0), tileWidth = 192f, tileHeight = 192f, maxTiles = 2, maxPolys = 1 << 16 };
         nav.Init(ref prm, 6);
         nav.AddTile(md, 0, 0, out _);
-        double u = float.IsFinite((float)up) ? up : 0;
+        double u = fromBottom ? md.header.bmin.Y : float.IsFinite((float)up) ? up : 0;
         return startRegion < 0
             ? ProbeNear(g, nav, new DtNavMeshQuery(nav), ew, u, ns, reach, regions)
             : ProbeReachable(g, nav, new DtNavMeshQuery(nav), ew, u, ns, reach, regions, startRegion, out moved);

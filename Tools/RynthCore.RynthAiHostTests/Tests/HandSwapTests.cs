@@ -26,9 +26,52 @@ internal static class HandSwapTests
     private const int Melee = HandSwapSequence.MeleeSlot, Off = HandSwapSequence.ShieldSlot, Missile = HandSwapSequence.MissileSlot,
                       Ammo = HandSwapSequence.AmmoSlot, Held = HandSwapSequence.HeldSlot, Two = HandSwapSequence.TwoHandedSlot;
 
+    // 2026.11.19.1: "When the macro swaps out wands it randomly throws them into pack 1, 2 or 4": every put-away
+    // took the side pack with the most free slots at that moment.
+    private static void HomePackFirst()
+    {
+        const uint PackA = 0x80000701, PackB = 0x80000702, PackC = 0x80000703, Filler = 0x80000710;
+        FakeHost.Reset();
+        FakeHost.ContentsCalls = true;
+        var ids = new List<uint>();
+        void Pack(uint id, string name, int capacity)
+        {
+            FakeHost.Names[id] = name; FakeHost.ItemTypes[id] = 0x200; FakeHost.Ints[(id, 6)] = capacity;
+            FakeHost.Containers[id] = Player; ids.Add(id);
+        }
+        Pack(PackA, "Pack A", 10); Pack(PackB, "Pack B", 30); Pack(PackC, "Pack C", 20);
+        FakeHost.Names[Sceptre] = "Sceptre"; FakeHost.ItemTypes[Sceptre] = 0x8000;   // a caster
+        FakeHost.Containers[Sceptre] = PackA; ids.Add(Sceptre);
+        var host = FakeHost.Create(Player);
+        var cache = FakeHost.MakeCache(host, Player, ids);
+        var clock = new DateTime(2026, 11, 21, 4, 0, 0);
+        cache.WalkClock = () => clock;
+        cache.GetDirectInventory(forceRefresh: true);   // the pack walk sees the Sceptre in Pack A
+        Check.Eq(cache.HomePackOf(I(Sceptre)), I(PackA), "the walk notes its pack");
+
+        // Wielded: out of the packs.
+        FakeHost.Containers.Remove(Sceptre);
+        FakeHost.Wielders[Sceptre] = Player;
+        clock = clock.AddSeconds(2);   // past the walk's refresh floor
+        Check.Eq(WorldObjectCache.FindPackFor(host, cache, includeMainPack: true, requireFree: 1), I(PackB), "the old choice: the emptiest pack (B)");
+        Check.Eq(WorldObjectCache.FindPackFor(host, cache, includeMainPack: true, requireFree: 1, new[] { I(Sceptre) }), I(PackA),
+                 "put away: back to Pack A, where it came from");
+        Check.Eq(cache.HomePackOf(I(Sceptre)), I(PackA), "a wielded weapon keeps its home");
+
+        // Pack A full: the usual choice.
+        for (uint i = 0; i < 10; i++) { FakeHost.Names[Filler + i] = $"Gem {i}"; FakeHost.ItemTypes[Filler + i] = 0x800; FakeHost.Containers[Filler + i] = PackA; _ = cache[I(Filler + i)]; }
+        clock = clock.AddSeconds(2);
+        Check.Eq(WorldObjectCache.FindPackFor(host, cache, includeMainPack: true, requireFree: 1, new[] { I(Sceptre) }), I(PackB),
+                 "its pack full: the emptiest pack instead");
+        // Two items from different packs: no single home, the usual choice.
+        Check.Eq(WorldObjectCache.FindPackFor(host, cache, includeMainPack: true, requireFree: 2, new[] { I(Sceptre), I(Filler) }), I(PackB),
+                 "two items with different homes: the usual choice");
+    }
+
     public static void Register(Runner r)
     {
         r.Add("hand swap: dual wield -> wand: the off hand, then the main hand, then the wand, each once the last landed", DualWieldOrder);
+        r.Add("weapon put away (R-20261121-040524-f6ed): back to the pack it came from while that has room, not the emptiest pack", HomePackFirst);
         r.Add("hand swap: sword + shield, two-hander, bow (arrows stay on), empty hands, a wand already in hand", Loadouts);
         r.Add("hand swap: peace first from a combat mode, then the hands (answered at once in peace), then the wand", PeaceFirst);
         r.Add("hand swap: an unanswered step is sent again once, then the swap fails (bounded)", Bounded);

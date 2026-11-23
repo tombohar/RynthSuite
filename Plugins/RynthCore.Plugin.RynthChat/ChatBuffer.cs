@@ -13,6 +13,9 @@ namespace RynthCore.Plugin.RynthChat;
 /// a fixed 500 before. Changing it keeps the newest lines and never touches the
 /// numbering: the engine (and its Discord relay) tell new lines from old by seq.
 ///
+/// Player chat (0.4.0) is kept longer, in a second ring (see DefaultPlayerCapacity): a read
+/// that starts before the main ring's oldest line gets those player lines first, in seq order.
+///
 /// JSON per line: {"seq":N,"ts":"HH:mm:ss","chan":"Chat","type":3,"sender":"Bob"|null,"text":"..."}.
 /// "type" (AC's ChatMessageType) was added in 0.2.0; engines before it ignore it.
 /// Every non-ASCII character is written as a \uXXXX escape, so the export is
@@ -26,15 +29,62 @@ internal sealed class ChatBuffer
     internal const int MinCapacity = 100;
     internal const int MaxCapacity = 10000;
 
+    // Player chat (0.4.0, ChatClassifier.IsPlayerChat) is also kept in a ring of its own, so it
+    // outlasts the main ring: the engine's "Player chat history" (RynthChatSetPlayerCapacity). A
+    // busy hunt fills the main ring with combat lines in minutes; after an engine reload, or with
+    // the chat window closed for a while, the engine reads the scrollback from here, and the tells
+    // and fellowship lines are still in it. 0 turns the second ring off.
+    internal const int DefaultPlayerCapacity = 5000;
+    internal const int MaxPlayerCapacity = 20000;
+
     private ChatLine?[] _ring;
     private readonly object _lock = new();
     private int  _head;   // next write index (mod _ring.Length)
     private int  _count;  // lines stored (<= _ring.Length)
     private ulong _nextSeq = 1;
+    private ChatLine?[] _players;
+    private int _pHead, _pCount;
 
-    internal ChatBuffer(int capacity = DefaultCapacity)
+    internal ChatBuffer(int capacity = DefaultCapacity, int playerCapacity = DefaultPlayerCapacity)
     {
         _ring = new ChatLine?[Math.Clamp(capacity, MinCapacity, MaxCapacity)];
+        _players = new ChatLine?[Math.Clamp(playerCapacity, 0, MaxPlayerCapacity)];
+    }
+
+    internal int PlayerCapacity
+    {
+        get { lock (_lock) return _players.Length; }
+    }
+
+    /// <summary>
+    /// Keeps up to <paramref name="capacity"/> player lines (0..MaxPlayerCapacity) in their own
+    /// ring from now on; when it shrinks, the oldest go. Returns the capacity applied, or -1 for 0
+    /// (off), so the engine can tell "applied" from "not up yet". Any thread.
+    /// </summary>
+    internal int SetPlayerCapacity(int capacity)
+    {
+        capacity = Math.Clamp(capacity, 0, MaxPlayerCapacity);
+        lock (_lock)
+        {
+            if (capacity != _players.Length)
+            {
+                (_players, _pHead, _pCount) = Resize(_players, _pHead, _pCount, capacity);
+            }
+            return capacity == 0 ? -1 : capacity;
+        }
+    }
+
+    private static (ChatLine?[] Ring, int Head, int Count) Resize(ChatLine?[] old, int head, int count, int capacity)
+    {
+        int keep = Math.Min(count, capacity);
+        var ring = new ChatLine?[capacity];
+        int oldCap = old.Length;
+        if (oldCap > 0)
+        {
+            int start = (head - keep + oldCap) % oldCap;   // the oldest line kept
+            for (int i = 0; i < keep; i++) ring[i] = old[(start + i) % oldCap];
+        }
+        return (ring, capacity == 0 ? 0 : keep % capacity, keep);
     }
 
     internal int Capacity
@@ -58,14 +108,7 @@ internal sealed class ChatBuffer
         lock (_lock)
         {
             if (capacity == _ring.Length) return capacity;
-            int keep = Math.Min(_count, capacity);
-            var ring = new ChatLine?[capacity];
-            int oldCap = _ring.Length;
-            int start = (_head - keep + oldCap) % oldCap;   // the oldest line kept
-            for (int i = 0; i < keep; i++) ring[i] = _ring[(start + i) % oldCap];
-            _ring = ring;
-            _count = keep;
-            _head = keep % capacity;
+            (_ring, _head, _count) = Resize(_ring, _head, _count, capacity);
             return capacity;
         }
     }
@@ -78,12 +121,13 @@ internal sealed class ChatBuffer
             : ChatClassifier.ChannelFor(text, chatType);
         string? sender = ChatClassifier.SenderFor(text, chatType);
         string ts = DateTime.Now.ToString("HH:mm:ss");
+        bool player = ChatClassifier.IsPlayerChat(channel, chatType, text);
 
         lock (_lock)
         {
             // Numbered under the lock, so the ring is always in seq order (the
             // engine skips anything at or below the last seq it has seen).
-            _ring[_head] = new ChatLine
+            var line = new ChatLine
             {
                 Seq       = _nextSeq++,
                 Timestamp = ts,
@@ -92,8 +136,15 @@ internal sealed class ChatBuffer
                 Sender    = sender,
                 Text      = text,
             };
+            _ring[_head] = line;
             _head = (_head + 1) % _ring.Length;
             if (_count < _ring.Length) _count++;
+            if (player && _players.Length > 0)
+            {
+                _players[_pHead] = line;   // the same object: no extra copy of the text
+                _pHead = (_pHead + 1) % _players.Length;
+                if (_pCount < _players.Length) _pCount++;
+            }
         }
     }
 
@@ -111,10 +162,31 @@ internal sealed class ChatBuffer
             ulong newest = _nextSeq - 1;
             int n = sinceSeq >= newest ? 0 : (int)Math.Min((ulong)_count, newest - sinceSeq);
             if (n == 0) return "[]";
-            lines = new ChatLine?[n];
+            // Player lines older than the main ring (0.4.0), first: only when the reader is behind
+            // the main ring's oldest line (its first read after a bind or reload, or a long gap).
+            // An ordinary poll (a few new lines) skips this, so it still copies only those.
+            ulong oldestMain = newest - (ulong)_count + 1;
+            int older = 0;
+            int pCap = _players.Length;
+            int pStart = pCap == 0 ? 0 : (_pHead - _pCount + pCap) % pCap;
+            if (_pCount > 0 && sinceSeq + 1 < oldestMain)
+                for (int i = 0; i < _pCount; i++)
+                {
+                    ChatLine? p = _players[(pStart + i) % pCap];
+                    if (p == null || p.Seq >= oldestMain) break;
+                    if (p.Seq > sinceSeq) older++;
+                }
+            lines = new ChatLine?[older + n];
+            int w = 0;
+            if (older > 0)
+                for (int i = 0; i < _pCount && w < older; i++)
+                {
+                    ChatLine? p = _players[(pStart + i) % pCap];
+                    if (p != null && p.Seq > sinceSeq && p.Seq < oldestMain) lines[w++] = p;
+                }
             int cap = _ring.Length;
             int start = (_head - n + cap) % cap;
-            for (int i = 0; i < n; i++) lines[i] = _ring[(start + i) % cap];
+            for (int i = 0; i < n; i++) lines[w + i] = _ring[(start + i) % cap];
         }
 
         var sb = new StringBuilder(64 + lines.Length * 192);

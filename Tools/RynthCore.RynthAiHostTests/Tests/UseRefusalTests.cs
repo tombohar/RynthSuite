@@ -43,6 +43,8 @@ internal static class UseRefusalTests
         r.Add("use check: the next open settles an answered one that opened nothing; an open resets", WatchSettlesOnNextOpen);
         r.Add("use check (looting): Drakkon's stall - stop once, retry, say it once in chat, stop opening corpses, probe, recover", LootingStall);
         r.Add("use check (looting): normal opens never trip it", LootingNormalOpens);
+        r.Add("loot only rare corpses: only a corpse whose description says it generated a rare is opened; off, both are", RareCorpsesOnly);
+        r.Add("corpse behind a wall (R-20261121-190950-ee4e): set aside after its first open, no clean stop or abandon; looted once the line is clear", CorpseBehindWallSetAside);
         r.Add("use check (looting): opens with monsters about never trip it (a fight cancels them)", OpensInAFightDontCount);
         r.Add("flight recorder: the use check asks the engine for a dump (clean stop, stuck); normal opens never do", FlightDumpRequests);
         r.Add("corpse open: a corpse claimed while Combat owns the tick is opened only on the Looting tick", OpenWaitsForLootingTick);
@@ -341,6 +343,76 @@ internal static class UseRefusalTests
             bot.P.OnViewObjectContents(probed);
             Check.Eq(ChatCount("Objects open again"), 1, "the player is told uses work again");
             Check.False(bot.Get<UseRefusalWatch>("_useRefusals").HoldsOpens(now()), "looting is back on");
+        });
+    }
+
+    // 2026-11-22: rare farming on Conquest; Rares mode opened every corpse. ACE adds "This corpse generated a
+    // rare item!" to the description of a corpse that holds a rare (Corpse.TryGenerateRare).
+    private static void RareCorpsesOnly()
+    {
+        Check.True(RynthAiPlugin.IsRareCorpse("Killed by Bob. This corpse generated a rare item!"), "the rare sentence");
+        Check.False(RynthAiPlugin.IsRareCorpse("Killed by Bob."), "an ordinary corpse");
+        Check.True(RynthAiPlugin.RareCorpseRefusal("")?.Contains("waiting for its description") == true, "no description yet: waits");
+        Check.Eq(RynthAiPlugin.ExtractCorpseKillerName("Killed by Bob. This corpse generated a rare item!"), "Bob", "the killer of a rare corpse is Bob, not \"Bob. This corpse...\" (My Kills Only left every rare corpse closed)");
+
+        foreach (bool on in new[] { true, false })
+        {
+            World();
+            FakeHost.Strings[(CorpseA, LongDescKey)] = $"Killed by {Me}. This corpse generated a rare item!";
+            var host = FakeHost.Create(Player);
+            var bot = new Bot(host);
+            bot.S.LootOnlyRareCorpses = on;
+            WithClock((now, advance) =>
+            {
+                for (int i = 0; i < 60; i++)
+                {
+                    int uses = FakeHost.Uses.Count;
+                    bot.Tick(BotActivity.Looting);
+                    advance(100);
+                    if (FakeHost.Uses.Count > uses) { FakeHost.UseDone(0); bot.P.OnViewObjectContents(FakeHost.Uses.Last()); }
+                }
+            });
+            Check.True(FakeHost.Uses.Contains(CorpseA), $"{(on ? "on" : "off")}: the rare corpse is opened");
+            if (on) Check.False(FakeHost.Uses.Contains(CorpseB), "on: the ordinary corpse is left closed");
+            else Check.True(FakeHost.Uses.Contains(CorpseB), "off: the ordinary corpse is opened too");
+        }
+    }
+
+    // 2026.11.19.1, Shadowfang Keep: corpses 3.4-3.7 m off behind a wall. Each open was answered and nothing
+    // opened; the corpse took four opens, a clean stop, a jump and a pause, then came back twice more.
+    private static void CorpseBehindWallSetAside()
+    {
+        World();
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        bool wall = true;
+        bot.P.CorpseWallOverride = id => wall && id == unchecked((int)CorpseA);
+        WithClock((now, advance) =>
+        {
+            long answerAt = 0;
+            void Step()
+            {
+                int uses = FakeHost.Uses.Count;
+                bot.Tick(BotActivity.Looting);
+                if (FakeHost.Uses.Count > uses) answerAt = now() + 60;
+                advance(100);
+                if (answerAt != 0 && now() >= answerAt) { FakeHost.UseDone(0); answerAt = 0; if (FakeHost.Uses.Last() == CorpseB) bot.P.OnViewObjectContents(CorpseB); }
+            }
+            for (int i = 0; i < 80; i++) Step();   // 8 s: the old way had four opens and the clean stop by now
+            Check.Eq(FakeHost.Uses.Count(u => u == CorpseA), 1, "one open of the corpse behind the wall, then it is set aside");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("a wall stands between: set aside")), "logged");
+            Check.False(FakeHost.Logs.Any(l => l.Contains("one clean stop")), "no clean stop or jump at the wall");
+            Check.False(FakeHost.Logs.Any(l => l.Contains("abandon #")), "not an abandon");
+            Check.True(FakeHost.Uses.Contains(CorpseB), "the corpse in the open is tried meanwhile");
+            Check.Eq(bot.Get<UseRefusalWatch>("_useRefusals").RefusedCorpses.Contains(unchecked((int)CorpseA)), false, "its failed open isn't a refusal");
+
+            // The character walked round: the line is clear, and the corpse is opened again.
+            wall = false;
+            bot.Get<System.Collections.Generic.Dictionary<int, long>>("_completedCorpses").Remove(unchecked((int)CorpseB));
+            int before = FakeHost.Uses.Count(u => u == CorpseA);
+            for (int i = 0; i < 80 && FakeHost.Uses.Count(u => u == CorpseA) == before; i++) Step();
+            Check.True(FakeHost.Uses.Count(u => u == CorpseA) > before, "the line clear: opened again");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("is clear now")), "and said so");
         });
     }
 

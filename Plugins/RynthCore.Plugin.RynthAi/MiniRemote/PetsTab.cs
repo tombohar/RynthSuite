@@ -120,6 +120,7 @@ internal sealed class PetsTab
         if (w is >= 78780001 and <= 78780012) return false;     // capture devices
         if (w is >= 787802001 and <= 787802072) return false;   // summoned combat pet creatures
         if (w is >= 787801001 and <= 787801072) return true;    // combat essence block
+        if (PetElements.IsHolder(_ctx.Host, unchecked((uint)wo.Id), wo.Name)) return true;   // a server's holder of summons
 
         if (HasSummonGemUnderlay(wo)) return true;
         if (RequiresSummoning(wo)) return true;
@@ -661,6 +662,7 @@ internal sealed class PetsTab
             }
 
             var s = PetStatsReader.Read(_ctx.Host, _ctx.Inventory, wo, unixNow);
+            ShowElements(s, wo);
             s.Kind = kind.Value;
             s.KindAssigned = assigned;
             int pri = rules.FindIndex(r => r.Id == wo.Id || r.Name.Equals(wo.Name, StringComparison.OrdinalIgnoreCase));
@@ -678,6 +680,21 @@ internal sealed class PetsTab
                 appraised++;
         }
         _pets = rows.ToArray();
+    }
+
+    /// <summary>
+    /// The row's element(s) when the server sent no damage type: "Fire", or "Fire+Cold" for a holder
+    /// of two summons (PetElements), with "holds 1 of 2" for one that can't summon yet.
+    /// </summary>
+    private void ShowElements(PetStats s, WorldObject wo)
+    {
+        var info = PetElements.Describe(_ctx.Host, unchecked((uint)wo.Id), wo.Name);
+        string text = s.DamageType.Length > 0 ? s.DamageType : info.ElementText;
+        if (info.IsHolder && !info.Ready)
+            text = (text.Length > 0 ? text + ", " : "") + $"holds {info.Held.Count} of {info.Slots}";
+        if (text == s.DamageType) return;
+        s.DamageType = text;
+        PetStatsReader.FormatLines(s);
     }
 
     // ── UI (render thread) ──────────────────────────────────────────────────
@@ -840,6 +857,16 @@ internal sealed class PetsTab
                 if (ImGui.InputInt("Min monsters", ref minMobs)) _ctx.Post(() => { settings.PetMinMonsters = Math.Max(1, minMobs); _ctx.SaveCombatSettings?.Invoke(); });
                 bool refill = settings.PetAutoRefill;
                 if (ImGui.Checkbox("Refill empty essences with Encapsulated Spirit", ref refill)) _ctx.Post(() => { settings.PetAutoRefill = refill; _ctx.SaveCombatSettings?.Invoke(); });
+                ImGui.TextUnformatted("Pet element");
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(110);
+                int petElem = PetChoice.SettingIndex(settings.PetElement);
+                if (ImGui.Combo("##petelement", ref petElem, PetChoice.SettingChoices, PetChoice.SettingChoices.Length))
+                {
+                    string chosen = PetChoice.SettingValue(petElem);
+                    _ctx.Post(() => { settings.PetElement = chosen; _ctx.SaveCombatSettings?.Invoke(); });
+                }
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip(PetChoice.SettingTooltip);
                 ImGui.TextDisabled("Tick pets to add them to the summon list; with Sort = Priority the arrows set the order.");
                 break;
             }

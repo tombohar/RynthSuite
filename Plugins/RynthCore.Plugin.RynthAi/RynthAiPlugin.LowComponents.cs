@@ -50,7 +50,7 @@ public sealed partial class RynthAiPlugin
         if (low == null) return;
 
         _lowCompsFired = true;
-        HandleMacroRunCommand("stop", Array.Empty<string>());
+        HandleMacroRunCommand("stop", Array.Empty<string>(), "Low Components Recall");
         bool recalled = Host.HasInvokeChatParser;
         if (recalled) Host.InvokeChatParser("/lifestone");
         string line = $"Low on components ({low}): macro stopped" + (recalled ? ", recalling to the lifestone" : "") +

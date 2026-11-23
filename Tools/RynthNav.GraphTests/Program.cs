@@ -51,6 +51,7 @@ internal static partial class Program
             Run(nameof(RaycastOnTheMesh), RaycastOnTheMesh);
             Run(nameof(RealPathEx), RealPathEx);
             Run(nameof(RealDoorsteps), RealDoorsteps);
+            Run(nameof(RealYaraqThreadExit), RealYaraqThreadExit);
             Run(nameof(RealTripWalk), RealTripWalk);
             Run(nameof(MeshViewFloorAndWalls), MeshViewFloorAndWalls);
             Run(nameof(MeshViewEmitBudgetAndFrame), MeshViewEmitBudgetAndFrame);
@@ -58,6 +59,7 @@ internal static partial class Program
             Run(nameof(DungeonFileAndLayer), DungeonFileAndLayer);
             Run(nameof(RealDungeons), RealDungeons);
             RunRouteMaker();   // RouteMakerTests.cs
+            RunPortalFloors();   // PortalFloorTests.cs
         }
         finally { try { Directory.Delete(_root, true); } catch { } }
         Console.WriteLine();
@@ -751,6 +753,60 @@ internal static partial class Program
     /// The real map (read only, when it's installed): FindPathEx and Raycast round Holtburg on the tiles
     /// a short query loads, a ring of goals at 40/80/150 u; the answers agree, and how long they take.
     /// </summary>
+    /// <summary>
+    /// 2026-11-18, a DreamWeave Thread in Yaraq (7D64): the Thread Exit's 4 m circle (24015.6, 19327.2)
+    /// touches the edge of one 73 x 161 m polygon, the town's open middle, and the corridor round the
+    /// circle left all of it out: every hunt walk from the east of town to the monsters on the west went
+    /// round the north edge, 262-380 m for 72-119 m, and the hunt called them "too far round". The plain
+    /// corridor, 40-97 m clear of the Exit, is taken now; a walk that does pass the Exit still goes round it.
+    /// </summary>
+    private static void RealYaraqThreadExit()
+    {
+        string dir = Environment.GetEnvironmentVariable("RYNTHNAV_NAVDATA") ?? @"C:\Games\RynthCore\NavData";
+        if (!File.Exists(Path.Combine(dir, "nav_7D64.tile")) || !File.Exists(Path.Combine(dir, "nav_7C64.tile")))
+        { Console.WriteLine("     (no real NavData here: skipped)"); return; }
+        var nav = new DtNavMesh();
+        nav.Init(new DtNavMeshParams { orig = new RcVec3f(0, 0, 0), tileWidth = 192f, tileHeight = 192f, maxTiles = 64, maxPolys = 1 << 16 }, 6);
+        for (int x = 0x7B; x <= 0x7E; x++)
+            for (int y = 0x62; y <= 0x66; y++)
+            {
+                uint lb = (uint)((x << 8) | y);
+                if (File.Exists(Path.Combine(dir, $"nav_{lb:X4}.tile"))) nav.AddTile(ReadTile(dir, lb), 0, 0, out _);
+            }
+        var q = new DtNavMeshQuery(nav);
+        var exit = new PortalAvoid();
+        exit.Set(new[] { new PortalAvoid.Spot(24015.63, 19327.15, PortalAvoid.LiveRadius, "Thread Exit") }, Array.Empty<PortalAvoid.Spot>());
+        int flags = RynthNavPathApiV1.PathAvoidPortals | RynthNavPathApiV1.PathWallClearance | RynthNavPathApiV1.PathAllowPartial
+                  | RynthNavPathApiV1.PathQuiet | RynthNavPathApiV1.PathStartOutdoors;
+        double Gap(PathExResult r)
+        {
+            double g = double.MaxValue;
+            for (int i = 1; i < r.Corners.Count; i++)
+                g = Math.Min(g, PortalAvoid.SegmentDistance(24015.63, 19327.15, r.Corners[i - 1].X, r.Corners[i - 1].Y, r.Corners[i].X, r.Corners[i].Y));
+            return g;
+        }
+        // From the street east of the square (and building 7D64#2's door) to the monsters of that Thread on the west.
+        var walks = new (double Sx, double Sy, double Gx, double Gy, double Gz, double Straight)[]
+        {
+            (24060, 19235, 23958.76, 19277.39, 1.69, 110), (24060, 19235, 23990.02, 19220.82, 8.34, 72),
+            (24076, 19284, 23958.76, 19277.39, 1.69, 119), (24076, 19284, 23990.02, 19220.82, 8.34, 107),
+        };
+        foreach (var (sx, sy, gx, gy, gz, straight) in walks)
+        {
+            var r = Ex(q, sx, sy, gx, gy, flags, new AvoidFilter(exit), sz: 10, gz: gz, maxCorners: 128);
+            Check(r.Code == RynthNavPathApiV1.ResultOk, $"({sx},{sy}) -> ({gx:F0},{gy:F0}): a way (code {r.Code})");
+            Check(r.Length < straight + 15, $"({sx},{sy}) -> ({gx:F0},{gy:F0}): {r.Length:F0} m, not round the north of town (the plain way is {straight} m)");
+            Check(r.PlainClear && !r.FellBack, $"({sx},{sy}) -> ({gx:F0},{gy:F0}): the plain corridor, taken because it is clear (PlainClear {r.PlainClear})");
+            Check(Gap(r) > PortalAvoid.LiveRadius + NavPathQuery.PlainClearMargin, $"({sx},{sy}) -> ({gx:F0},{gy:F0}): {Gap(r):F0} m from the Thread Exit");
+            Console.WriteLine($"     ({sx},{sy}) -> ({gx:F0},{gy:F0}): {r.Length:F0} m, {Gap(r):F0} m from the Exit");
+        }
+        // A walk that does pass the Exit still goes round it: from its west side to its east side, through it.
+        var past = Ex(q, 24000, 19327, 24031, 19327, flags, new AvoidFilter(exit), sz: 10, gz: 10, maxCorners: 128);
+        Check(past.Code == RynthNavPathApiV1.ResultOk && !past.PlainClear, $"a walk across the Exit: not the plain corridor (code {past.Code}, PlainClear {past.PlainClear})");
+        Check(Gap(past) >= PortalAvoid.LiveRadius - 0.5, $"a walk across the Exit keeps out of its circle ({Gap(past):F1} m)");
+        Console.WriteLine($"     across the Exit: {past.Length:F0} m, {Gap(past):F1} m from it");
+    }
+
     /// <summary>
     /// RynthAi's hunt into buildings (2026-10-25) walks to a door's step out (BuildingMap: 1.5 m out of
     /// the door, at its foot) and asks RynthNav where the ground is there (a path from the step to

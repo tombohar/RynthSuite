@@ -27,6 +27,9 @@ internal sealed class AutoRunGate
     private bool _halted;        // a StopCompletely went through and nothing has started since
     private long _retryAtMs;     // a call was refused: nothing but Stop() before this
 
+    /// <summary>Autorun is on, as far as what went through says (the trip clock's run speed samples).</summary>
+    public bool Running => _run == 1;
+
     public AutoRunGate(Func<bool, bool> setAutoRun, Func<bool> stopCompletely, Func<long> now)
     {
         _setAutoRun = setAutoRun;

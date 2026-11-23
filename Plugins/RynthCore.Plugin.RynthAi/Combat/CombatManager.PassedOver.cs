@@ -50,6 +50,7 @@ public partial class CombatManager
     internal const double PassedOverBeyondRangeM = 15.0;
 
     internal const string PassedOverLos = "line of sight blocked";
+    internal const string PassedOverWindow = "in a building (or outside it) seen through a window: melee goes in by a door";
     internal const string PassedOverOtherLevel = "too far above or below for melee";
     internal const string PassedOverBlacklisted = "blacklisted";
     internal const string PassedOverNeverAttack = "on the never-attack list";

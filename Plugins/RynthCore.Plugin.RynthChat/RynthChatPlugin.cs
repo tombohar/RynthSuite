@@ -7,7 +7,7 @@ namespace RynthCore.Plugin.RynthChat;
 public sealed class RynthChatPlugin : RynthPluginBase
 {
     internal static readonly IntPtr NamePointer    = Marshal.StringToHGlobalAnsi("RynthChat");
-    internal static readonly IntPtr VersionPointer = Marshal.StringToHGlobalAnsi("0.3.0");
+    internal static readonly IntPtr VersionPointer = Marshal.StringToHGlobalAnsi("0.4.0");
 
     private readonly ChatBuffer _buffer = new();
 
@@ -43,6 +43,8 @@ public sealed class RynthChatPlugin : RynthPluginBase
     internal string BuildScrollbackJson(ulong sinceSeq) => _buffer.BuildJson(sinceSeq);
 
     internal int SetScrollbackCapacity(int lines) => _buffer.SetCapacity(lines);
+
+    internal int SetPlayerScrollbackCapacity(int lines) => _buffer.SetPlayerCapacity(lines);
 
     // Called on the game thread from the engine's deferred chat dispatch
     // (Win32Backend posts WM_RYNTHCORE_CHAT so this runs on a fresh, non-reentrant

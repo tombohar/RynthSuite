@@ -21,16 +21,20 @@ namespace RynthCore.Plugin.RynthAi;
 public sealed partial class RynthAiPlugin
 {
     private readonly OutdoorHunt _hunt = new();
+    private bool _huntFenceHooked;
     private readonly List<OutdoorHunt.Candidate> _huntCandidates = new();
     private NavRouteParser? _huntRoute;      // the route the hunt installed; another one loaded ends the hunt
     private NavRecoveryPlanner? _huntDungeonCheck;
+    private int _huntStuckSeq;   // NavigationEngine.StuckSpotSeq last looked at
     private BuildingMap? _huntBuildings;
     private long _huntPortalsAt;
     private string _huntNoteLogged = "";
     private bool _huntOnLoginPending;        // Hunt On Login: read at login, run once by TickLoginAutoStart
     private const int HuntMaxCorners = 128;
-    private const int HuntPathFlags = RynthNavPathApiV1.PathAvoidPortals | RynthNavPathApiV1.PathWallClearance
-                                    | RynthNavPathApiV1.PathAllowPartial | RynthNavPathApiV1.PathQuiet;
+    // Also the stuck recovery's outdoor detours (NavRecovery.PlanOutdoor) and a script's GoTo: one set of rules for every
+    // walk RynthAi lays on RynthNav's map.
+    internal const int HuntPathFlags = RynthNavPathApiV1.PathAvoidPortals | RynthNavPathApiV1.PathWallClearance
+                                     | RynthNavPathApiV1.PathAllowPartial | RynthNavPathApiV1.PathQuiet;
     private const uint HuntItemTypePortal = 0x00010000;
     private const long HuntPortalRefreshMs = 1000;
 
@@ -56,6 +60,9 @@ public sealed partial class RynthAiPlugin
             case "radius":
                 SetHuntSetting(arg, parts.Length > 3 ? parts[3] : "");
                 break;
+            case "fence":
+                SetHuntFence(parts);
+                break;
             case "pick":
                 SetHuntPick(parts.Length > 3 ? string.Join(" ", parts, 3, parts.Length - 3) : "");
                 break;
@@ -74,7 +81,7 @@ public sealed partial class RynthAiPlugin
                 if (_hunt.Active) StopHunt("stopped", say: true); else StartHunt();
                 break;
             default:
-                ChatLine("[RynthAi] /ra hunt [start|stop|status|panel] | /ra hunt range <yd> | /ra hunt radius <yd, 0 = anywhere> | " + HuntPickUsage + " | " + HuntLoginUsage + " | " + KeepHuntingUsage);
+                ChatLine("[RynthAi] /ra hunt [start|stop|status|panel] | /ra hunt range <yd> | /ra hunt radius <yd, 0 = anywhere> | /ra hunt fence <x> <y> <radius> | off | " + HuntPickUsage + " | " + HuntLoginUsage + " | " + KeepHuntingUsage);
                 break;
         }
     }
@@ -302,7 +309,7 @@ public sealed partial class RynthAiPlugin
         s.EnableNavigation = true;
         if (!s.IsMacroRunning)
         {
-            s.IsMacroRunning = true;
+            s.SetMacroRunning(true, "the outdoor hunt");
             _macroWasRunning = true;   // no macro-start "nearest waypoint" pick: the hunt plans its own walks
         }
         ChatLine((onLogin ? "[RynthAi] Hunt On Login: outdoor hunt on: "
@@ -417,6 +424,21 @@ public sealed partial class RynthAiPlugin
         }
         if (!TryHuntPosition(out uint cell, out var me)) return;
         if (InDungeon(cell)) { StopHunt("went into a dungeon", say: true); return; }
+        // Navigation stuck at one spot again and again on the hunt's walk (a snag RynthNav's map doesn't hold):
+        // the hunt leaves that monster and keeps its walks off the spot (OutdoorHunt.Snagged). 2026-11-17 11:14,
+        // the fort Thread 3073: the same walk was planned through a piece of wall every 8 s for 90 s.
+        var navE = _navigationEngine;
+        if (navE != null && navE.StuckSpotSeq != _huntStuckSeq)
+        {
+            _huntStuckSeq = navE.StuckSpotSeq;
+            if (navE.StuckSpotHits >= NavigationEngine.StuckSpotRepeatHits && s.CurrentRoute.Points.Count > 0)
+            {
+                // Where the snag is, on one line with the stuck line's words (cell, local x/y/z, headings, the walk's
+                // target, metres moved): the snags in the logs had x,y only, and the A9B4 replays failed for want of z.
+                Host.Log($"[RynthAi] Hunt: snag x{navE.StuckSpotHits} on the walk to 0x{(uint)_hunt.TargetId:X8} | {navE.LastStuckWhere}");
+                _hunt.Snagged(RynthClock.Now, me);
+            }
+        }
         // A building's rooms (InDungeon said it isn't a dungeon): off RynthNav's landscape map. The way in
         // is kept on every tick, a fight's chase included, for the walk back out of a building whose
         // doors aren't known.
@@ -486,6 +508,7 @@ public sealed partial class RynthAiPlugin
         _hunt.RangeYd = Math.Clamp(s.OutdoorHuntRange, OutdoorHuntRangeMin, OutdoorHuntRangeMax);
         _hunt.RadiusYd = Math.Clamp(s.OutdoorHuntRadius, 0, OutdoorHuntRadiusMax);
         _hunt.Pick = (OutdoorHunt.PickMode)Math.Clamp(s.OutdoorHuntPick, 0, 2);
+        if (!_huntFenceHooked) { _hunt.Fence = p => InHuntFence(p.X, p.Y); _hunt.WalkFence = WalkInHuntFence; _huntFenceHooked = true; }
         _hunt.XpLookup ??= XpPerKill;   // the learned XP per kill (MonsterXpTable), for Most XP
     }
 
@@ -522,7 +545,11 @@ public sealed partial class RynthAiPlugin
         {
             _huntDungeonCheck ??= new NavRecoveryPlanner(Host, () => _raycast, () => _objectCache?.GetHazardCells());
             var check = _huntDungeonCheck;
-            _huntBuildings = new BuildingMap(cellDat, () => _raycast?.GeometryLoader?.DungeonLOS, lb => check.IsDungeonLandblock(lb, cellDat));
+            // The cells' furniture too (the stairs left out): walks round tables and chairs, not through them.
+            // The ground's height too: an opening whose foot is a step over it and over the room's floor is a window.
+            _huntBuildings = new BuildingMap(cellDat, () => _raycast?.GeometryLoader?.DungeonLOS, lb => check.IsDungeonLandblock(lb, cellDat),
+                                             lb => _raycast?.GeometryLoader?.GetDungeonStaticMeshes(lb),
+                                             (x, y) => _raycast?.GeometryLoader is { } gl ? gl.GetTerrainZWorld((float)x, (float)y) : double.NaN);
         }
         return _huntBuildings;
     }
@@ -609,5 +636,28 @@ public sealed partial class RynthAiPlugin
         for (int i = 1; i < count; i++)   // corner 0 is the start
             corners.Add(new OutdoorHunt.Vec(buf[i * 3], buf[i * 3 + 1], buf[i * 3 + 2]));
         return new OutdoorHunt.PathResult(status, corners, info[0], info[5]);
+    }
+
+    /// <summary>HuntRaycast's answer when RynthNav (v2 or later) isn't loaded.</summary>
+    internal const int HuntRayUnavailable = -2;
+
+    /// <summary>
+    /// RynthNav's raycast (RynthNav.Path v2): RayClear when walking straight from (ax, ay, az) to (bx, by, bz), world
+    /// units, stays on the navmesh (the agent radius from every wall it knows), RayBlocked when a wall, building, drop
+    /// or the mesh's edge is in the way, ResultNoMesh off the landscape mesh (a building's cells, a dungeon), or
+    /// <see cref="HuntRayUnavailable"/>. The navigation engine's corner gate asks it on hunt walks, planned GoTo
+    /// walks and navmesh detours (NavigationEngine.NavmeshRaycast), as RynthNav's own walker does (PathFollow.Advance).
+    /// </summary>
+    internal int HuntRaycast(double ax, double ay, double az, double bx, double by, double bz)
+    {
+        if (!Host.HasGetPluginInterface) return HuntRayUnavailable;
+        unsafe
+        {
+            // Resolved on every call, as HuntPath.
+            var t = (RynthNavPathApiV1*)Host.GetPluginInterface(RynthNavPathApiV1.PluginName, RynthNavPathApiV1.InterfaceName, 2);
+            if (t == null || t->Version < 2 || t->StructSize < (uint)sizeof(RynthNavPathApiV1) || t->Raycast == null)
+                return HuntRayUnavailable;
+            return t->Raycast(ax, ay, az, bx, by, bz);
+        }
     }
 }

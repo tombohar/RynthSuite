@@ -214,6 +214,7 @@ public sealed partial class RynthAiPlugin
         if (!_objectCache.IsOnGround(id) && _objectCache.GetContainerId(id) != 0)
         {
             LootDiag($"[RynthAi] Ground loot: pickup confirmed for 0x{(uint)id:X8} '{_groundTargetName}'.");
+            NotePerDayPickedUp(id);   // Keep # per day: it counts now
             if (DescribeLootPickup(id, _groundTargetAction, _groundTargetName, _groundTargetRule,
                     _groundTargetIsSalvage, IsStackAtSend(id), where: "ground") is { } described)
                 WriteItemInfoLine(described.Line, described.ChatType);
@@ -284,6 +285,7 @@ public sealed partial class RynthAiPlugin
             : Host.UseObject(uid);
         _groundPickupAttempts++;
         _groundPickupRequestedAt = now;
+        if (sent) NotePerDaySent(unchecked((int)uid));   // Keep # per day: on its way
         LootDiag($"[RynthAi] Ground loot: pickup {(sent ? "sent" : "rejected")} for 0x{uid:X8} attempt {_groundPickupAttempts}.");
     }
 

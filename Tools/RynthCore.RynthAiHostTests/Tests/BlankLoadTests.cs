@@ -37,7 +37,92 @@ internal static class BlankLoadTests
         r.Add("blank load: unsafe names are refused and nothing is written", UnsafeNames);
         r.Add("blank load: names are tidied (quotes, .nav/.af/.met)", Tidy);
         r.Add("blank load: /ra meta load|new|list reach the dashboard", MetaCommand);
+        r.Add("nav folders: a nav in a NavProfiles subfolder is listed and loads by either name", NavSubfolder);
+        r.Add("nav folders: VirindiTank navs in NavData are said in the Nav panel and copied in by its button", StrayNavsButton);
     }
+
+    private static void WriteTwoPointNav(string path)
+    {
+        var route = new NavRouteParser { RouteType = NavRouteType.Linear };
+        route.Points.Add(new NavPoint { NS = 10.5, EW = -3.25 });
+        route.Points.Add(new NavPoint { NS = 11.5, EW = -4.25 });
+        route.Save(path);
+    }
+
+    private static void NavSubfolder()
+    {
+        var rig = new Rig("nav-subfolder");
+        Set(rig, "_navEditStatus", string.Empty);   // BuildNavJson reads it (the rig skips the constructor)
+        string sub = Path.Combine(rig.Navs, "VirindiTank");
+        Directory.CreateDirectory(sub);
+        WriteTwoPointNav(Path.Combine(sub, "Hive Loop.nav"));
+        WriteTwoPointNav(Path.Combine(rig.Navs, "A", "Same.nav"));
+        WriteTwoPointNav(Path.Combine(rig.Navs, "B", "Same.nav"));
+
+        List<string> names = rig.Dash.NavFileNames();
+        Check.True(names.Contains("VirindiTank\\Hive Loop"), "listed as Folder\\Name: " + string.Join(", ", names));
+
+        string msg = rig.Dash.LoadNavByName("Hive Loop");
+        Check.Eq(msg, "[RynthAi] Loaded VirindiTank\\Hive Loop (2 waypoints).", "a bare name only one subfolder has: " + msg);
+        Check.Eq(rig.S.CurrentNavPath, Path.Combine(sub, "Hive Loop.nav"), "the subfolder file is the loaded nav");
+        Check.False(File.Exists(Path.Combine(rig.Navs, "Hive Loop.nav")), "no blank made at the top");
+
+        msg = rig.Dash.LoadNavByName("\"virinditank/hive loop.nav\"");
+        Check.Eq(msg, "[RynthAi] Loaded VirindiTank\\Hive Loop (2 waypoints).", "folder/name, any case: " + msg);
+
+        msg = rig.Dash.LoadNavByName("Same");
+        Check.True(msg.StartsWith("[RynthAi] 2 navs are named 'Same': A\\Same, B\\Same.", StringComparison.Ordinal), "two of that name: asks which: " + msg);
+        Check.False(File.Exists(Path.Combine(rig.Navs, "Same.nav")), "and makes nothing");
+
+        // The picker's own load (the Nav panel sends the entry).
+        rig.Dash.HandleNavCommand("{\"Cmd\":\"loadNav\",\"NavName\":\"B\\\\Same\"}");
+        Check.Eq(rig.S.CurrentNavPath, Path.Combine(rig.Navs, "B", "Same.nav"), "the Nav panel's pick loads the subfolder file");
+        Check.Eq(Nav(rig).ActiveNavName, "B\\Same", "the panel shows it as the list entry (its picker selects it)");
+    }
+
+    private static void StrayNavsButton()
+    {
+        FakeHost.Reset();
+        var rig = new Rig("stray-navs");
+        Set(rig, "_host", FakeHost.Create());
+        Set(rig, "_navEditStatus", string.Empty);
+        string navData = Path.Combine(rig.Root, "NavData");
+        Directory.CreateDirectory(navData);
+        WriteTwoPointNav(Path.Combine(navData, "To Town.nav"));
+        File.WriteAllText(Path.Combine(navData, "nav_1234.tile"), "tile");
+        rig.Dash.StrayFolders = new List<string> { navData };
+
+        rig.Dash.TickNavFolder();
+        NavBridgePayload nav = Nav(rig);
+        Check.Eq(nav.StrayNavCount, 1, "the Nav panel gets the count");
+        Check.True(nav.StrayNavText.StartsWith("1 VirindiTank nav is in " + navData + " (RynthNav's map data folder)", StringComparison.Ordinal), "and the line: " + nav.StrayNavText);
+        var chat = new List<string>();
+        rig.Dash.DrainStrayNavNotice(l => { chat.Add(l); return true; });
+        Check.Eq(chat.Count, 1, "one chat line in game");
+        Check.True(chat.Count == 1 && chat[0].Contains("Copy them into NavProfiles (or /ra nav import)"), "naming the button and the command");
+        chat.Clear();
+        rig.Dash.TickNavFolder();
+        rig.Dash.DrainStrayNavNotice(l => { chat.Add(l); return true; });
+        Check.Eq(chat.Count, 0, "said once");
+
+        rig.Dash.HandleNavCommand("{\"Cmd\":\"copyStrayNavs\"}");
+        Check.True(File.Exists(Path.Combine(rig.Navs, "To Town.nav")), "copied into NavProfiles");
+        Check.True(File.Exists(Path.Combine(navData, "To Town.nav")), "the original stays");
+        Check.True(rig.Dash.NavFileNames().Contains("To Town"), "listed now");
+        nav = Nav(rig);
+        Check.Eq(nav.StrayNavCount, 0, "the line goes away");
+        Check.Eq(nav.StrayNavText, "", "no text");
+        Check.True(nav.EditStatus.StartsWith("Copied 1 nav into", StringComparison.Ordinal), "the result shows in the panel's status: " + nav.EditStatus);
+        Check.True(FakeHost.Chat.Exists(l => l.StartsWith("[RynthAi] Copied 1 nav into", StringComparison.Ordinal)), "and in chat");
+
+        rig.Dash.HandleNavCommand("{\"Cmd\":\"copyStrayNavs\"}");
+        Check.True(Nav(rig).EditStatus.StartsWith("No VirindiTank navs outside NavProfiles", StringComparison.Ordinal), "again: nothing to copy, and it says so");
+    }
+
+    private static NavBridgePayload Nav(Rig rig) =>
+        System.Text.Json.JsonSerializer.Deserialize(rig.Dash.BuildNavJson(), RynthAiJsonContext.Default.NavBridgePayload)!;
+
+    private static void Set(Rig rig, string f, object v) => typeof(LegacyDashboardRenderer).GetField(f, Any)!.SetValue(rig.Dash, v);
 
     private sealed class Rig
     {

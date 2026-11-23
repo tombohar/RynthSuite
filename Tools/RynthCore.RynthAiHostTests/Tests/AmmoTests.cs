@@ -23,7 +23,7 @@ internal static class AmmoTests
     private const uint Monster = 0x80001001;
     private const uint Wcid = 424242;
     private const uint Bow = 0x80000101, Crossbow = 0x80000102, Throwing = 0x80000103, Sword = 0x80000104;
-    private const uint Arrows = 0x80000201, Quarrels = 0x80000202, AcidQuarrels = 0x80000203, PrismArrows = 0x80000204;
+    private const uint Arrows = 0x80000201, Quarrels = 0x80000202, AcidQuarrels = 0x80000203, PrismArrows = 0x80000204, FireArrows = 0x80000205;
     private const uint Pack = 0x80000301;
     private const int AmmoSlot = 0x00800000, MissileSlot = 0x00400000, MeleeSlot = 0x00100000;
 
@@ -31,6 +31,7 @@ internal static class AmmoTests
     {
         r.Add("ammo: the rules (AmmoType, thrown, names, prismatic)", Rules);
         r.Add("ammo: the choice (listed first, then the weak element, then quality)", Choice);
+        r.Add("ammo (R-20261121-163725-da49): arrows already on are changed for a stack of a better element for the target, once per 15 s", ElementSwapInHand);
         r.Add("ammo: bow -> crossbow puts the arrows away and wields quarrels", BowToCrossbow);
         r.Add("ammo: no fitting ammo in the pack, no swap to that launcher (logged once)", NoAmmoNoSwap);
         r.Add("ammo: listed ammo is wielded first and is never taken for a weapon", ListedPreferred);
@@ -96,7 +97,7 @@ internal static class AmmoTests
         public int InHand;
         private readonly MethodInfo _equip = typeof(CombatManager).GetMethod("EquipWeaponAndSetStance", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
-        public Rig(bool quarrels = true, bool acidQuarrels = false, bool prismArrows = false, bool arrowsWielded = true)
+        public Rig(bool quarrels = true, bool acidQuarrels = false, bool prismArrows = false, bool arrowsWielded = true, bool fireArrows = false)
         {
             FakeHost.Reset();
             FakeHost.WeaponCalls = true;
@@ -107,6 +108,7 @@ internal static class AmmoTests
             var ids = new List<uint> { Bow, Crossbow, Arrows };
             if (quarrels) { Item(Quarrels, "Quarrel", 0x100, AmmoSlot, ammoType: 2, stack: 80); ids.Add(Quarrels); }
             if (acidQuarrels) { Item(AcidQuarrels, "Deadly Acid Quarrel", 0x100, AmmoSlot, ammoType: 2, stack: 60); FakeHost.Ints[(AcidQuarrels, 45)] = 0x20; ids.Add(AcidQuarrels); }
+            if (fireArrows) { Item(FireArrows, "Deadly Fire Arrow", 0x100, AmmoSlot, ammoType: 1, stack: 60); FakeHost.Ints[(FireArrows, 45)] = 0x10; ids.Add(FireArrows); }
             if (prismArrows) { Item(PrismArrows, "Deadly Prismatic Arrow", 0x100, AmmoSlot, ammoType: 1, stack: 40); FakeHost.Ints[(PrismArrows, 45)] = 0x10000000; ids.Add(PrismArrows); }
             Wield(Bow, MissileSlot);
             if (arrowsWielded) Wield(Arrows, AmmoSlot);
@@ -154,6 +156,38 @@ internal static class AmmoTests
     }
 
     // ── Combat ────────────────────────────────────────────────────────────────
+
+    // 2026.11.19.1: "Bows will swap correctly but not ammo". The ammo step chose a stack only for an empty
+    // slot or ammo of another type, so arrows already on stayed on whatever the monster was weak to.
+    private static void ElementSwapInHand()
+    {
+        var rig = new Rig(quarrels: false, fireArrows: true);
+        rig.S.MonsterRules.Clear();
+        rig.S.MonsterRules.Add(new MonsterRule { Name = "Default", DamageType = "Fire" });
+
+        Check.False(rig.Tick(), "tick 1: the plain arrows (Pierce) are on and Fire is wanted: not ready");
+        Check.True(FakeHost.Moves.Count == 1 && FakeHost.Moves[0] == (Arrows, Pack, 120), "the plain arrows go into the pack");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("ammo by element") && l.Contains("Deadly Fire Arrow")),
+            "logged: " + FakeHost.Logs.LastOrDefault(l => l.Contains("ammo by element")));
+        Rig.Unwield(Arrows);
+        Check.False(rig.Tick(), "the slot empty: the Fire arrows are wielded");
+        Check.Eq(FakeHost.Uses.LastOrDefault(), FireArrows, "a UseObject for the Fire arrows");
+        Rig.Wield(FireArrows, AmmoSlot);
+        Check.True(rig.Tick(), "Fire arrows on: ready to shoot");
+
+        // The wanted element changes inside the rest: no flip back.
+        rig.S.MonsterRules[0].DamageType = "Pierce";
+        int moves = FakeHost.Moves.Count;
+        Check.True(rig.Tick(), "Pierce wanted 0 s later: it shoots what's on");
+        Check.Eq(FakeHost.Moves.Count, moves, "no swap inside the 15 s rest");
+
+        // No element wanted (no rule element, no weakness): what's on stays.
+        var plain = new Rig(quarrels: false, fireArrows: true);
+        plain.S.MonsterRules.Clear();
+        plain.S.MonsterRules.Add(new MonsterRule { Name = "Default", DamageType = "Auto" });
+        Check.True(plain.Tick(), "nothing to match: ready with the arrows on");
+        Check.Eq(FakeHost.Moves.Count, 0, "no ammo moved");
+    }
 
     private static void BowToCrossbow()
     {

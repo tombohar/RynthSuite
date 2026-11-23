@@ -25,7 +25,7 @@ public sealed partial class RynthNavPlugin
     private volatile TownNet? _townNet;
     private volatile string _townNetStatus = "loading…";
     private HubLinks? _hubLinks;
-    private (TownNet? Net, int Level, bool Olthoi) _hubLinksKey;
+    private (TownNet? Net, int Level, bool Olthoi, uint Pk, bool? Vitae) _hubLinksKey;
 
     // The hub step being walked (tick thread).
     private bool _hubActive, _hubLanded, _hubWaitSaid;
@@ -72,16 +72,19 @@ public sealed partial class RynthNavPlugin
     }
 
     /// <summary>The Town Network as this character's route planner sees it; null without townnet.json.</summary>
-    private HubLinks? CurrentHubLinks(List<string>? notes)
+    private HubLinks? CurrentHubLinks(List<string>? notes) => CurrentHubLinks(notes, ReadTraveller());
+
+    private HubLinks? CurrentHubLinks(List<string>? notes, in Traveller who)
     {
         TownNet? t = _townNet;
         if (t == null) return null;
-        ReadCharacterRules(out int level, out bool olthoi);
-        if (notes == null && _hubLinks != null && ReferenceEquals(_hubLinksKey.Net, t) && _hubLinksKey.Level == level && _hubLinksKey.Olthoi == olthoi)
+        var key = (t, who.Level, who.Olthoi, who.PkStatus, who.Vitae);
+        if (notes == null && _hubLinks != null && ReferenceEquals(_hubLinksKey.Net, t) && _hubLinksKey.Level == key.Level
+            && _hubLinksKey.Olthoi == key.Olthoi && _hubLinksKey.Pk == key.PkStatus && _hubLinksKey.Vitae == key.Vitae)
             return _hubLinks;
-        HubLinks links = t.Links(level, olthoi, notes);
+        HubLinks links = t.Links(who, notes);
         _hubLinks = links;
-        _hubLinksKey = (t, level, olthoi);
+        _hubLinksKey = key;
         return links;
     }
 
@@ -255,24 +258,29 @@ public sealed partial class RynthNavPlugin
     private List<RouteStep>? PlanFromInsideHub(double goalNs, double goalEw, out double est, out int teleports)
     {
         est = 0; teleports = 0;
+        TripTimes times = PlanTimes();   // a portal costs its time (RynthNavPlugin.TripTime.cs)
         TownNet? t = _townNet;
-        HubLinks? links = CurrentHubLinks(null);
+        Traveller who = ReadTraveller();
+        HubLinks? links = CurrentHubLinks(null, who);
         if (t == null || links == null) return null;
         double px = LocalX, py = LocalY;
         List<RouteStep>? best = null;
         double bestCost = double.MaxValue;
         int bestUsed = 0;
         if (_portalsEnabled) EnsurePortalsLoaded();
+        // Portals and exits that would refuse you, or did (RynthNavPlugin.Ways.cs).
+        HashSet<string> bans = PlanBans(who, null);
         foreach (HubExit hx in links.Exits)
         {
+            if (bans.Contains(PortalRoute.HubExitKey(hx.Id))) continue;
             List<TownNetPoint>? way = t.WayTo(hx.Id, px, py, HubOffRouteUnits, out _);
             if (way == null) continue;
-            double inside = TownNet.PathLength(way, 0) + PortalRoute.PortalPenaltyUnits;
+            double inside = TownNet.PathLength(way, 0) + times.PortalUnits;
             List<RouteStep> rest;
             double restCost;
             int used = 0;
             if (_portalsEnabled && _portals is { Count: > 0 })
-                rest = PortalRoute.Plan(_portals, null, hx.DstNs, hx.DstEw, goalNs, goalEw, out restCost, out used);
+                rest = PortalRoute.Plan(_portals, null, null, hx.DstNs, hx.DstEw, goalNs, goalEw, out restCost, out used, null, true, bans, null, times);
             else
             {
                 restCost = NavCoords.Distance(hx.DstNs, hx.DstEw, goalNs, goalEw);
@@ -280,8 +288,8 @@ public sealed partial class RynthNavPlugin
             }
             if (inside + restCost >= bestCost) continue;
             bestCost = inside + restCost;
-            best = new List<RouteStep> { RouteStep.Hub(hx.DstNs, hx.DstEw, hx.Name, hx.Id) };
-            best.AddRange(rest);
+            best = new List<RouteStep> { RouteStep.Hub(hx.DstNs, hx.DstEw, hx.Name, hx.Id) with { Via = PortalRoute.HubExitKey(hx.Id), EstAfter = inside } };
+            foreach (RouteStep r in rest) best.Add(r with { EstAfter = r.EstAfter > 0 ? r.EstAfter + inside : inside + restCost });
             bestUsed = used + 1;
         }
         est = bestCost;

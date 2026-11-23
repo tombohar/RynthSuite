@@ -66,7 +66,7 @@ internal sealed partial class MetaManager
     {
         DateTime now = Clock();
         _settings.CurrentState = s.State;
-        _settings.IsMacroRunning = s.MacroRunning;
+        _settings.SetMacroRunning(s.MacroRunning, "the meta resume after a reload");
         _lastState = s.State;
         _lastMacroRunning = s.MacroRunning;   // no "macro started": that would re-arm every rule
         _settings.MetaCallStackReset = false;

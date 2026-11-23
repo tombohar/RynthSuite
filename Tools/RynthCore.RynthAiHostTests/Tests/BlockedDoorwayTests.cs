@@ -15,7 +15,7 @@ internal static class BlockedDoorwayTests
 {
     public static void Register(Runner r)
     {
-        r.Add("blocked doorways: Thread 0x5456's spider webs close their doorways (every cell pair) on the real dats; the explore keeps out of them; other dungeons lose none, 0x039B its round room's floor-level way (if the dats are here)", RealDats);
+        r.Add("blocked doorways: Thread 0x5456's spider webs close their doorways (every cell pair) on the real dats; the explore keeps out of them; other dungeons lose none, nor do 0x039B's spiral stair, 0x0150's door frames and 0x000A's bridge shut theirs (if the dats are here)", RealDats);
     }
 
     private static void RealDats()
@@ -61,29 +61,35 @@ internal static class BlockedDoorwayTests
             DungeonPathfinder.MainRouteNote = null;
             Check.Eq(through, 0, "the explore walk takes no step through a web's doorway");
 
-            // Dungeons the explore has walked: nothing closed. 0x039B aside: a 9.2 m model 6.2 m tall fills its round
-            // room from the floor (-12) to the corridor (-6), and the one doorway into it at floor level meets its side.
-            foreach (uint lb in new uint[] { 0x0289, 0x0192, 0x6346, 0x0199, 0x01F5, 0x039B })
+            // Dungeons the explore has walked: nothing closed. 0x039B, 0x0150 and 0x000A too since 2026-11-18 (the lanes are
+            // a body's walk on the solid models, DungeonPathfinder.Blocked.cs): the old rays counted one that went into a
+            // model's box and met none of its polygons (nor does the loader hand that box over now: its pieces are
+            // NoAabbFallback, Raycasting/GeometryLoader.cs), and so shut
+            //   - 0x039B's floor-level doorway 012E>0142 into its round room by the 9.2 m spiral stair 0x010000EE: the
+            //     doorway opens onto the stair's foot (under the body band), nothing of the stair in a body's way within
+            //     1.2 m of it, and the 11 cells past it (012C-012F at -12, 010A-010F at -18) were left out;
+            //   - 0x0150's doorways 0116>0126 and 0126>012A by door frames 0x01000E60 (two posts and a lintel 2.6 m up),
+            //     leaving 43 of 155 cells reachable from 0100;
+            //   - 0x000A's four doorways onto the bridge 0x02000224 over the hall (its deck at the doorways' floor, a
+            //     body's height clear between its rails).
+            foreach (uint lb in new uint[] { 0x0289, 0x0192, 0x6346, 0x0199, 0x01F5, 0x039B, 0x0150, 0x000A })
             {
                 DungeonPathfinder.InvalidateCache();
                 var g = DungeonPathfinder.GetGraph(lb, loader.CellDat);
-                var before39 = lb == 0x039B ? DungeonPathfinder.ReachableCells(g, 0x039B0177, null) : new HashSet<uint>();
-                int reachBefore = before39.Count;
+                int reachBefore = lb == 0x039B ? DungeonPathfinder.ReachableCells(g, 0x039B0177, null).Count : 0;
                 var gg = DungeonPathfinder.GetGeometry(lb, loader.CellDat, loader.DungeonLOS);
                 if (gg == null) continue;
                 Console.WriteLine($"    0x{lb:X4}: {(DungeonPathfinder.BlockedNote ?? "nothing closed")}");
+                Check.Eq(DungeonPathfinder.BlockedNote, null, $"0x{lb:X4}: nothing closed");
                 if (lb == 0x039B)
                 {
-                    Check.True(DungeonPathfinder.BlockedNote is { } n39 && n39.Contains("0x010000EE") && !n39.Contains(", 0x"), "0x039B: only by the round room's 9 m model");
                     var full = DungeonPathfinder.GetGraph(lb, loader.CellDat);
                     var after39 = DungeonPathfinder.ReachableCells(full, 0x039B0177, null);
                     int reach = after39.Count;
-                    Console.WriteLine($"    0x039B from 0177: {reachBefore} cells reachable as the map was, {reach} with it closed");
-                    // The cells under the 9 m model's floor-level side (012C-012F at -12, 010A-010F at -18 past them).
-                    Check.True(after39.Contains(0x039B0141) && !after39.Contains(0x039B012E) && reachBefore - reach == 11,
-                               $"0x039B: the round room stays, the 11 cells only past the model's side are left out ({reachBefore - reach})");
+                    Console.WriteLine($"    0x039B from 0177: {reachBefore} cells reachable as the map was, {reach} now");
+                    Check.True(after39.Contains(0x039B0141) && after39.Contains(0x039B012E) && reach == reachBefore,
+                               $"0x039B: the round room and the cells past its floor-level doorway are reachable ({reachBefore - reach} left out)");
                 }
-                else Check.Eq(DungeonPathfinder.BlockedNote, null, $"0x{lb:X4}: nothing closed");
             }
         }
         finally

@@ -11,7 +11,14 @@
 //   - on walkable floor, keeping the walk's wall clearance, or at least as much as the legs it
 //     replaces had (LegClearance: a floor edge counts as a wall, so never over a ledge or a pit), and
 //   - passing through the room of every point it skips (the explore must still walk into each room
-//     it was laid through).
+//     it was laid through), and
+//   - staying on the floor all the way, a step at a time (OnFloorAll, as the hole rule judges a leg).
+//     2026-11-17, a DreamWeave Thread in 0x0278: a ramp climbs south from a room at -36 to a corridor
+//     at -30 that runs back north over that room. The walk went up the ramp and back along the
+//     corridor; seen from above every point of that U-turn lies on one line, so one straight leg north
+//     "passed through" all their rooms, and its samples kept their clearance (none fell in the 7 m with
+//     no floor between the room's end and the corridor). The character ran north along the bottom
+//     into the room's end wall and stuck there ("running into a wall in a place that makes no sense").
 // Only plain waypoints are skipped, and never one in keepPoints: the middles of the rooms the explore walks
 // into (2026-11-16, enter and scan). A look into a dead end, in and out by one doorway, passes "through" the
 // room at its doorway: Thread 0x00B5's boss room lost its middle here and was only touched at the door.
@@ -85,6 +92,7 @@ internal static partial class DungeonPathfinder
                                       double needClear, double wall)
     {
         if (LegLeast(geo, pts[i], pts[j], wall, out _, out _, out _) < needClear - 0.01) return false;
+        if (!LegOnFloor(geo, pts[i], pts[j])) return false;
         var must = new HashSet<int>();
         for (int k = i; k < j; k++) must.UnionWith(legRooms[k]);
         for (int k = i + 1; k < j; k++)

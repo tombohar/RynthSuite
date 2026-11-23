@@ -181,6 +181,7 @@ public sealed partial class RynthNetPlugin : RynthPluginBase
 
         for (int i = 0; i < 64 && node.TryDequeueEvent(out NetEvent e); i++)
             HandleEvent(node, e, now);
+        FlushJoins(now);
 
         for (int i = 0; i < 16 && _localCommands.TryDequeue(out var queued); i++)
         {
@@ -299,13 +300,36 @@ public sealed partial class RynthNetPlugin : RynthPluginBase
 
     // ── Network events ──────────────────────────────────────────────────────
 
+    /// <summary>A client's "connected" line waits this long, so a link that drops at once says nothing.</summary>
+    internal const long JoinSayDelayMs = 3000;
+    private readonly Dictionary<string, long> _joinsToSay = new();   // node id -> when it joined (not said yet)
+    private readonly HashSet<string> _saidJoined = new();             // node ids whose "connected" was said
+
+    /// <summary>Every tick: says "X connected." for each client whose link has held JoinSayDelayMs.</summary>
+    private void FlushJoins(long now)
+    {
+        if (_joinsToSay.Count == 0) return;
+        List<string>? done = null;
+        foreach (var kv in _joinsToSay)
+        {
+            if (now - kv.Value < JoinSayDelayMs) continue;
+            (done ??= new List<string>()).Add(kv.Key);
+            if (_loggedIn && _peerNames.TryGetValue(kv.Key, out string? name) && name.Length > 0)
+            {
+                ChatLine($"{name} connected.");
+                _saidJoined.Add(kv.Key);
+            }
+        }
+        if (done != null) foreach (string id in done) _joinsToSay.Remove(id);
+    }
+
     private void HandleEvent(NetNode node, NetEvent e, long now)
     {
         switch (e.Kind)
         {
             case NetEventKind.PeerJoined:
                 _peerNames[e.NodeId] = e.From;
-                if (_loggedIn && e.From.Length > 0) ChatLine($"{e.From} connected.");
+                if (_loggedIn && e.From.Length > 0) _joinsToSay[e.NodeId] = now;   // said once it has held (FlushJoins)
                 break;
             case NetEventKind.PeerUpdated:
             {
@@ -315,13 +339,18 @@ public sealed partial class RynthNetPlugin : RynthPluginBase
                 if (before == e.From) break;
                 _peerNames[e.NodeId] = e.From;
                 if (!_loggedIn) break;
-                if (before.Length == 0) ChatLine($"{e.From} connected.");
-                else if (e.From.Length == 0) ChatLine($"{before} logged out.");
+                if (before.Length == 0) _joinsToSay[e.NodeId] = now;
+                else if (!_saidJoined.Contains(e.NodeId)) _joinsToSay[e.NodeId] = now;   // not said yet: said under the new name
+                else if (e.From.Length == 0) { ChatLine($"{before} logged out."); _saidJoined.Remove(e.NodeId); }
                 else ChatLine($"{before} is now {e.From}.");
                 break;
             }
             case NetEventKind.PeerLeft:
-                if (_loggedIn && e.From.Length > 0) ChatLine($"{e.From} disconnected ({e.Text}).");
+                // Only a client whose "connected" was said is said to go: a link that dropped within
+                // JoinSayDelayMs said nothing either way (R-20261122-193027-b795: a connect and a disconnect
+                // line every second while muling).
+                _joinsToSay.Remove(e.NodeId);
+                if (_saidJoined.Remove(e.NodeId) && _loggedIn && e.From.Length > 0) ChatLine($"{e.From} disconnected ({e.Text}).");
                 _peerNames.Remove(e.NodeId);
                 _rate.Remove(e.NodeId);
                 break;

@@ -91,7 +91,9 @@ internal static class RynthIcons
     public const string NavigationArrow = "\uEADE";
     public const string Package = "\uE390";
     public const string Path = "\uE39C";
+    public const string Pause = "\uE39E";
     public const string PencilSimple = "\uE3B4";
+    public const string PersonSimpleRun = "\uE730";
     public const string Play = "\uE3D0";
     public const string Plus = "\uE3D4";
     public const string PushPin = "\uE3E2";

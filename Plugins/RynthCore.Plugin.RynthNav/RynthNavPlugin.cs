@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using DotRecast.Core.Numerics;
@@ -42,6 +43,13 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
     private const int MaxTiles = 256;
     private const int MaxCorridorTiles = 220;
     private const double ArrivalUnits = 7.0;
+    // The goto's own goal (the coords given, not a portal or a route leg's end) is stood on: within
+    // FinalArrivalUnits, run at with the tight servo from FinalApproachUnits out. A spot it can't get
+    // that close to (something standing on it) counts once within ArrivalUnits and no closer for
+    // CloseEnoughMs. Before 11-19 every leg ended 7 u out (a player: "it stops 1 yard or so before").
+    private const double FinalArrivalUnits = 2.5;
+    private const double FinalApproachUnits = 20.0;
+    private const long CloseEnoughMs = 2000;
     private const double CornerLookaheadUnits = 6.0;  // a path corner is cut from this far out when the next is in plain view
     private const int PreviewMaxLandblocks = 3;   // preview only targets this many landblocks away (a <= 6x6 tile box)
     private const int BlindPushTicks = 45;        // ~1.5 s straight at the goal when the plan runs out short of it (crosses a seam)
@@ -105,14 +113,16 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
     private int _blindTicks;                  // ticks since the plan ran out (see BlindPushTicks)
     private int _legTicks, _bestTick;         // progress watchdog for the current leg
     private double _bestDist = double.MaxValue;
+    private double _nearBest = double.MaxValue;   // the closest yet within ArrivalUnits of the final goal...
+    private long _nearBestMs;                     // ...and when (CloseEnoughMs)
     private string _gotoName = "";            // what the goto is walking to (for its chat lines)
     private volatile bool _echoChat;          // the pending load/test/preview came from chat: answer there
 
     // Portal route execution (tick thread only).
     private List<PortalLink>? _portals;          // loaded lazily from NavData\portals.tsv
-    // OFF by default: goto walks straight to the coord (the original, working behavior).
-    // Portal routing is opt-in via "/rnav portals on" while we get it reliable.
-    private volatile bool _portalsEnabled = false;
+    // ON by default since 2026-11-19: Go and Route take portals, the Town Network and recalls when
+    // that is quicker. "/rnav portals off" (or the panel's switch) walks only; the choice is saved.
+    private volatile bool _portalsEnabled = true;
     private List<RouteStep>? _route;             // current planned legs (null = pure navmesh goto)
     private int _routeIdx;
     private bool _portalWait;                     // standing at a portal entrance, waiting for the teleport
@@ -142,7 +152,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         // Every use logged (Plugins/Shared/UseAudit.cs). No macro here: no door/corpse guard.
         RynthCore.Plugin.Shared.UseAudit.Reset("RynthNav", null);
         // The panel's switches survive reloads and relogs (rynthnav.json, next to navDataDir).
-        _portalsEnabled = NavDataConfig.ReadSwitch("portals", false);
+        _portalsEnabled = NavDataConfig.ReadSwitch("portals", true);
         _recallsEnabled = NavDataConfig.ReadSwitch("recalls", true);
         LoadAvoidSettings();
         LoadMarkerSettings();
@@ -179,7 +189,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         _hasPose = false; _lastSeenLb = 0;
         lock (_gate) { _status = "logged out"; _lastPath = ""; }
         lock (_moveGate) { _desiredRun = 0; _turnState = 0; _haltPending = true; }
-        _gotoActive = false;
+        _gotoActive = false; _paused = false;
         _route = null; _portalWait = false; _portalWaitTicks = 0; _wasPortaling = false; _settling = false;
         ResetHub();
         lock (_gotoGate) { _gotoPath = null; _gotoIdx = 0; }
@@ -381,7 +391,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         if (cancel)
         {
             if (_gotoActive) _goNote = "stopped";   // the panel's status line (the d-pad and Stop say nothing in chat)
-            _gotoActive = false; _route = null; _portalWait = false; if (_recallWait) EndRecall();
+            _gotoActive = false; _paused = false; _route = null; _portalWait = false; if (_recallWait) EndRecall();
             ResetHub();
             HideMarkers("cancelled");
         }
@@ -470,7 +480,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
     {
         if (!_hasPose) { lock (_gate) _status = "no pose"; Note("goto: no player position yet"); return; }
         // A new goto (not the re-plan after "no route over land") may re-plan once again.
-        if (!landReplan) { _landReplanned = false; _enterPortal = enter.Length > 0 ? _nextEnterPortal : ""; _nextEnterPortal = ""; }
+        if (!landReplan) { _landReplanned = false; _tripReplans = 0; _enterPortal = enter.Length > 0 ? _nextEnterPortal : ""; _nextEnterPortal = ""; }
         // Whatever was running stops first: a refused goto must not leave the old one half-changed.
         if (_gotoActive) { _gotoActive = false; _route = null; _portalWait = false; ResetHub(); AutoRun.Stop(); HideMarkers("a new goto"); }
         double twx = NavCoords.WorldX(tew), twy = NavCoords.WorldY(tns);
@@ -481,6 +491,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
             return;
         }
         if (_recallWait) EndRecall();
+        _paused = false;
         _finalTew = twx; _finalTns = twy;
         _replanTick = 0;
         _portalWait = false; _portalWaitTicks = 0; _wasPortaling = false; _settling = false;
@@ -516,6 +527,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
             _route = plan.Steps; portalsUsed = plan.Teleports; est = plan.Est;
         }
         _routeRecalls = recalls;
+        _tripEst = est; _tripTimes = inHub ? PlanTimes() : _planTimes;   // the time left (RynthNavPlugin.TripTime.cs)
 
         _routeIdx = 0;
         // Into a dungeon (or through a portal): the last leg walks into its portal and waits for
@@ -560,7 +572,9 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         _gotoActive = true;
         _gotoName = name; _gotoType = type;
         _walkHaveLast = false;
-        string via = (_route != null && portalsUsed > 0) ? $" via {portalsUsed} teleport(s), ~{est:F0}u" : "";
+        string eta = AboutTime(_tripTimes, est);
+        string via = (_route != null && portalsUsed > 0) ? $" via {portalsUsed} teleport(s), {(eta.Length > 0 ? eta + " " : "")}(~{est:F0}u)"
+            : eta.Length > 0 ? ", " + eta : "";
         lock (_gate) { _status = $"walking -> {NavCoords.Fmt(tns, tew)}{via}"; _lastPath = "planning…"; }
         Host.Log($"[RynthNav] goto {name} ({tns:F2},{tew:F2}){via}");
         string at = name == NavCoords.Fmt(tns, tew) ? name : $"{name} at {NavCoords.Fmt(tns, tew)}";
@@ -577,7 +591,8 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         // #17) instead of mutating _gotoActive/_route/_portalWait directly —
         // those are tick-thread-owned state read non-atomically by
         // StepGoto/OnSubGoalReached.
-        lock (_reqGate) _reqCancel = true;
+        // While paused the d-pad moves you and the trip stays on the map; its Stop still ends the trip.
+        if (!_paused || cmd == 5) lock (_reqGate) _reqCancel = true;
         lock (_moveGate)
         {
             switch (cmd)
@@ -593,7 +608,8 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
 
     private void ApplyMovement()
     {
-        if (_gotoActive) { _wasGoto = true; StepGoto(); return; }
+        // Paused (RynthNavPlugin.Pause.cs): the trip stays, the walking stops, the d-pad works.
+        if (_gotoActive && !_paused) { _wasGoto = true; StepGoto(); return; }
         if (_wasGoto)
         {
             _wasGoto = false;
@@ -675,17 +691,35 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
             return;
         }
         _walkHaveLast = true; _walkLastWx = _wx; _walkLastWy = _wy;
+        _clock.RunTick(NowMs, _wx, _wy, AutoRun.Running);   // run speed (RynthNavPlugin.TripTime.cs)
         RefreshAvoid(force: false);
 
         bool isPortalLeg = _route != null && _routeIdx < _route.Count && _route[_routeIdx].UsePortal;
-        double arrive = isPortalLeg ? PortalArriveUnits : ArrivalUnits;
+        // The goto's own goal: stood on, not stopped 7 u short of (FinalArrivalUnits).
+        bool finalLeg = !isPortalLeg && (_route == null || _routeIdx >= _route.Count - 1);
+        double endReach = finalLeg ? FinalArrivalUnits : ArrivalUnits;
+        double arrive = isPortalLeg ? PortalArriveUnits : endReach;
         double fdew = _gotoTew - _wx, fdns = _gotoTns - _wy;
         double toGoal = Math.Sqrt(fdew * fdew + fdns * fdns);
         // A /loc inside a building, a tree or on a steep slope has no walkable ground:
         // the path ends at the nearest walkable spot, which can be more than
         // ArrivalUnits from the typed point. Standing on that spot is arriving.
-        bool atMeshGoal = !isPortalLeg && _goalOnMesh &&
-            Math.Sqrt((_goalMeshEw - _wx) * (_goalMeshEw - _wx) + (_goalMeshNs - _wy) * (_goalMeshNs - _wy)) < ArrivalUnits;
+        double toMeshGoal = Math.Sqrt((_goalMeshEw - _wx) * (_goalMeshEw - _wx) + (_goalMeshNs - _wy) * (_goalMeshNs - _wy));
+        bool atMeshGoal = !isPortalLeg && _goalOnMesh && toMeshGoal < endReach;
+        // Close to the goal but no closer for CloseEnoughMs (an NPC, a chest or a tree on the spot): there.
+        if (finalLeg && !atMeshGoal)
+        {
+            double near = _goalOnMesh ? Math.Min(toGoal, toMeshGoal) : toGoal;
+            if (near < ArrivalUnits)
+            {
+                if (near < _nearBest - 0.3) { _nearBest = near; _nearBestMs = NowMs; }
+                else if (NowMs - _nearBestMs > CloseEnoughMs)
+                {
+                    Host.Log($"[RynthNav] goto: {near:F1}u from the goal and no closer for {CloseEnoughMs / 1000} s: arrived");
+                    atMeshGoal = true;
+                }
+            }
+        }
         // A portal is run into straight from PortalArriveUnits: only with nothing between, as far as
         // the navmesh shows. A portal round a corner (a wall within 14 u of it) is reached along
         // the path first; it used to be run at through the wall, 12 s a try, five tries.
@@ -695,7 +729,12 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
             lock (_gotoGate) pathLeft = _gotoPath != null && _gotoIdx < _gotoPath.Count;
             if (pathLeft && !StraightOnMesh(_gotoTew, _gotoTns)) arrive = PortalContactUnits;
         }
-        if (toGoal < arrive || atMeshGoal)
+        // A portal down the cellar stairs is right under you from the street: arrived only on its floor.
+        // Close to one whose floor hasn't been looked for yet: plan once now, which looks (PortalFloorGoal).
+        if (isPortalLeg && toGoal < arrive && _legFloorReach == null && !double.IsNaN(_legSpotZ)
+            && (_legSpotIndoor || Math.Abs(_legSpotZ - _wz) > PortalLevelUnits))
+            Replan();
+        if ((toGoal < arrive || atMeshGoal) && !(isPortalLeg && PortalOnOtherLevel))
         {
             OnSubGoalReached();
             return;
@@ -750,7 +789,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
             // straight (the navmesh's raycast: the agent radius from every wall it knows, and out
             // of the portal circles): the walk turns smoothly instead of overshooting each corner
             // at run speed and turning back to it (11-01).
-            idx = PathFollow.Advance(path, idx, _wx, _wy, _cornerReach, ArrivalUnits, CornerLookaheadUnits, WalkableStraight);
+            idx = PathFollow.Advance(path, idx, _wx, _wy, _cornerReach, endReach, CornerLookaheadUnits, WalkableStraight);
             lock (_gotoGate) _gotoIdx = idx;
         }
         if (path == null || idx >= path.Count)
@@ -785,7 +824,9 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         // hub portals' circles, a wall beside), it held 234 deg into the wall while the path wanted
         // 301 and re-planned every 0.6 s (10-01 20:07, "just spazzing"). Steering is for the
         // blind push and the last steps onto a portal, where there is no path.
-        WalkDrive(desired);
+        // The last FinalApproachUnits to the goal: the tight servo (4 deg dead zone, stops to turn past
+        // 20), so the run lines up on a 2.5 u spot instead of passing beside it.
+        WalkDrive(desired, tight: finalLeg && toGoal < FinalApproachUnits);
     }
 
     // ── Portal routing ───────────────────────────────────────────────────────────
@@ -803,7 +844,9 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         if (step.UsePortal)
         {
             _portalWait = true; _portalWaitTicks = 0; _wasPortaling = false;
+            _portalStepMs = NowMs;   // the trip clock: from here to the jump (RynthNavPlugin.TripTime.cs)
             _prePortalWx = _wx; _prePortalWy = _wy; _prePortalLb = CurrentLandblock;
+            ResetTeleportJump();
             BeginPortalAim();
             lock (_gate) _status = $"taking portal '{Trunc(step.Label)}'";
             Host.Log($"[RynthNav] at portal entrance '{step.Label}' lb=0x{_prePortalLb:X4} — approaching");
@@ -829,8 +872,9 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
             var s = _route[_routeIdx];
             _gotoTew = (s.Ew * 10.0 + 1019.5) * 24.0;
             _gotoTns = (s.Ns * 10.0 + 1019.5) * 24.0;
+            SetLegSpot(s);   // a portal: exactly where it stands, and its height (RynthNavPlugin.Ways.cs)
         }
-        else { _gotoTew = _finalTew; _gotoTns = _finalTns; }
+        else { _gotoTew = _finalTew; _gotoTns = _finalTns; SetLegSpot(default); }
         // New leg: fresh progress watchdog, and the old leg's walkable end no longer counts.
         ResetHub();
         ResetBlocked();
@@ -840,13 +884,15 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         _walkHaveLast = false;   // a new leg starts where the last step's teleport put us
         _goalOnMesh = false; _blindTicks = 0;
         _legTicks = 0; _bestTick = 0; _bestDist = double.MaxValue;
+        _nearBest = double.MaxValue; _nearBestMs = NowMs;
         ResetCoarse();
     }
 
     private void FinishGoto(string status)
     {
         if (_recallWait) EndRecall();
-        _gotoActive = false; _route = null; _portalWait = false;
+        _gotoActive = false; _paused = false; _route = null; _portalWait = false;
+        _tripEst = double.NaN; _portalStepMs = 0;
         ResetHub();
         _avoid.Clear(); _coarseHoldTicks = 0;
         ResetBlocked();
@@ -856,28 +902,39 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         Host.Log($"[RynthNav] goto: {status}");
         Say(status == "arrived" && _gotoName.Length > 0 ? $"goto: arrived at {_gotoName}" : $"goto: {status}");
         _goNote = status == "arrived" && _gotoName.Length > 0 ? $"arrived at {_gotoName}" : status;
+        if (status == "arrived") _wayChosenMs = 0;   // there: the next trip there is planned afresh (RynthNavPlugin.Ways.cs)
         _enterName = ""; _enterType = "";
         HideMarkers(status == "arrived" ? "arrived" : "the goto ended");
     }
 
-    // At a portal entrance, waiting for the teleport. A portal ALWAYS changes the
-    // landblock, so a landblock change is the reliable trigger signal (the old
-    // distance check missed teleports). To avoid orbiting the entrance at run speed
-    // we approach to a small radius then settle and let the collision fire.
+    // At a portal entrance, waiting for the teleport: portal space ending, or a jump (TeleportJump: too far
+    // and too fast between two ticks to be running). A landblock change alone is not one: 15% of the
+    // portals stand within 14 u of a landblock line, and backing off to try again crossed it (11-18).
+    // To avoid orbiting the entrance at run speed we approach to a small radius then settle and let
+    // the collision fire.
     private void StepPortalWait()
     {
         bool portaling = Host.HasIsPortaling && Host.IsPortaling();
         if (portaling) _wasPortaling = true;
         bool lbChanged = CurrentLandblock != _prePortalLb;
         double moved = Math.Sqrt((_wx - _prePortalWx) * (_wx - _prePortalWx) + (_wy - _prePortalWy) * (_wy - _prePortalWy));
-        bool teleported = lbChanged || (_wasPortaling && !portaling) || moved > PortalJumpUnits;
+        bool jumped = TeleportJump(out double jump);
+        bool teleported = (_wasPortaling && !portaling) || moved > PortalJumpUnits || jumped;
+        if (!teleported && lbChanged && !_lbCrossSaid)
+        {
+            _lbCrossSaid = true;
+            Host.Log($"[RynthNav] at the portal: crossed into landblock 0x{CurrentLandblock:X4} ({moved:F0}u from where the try began): not a teleport");
+        }
 
         if (teleported)
         {
             AutoRun.Stop();
             _portalWait = false;
             _lastLandMs = NowMs;
-            Host.Log($"[RynthNav] teleport detected (lb 0x{_prePortalLb:X4}->0x{CurrentLandblock:X4}, moved {moved:F0}u) — next leg");
+            _lbCrossSaid = false;
+            ClockPortal();
+            Host.Log($"[RynthNav] teleport detected (lb 0x{_prePortalLb:X4}->0x{CurrentLandblock:X4}, moved {moved:F0}u{(jumped ? $", a {jump:F0}u jump" : "")}"
+                   + $"{(_wasPortaling ? ", portal space" : "")}) — next leg");
             RefreshTiles(CurrentLandblock); // stream the area we landed in
             if (_enterName.Length > 0 && _route != null && _routeIdx >= _route.Count - 1)
             {
@@ -913,6 +970,9 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         }
         _cooldownSaid = false;
 
+        // Right over (or under) a portal on another level with no way to its floor: not for ever.
+        if (GiveUpOnOtherLevel(d)) return;
+
         _portalWaitTicks++;
         DriveIntoPortal(dew, dns, d);
     }
@@ -921,6 +981,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
     {
         if (_portals != null) return;
         var list = new List<PortalLink>();
+        int withRules = 0;
         try
         {
             string path = Path.Combine(NavDataDir, "portals.tsv");
@@ -928,18 +989,16 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
             {
                 foreach (var line in File.ReadAllLines(path))
                 {
-                    if (string.IsNullOrWhiteSpace(line)) continue;
-                    var f = line.Split('\t');
-                    if (f.Length < 4) continue;
-                    if (!double.TryParse(f[0], NumberStyles.Float, CultureInfo.InvariantCulture, out double sns)) continue;
-                    if (!double.TryParse(f[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double sew)) continue;
-                    if (!double.TryParse(f[2], NumberStyles.Float, CultureInfo.InvariantCulture, out double dns)) continue;
-                    if (!double.TryParse(f[3], NumberStyles.Float, CultureInfo.InvariantCulture, out double dew)) continue;
-                    string pname = f.Length > 4 ? f[4] : "";
-                    if (Entrance.IsDestroyed(pname)) continue;   // wrecks take you nowhere
-                    list.Add(new PortalLink(sns, sew, dns, dew, pname));
+                    // Who may use it (NavData from 11-19 on): minLevel, maxLevel, PortalBitmask. An older
+                    // portals.tsv has none: every portal is then planned as open to anyone, as before.
+                    if (!PortalLink.TryParseTsv(line, out PortalLink link, out bool rules)) continue;
+                    if (Entrance.IsDestroyed(link.Name)) continue;   // wrecks take you nowhere
+                    if (rules) withRules++;
+                    list.Add(link);
                 }
-                Host.Log($"[RynthNav] loaded {list.Count} portals from portals.tsv");
+                Host.Log($"[RynthNav] loaded {list.Count} portals from portals.tsv "
+                       + (withRules > 0 ? $"({list.Count(p => p.HasRules)} with use rules)"
+                                        : "(no use rules in it: an older NavData; a refusal is learned instead)"));
             }
             else Host.Log("[RynthNav] portals.tsv not found — portal routing off");
         }
@@ -955,18 +1014,27 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
     /// <paramref name="portals"/>: use portals and recalls or not this once (null: the switch; the
     /// route maker's plan op). Tick thread.
     /// </summary>
-    private TravelPlan.Result PlanRoute(string name, double goalNs, double goalEw, out List<RecallOption> recalls, bool? portals = null)
+    private TravelPlan.Result PlanRoute(string name, double goalNs, double goalEw, out List<RecallOption> recalls, bool? portals = null,
+        bool ignoreChoice = false)
     {
-        bool portalsOn = portals ?? _portalsEnabled;
+        // The way chosen for this place (RynthNavPlugin.Ways.cs), unless asked for every way.
+        if (!ignoreChoice) ForgetWayChoice(goalNs, goalEw);
+        bool chosen = !ignoreChoice && SameWayTarget(goalNs, goalEw) && (_wayBans.Count > 0 || _wayWalk);
+        bool portalsOn = (portals ?? _portalsEnabled) && !(chosen && _wayWalk);
         double startNs = NavCoords.NsFromWorld(_wy), startEw = NavCoords.EwFromWorld(_wx);
         bool startOnMap = IsOnMap(_cellId);
         var recallNotes = new List<string>();
+        TripTimes times = PlanTimes();   // teleports costed by how long they take (RynthNavPlugin.TripTime.cs)
         recalls = _charKey.Length == 0 ? new List<RecallOption>() : RecallPlanner.Build(_atlas, _known, _memory, _charKey, recallNotes);
         if (_charKey.Length == 0) recallNotes.Add("not logged in yet");
         var hubNotes = new List<string>();
-        HubLinks? hub = portalsOn ? CurrentHubLinks(hubNotes) : null;
+        Traveller who = ReadTraveller();
+        HubLinks? hub = portalsOn ? CurrentHubLinks(hubNotes, who) : null;
         if (hub != null && _preferAphus && _recallsEnabled) hub = ViaAphus(hub, recalls, hubNotes);
         if (portalsOn) EnsurePortalsLoaded();
+        var banNotes = new List<string>();
+        HashSet<string> bans = portalsOn ? PlanBans(who, banNotes) : new HashSet<string>(StringComparer.Ordinal);
+        if (chosen) bans.UnionWith(_wayBans);
         // Walks that can't be done over land (another landmass) are left out, so an island or the
         // far side of water is only reached by a portal, a recall or the Town Network.
         NavGraph? g = UsableGraph();
@@ -974,17 +1042,36 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
             : (ans, aew, bns, bew) => g.SameLand(NavGraph.LandblockAt(NavCoords.WorldX(aew), NavCoords.WorldY(ans)),
                                                  NavGraph.LandblockAt(NavCoords.WorldX(bew), NavCoords.WorldY(bns))) != false;
         bool? land = startOnMap && g != null ? g.SameLand(CurrentLandblock, NavGraph.LandblockAt(NavCoords.WorldX(goalEw), NavCoords.WorldY(goalNs))) : null;
+        // Walks costed on the route graph, not as straight lines (RealWalk.cs): a portal landing on the far
+        // side of a ridge isn't a short walk from the goal (11-19, Mountain Shortcut and the Olthoi tents).
+        RealWalk? real = g != null && portalsOn ? new RealWalk(g, NavDataDir, startNs, startEw, _wz) : null;
 
-        TravelPlan.Result r = TravelPlan.Plan(portalsOn ? _portals : null, RecallPlanner.Links(recalls), hub,
-            portalsOn, _recallsEnabled, startOnMap, startNs, startEw, goalNs, goalEw, canWalk, land, name);
+        TravelPlan.Result r = TravelPlan.Plan(portalsOn ? _portals : null, RecallPlanner.Links(recalls, times), hub,
+            portalsOn, _recallsEnabled, startOnMap, startNs, startEw, goalNs, goalEw, canWalk, land, name, bans, MaxWays,
+            real == null ? null : real.Cost, times, real == null ? null : real.BestPlanned);
+        if (chosen && (r.Refusal.Length > 0 || r.Options.Count == 0))
+        {
+            // The way chosen goes nowhere from here: the best way, and the choice forgotten.
+            Host.Log($"[RynthNav] plan {name}: {WayText()} has no way from here; planning the best way");
+            _wayBans = new HashSet<string>(StringComparer.Ordinal); _wayAvoids = new List<string>(); _wayWalk = false; _wayIdx = 0;
+            return PlanRoute(name, goalNs, goalEw, out recalls, portals);
+        }
+        if (!ignoreChoice) KeepWays(r, name, goalNs, goalEw, chosen);
 
         Host.Log($"[RynthNav] plan {name}: {r.Basis}; {(portalsOn ? $"{_portals?.Count ?? 0} portals" : "no portals")}, "
                + $"{recalls.Count} recall(s) ready" + (recalls.Count > 0 ? " (" + string.Join(", ", recalls.ConvertAll(o => o.Name)) + ")" : "")
                + $", Town Network {(hub == null ? (portalsOn ? "not loaded" : "unused") : $"{hub.Entries.Count} entries / {hub.Exits.Count} exits")}"
                + $", land check {(canWalk == null ? "off (no route graph)" : "on")}"
+               + (real == null ? "" : $", walks costed on the route graph {real.Costed} of {real.Asked} ({real.Ms:F0} ms{(double.IsNaN(real.BestMs) ? "" : $", {real.BestMs:F0} for the best way")})")
+               + $", a portal {times.PortalSeconds + times.SpaceSeconds:F1} s, running {times.RunSpeed:F1} u/s"
                + (startOnMap ? "" : $" (in landblock 0x{CurrentLandblock:X4})"));
         foreach (string n in recallNotes) Host.Log($"[RynthNav] plan: recall left out: {n}");
         foreach (string n in hubNotes) Host.Log($"[RynthNav] plan: {n}");
+        foreach (string n in banNotes) Host.Log($"[RynthNav] plan: {n}");
+        if (chosen) Host.Log($"[RynthNav] plan: the way chosen: {WayText()}");
+        if (r.Options.Count > 1)
+            Host.Log($"[RynthNav] plan: {r.Options.Count} ways: " + string.Join("; ", r.Options.Select((o, i) =>
+                $"{i + 1}. ~{o.Est:F0}u, {o.Teleports} teleport(s){(o.Avoids.Count > 0 ? " avoiding " + string.Join(", ", o.Avoids) : "")}")));
         Host.Log(r.Refusal.Length > 0
             ? $"[RynthNav] route to {name}: none: {r.Refusal}"
             : $"[RynthNav] route to {name}: {RouteLine(r.Steps, startNs, startEw, goalNs, goalEw, r.Est, land)}");
@@ -1034,7 +1121,10 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         // (AllowB below). Through the avoid filter, a big open-ground polygon that also reaches
         // another portal's circle hid the goal: 10-02 16:05, Lucy at the Lady Maila Estates Portal
         // in a cluster of housing portals: "no tile ahead", 74u short, on the collision-built tiles.
-        _query.FindNearestPoly(targetP, steer != null ? new RcVec3f(8, 32, 8) : new RcVec3f(12, 256, 12), filter, out long gRef, out RcVec3f gPt, out _);
+        long gRef; RcVec3f gPt;
+        // A portal in a cellar or a tunnel below the street: its own floor, when the walk reaches it (RynthNavPlugin.Ways.cs).
+        if (steer != null || !PortalFloorGoal(sRef, sPt, filter, out gRef, out gPt))
+            _query.FindNearestPoly(targetP, steer != null ? new RcVec3f(8, 32, 8) : new RcVec3f(12, 256, 12), filter, out gRef, out gPt, out _);
         bool direct = gRef != 0 && steer == null;
         if (gRef == 0) gRef = FindGoalToward(aimEw, aimNs, out gPt);
         if (gRef == 0) { lock (_gate) _status = "no tile ahead — bake the route"; lock (_gotoGate) _gotoPath = null; return; }
@@ -1042,8 +1132,9 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         Span<long> p = new long[NavPathQuery.MaxPolys];
         avoid.AllowB = gRef;
         // No way round the portals to there: planned as before; steering still keeps out of them.
-        int pc = NavPathQuery.Corridor(_query, sRef, gRef, sPt, gPt, avoid, filter, _avoid.Count > 0, p, out bool fellBack, out _);
+        int pc = NavPathQuery.Corridor(_query, sRef, gRef, sPt, gPt, avoid, filter, _avoid.Count > 0, p, out bool fellBack, out _, out bool plainTaken);
         if (fellBack && !_avoidFallbackSaid) { _avoidFallbackSaid = true; Host.Log("[RynthNav] avoid: no path round the portals here; steering round them instead"); }
+        if (plainTaken && !_avoidPlainSaid) { _avoidPlainSaid = true; Host.Log("[RynthNav] avoid: the way round the portals went far round; the plain path, clear of them all, is taken"); }
         Span<DtStraightPath> sp = new DtStraightPath[512];
         _query.FindStraightPath(sPt, gPt, p[..pc], pc, sp, out int spc, 512, 0);
         if (spc < 2) { lock (_gate) _status = "no path"; lock (_gotoGate) _gotoPath = null; return; }
@@ -1224,6 +1315,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         sb.Append("\"runState\":").Append(_appliedRun).Append(',');
         sb.Append("\"turnState\":").Append(_appliedTurn).Append(',');
         sb.Append("\"goto\":").Append(_gotoActive ? 1 : 0).Append(',');
+        sb.Append("\"paused\":").Append(_gotoActive && _paused ? 1 : 0).Append(',');
         sb.Append("\"status\":\"").Append(Esc(status)).Append("\",");
         sb.Append("\"lastPath\":\"").Append(Esc(lastPath)).Append('"');
         string travel;

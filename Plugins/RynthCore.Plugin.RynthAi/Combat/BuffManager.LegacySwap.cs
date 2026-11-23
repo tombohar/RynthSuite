@@ -108,7 +108,7 @@ public partial class BuffManager
 
             if (IsWieldedLive(bowId))
             {
-                int openPack = WorldObjectCache.FindPackFor(_host, _worldObjectCache, includeMainPack: true, requireFree: 1);
+                int openPack = WorldObjectCache.FindPackFor(_host, _worldObjectCache, includeMainPack: true, requireFree: 1, new[] { bowId });
                 if (openPack == 0 || _bowDequipAttempts >= BowDequipMaxAttempts)
                 {
                     // No verified-open pack to receive the bow, or repeated dequip

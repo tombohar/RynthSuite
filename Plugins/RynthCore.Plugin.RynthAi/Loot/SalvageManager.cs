@@ -291,7 +291,8 @@ public sealed class SalvageManager
     public void NoteLootedForSalvage(uint itemId, string? name = null)
     {
         if (itemId == 0) return;
-        if (IsSalvageBag(name ?? _cache?[unchecked((int)itemId)]?.Name)) return;
+        string? noted = name ?? _cache?[unchecked((int)itemId)]?.Name;
+        if (IsSalvageBag(noted) || IsFoolproof(noted)) return;
         Track(itemId, name);
     }
 
@@ -312,6 +313,11 @@ public sealed class SalvageManager
         {
             Log($"[Salvage] Ignoring enqueue of salvage bag 0x{itemId:X8} ({name}) — bags are combined by the sweep, not salvaged solo.");
             if (_settings.EnableCombineSalvage) _pendingCombineScan = true;
+            return;
+        }
+        if (IsFoolproof(name))
+        {
+            Log($"[Salvage] Not salvaging 0x{itemId:X8} ({name}): {SkipFoolproof}.");
             return;
         }
 
@@ -650,12 +656,14 @@ public sealed class SalvageManager
     internal const string SkipItemsList = "on the Items list";
     internal const string SkipUst = "it is the UST";
     internal const string SkipBag = "already a salvage bag (the combine sweep handles bags)";
+    internal const string SkipFoolproof = "a Foolproof tinkering material (salvaging it would turn it into plain salvage)";
     internal const string SkipGaveUp = "salvage failed too often";
 
     /// <summary>Why <paramref name="wo"/> (in the pack) must not be salvaged, or null.</summary>
     private string? SkipReasonFor(uint id, WorldObject wo)
     {
         if (IsSalvageBag(wo.Name)) return SkipBag;
+        if (IsFoolproof(wo.Name)) return SkipFoolproof;
         if (IsWornByPlayer(wo)) return SkipWorn;
         if (wo.ObjectClass == AcObjectClass.Ust || IsUst(wo.Name)
             || (_host.HasGetObjectWcid && _host.TryGetObjectWcid(id, out uint wcid) && wcid == UstWcid))
@@ -1702,6 +1710,15 @@ public sealed class SalvageManager
         string inside = name.Substring(open + 1, close - open - 1);
         return int.TryParse(inside, out value);
     }
+
+    /// <summary>
+    /// A Foolproof tinkering material ("Foolproof" plus its material, a bag that can't fail; TinkerPlanner.IsFoolproof
+    /// uses the same name test). R-20261122-193822-831d: one looted from a chest matched the profile's
+    /// "(Salv) Red Garnet" rule by its material, and the batch salvaged it into 33 plain Red Garnet. It is
+    /// already the finished material: never salvaged, whatever a rule says.
+    /// </summary>
+    internal static bool IsFoolproof(string? name)
+        => !string.IsNullOrEmpty(name) && name.IndexOf("Foolproof", StringComparison.OrdinalIgnoreCase) >= 0;
 
     private static bool IsSalvageBag(string? name)
     {

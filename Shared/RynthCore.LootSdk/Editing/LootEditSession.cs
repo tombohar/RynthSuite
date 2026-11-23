@@ -305,7 +305,7 @@ public sealed class LootEditSession
         var copy = new VTankLootRule
         {
             Name = src.Name, CustomExpression = src.CustomExpression, Priority = src.Priority,
-            Action = src.Action, KeepCount = src.KeepCount,
+            Action = src.Action, KeepCount = src.KeepCount, PerDayHours = src.PerDayHours,
         };
         foreach (VTankLootCondition c in src.Conditions)
             copy.Conditions.Add(new VTankLootCondition(c.NodeType, c.LengthCode, c.DataLines));
@@ -368,6 +368,8 @@ public sealed class LootEditSession
         rule.Name = name;
         rule.Action = action;
         rule.KeepCount = action == VTankLootAction.KeepUpTo ? dto.KeepCount : null;
+        // Keep # per day: an engine without the option sends no PerDayHours, which keeps the rule's.
+        rule.PerDayHours = action == VTankLootAction.KeepUpTo ? LootPerDay.Clamp(dto.PerDayHours ?? rule.PerDayHours) : 0;
         rule.Priority = dto.Priority;
         if (rule.CustomExpression != null || _utl!.FileVersion >= 1)
             rule.CustomExpression = OneLine(dto.CustomExpression ?? string.Empty);
@@ -660,6 +662,7 @@ public sealed class LootEditSession
                 {
                     Name = r.Name, Enabled = r.Enabled, Action = (int)r.Action, KeepCount = r.KeepCount ?? 0,
                     Summary = LootRuleText.Summary(r), Conditions = CountConditions(r),
+                    PerDayHours = r.Action == VTankLootAction.KeepUpTo ? r.PerDayHours : 0,
                 });
         }
         else if (_json != null)
@@ -670,6 +673,7 @@ public sealed class LootEditSession
                     Name = r.Name, Enabled = r.Enabled, Action = (int)JsonAction(r.Action), KeepCount = r.KeepCount,
                     Summary = r.Conditions.Count == 0 ? "Matches every item" : string.Join(" AND ", r.Conditions),
                     Conditions = r.Conditions.Count,
+                    PerDayHours = r.Action == LootAction.KeepUpTo ? LootPerDay.Clamp(r.PerDayHours) : 0,
                 });
         }
         return s;
@@ -693,6 +697,7 @@ public sealed class LootEditSession
             {
                 Index = index, Name = r.Name, Enabled = r.Enabled, Action = (int)r.Action, KeepCount = r.KeepCount ?? 0,
                 Priority = r.Priority, CustomExpression = r.CustomExpression,
+                PerDayHours = r.Action == VTankLootAction.KeepUpTo ? r.PerDayHours : 0,
             };
             foreach (VTankLootCondition c in r.Conditions)
                 dto.Conditions.Add(new LootEditCondition { NodeType = c.NodeType, LengthCode = c.LengthCode, Lines = new List<string>(c.DataLines) });
@@ -704,6 +709,7 @@ public sealed class LootEditSession
             var dto = new LootEditRule
             {
                 Index = index, Name = r.Name, Enabled = r.Enabled, Action = (int)JsonAction(r.Action), KeepCount = r.KeepCount,
+                PerDayHours = r.Action == LootAction.KeepUpTo ? LootPerDay.Clamp(r.PerDayHours) : 0,
             };
             foreach (LootCondition c in r.Conditions)
                 dto.Conditions.Add(new LootEditCondition { NodeType = -1, Lines = new List<string> { c.ToString() ?? string.Empty } });
@@ -756,6 +762,9 @@ public sealed class LootEditSession
         SetMessage(message, ok: false);
         return false;
     }
+
+    /// <summary>Shows <paramref name="message"/> in the editor's message line (a command the bridge handles itself).</summary>
+    public void Say(string message, bool ok) => SetMessage(message, ok);
 
     private void SetMessage(string message, bool ok)
     {

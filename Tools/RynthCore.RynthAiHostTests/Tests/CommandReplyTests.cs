@@ -171,6 +171,15 @@ internal static class CommandReplyTests
         new("/ra autoconfirm off", "/ra autoconfirm banana", K.Act),
         new(null, "/ra autoconfirm 30", K.Act),                 // under 50: the range and the usage
         new(null, "/ra autoconfirm on", K.Act),                 // this rig's engine has no confirmation answers: says why
+        new(null, "/ra kits banana", K.Act),                    // unknown option: the usage
+        new(null, "/ra kits make", K.Act),                      // nothing to make in this rig: why not
+        new(null, "/ra kits floor 150", K.Act),                 // out of range: the range and the usage
+        new("/ra kits auto off", "/ra kits auto banana", K.Act),
+        new("/ra kits auto on", null, K.Act),
+        new("/ra kits auto below 3", "/ra kits auto below 0", K.Act),
+        new("/ra kits auto upto 4", "/ra kits auto upto 500", K.Act),
+        new("/ra petelement cold", "/ra petelement banana", K.Act),
+        new("/ra petelement any", null, K.Act),
         new(null, "/ra nosuchverb", K.Act),
         // ── /ra: output asked for ──
         new("/ra help", null, K.Query),
@@ -178,6 +187,12 @@ internal static class CommandReplyTests
         new("/ra aetheria status", null, K.Query),
         new("/ra autoconfirm", null, K.Query),
         new("/ra autoconfirm status", null, K.Query),
+        new("/ra kits", null, K.Query),
+        new("/ra kits status", null, K.Query),
+        new("/ra kits auto", null, K.Query),
+        new("/ra kits auto status", null, K.Query),
+        new("/ra petelement", null, K.Query),
+        new("/ra petelement status", null, K.Query),
         new("/ra", null, K.Query),
         new("/ra version", null, K.Query),
         new("/ra server", null, K.Query),

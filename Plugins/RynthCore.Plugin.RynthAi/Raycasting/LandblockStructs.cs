@@ -340,11 +340,65 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         // Collision cylinders
         public List<CollisionCylinder> Cylinders = new List<CollisionCylinder>();
 
-        // Default pose part frames (from first placement in Setup)
-        // Used to compute composite building bounding volumes.
+        /// <summary>Every placement in the file (the parts' frames for one pose), by key: 0 Default,
+        /// 0x65 Resting, and the animation poses.</summary>
+        public Dictionary<int, Frame[]> Placements = new Dictionary<int, Frame[]>();
+
+        /// <summary>The key of the placement <see cref="PartFrames"/> is, or -1 when the file has none.</summary>
+        public int PartFramesKey = -1;
+
+        /// <summary>The key of the first placement in the file.</summary>
+        public int FirstPlacementKey;
+
+        // The parts' frames in the pose AC puts a placed object in: Resting (0x65) when the setup has it,
+        // else Default (0), else the first in the file (ACE PartArray.SetPlacementFrame: the server and
+        // client both ask for 0x65 when they make a static). This was the first placement in the file:
+        // all 5,935 setups of today's portal.dat have a Default pose, 2,629 also have a Resting one and it
+        // is never the first, so 0x0200016C's parts stood 0.41 m too low (z -0.41..0.41, AC 0..0.82) and
+        // 0x02000183's a metre off (measured 2026-11-18).
         public Frame[] PartFrames;
 
+        /// <summary>Each part's DefaultScale (applied to its GfxObj before its frame, as ACE PartArray
+        /// does), or null when the setup has none (scale 1). 330 setups have one.</summary>
+        public Vector3[] DefaultScale;
+
+        public float StepUpHeight, StepDownHeight;
+
+        /// <summary>A placement carried animation hooks, which this reader can't step over: placements after
+        /// it and the collision volumes come from the fallback parse. None in today's portal.dat.</summary>
+        public bool PlacementHooks;
+
         public bool HasBounds;
+
+        /// <summary>Part <paramref name="part"/>'s scale (1, 1, 1 when the setup has none).</summary>
+        public Vector3 PartScale(int part)
+        {
+            if (DefaultScale == null || part < 0 || part >= DefaultScale.Length) return new Vector3(1, 1, 1);
+            return DefaultScale[part];
+        }
+
+        /// <summary>A point of part <paramref name="part"/>'s GfxObj in the setup's space: scaled by the
+        /// part's DefaultScale, then posed by its frame in <see cref="PartFrames"/>.</summary>
+        public Vector3 PartToSetup(int part, Vector3 local)
+        {
+            var s = PartScale(part);
+            var scaled = new Vector3(local.X * s.X, local.Y * s.Y, local.Z * s.Z);
+            var f = PartFrames != null && part >= 0 && part < PartFrames.Length ? PartFrames[part] : null;
+            return f != null ? f.TransformPoint(scaled) : scaled;
+        }
+
+        // Resting (0x65), else Default (0), else the first in the file.
+        private void ChoosePartFrames()
+        {
+            if (PartFrames != null) return;
+            foreach (int key in new[] { 0x65, 0, FirstPlacementKey })
+                if (Placements.TryGetValue(key, out var frames))
+                {
+                    PartFrames = frames;
+                    PartFramesKey = key;
+                    return;
+                }
+        }
 
         public bool Unpack(byte[] data)
         {
@@ -373,9 +427,15 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     if ((Flags & 0x01) != 0)
                         ms.Seek(numParts * 4, SeekOrigin.Current);
 
-                    // HasDefaultScale = 0x02
+                    // HasDefaultScale = 0x02: one Vector3 per part (setups such as 0x0200187B and
+                    // 0x02000D96 shrink or stretch parts with it; skipping it left them at size 1)
                     if ((Flags & 0x02) != 0)
-                        ms.Seek(numParts * 12, SeekOrigin.Current); // Vector3 = 12 bytes
+                    {
+                        if (ms.Position + numParts * 12 > ms.Length) return TryFallbackParse(data);
+                        DefaultScale = new Vector3[numParts];
+                        for (int i = 0; i < numParts; i++)
+                            DefaultScale[i] = new Vector3(reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle());
+                    }
 
                     // --- Skip HoldingLocations: uint32 count + count × (key(4) + PartId(4) + Frame(28)) ---
                     if (!SkipHashTable(reader, ms, 36)) return TryFallbackParse(data);
@@ -383,41 +443,39 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     // --- Skip ConnectionPoints: same format ---
                     if (!SkipHashTable(reader, ms, 36)) return TryFallbackParse(data);
 
-                    // --- Skip PlacementFrames ---
+                    // --- PlacementFrames: every one kept by its key ---
                     if (ms.Position + 4 > ms.Length) return TryFallbackParse(data);
                     int placementsCount = reader.ReadInt32();
                     if (placementsCount < 0 || placementsCount > 100) return TryFallbackParse(data);
 
                     for (int p = 0; p < placementsCount; p++)
                     {
-                        if (ms.Position + 4 > ms.Length) return TryFallbackParse(data);
-                        reader.ReadInt32(); // key
+                        if (ms.Position + 4 > ms.Length) { ChoosePartFrames(); return TryFallbackParse(data); }
+                        int key = reader.ReadInt32();
+                        if (p == 0) FirstPlacementKey = key;
 
                         // AnimationFrame: numParts × Frame(28 bytes) + uint32 numHooks
+                        if (ms.Position + numParts * 28L > ms.Length) { ChoosePartFrames(); return TryFallbackParse(data); }
+                        var frames = new Frame[numParts];
                         for (int part = 0; part < numParts; part++)
                         {
-                            if (ms.Position + 28 > ms.Length) return TryFallbackParse(data);
-                            if (p == 0) // Store default pose part frames for composite bounds
-                            {
-                                if (PartFrames == null) PartFrames = new Frame[numParts];
-                                PartFrames[part] = new Frame();
-                                PartFrames[part].Unpack(reader);
-                            }
-                            else
-                            {
-                                ms.Seek(28, SeekOrigin.Current);
-                            }
+                            frames[part] = new Frame();
+                            frames[part].Unpack(reader);
                         }
+                        Placements[key] = frames;
 
-                        if (ms.Position + 4 > ms.Length) return TryFallbackParse(data);
+                        if (ms.Position + 4 > ms.Length) { ChoosePartFrames(); return TryFallbackParse(data); }
                         uint numHooks = reader.ReadUInt32();
                         if (numHooks > 0)
                         {
-                            // AnimationHooks are variable-size; can't easily skip
-                            // But we already stored PartFrames from the default placement above
+                            // AnimationHooks are variable-size and this reader can't step over them: the
+                            // placements read so far are kept, the volumes come from the fallback.
+                            PlacementHooks = true;
+                            ChoosePartFrames();
                             return TryFallbackParse(data);
                         }
                     }
+                    ChoosePartFrames();
 
                     // --- NOW we're at the good stuff! ---
                     return ReadBoundsData(reader, ms, data);
@@ -425,6 +483,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             }
             catch
             {
+                ChoosePartFrames();
                 return TryFallbackParse(data);
             }
         }
@@ -471,8 +530,8 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 if (ms.Position + 16 > ms.Length) return false;
                 Height = reader.ReadSingle();
                 Radius = reader.ReadSingle();
-                float stepUp = reader.ReadSingle();
-                float stepDown = reader.ReadSingle();
+                StepUpHeight = reader.ReadSingle();
+                StepDownHeight = reader.ReadSingle();
 
                 // SortingSphere: Vector3 center + float radius
                 if (ms.Position + 16 > ms.Length) return false;

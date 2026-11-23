@@ -121,7 +121,8 @@ public sealed partial class RynthAiPlugin
             if (ImGui.Combo("Then attack##dfdefault", ref defIdx, DfDefaultLabels, DfDefaultLabels.Length))
                 s.DfDefaultHeight = defIdx - 1;
             if (!s.DfHeightRotation) ImGui.EndDisabled();
-            Wrapped("Once all three are on, attacks use the Then attack height (Attack Height setting: the Melee "
+            Wrapped("An order with one or two heights puts on just those effects. "
+                + "Once the effects in the order are on, attacks use the Then attack height (Attack Height setting: the Melee "
                 + "or Missile Attack Height), and go back to an effect about 5 seconds before it runs out. "
                 + "Each effect lands on up to 1 hit in 4 and lasts 20 seconds; RynthAi sees it land from the "
                 + "\"Dirty Fighting! ...\" combat line.", Ui.Mute);

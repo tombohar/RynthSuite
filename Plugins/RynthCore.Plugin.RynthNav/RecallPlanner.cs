@@ -17,7 +17,9 @@ internal sealed class RecallOption
     /// <summary>Learned in game (RecallMemory), not fixed by the world data.</summary>
     public bool Learned;
 
-    public RecallLink ToLink() => new(Ns, Ew, Name, PortalRoute.RecallCostUnits(CastSeconds));
+    /// <summary>The planner's recall: its cost the flat way, or (TripTimes) the cast and portal space it takes.</summary>
+    public RecallLink ToLink(TripTimes? times = null)
+        => new(Ns, Ew, Name, times == null ? PortalRoute.RecallCostUnits(CastSeconds) : times.RecallUnits(SpellId != 0));
 }
 
 /// <summary>
@@ -232,10 +234,10 @@ internal static class RecallPlanner
         _ => "Allegiance hometown recall",
     };
 
-    public static List<RecallLink> Links(List<RecallOption> options)
+    public static List<RecallLink> Links(List<RecallOption> options, TripTimes? times = null)
     {
         var links = new List<RecallLink>(options.Count);
-        foreach (var o in options) links.Add(o.ToLink());
+        foreach (var o in options) links.Add(o.ToLink(times));
         return links;
     }
 }

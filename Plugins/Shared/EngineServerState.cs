@@ -236,6 +236,64 @@ internal sealed record ServerTrinketRule(IReadOnlyList<string> Names, IReadOnlyL
     }
 }
 
+/// <summary>
+/// One summon item of the server's own from a server plugin's profile "summons" list
+/// (ServerPackInfo.Summons): an item that holds other summoning items and brings out their pets (a
+/// "holder"). The item is told by <paramref name="Wcid"/> (0 = any) and/or by a name holding
+/// <paramref name="NameMatch"/> ("" = any); a row with neither is skipped. The item's appraisal
+/// description (LongDesc) names each held item on a line starting with <paramref name="SlotPrefix"/>,
+/// a number and ": " ("Summon 1: Fire Moar Essence (180)"). It summons nothing until it holds
+/// <paramref name="Slots"/> items; one use brings out the first held item's pet, and later ones only
+/// when the character can have more pets out. <paramref name="ElementIsLast"/>: the item's own element
+/// (UiEffects) is the last held item's.
+/// </summary>
+internal sealed record ServerSummonView(uint Wcid, string NameMatch, string SlotPrefix, int Slots, bool ElementIsLast)
+{
+    /// <summary>
+    /// True when the item (<paramref name="wcid"/>, 0 = not known, and <paramref name="name"/>) is this
+    /// row's: by wcid when both are known, else by name.
+    /// </summary>
+    public bool Matches(uint wcid, string? name)
+    {
+        if (Wcid != 0 && wcid != 0) return wcid == Wcid;
+        return NameMatch.Length > 0 && (name ?? "").Contains(NameMatch, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The profile's summons rows, read leniently: a missing list (an older plugin, another server) is
+    /// empty; a row with no wcid and no name, or no slot prefix, is skipped; "slots" defaults to 2.
+    /// </summary>
+    public static IReadOnlyList<ServerSummonView> ParseList(string? json)
+    {
+        var rows = new List<ServerSummonView>();
+        if (string.IsNullOrWhiteSpace(json)) return rows;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            JsonElement root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("summons", out JsonElement list) || list.ValueKind != JsonValueKind.Array)
+                return rows;
+            foreach (JsonElement e in list.EnumerateArray())
+            {
+                if (e.ValueKind != JsonValueKind.Object) continue;
+                int wcid = EngineServerState.Int(e, "wcid");
+                string name = EngineServerState.Str(e, "nameMatch").Trim();
+                string prefix = EngineServerState.Str(e, "slotPrefix");
+                if ((wcid <= 0 && name.Length == 0) || prefix.Trim().Length == 0) continue;
+                int slots = EngineServerState.Int(e, "slots");
+                rows.Add(new ServerSummonView(wcid > 0 ? (uint)wcid : 0, name, prefix.TrimStart(),
+                                              slots is > 0 and <= 8 ? slots : 2, EngineServerState.Bool(e, "elementIsLast")));
+            }
+        }
+        catch (JsonException)
+        {
+            rows.Clear();
+        }
+        return rows;
+    }
+}
+
 internal sealed record ServerSalvageView(string Bench, int Material, string Kind, string Effect, bool UsesTinkSlot, string NameMatch,
                                          int AppliedInt = 0, bool Prepared = false, int Order = 0, bool AfterCap = false,
                                          string StackGroup = "", int StackCap = 0)

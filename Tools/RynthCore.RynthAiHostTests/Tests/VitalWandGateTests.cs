@@ -50,8 +50,37 @@ internal static class VitalWandGateTests
         r.Add("vital wand gate: under Emergency Heal At the kit despite Kit Min Success still goes; the HP failsafe's recall still swaps to the wand", EmergencyFloorKept);
         r.Add("vital wand gate: the between-fights top-off (no Revitalize) uses no stamina kit under Stamina Kit Min Success %", TopOffStaminaLastResort);
         r.Add("vital wand gate: at or under Emergency Heal At a health spell may swap to the wand with a kit carried (the surest heal goes)", EmergencySpellMaySwap);
+        r.Add("top-off speed: out of a fight a healing kit under Kit Min Success % doesn't refuse Heal Self's swap; in a fight it does", IdlePoorKitAllowsSwap);
         r.Add("emergency heal: under Stamina To Health At but over Emergency Heal At, a melee character casts Stamina to Health, no kit first", StamToHealthLineFirst);
-        r.Add("buffs wait: under Heal At in a fight no buff is cast and the arbiter isn't asked for buffs; over it or out of a fight they go on", BuffsWaitWhileHurt);
+        r.Add("buffs wait: in a fight no buff is cast and the arbiter isn't asked for buffs, under Heal At or over it (2026-11-20); out of a fight they go on", BuffsWaitWhileHurt);
+    }
+
+    // 2026-11-20: the between-fights top-off sent a 3-19% kit (Eternal Health Kit, 317-346 missing)
+    // again and again as the last resort, 3.1 s a try. Out of a fight a kit under Kit Min Success % no
+    // longer refuses Heal Self's wand swap; in a fight, and with a kit over its %, unchanged.
+    private static void IdlePoorKitAllowsSwap()
+    {
+        var b = Rig(CombatMode.Melee, new[] { Kit }, kitMinSuccess: 95);
+        b.InCombatOverride = () => false;
+        Check.True(VitalCast(b, "Heal Self"), "out of a fight, the kit under its %: Heal Self handled: " + Why(b));
+        Check.True(SwapActive(b), "its wand swap is under way");
+
+        var c = Rig(CombatMode.Melee, new[] { Kit }, kitMinSuccess: 95);
+        c.InCombatOverride = () => false;
+        Check.True(c.CheckVitals(), "the whole chain out of a fight: acts");
+        Check.Eq(FakeHost.UsesOn.Count, 0, "no last-resort kit");
+        Check.True(SwapActive(c), "the wand swap for Heal Self instead");
+        Check.False(FakeHost.Logs.Any(l => l.Contains("despite Kit Min Success", StringComparison.Ordinal)), "no last resort logged");
+
+        var f = Rig(CombatMode.Melee, new[] { Kit }, kitMinSuccess: 95);   // InCombatOverride true: a fight
+        Check.False(VitalCast(f, "Heal Self"), "in a fight, the kit under its %: still refused");
+        Check.True(Why(f).Contains("no wand swap for a vital spell", StringComparison.Ordinal), "with the old reason: " + Why(f));
+
+        var ok = Rig(CombatMode.Melee, new[] { Kit }, kitMinSuccess: 0);
+        ok.InCombatOverride = () => false;
+        Check.False(VitalCast(ok, "Heal Self"), "out of a fight, a kit that passes its %: still refused (the kit heals)");
+        Check.True(ok.CheckVitals(), "control: the chain acts");
+        Check.Eq(FakeHost.UsesOn.Count, 1, "control: the kit goes");
     }
 
     // 2026-11-07: at 9% the gate sent Drakkon's kit (5-8% at low health with vitae) instead of Stamina to Health, and he died.
@@ -113,16 +142,14 @@ internal static class VitalWandGateTests
         S.HealAt = 60;
         b.InCombatOverride = () => true;
         SetVitals(b, 54, 100, 100);
-        Check.True(b.BuffsWaitForHealth(), "54% under Heal At 60% in a fight: buffs wait");
-        Check.True(FakeHost.Logs.Any(l => l.Contains("[Buff] buffs wait: health 54% is under Heal At 60% in a fight", StringComparison.Ordinal)), "logged once at the start");
-        Check.True(b.BuffsWaitForHealth(), "still waiting");
-        Check.Eq(FakeHost.Logs.Count(l => l.Contains("[Buff] buffs wait:", StringComparison.Ordinal)), 1, "not logged again");
+        Check.True(b.BuffsWaitForFight(), "54% under Heal At 60% in a fight: buffs wait");
+        Check.True(b.BuffsWaitForFight(), "still waiting");
+        // Since 2026-11-20 the fight alone holds them ("clear the mobs nearby before we rebuff").
         SetVitals(b, 70, 100, 100);
-        Check.False(b.BuffsWaitForHealth(), "back over Heal At: buffs go on");
-        Check.True(FakeHost.Logs.Any(l => l.Contains("[Buff] buffs go on", StringComparison.Ordinal)), "the end is logged");
+        Check.True(b.BuffsWaitForFight(), "back over Heal At, the fight still on: buffs still wait");
         SetVitals(b, 40, 100, 100);
         b.InCombatOverride = () => false;
-        Check.False(b.BuffsWaitForHealth(), "out of a fight: buffs go on even under Heal At");
+        Check.False(b.BuffsWaitForFight(), "out of a fight: buffs go on even under Heal At");
     }
 
     private static void GateLogLines()
@@ -526,7 +553,7 @@ internal static class VitalWandGateTests
         var host = FakeHost.Create(Player);
         S = new LegacyUiSettings
         {
-            IsMacroRunning = true, HealAt = 75, TopOffHP = 75, EmergencyHealAt = 0, StaminaToHealthAt = 0,
+            IsMacroRunning = true, EnableCombat = true, HealAt = 75, TopOffHP = 75, EmergencyHealAt = 0, StaminaToHealthAt = 0,
             GetManaAt = 0, TopOffMana = 0, RestamAt = 0, TopOffStam = 0, UsePotions = usePotions, EnableBuffing = false,
             KitMinSuccessPct = kitMinSuccess, StaminaKitMinSuccessPct = kitMinSuccess, PeaceModeForKits = false,
         };

@@ -74,6 +74,47 @@ internal static class ChatClassifier
             || text.StartsWith("[Admin]", StringComparison.OrdinalIgnoreCase);
     }
 
+    // ── Player chat (0.4.0) ────────────────────────────────────────────────
+    // The engine's ChatPlayerText (RynthCore, UI/Data/ChatPlayerText.cs) has the same rule; keep
+    // the two the same. ChatBuffer keeps these lines in a ring of their own, so a reload or a
+    // closed chat window doesn't lose tells and fellowship lines to combat spam.
+
+    /// <summary>
+    /// True for a line a player typed: say, tells both ways, emotes, allegiance, fellowship, every
+    /// channel line, an admin's tell, and a room line of any other type ("[Room] Name says, \"").
+    /// Never plugin output, item info, combat or spell words.
+    /// </summary>
+    internal static bool IsPlayerChat(string channel, int chatType, string? text)
+    {
+        if (channel is Rynth or Items) return false;
+        if (channel is Chat or Channels) return true;
+        if (chatType == 0x1F) return true;   // AdminTell
+        if (channel == Combat) return false;
+        return LooksLikeSpeech(text);
+    }
+
+    /// <summary>"[Tag] Name says, \"" / "[Tag] Name tells you, \"" (AC's name links allowed), or "You say ..., \"".</summary>
+    internal static bool LooksLikeSpeech(string? text)
+    {
+        if (string.IsNullOrEmpty(text) || text.Length < 8) return false;
+        int start = 0;
+        bool tagged = false;
+        if (text[0] == '[')
+        {
+            int close = text.IndexOf(']', 1);
+            if (close < 2 || close > 41 || close + 1 >= text.Length || text[close + 1] != ' ') return false;
+            if (text.IndexOf('[', 1, close - 1) >= 0) return false;
+            start = close + 2;
+            tagged = true;
+        }
+        int quote = text.IndexOf(", \"", start, StringComparison.Ordinal);
+        if (quote < 0 || quote - start > 220) return false;
+        string who = text.Substring(start, quote - start);
+        if (who.IndexOf('"') >= 0) return false;
+        if (who.StartsWith("You say", StringComparison.Ordinal) || who.StartsWith("You tell ", StringComparison.Ordinal)) return true;
+        return tagged && (who.Contains(" says", StringComparison.Ordinal) || who.Contains(" tells you", StringComparison.Ordinal));
+    }
+
     internal static uint ColorFor(string channel) => channel switch
     {
         Chat     => 0xFFE0E0E0,

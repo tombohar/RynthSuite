@@ -76,7 +76,7 @@ internal sealed class LegacyNavigationUi
             if (ImGui.Button("Start Navigation", new Vector2(-1, 28)))
             {
                 _settings.RearmFinishedNavRoute();   // a finished Once route runs again
-                _settings.IsMacroRunning  = true;
+                _settings.SetMacroRunning(true, "the Start Navigation button");
                 _settings.EnableNavigation = true;
                 if (_settings.BotAction != "Navigating")
                     _settings.BotAction = "Default";

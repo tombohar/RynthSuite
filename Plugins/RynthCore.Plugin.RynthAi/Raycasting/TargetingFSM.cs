@@ -76,6 +76,40 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             public bool  LineBlocked;
             public bool  ArcChecked;
             public RaycastEngine.ArcLosResult Arc;
+            public bool  TerrainBlocked;   // outdoors: the ground rises above the path (a hill between)
+            public float TerrainAlong;     // where along the path, in meters from the shooter
+        }
+
+        // ── Hills (2026-11-22, R-20261122-203611-ff3d) ─────────────────────────────────────────
+        // The verdict tested objects and buildings only, never the ground: on the Withered Tumerok
+        // hills a caster 56-68 m below its targets (11 m lower) cast Blade Arc after Blade Arc into
+        // the hillside ("stopped short of the target"), three no-damage casts and a blacklist per
+        // monster, round the whole group. Outdoors the path is now sampled every TerrainStepMeters
+        // against the landscape: the ground above it by TerrainClearance anywhere past the first and
+        // before the last TerrainEndSkipMeters (the slopes the two stand on) blocks the shot.
+        private const float TerrainStepMeters = 1.5f, TerrainEndSkipMeters = 2.0f, TerrainClearance = 0.25f;
+
+        /// <summary>
+        /// Outdoors, whether the ground rises above the path from <paramref name="a"/> to <paramref name="b"/>
+        /// (chest heights, global meters); with <paramref name="sag"/> &gt; 0 the path bows up by that much at
+        /// its middle (an arc). <paramref name="along"/>: where, in meters from <paramref name="a"/>.
+        /// </summary>
+        public bool TerrainBetween(Vector3 a, Vector3 b, float sag, out float along)
+        {
+            along = 0f;
+            float dx = b.X - a.X, dy = b.Y - a.Y;
+            float flat = (float)Math.Sqrt(dx * dx + dy * dy);
+            if (flat <= 2 * TerrainEndSkipMeters) return false;
+            for (float s = TerrainEndSkipMeters; s <= flat - TerrainEndSkipMeters; s += TerrainStepMeters)
+            {
+                float f = s / flat;
+                float x = a.X + dx * f, y = a.Y + dy * f;
+                float ground = _geoLoader.GetTerrainZWorld(x, y);
+                if (float.IsNaN(ground)) continue;
+                float pathZ = a.Z + (b.Z - a.Z) * f + (sag > 0 ? 4f * sag * f * (1f - f) : 0f);
+                if (ground > pathZ + TerrainClearance) { along = s; return true; }
+            }
+            return false;
         }
 
         private static bool IsMissileArc(AttackType t) =>
@@ -257,6 +291,20 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                         : MissileBallistics.Solve(origin.X, origin.Y, origin.Z,
                                                   targetPos.X, targetPos.Y, targetPos.Z, detail.Velocity);
                     arcHeadroom = arc.ApexAboveLaunch + (launch.Z - origin.Z) + Math.Max(0f, MissileArcClearance) + 0.5f;
+                }
+
+                // Outdoors: a hill between (TerrainBetween). Before the pre-filter below, which only
+                // knows objects: open hillsides have none near the path.
+                if (!isDungeon)
+                {
+                    float sag = missileArc && arc.Valid ? arc.MaxRiseAboveChord : 0f;
+                    if (TerrainBetween(missileArc ? launch : origin, targetPos, sag, out float along))
+                    {
+                        detail.Checked = true;
+                        detail.TerrainBlocked = true;
+                        detail.TerrainAlong = along;
+                        return true;
+                    }
                 }
 
                 // Pre-filter: skip full ray test if no geometry near the path

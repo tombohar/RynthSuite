@@ -44,6 +44,10 @@ internal static class PetDeviceKind
     {
         if (host.HasGetObjectWcid && host.TryGetObjectWcid(id, out uint w) && w is >= 787801001 and <= 787801072)
             return Verdict.Combat;   // ACECustom combat essence block
+        // A server's holder of combat summons (PetElements, the server plugin's "summons" rows): a
+        // combat pet device even before it holds anything (the summoner skips it until it is full).
+        if (PetElements.IsHolder(host, id, null))
+            return Verdict.Combat;
         if (host.HasGetObjectIntProperty)
         {
             if (host.TryGetObjectIntProperty(id, IntStructure, out _) || host.TryGetObjectIntProperty(id, IntMaxStructure, out _))
