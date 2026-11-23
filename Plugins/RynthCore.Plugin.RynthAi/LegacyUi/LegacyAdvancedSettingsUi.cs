@@ -1155,7 +1155,8 @@ internal sealed class LegacyAdvancedSettingsUi
                     ImGui.SetTooltip("Loots scrolls of spells you don't know and can learn (magic school trained or\nspecialized, skill high enough), and reads them when it's safe. Scrolls already\nin your pack are read too.");
                 ImGui.Checkbox("Pickup with macro off", ref _settings.LootChestsMacroOff);
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("A chest you open is looted by the loaded loot profile\neven with the macro or Looting off.");
+                    ImGui.SetTooltip("A chest you open is looted by the loaded loot profile\neven with the macro or Looting off.\n" +
+                                     "If the game closes it before that's done because the character\nstepped out of its reach, it is opened once more. A chest you\nclose yourself, or leave for another, is not.");
                 if (_settings.LootChestsMacroOff)
                 {
                     ImGui.Indent();

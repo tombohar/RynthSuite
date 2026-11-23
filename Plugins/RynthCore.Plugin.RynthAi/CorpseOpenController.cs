@@ -518,6 +518,8 @@ public sealed partial class RynthAiPlugin
     public override void OnViewObjectContents(uint objectId)
     {
         int sid = unchecked((int)objectId);
+        // Another container opened (the player's, a meta's): a Pickup-with-macro-off reopen is dropped.
+        CancelManualChestReopen(sid, $"0x{objectId:X8} was opened instead");
         if (!IsCorpseLikeObject(sid))
         {
             // Non-corpse container (chest, bag, etc.) — queue a loot-check once inventory arrives.
@@ -626,7 +628,8 @@ public sealed partial class RynthAiPlugin
         int sid = unchecked((int)objectId);
         if (_pendingLootCheckContainerId == sid)
             _pendingLootCheckContainerId = 0;
-        // A chest: closed by the player, the server (walked away) or our own close. Never reopened.
+        // A chest: closed by the player, the client (out of its reach) or our own close. Reopened
+        // only as OnChestGone decides (RynthAiPlugin.ChestLoot.cs).
         if (OnChestGone(sid, "was closed"))
             return;
         bool wasOpenCorpse = _openedContainerId == sid;
@@ -656,6 +659,7 @@ public sealed partial class RynthAiPlugin
 
     public override void OnVendorOpen(uint vendorId)
     {
+        CancelManualChestReopen(unchecked((int)vendorId), "a vendor was opened");
         _metaManager?.OnVendorOpen(vendorId);
 
         // AutoVendor prints the open line itself (UB's merchant-info line when it can read the
@@ -765,6 +769,7 @@ public sealed partial class RynthAiPlugin
         TakeLootThisRequest(settings);   // /ra lootthis (RynthAiPlugin.VTankHotkeys.cs)
         TakeChestKeyRequest();           // the Item Tool's chest looter (RynthAiPlugin.ItemTool.cs)
         TakeManualChest(settings);       // Pickup with macro off (RynthAiPlugin.ChestLoot.cs)
+        TickManualChestReopen(settings, CorpseNowMs);   // ... and its one reopen of a chest the client closed
 
         // ── Macro off / looting disabled / nav-boost — full stop and reset ──
         // Must come before the Buffing check so that turning off the macro always
@@ -1695,7 +1700,9 @@ public sealed partial class RynthAiPlugin
             // Wait for inventory update event from server
             if (_openedContainerInventoryObservedAt == 0)
             {
-                if (openAge < Math.Max(300, settings.LootEmptyCorpseMs))
+                // A chest's contents can come well after the open (a 120-item cache took over
+                // 312 ms): waiting only the corpse's short time called it empty and finished it.
+                if (openAge < EmptyContainerWaitMs(corpseId, settings.LootEmptyCorpseMs))
                     return;
                 _openedContainerInventoryObservedAt = _openedContainerAt;
                 LootDiag($"[RynthAi] {LootTag}: no inventory update for 0x{(uint)corpseId:X8}; probing after {openAge}ms.");

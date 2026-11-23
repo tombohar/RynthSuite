@@ -51,6 +51,10 @@ internal static class ChestLootTests
         r.Add("chest loot: closed mid-loot -> the looter opens it again and takes the rest", ClosedMidLootReopened);
         r.Add("chest loot: a chest that keeps closing is opened again twice in a minute, then left", ReopenIsBounded);
         r.Add("chest loot: a chest the player opened with the macro off is not reopened when it closes", ManualChestNotReopened);
+        r.Add("chest loot: Pickup with macro off opens a chest the client closed out of reach again, once, and takes the rest", ManualChestClosedOutOfReachReopened);
+        r.Add("chest loot: Pickup with macro off: no use radius readable -> moved away counts, standing still is the player's close", ManualChestReopenWithoutRadius);
+        r.Add("chest loot: Pickup with macro off: something else opened before the reopen -> it is dropped", ManualChestReopenDroppedForOtherOpen);
+        r.Add("chest loot: Pickup with macro off with the macro on and Looting off: the reopen waits for the fight", ManualChestReopenWaitsForFight);
         r.Add("chest loot: an open chest that closes before the looter gets to it (a fight had the tick) is opened again", ClosedBeforeTakenReopened);
         r.Add("chest loot: no jump-loot from a chest (a hop can take the character out of its use radius)", NoJumpLootFromChest);
         r.Add("chest loot: a chest gets 2 minutes (not the 12 s corpse timeout), restarted by each pickup", ChestTimeoutLongAndRestarted);
@@ -646,8 +650,161 @@ internal static class ChestLootTests
 
         bot.ServerCloses(Chest);   // the player closes it
         bot.TickFor((int)RynthAiPlugin.ChestReopenDelayMs + 400);
-        Check.Eq(ChestUses(), 0, "the player's chest is the player's to close: never reopened");
-        Check.True(FakeHost.Logs.Any(l => l.Contains("Chest loot:") && l.Contains("not reopening it")), "logged as before");
+        Check.Eq(ChestUses(), 0, "the player's close (where looting began) is the player's: not reopened");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("Chest loot:") && l.Contains("not reopening it") && l.Contains("your own close")),
+            "logged, with why");
+    }
+
+    // ── Pickup with macro off: one reopen of a chest the client closed (2026-11-23) ──────────────
+    // A treasure cache a script opened closed three times with items left; the LootWindowProbe named
+    // the client's once-a-second range check (CPlayerSystem::CalculateObjectRangeChecks) each time,
+    // with the character 2.5-3.7 m off. Salvage was not involved.
+
+    private const uint OtherChest = 0x7A9B4005;
+    private const uint UseRadiusFloat = 54;
+
+    /// <summary>Puts the character <paramref name="meters"/> west of the chest (the chest is at Me0.X + 1).</summary>
+    private static void StandFromChest(float meters)
+    {
+        var at = (Me0.Cell, Me0.X + 1.0f - meters, Me0.Y, Me0.Z);
+        FakeHost.Positions[Player] = at;
+        FakeHost.PlayerPose = at;
+    }
+
+    /// <summary>Macro off, the chest opened by the player and the gem's pickup sent.</summary>
+    private static Bot ManualChestMidLoot(bool macroOn = false)
+    {
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        if (macroOn) bot.S.EnableLooting = false; else bot.S.IsMacroRunning = false;
+        bot.Create(Chest, Gem, Spoon);
+        bot.ServerOpens(Chest);
+        bot.TickUntil(() => bot.Moved(Gem));
+        Check.True(bot.Moved(Gem), "the gem's move is sent");
+        return bot;
+    }
+
+    private static void ManualChestClosedOutOfReachReopened()
+    {
+        BaseWorld();
+        FakeHost.Doubles[(Chest, UseRadiusFloat)] = 2.0;   // the chest's use radius (its PublicWeenieDesc)
+        var bot = ManualChestMidLoot();
+
+        // A step back past its reach: the client's range check closes it.
+        StandFromChest(3.5f);
+        bot.ServerCloses(Chest);
+        Check.Eq(bot.Get<int>("_openedContainerId"), 0, "the session ends");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("Pickup with macro off: chest") && l.Contains("by the client")
+            && l.Contains("past its 2.0 m reach") && l.Contains("opening it again (once)")), "booked and logged with why");
+        Check.False(bot.HasLootWork(), "not macro loot work: the arbiter is not asked for Looting");
+        bot.Tick();
+        Check.Eq(ChestUses(), 0, "not at once: the close settles first");
+        bot.TickUntil(() => ChestUses() > 0);
+        Check.Eq(ChestUses(), 1, "then the chest is used to open it again");
+        bot.TickFor(200);
+        Check.Eq(ChestUses(), 1, "one use while it waits for the chest to open");
+
+        // It opens (the server walked the character back): Pickup with macro off takes it again.
+        StandFromChest(1.0f);
+        int movesBefore = FakeHost.ExternalMoves.Count;
+        bot.ServerOpens(Chest);
+        bot.TickUntil(() => FakeHost.ExternalMoves.Count > movesBefore);
+        Check.True(FakeHost.ExternalMoves.Count > movesBefore, "the gem's move is sent again");
+        Check.Eq(FakeHost.Logs.Count(l => l.Contains("Pickup with macro off: looting the opened chest")), 2, "taken a second time");
+
+        // It closes out of reach again within the minute: once is all.
+        StandFromChest(3.5f);
+        bot.ServerCloses(Chest);
+        bot.TickFor((int)RynthAiPlugin.ChestReopenDelayMs + 400);
+        Check.Eq(ChestUses(), 1, "no second reopen in a minute");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("not reopening it") && l.Contains("opened again once in the last minute")), "logged");
+
+        // A close inside its reach is the player's (the close button, a second use): not reopened.
+        BaseWorld();
+        FakeHost.Doubles[(Chest, UseRadiusFloat)] = 2.0;
+        var bot2 = ManualChestMidLoot();
+        StandFromChest(1.5f);
+        bot2.ServerCloses(Chest);
+        bot2.TickFor((int)RynthAiPlugin.ChestReopenDelayMs + 400);
+        Check.Eq(ChestUses(), 0, "closed within its reach: the player's close, not reopened");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("not reopening it") && l.Contains("inside its 2.0 m reach") && l.Contains("your own close")), "logged with why");
+    }
+
+    private static void ManualChestReopenWithoutRadius()
+    {
+        // No use radius readable: a close after the character moved away is the client's.
+        BaseWorld();
+        var bot = ManualChestMidLoot();
+        StandFromChest(1.0f + (float)RynthAiPlugin.ManualChestMovedMeters + 0.5f);
+        bot.ServerCloses(Chest);
+        Check.True(FakeHost.Logs.Any(l => l.Contains("by the client") && l.Contains("farther than when looting began")), "booked: it moved away");
+        bot.TickUntil(() => ChestUses() > 0);
+        Check.Eq(ChestUses(), 1, "opened again");
+
+        // Standing where looting began (0.2 m is within the margin): the player's close.
+        BaseWorld();
+        var bot2 = ManualChestMidLoot();
+        StandFromChest(1.2f);
+        bot2.ServerCloses(Chest);
+        bot2.TickFor((int)RynthAiPlugin.ChestReopenDelayMs + 400);
+        Check.Eq(ChestUses(), 0, "not reopened");
+
+        // Pickup with macro off turned off meanwhile: the booking goes.
+        BaseWorld();
+        var bot3 = ManualChestMidLoot();
+        StandFromChest(3.0f);
+        bot3.ServerCloses(Chest);
+        bot3.S.LootChestsMacroOff = false;
+        bot3.TickFor((int)RynthAiPlugin.ChestReopenDelayMs + 400);
+        Check.Eq(ChestUses(), 0, "the setting went off: not reopened");
+    }
+
+    private static void ManualChestReopenDroppedForOtherOpen()
+    {
+        BaseWorld();
+        FakeHost.Doubles[(Chest, UseRadiusFloat)] = 2.0;
+        FakeHost.Names[OtherChest] = "Chest";
+        FakeHost.ItemTypes[OtherChest] = ItemTypeContainer;
+        FakeHost.Positions[OtherChest] = (Me0.Cell, Me0.X - 4.0f, Me0.Y, Me0.Z);
+        FakeHost.NotAttackable.Add(OtherChest);
+        FakeHost.Containers[OtherChest] = 0;
+        var bot = ManualChestMidLoot();
+        bot.Create(OtherChest);
+
+        StandFromChest(3.5f);
+        bot.ServerCloses(Chest);
+        Check.True(FakeHost.Logs.Any(l => l.Contains("opening it again (once)")), "booked");
+        // The player opens another chest before the reopen goes out (the server closed the first for it).
+        bot.ServerOpens(OtherChest);
+        Check.True(FakeHost.Logs.Any(l => l.Contains("Pickup with macro off: not opening chest") && l.Contains("was opened instead")), "dropped and logged");
+        bot.TickFor((int)RynthAiPlugin.ChestReopenDelayMs + 400);
+        Check.Eq(ChestUses(), 0, "the first chest is not used again");
+
+        // A vendor opening drops it too.
+        BaseWorld();
+        FakeHost.Doubles[(Chest, UseRadiusFloat)] = 2.0;
+        var bot2 = ManualChestMidLoot();
+        StandFromChest(3.5f);
+        bot2.ServerCloses(Chest);
+        bot2.P.OnVendorOpen(0x7A9B4006);
+        bot2.TickFor((int)RynthAiPlugin.ChestReopenDelayMs + 400);
+        Check.Eq(ChestUses(), 0, "a vendor opened: not reopened");
+    }
+
+    private static void ManualChestReopenWaitsForFight()
+    {
+        BaseWorld();
+        FakeHost.Doubles[(Chest, UseRadiusFloat)] = 2.0;
+        var bot = ManualChestMidLoot(macroOn: true);   // the macro on, Looting off: Pickup with macro off has the chest
+        Check.True(FakeHost.Logs.Any(l => l.Contains("Pickup with macro off: looting the opened chest")), "Pickup with macro off took it");
+
+        StandFromChest(3.5f);   // a step toward a monster
+        bot.ServerCloses(Chest);
+        Check.True(FakeHost.Logs.Any(l => l.Contains("opening it again (once)")), "booked");
+        bot.TickFor((int)RynthAiPlugin.ChestReopenDelayMs + 300, BotActivity.Combat);
+        Check.Eq(ChestUses(), 0, "no use while the fight has the tick");
+        bot.TickUntil(() => ChestUses() > 0);
+        Check.Eq(ChestUses(), 1, "used once the fight is over");
     }
 
     // The 2026-11-11 20:02 case: a meta opened a cache while the looter was on a corpse; the corpse's

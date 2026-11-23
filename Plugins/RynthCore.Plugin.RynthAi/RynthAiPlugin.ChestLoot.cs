@@ -40,6 +40,16 @@ public sealed partial class RynthAiPlugin
 
     private bool IsChestLoot(int id) => id != 0 && id == _lootChestId;
 
+    /// <summary>How long an open chest may show no contents before it counts as empty. A big chest's
+    /// contents can arrive well after the open (a 120-item cache had nothing after 312 ms, then all of
+    /// it); the corpse's short wait finished it unlooted and a script moved on to the next one.</summary>
+    internal const int ChestNoContentsWaitMs = 3000;
+
+    /// <summary>The no-contents wait for the open container: <see cref="ChestNoContentsWaitMs"/> for a
+    /// chest, the corpse setting (at least 300 ms) otherwise.</summary>
+    internal int EmptyContainerWaitMs(int id, int corpseEmptyMs)
+        => IsChestLoot(id) ? Math.Max(ChestNoContentsWaitMs, corpseEmptyMs) : Math.Max(300, corpseEmptyMs);
+
     /// <summary>The last chest looted to the end (every item judged), for the meta's ralastchestlooted[] (0 = none).</summary>
     private uint _lastChestLootedId;
 
@@ -326,10 +336,15 @@ public sealed partial class RynthAiPlugin
             _lootChestId = 0;
             return true;
         }
-        // Not a chest the player opened with the macro off: that one is the player's to close.
-        bool reopens = how == ChestClosedHow && id != _manualChestLootId && ConsiderChestReopen(id, taken: true);
+        // A chest the player opened with the macro off (Pickup with macro off) is opened again once,
+        // and only when the client closed it on its own (ConsiderManualChestReopen, below).
+        bool manual = id == _manualChestLootId;
+        string manualWhy = string.Empty;
+        bool reopens = how == ChestClosedHow
+            && (manual ? ConsiderManualChestReopen(id, out manualWhy) : ConsiderChestReopen(id, taken: true));
         if (!reopens)
-            LootDiag($"[RynthAi] Chest loot: chest 0x{(uint)id:X8} {how} before looting finished; not reopening it (open it again to loot the rest).");
+            LootDiag($"[RynthAi] Chest loot: chest 0x{(uint)id:X8} {how} before looting finished; not reopening it" +
+                     (manualWhy.Length > 0 ? $" ({manualWhy})" : string.Empty) + " (open it again to loot the rest).");
         FinishChestLoot(id, how, close: false, sayNothingMatched: false);
         return true;
     }
@@ -347,8 +362,8 @@ public sealed partial class RynthAiPlugin
     // A corpse the looter was on is opened again (OnStopViewingObjectContents); a chest was not,
     // so the rest stayed in it until someone opened it again. Now the looter uses the chest again,
     // at most ChestReopenMax times a minute per chest: a chest that keeps closing (locked again,
-    // a player closing it on purpose) is left after that. Only with the macro and Looting on, and
-    // never for a chest the player opened with the macro off.
+    // a player closing it on purpose) is left after that. Only with the macro and Looting on; a
+    // chest Pickup with macro off is looting has its own, narrower rule (further down).
 
     /// <summary>OnChestGone's "how" for the server's close (the other is "left range": the object is gone).</summary>
     internal const string ChestClosedHow = "was closed";
@@ -373,6 +388,7 @@ public sealed partial class RynthAiPlugin
         _chestReopenId = 0;
         _chestReopenDueAt = 0;
         _chestReopenSentAt = 0;
+        _chestReopenManual = false;
     }
 
     /// <summary>
@@ -417,7 +433,7 @@ public sealed partial class RynthAiPlugin
 
     /// <summary>HasLootWork: a chest waits to be opened again (no state changed).</summary>
     private bool HasChestReopenWork() =>
-        _chestReopenId != 0 && _targetCorpseId == 0 && _openedContainerId == 0;
+        _chestReopenId != 0 && !_chestReopenManual && _targetCorpseId == 0 && _openedContainerId == 0;
 
     /// <summary>
     /// TickCorpseOpening, nothing claimed or open: uses the chest booked by ConsiderChestReopen once
@@ -428,8 +444,8 @@ public sealed partial class RynthAiPlugin
     private bool TryReopenChest(LegacyUiSettings settings, long now)
     {
         int id = _chestReopenId;
-        if (id == 0 || _targetCorpseId != 0 || _openedContainerId != 0)
-            return false;
+        if (id == 0 || _chestReopenManual || _targetCorpseId != 0 || _openedContainerId != 0)
+            return false;   // (a Pickup-with-macro-off reopen is TickManualChestReopen's)
         if (_objectCache?[id] == null)
         {
             ClearChestReopen();
@@ -527,5 +543,179 @@ public sealed partial class RynthAiPlugin
         LootDiag($"[RynthAi] Pickup with macro off: looting the opened chest 0x{(uint)id:X8} by the loot profile.");
         ForceLootOpenChest(id);
         _manualChestLootId = id;
+        _manualChestTakenAtMeters = _objectCache?.Distance(unchecked((int)_playerId), id) ?? double.NaN;
+    }
+
+    // ── Pickup with macro off: one reopen of a chest the client closed (2026-11-23) ────────────
+    // A treasure cache a Lua script opened closed three times in two minutes with items left,
+    // each one "was closed before looting finished; not reopening it". The client's LootWindowProbe
+    // named the sender each time: CPlayerSystem::CalculateObjectRangeChecks (0x005600D0), the
+    // once-a-second check gmExternalContainerUI::SetGroundObject registers with the container's use
+    // radius, found the character out of it (3.0, 3.7 and 2.5 m off) and hid the loot window, whose
+    // hide uses the container (CloseCurrentContainer) - and the server closes it. 235 of 238 probe
+    // lines in a month of logs are that check; the other 3 are the window's close button
+    // (UIElement_Button::MouseUp). Salvage without the panel opens no window and was not involved.
+    //
+    // So with the macro off a chest the client closed is opened again, once a minute per chest -
+    // but not one the player closed or left for something else:
+    //  - the player's close (the close button, a second use) happens within the chest's reach. The
+    //    client's check closes it only out of reach, and its cylinder distance is never more than
+    //    the centre distance read here, so a close with the character inside the chest's use radius
+    //    (STypeFloat 54) is the player's. Without a readable radius, a close where the character
+    //    stands no farther than when looting began is taken as the player's too.
+    //  - anything else opened before the reopen goes out (another chest, a corpse, a vendor) drops it.
+    //  - a character walked past the loot range is not walked back (TryReopenChest's distance rule).
+
+    /// <summary>Pickup with macro off opens a chest the client closed again at most this often a minute.</summary>
+    internal const int ManualChestReopenMax = 1;
+    /// <summary>Without a use radius: this much farther from the chest than when looting began counts as moved out of reach.</summary>
+    internal const double ManualChestMovedMeters = 0.5;
+    private const uint UseRadiusFloat = 54;
+
+    /// <summary>The booked reopen is Pickup with macro off's (TickManualChestReopen), not the macro's.</summary>
+    private bool _chestReopenManual;
+    /// <summary>The character's distance to the Pickup-with-macro-off chest when looting began.</summary>
+    private double _manualChestTakenAtMeters = double.NaN;
+
+    /// <summary>
+    /// The Pickup-with-macro-off chest <paramref name="id"/> was closed with loot left: books one
+    /// reopen when the client closed it (the character out of its reach) and logs it. False, with
+    /// <paramref name="why"/>, when it was the player's close or it was reopened already.
+    /// </summary>
+    private bool ConsiderManualChestReopen(int id, out string why)
+    {
+        why = string.Empty;
+        var settings = _dashboard?.Settings;
+        if (settings == null || !settings.LootChestsMacroOff || _objectCache?[id] == null || _playerId == 0)
+            return false;
+
+        double meters = _objectCache.Distance(unchecked((int)_playerId), id);
+        if (double.IsNaN(meters) || meters >= double.MaxValue / 2)
+        {
+            why = "where the character stands can't be read, so it is taken as your own close";
+            return false;
+        }
+        double radius = Host.HasGetObjectDoubleProperty
+            && Host.TryGetObjectDoubleProperty(unchecked((uint)id), UseRadiusFloat, out double r) && r > 0 ? r : 0;
+        string where;
+        if (radius > 0)
+        {
+            if (meters < radius)
+            {
+                why = $"you were {meters:0.0} m from it, inside its {radius:0.0} m reach, so it was your own close";
+                return false;
+            }
+            where = $"you were {meters:0.0} m from it, past its {radius:0.0} m reach";
+        }
+        else
+        {
+            double moved = double.IsNaN(_manualChestTakenAtMeters) ? 0 : meters - _manualChestTakenAtMeters;
+            if (moved < ManualChestMovedMeters)
+            {
+                why = $"you were {meters:0.0} m from it, no farther than when looting began, so it was your own close";
+                return false;
+            }
+            where = $"you were {meters:0.0} m from it, {moved:0.0} m farther than when looting began";
+        }
+
+        long now = CorpseNowMs;
+        int count = 0;
+        long firstAt = now;
+        if (_chestReopens.TryGetValue(id, out var seen) && now - seen.FirstAt < ChestReopenWindowMs)
+        {
+            count = seen.Count;
+            firstAt = seen.FirstAt;
+        }
+        if (count >= ManualChestReopenMax)
+        {
+            why = $"{where}; it was opened again once in the last minute already";
+            return false;
+        }
+        if (_chestReopens.Count > 32)
+            _chestReopens.Clear();
+        _chestReopens[id] = (firstAt, count + 1);
+        _chestReopenId = id;
+        _chestReopenManual = true;
+        _chestReopenDueAt = now + ChestReopenDelayMs;
+        _chestReopenSentAt = 0;
+        LootDiag($"[RynthAi] Pickup with macro off: chest 0x{(uint)id:X8} {ChestClosedHow} before looting finished, " +
+                 $"by the client ({where}), not by you; opening it again (once).");
+        return true;
+    }
+
+    /// <summary>Drops a booked Pickup-with-macro-off reopen when container <paramref name="openedId"/>, not the chest, opens.</summary>
+    private void CancelManualChestReopen(int openedId, string what)
+    {
+        int id = _chestReopenId;
+        if (id == 0 || !_chestReopenManual || openedId == id)
+            return;
+        LootDiag($"[RynthAi] Pickup with macro off: not opening chest 0x{(uint)id:X8} again: {what}.");
+        ClearChestReopen();
+    }
+
+    /// <summary>
+    /// TickCorpseOpening, every tick (the macro or Looting may be off): uses the chest booked by
+    /// ConsiderManualChestReopen once its delay is over and nothing holds a use, then waits for it
+    /// to open (OnViewObjectContents hands it to TakeManualChest again).
+    /// </summary>
+    private void TickManualChestReopen(LegacyUiSettings settings, long now)
+    {
+        int id = _chestReopenId;
+        if (id == 0 || !_chestReopenManual)
+            return;
+        if (!settings.LootChestsMacroOff || _objectCache?[id] == null || _playerId == 0)
+        {
+            ClearChestReopen();
+            return;
+        }
+        if (settings.IsMacroRunning && settings.EnableLooting)
+        {
+            _chestReopenManual = false;   // the macro's own chest looting has it now (TryReopenChest)
+            return;
+        }
+        if (_openedContainerId != 0 || _targetCorpseId != 0)
+            return;   // something else is open (an open cancels the booking; this is a guard)
+
+        if (_chestReopenSentAt != 0)
+        {
+            if (now - _chestReopenSentAt < ChestReopenAnswerMs)
+                return;
+            LootDiag($"[RynthAi] Pickup with macro off: chest 0x{(uint)id:X8} didn't open again within {ChestReopenAnswerMs / 1000} s of the use; it is left (open it again to loot the rest).");
+            ClearChestReopen();
+            return;
+        }
+        if (now - _chestReopenDueAt >= ChestReopenStaleMs)
+        {
+            LootDiag($"[RynthAi] Pickup with macro off: the reopen of chest 0x{(uint)id:X8} waited {ChestReopenStaleMs / 1000} s; dropped (open it again to loot the rest).");
+            ClearChestReopen();
+            return;
+        }
+        if (now < _chestReopenDueAt)
+            return;
+        // The macro on with Looting off: a fight or a buff run has the tick; the use waits for it.
+        if (settings.IsMacroRunning && _activity is BotActivity.Combat or BotActivity.Buffing)
+            return;
+        // A salvage panel opening, or an item move with no answer yet: the client would drop the use.
+        if (WorldUseHoldReason() != null)
+            return;
+
+        double maxMeters = GetCorpseApproachRangeMaxMeters(settings);
+        double distance = _objectCache.Distance(unchecked((int)_playerId), id);
+        if (double.IsNaN(distance) || distance > Math.Max(maxMeters * 1.5, maxMeters + 2.0))
+        {
+            LootDiag($"[RynthAi] Pickup with macro off: not opening chest 0x{(uint)id:X8} again - it is {distance:0.0} m away, past the loot range ({maxMeters:0.0} m).");
+            ClearChestReopen();
+            return;
+        }
+
+        bool sent = Host.UseFor(unchecked((uint)id), "Loot", "open the chest again: the client closed it before Pickup with macro off was done");
+        if (!sent)
+        {
+            LootDiag($"[RynthAi] Pickup with macro off: the use to open chest 0x{(uint)id:X8} again wasn't taken; it is left (open it again to loot the rest).");
+            ClearChestReopen();
+            return;
+        }
+        _chestReopenSentAt = now;
+        LootDiag($"[RynthAi] Pickup with macro off: used chest 0x{(uint)id:X8} to open it again.");
     }
 }

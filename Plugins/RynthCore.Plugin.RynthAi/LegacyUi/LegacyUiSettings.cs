@@ -234,7 +234,8 @@ public sealed class LegacyUiSettings
     /// <summary>
     /// Pickup with macro off (2026-11-02, on by default): a chest the player opens is looted by the
     /// loaded loot profile even with the macro or Looting off (like /ra lootthis). With both on the
-    /// macro's own chest looting takes it.
+    /// macro's own chest looting takes it. A chest the client closes before it is done (the
+    /// character out of its use radius) is opened again once (2026-11-23, RynthAiPlugin.ChestLoot.cs).
     /// </summary>
     public bool LootChestsMacroOff = true;
     /// <summary>

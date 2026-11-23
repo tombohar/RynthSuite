@@ -771,7 +771,9 @@ public class WorldObjectCache
         if (wielder == _playerId || container == _playerId) return Holder.Player;
         if (wielder != 0) return Holder.OtherWielder;
         if (container == 0) return Holder.Nobody;
-        // Side packs sit in the main pack (AC has no deeper nesting).
+        // Side packs sit in the main pack (AC has no deeper nesting). A pack already filed as ours is ours,
+        // even when its own ownership can't be read (after an engine reload, 2026-11-23).
+        if (_inventory.Contains(containerId)) return Holder.Player;
         return TryGetOwnership(containerId, out int outer, out _, out _) && unchecked((uint)outer) == _playerId
             ? Holder.Player : Holder.OtherContainer;
     }
@@ -808,7 +810,10 @@ public class WorldObjectCache
         else
         {
             Holder holder = WhoHas(id);
-            toInventory = holder == Holder.Player || (holder == Holder.Unknown && gear);
+            // "Nobody" while the last container walk found it in our packs: the container and wielder of
+            // an item that was wielded earlier can both read 0 once it is back in a pack (2026-11-23).
+            toInventory = holder == Holder.Player || (holder == Holder.Unknown && gear)
+                || (holder == Holder.Nobody && _directInventoryIds.Contains(id));
             toLandscape = !toInventory && holder != Holder.OtherWielder;
         }
 
@@ -1500,6 +1505,7 @@ public class WorldObjectCache
                 // parent/slot for the remote inventory view (stashed onto the WorldObject).
                 if (!TryAddDirectInventoryItem(itemId, playerId, containerId, i, out bool isContainer))
                     continue;
+                RefileWalkedAsCarried(unchecked((int)itemId));
                 // The player's own contents can list what the player wields (the 07:27 export had the
                 // wielded Sceptre in it, 2026-10-18), and reading a wielded caster as "in the pack" made
                 // buffing ignore it and try every other one. So only a side pack, or the main pack with
@@ -2428,6 +2434,30 @@ public class WorldObjectCache
         wo.Cache = this;
         UpsertDirectInventoryItem(wo);
         return true;
+    }
+
+    /// <summary>Entries the container walk moved back from the landscape (for the log and the tests).</summary>
+    internal int WalkRefiled { get; private set; }
+
+    /// <summary>
+    /// The container walk is the client's own pack lists: what it finds there is carried. A weapon that
+    /// was wielded earlier keeps its physics object (it reads as positioned) while its container and
+    /// wielder fields can both read 0 back in a pack, so a classify after an engine reload filed it as
+    /// lying loose and nothing filed it back: the Items panel showed packed weapons as "(missing)" and
+    /// combat skipped the listed wand (2026-11-23). Only ids the cache already knows; no new probes.
+    /// </summary>
+    private void RefileWalkedAsCarried(int id)
+    {
+        lock (_gate)
+        {
+            if (!_byId.TryGetValue(id, out var wo) || _inventory.Contains(id)) return;
+            if (wo.ObjectClass == AcObjectClass.Monster || wo.ObjectClass == AcObjectClass.Corpse) return;
+            _inventory.Add(id);
+            _landscape.Remove(id);
+            _inventoryDirty = true;
+            WalkRefiled++;
+            _host.Log($"[RynthAi] Inventory: 0x{unchecked((uint)id):X8} '{wo.Name}' was filed as lying loose, but the container walk found it in a pack: back in the inventory.");
+        }
     }
 
     /// <summary>Inventory entries dropped by <see cref="DropVanishedInventory"/> (for the log and the tests).</summary>
