@@ -243,6 +243,7 @@ internal sealed class TickGuard
         if (!keepsFailing || st.Warned) return;
         st.Warned = true;
         string what = $"{ex.GetType().Name}: {ex.Message}";
+        if (NeedsNewerCore(ex)) what = $"this RynthAi needs a newer RynthCore core: install the core update in the launcher - {what}";
         if (info.Essential)
         {
             Say($"[RynthAi] {info.Name} keeps failing ({what}); it is tried every tick, the rest of the bot keeps running. See the log.");
@@ -253,6 +254,32 @@ internal sealed class TickGuard
             st.RetryAt = now + RetryMs;
             Say($"[RynthAi] {info.Name} is off: it failed every tick for {(now - st.FirstFailAt) / 1000} s ({what}). The rest of the bot keeps running; it is tried again every {RetryMs / 1000} s.");
         }
+    }
+
+    /// <summary>
+    /// The failure is a member or type this RynthAi was built against and the loaded RynthCore
+    /// library lacks (2026-11-23, R-20261123-203520-9756 and three more: RynthAi 2026.11.23.1 on a
+    /// 2026.11.19.1 core, "looting is off ... MissingMethodException: Method not found: 'Int32
+    /// RynthCore.Loot.VTank.VTankLootRule.get_PerDayHours()'"). The update feed ships the plugin as
+    /// one DLL; the libraries it shares with the other plugins (RynthCore.LootSdk, PluginSdk,
+    /// PluginCore) come with the core installer in Runtime\PluginShared, so a plugin updated without
+    /// its core finds an older copy. RynthAi's own types (RynthCore.Plugin.RynthAi.*) never count.
+    /// </summary>
+    internal static bool NeedsNewerCore(Exception? ex)
+    {
+        for (int depth = 0; ex != null && depth < 4; depth++, ex = ex.InnerException)
+        {
+            if (ex is not (MissingMemberException or TypeLoadException)) continue;
+            string m = ex.Message ?? string.Empty;
+            if (ex is TypeLoadException tle && !string.IsNullOrEmpty(tle.TypeName)) m += " " + tle.TypeName;
+            int at = 0;
+            while ((at = m.IndexOf("RynthCore.", at, StringComparison.Ordinal)) >= 0)
+            {
+                if (string.CompareOrdinal(m, at, "RynthCore.Plugin.RynthAi", 0, 24) != 0) return true;
+                at += 10;
+            }
+        }
+        return false;
     }
 
     private void Say(string line)

@@ -28,6 +28,7 @@ internal static class TickIsolationTests
     public static void Register(Runner r)
     {
         r.Add("tick isolation: a step before healing that throws every tick (quest tracker) doesn't stop the heal", HealDespiteEarlierFault);
+        r.Add("tick guard: a member missing from a shared RynthCore library says to install the core update (R-20261123-203520-9756)", GuardSaysNeedsNewerCore);
         r.Add("tick isolation: chores that throw every tick (mana stones, AutoCram) don't stop combat's heartbeat", CombatDespiteChoreFault);
         r.Add("tick isolation: a chore failing every tick is switched off with one chat line, retried every 60 s, back on when it works", ChoreTripsAndRecovers);
         r.Add("tick isolation: healing failing every tick is never switched off; one chat line, and combat still runs", HealingNeverTrips);
@@ -265,6 +266,28 @@ internal static class TickIsolationTests
         long now = 1_000_000;
         var g = new TickGuard(log.Add, chat.Add) { Clock = () => now };
         return (g, log, chat, () => now += stepMs);
+    }
+
+    private static void GuardSaysNeedsNewerCore()
+    {
+        var (g, _, chat, advance) = Guard();
+        var ex = new MissingMethodException("Method not found: 'Int32 RynthCore.Loot.VTank.VTankLootRule.get_PerDayHours()'.");
+        for (int i = 0; i < 60; i++) { g.Failed(TickStep.Looting, ex); advance(); }
+        Check.True(g.IsOff(TickStep.Looting), "looting is off");
+        string line = chat.FirstOrDefault(l => l.Contains("looting is off")) ?? "";
+        Check.True(line.Contains("this RynthAi needs a newer RynthCore core: install the core update in the launcher"), "the line says what to do: " + line);
+        Check.True(line.Contains("get_PerDayHours"), "and still names the missing member");
+
+        Check.True(TickGuard.NeedsNewerCore(new TypeLoadException("Could not load type 'RynthCore.Loot.LootPerDay' from assembly 'RynthCore.LootSdk, Version=1.0.0.0'.")), "a missing type from the loot library");
+        Check.True(TickGuard.NeedsNewerCore(new InvalidOperationException("wrapped", new MissingFieldException("Field not found: 'RynthCore.PluginSdk.X.Y'."))), "an inner missing member counts");
+        Check.False(TickGuard.NeedsNewerCore(new MissingMethodException("Method not found: 'Void RynthCore.Plugin.RynthAi.Foo.Bar()'.")), "RynthAi's own types never count");
+        Check.False(TickGuard.NeedsNewerCore(new InvalidOperationException("RynthCore.Loot broke")), "another kind of failure doesn't");
+        Check.False(TickGuard.NeedsNewerCore(new MissingMethodException("Method not found: 'Void MoonSharp.Interpreter.Script.Foo()'.")), "a third-party library doesn't");
+
+        var (g2, _, chat2, advance2) = Guard();
+        var plain = new InvalidOperationException("bad spell data");
+        for (int i = 0; i < 60; i++) { g2.Failed(TickStep.Salvage, plain); advance2(); }
+        Check.False(chat2.Any(l => l.Contains("newer RynthCore")), "an ordinary failure's line is unchanged");
     }
 
     private static void GuardLogThrottle()
