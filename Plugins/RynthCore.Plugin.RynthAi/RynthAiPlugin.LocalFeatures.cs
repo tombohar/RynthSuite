@@ -141,6 +141,9 @@ public sealed partial class RynthAiPlugin
         var huds = _huds;
         _miniRemote.MiniRemoteCommand = mode => "[Mini Remote] " + huds.HandleCommand("remote", mode);
         _miniRemote.MiniRemoteTabCommand = (tab, mode) => huds.HandleTabCommand(tab, mode);
+        // Crafting > Ammo: Make ammo when low and Make ammo now (RynthAiPlugin.Ammo.cs).
+        _miniRemote.Crafting.Ammo = () => _missileCraftingManager;
+        _miniRemote.Crafting.AmmoStatus = AmmoAutoStatusText;
         EnsureItemInfoUi();
         EnsureSpellsUi();
     }
@@ -197,6 +200,8 @@ public sealed partial class RynthAiPlugin
         catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "monster stats tick"); }
         try { TickActiveGear(); }   // RynthAiPlugin.ActiveGear.cs
         catch (Exception ex) { RynthLog.Exception(LogCat.UI, ex, "active gear tick"); }
+        try { TickAcMaps(); }   // RynthAiPlugin.AcMaps.cs (the chat line, when turned on)
+        catch (Exception ex) { RynthLog.Exception(LogCat.UI, ex, "ACMAPS tick"); }
         try { _serverHub?.Tick(); }
         catch (Exception ex) { RynthLog.Exception(LogCat.UI, ex, "server plugin hub lookup"); }
         try { _miniRemote?.Tick(); }
@@ -284,6 +289,7 @@ public sealed partial class RynthAiPlugin
             RenderLootWhyWindow();
             RenderHuntPanel();
             RenderDfHeightPanel();
+            ReleaseIdleAcMapTextures();
         }
         catch (Exception ex)
         {
@@ -494,7 +500,8 @@ public sealed partial class RynthAiPlugin
         if (!_initialized || !_loginComplete) return null;
         return Huds.SectionsManifest.Build(Huds.SectionsManifest.Views(), Huds.SectionsManifest.OwnSections,
             dashboard: DashboardWindowWanted, monsterStats: MonsterStatsWindowWanted, timedCommands: TimedCommandsWindowWanted,
-            activeGear: ActiveGearWindowWanted, featureSearch: FeatureSearchWindowWanted);
+            activeGear: ActiveGearWindowWanted, featureSearch: FeatureSearchWindowWanted, acMaps: AcMapsWindowWanted,
+            commandButtons: CommandButtonsWindowWanted, tradeShop: TradeShopWindowWanted);
     }
     /// <summary>Chat Translate window in the dashboard colours (no-op while hidden).</summary>
     private void RenderTranslateWindow()

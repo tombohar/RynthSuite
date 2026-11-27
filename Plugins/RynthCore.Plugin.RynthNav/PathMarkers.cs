@@ -187,6 +187,15 @@ internal static class PathMarkers
         return idx;
     }
 
+    /// <summary>
+    /// A plan (Route, not walked) is done once you stand at its goal: within <paramref name="arriveUnits"/>
+    /// of it (the arrow's arrival distance), on the map. A walked trip (Live) reports its own arrival; a
+    /// plan that ends in a dungeon's entrance goes when you walk through it (the landblock check).
+    /// </summary>
+    public static bool PlanReached(PlannedTrip trip, bool hasPos, double ns, double ew, double arriveUnits)
+        => !trip.Live && hasPos && !trip.EndsInEntrance
+           && NavCoords.Distance(ns, ew, trip.GoalNs, trip.GoalEw) <= arriveUnits;
+
     /// <summary>The marker nearest the character (a plan only: where the guide line points), or -1.</summary>
     public static int Nearest(MarkerSnapshot s, double px, double py)
     {

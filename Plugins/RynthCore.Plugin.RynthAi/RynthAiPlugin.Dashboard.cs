@@ -323,6 +323,8 @@ internal sealed class DashboardBridge : IDashboardHost
     public bool FightSelectedTarget => _p.DashboardRenderer?.Settings.FightSelectedTarget == true;
     public bool DebuffAllBeforeAttacking => _p.DashboardRenderer?.Settings.DebuffAllBeforeAttacking == true;
     public void SetAutoSort(bool on) => Queue(() => _p.SetDashAutoSort(on));
+    public RechargeVital RechargeHeld => _p.RechargeHeld;
+    public void SetRechargeHold(RechargeVital vitals, bool on) => Queue(() => _p.SetRechargeHold(vitals, on));
     public void ToggleSortWindow() => Queue(() => _p.SendSortCommand(string.Empty));
     public void StartPatrol() => Queue(_p.HandleDungeonNavPatrol);
     public void ToggleHunt() => Queue(_p.ToggleHunt);
@@ -333,7 +335,9 @@ internal sealed class DashboardBridge : IDashboardHost
     public void ToggleSpells() => _p.EnqueueRemoteCommand("spells", "toggle");
     public void ToggleActiveGear() => Queue(_p.ToggleActiveGearWindow);
     public void ToggleTimedCommands() => Queue(_p.ToggleTimedCommandsWindow);
+    public void ToggleCommandButtons() => Queue(_p.ToggleCommandButtonsWindow);
     public void OpenFeatureSearch() => Queue(_p.OpenFeatureSearchWindow);
+    public void ToggleAcMaps() => Queue(_p.ToggleAcMapsWindow);
     public void UseClassicLook() => _p.UseClassicLook();
 
     public ProfileFileInfo ProfileInfo(int kind)

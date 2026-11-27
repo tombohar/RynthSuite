@@ -455,6 +455,10 @@ internal static class Program
         Eq(AutoVendorPlanner.MostCarriedUnit(staleVotes), 5_000_000 / 79, "the vote alone picks the stale price");
         Eq(AutoVendorPlanner.TrueUnit(staleVotes, 50_000), 50_000, "a split-off stack's fresh unit wins");
         Eq(AutoVendorPlanner.TrueUnit(staleVotes, 0), 5_000_000 / 79, "no fresh unit: the vote");
+        // R-20261125-011308-9444: a split-off stack split again keeps the old Value: no longer fresh.
+        Check(AutoVendorPlanner.FreshSplitReading(42, 42), "a split's new stack, untouched: fresh");
+        Check(!AutoVendorPlanner.FreshSplitReading(42, 1), "split again down to 1: stale (it read 2,100,000 a pea)");
+        Check(!AutoVendorPlanner.FreshSplitReading(0, 5), "not made by a split: never fresh");
         var lastFull = AutoVendorPlanner.PlanNext(v, none, new List<SellItem> { PyPea(1, 100) }, Pack(0, free: 44));
         Eq(lastFull.Kind, PlanKind.Split, "44 free: split...");
         Eq(lastFull.SplitAmount, 21, "...21 off");

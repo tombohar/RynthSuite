@@ -395,6 +395,18 @@ public partial class BuffManager : IDisposable
     private DateTime _buffFightWaitSince = DateTime.MinValue;
     private DateTime _buffFightNeedCheckedAt = DateTime.MinValue;
 
+    // ── A fight that never ends (2026-11-25, R-20261125-130039-e3bc) ──
+    // Conquest, a spot that respawns constantly with Monster Range 10: never more than ~15 s without a
+    // monster in range, so the wait above never ended. Buffs waited 24,811 s (almost 7 hours), ran out,
+    // and the character died several times; Force Rebuff (cast in the fight) worked. Now once buffs
+    // have waited BuffFightWaitMaxSec through one unbroken fight, a full pass goes in it, the way a Force
+    // Rebuff does: never while health is under Heal At, and it stops once nothing is due. A short fight
+    // (the 11-20 Thread dispel case) is over long before that and still waits.
+    internal const int BuffFightWaitMaxSec = 120;
+    private bool _buffFightPass;                           // a pass let through a fight that doesn't end
+    private bool _buffFightPassNeed;                       // NeedsAnyBuff, asked at most once a second during a pass
+    private DateTime _buffFightPassCheckedAt = DateTime.MinValue;
+
     /// <summary>True in a fight: no new buff cast. A Force Rebuff the player asked for waits only while health
     /// is under Heal At. Logs the start (when there are buffs to cast) and the end of each wait.</summary>
     public bool BuffsWaitForFight()
@@ -402,12 +414,34 @@ public partial class BuffManager : IDisposable
         bool fight = InCombatNow();
         bool hurt = _settings.HealAt > 0 && _vitals.HealthPct > 0 && _vitals.HealthPct < _settings.HealAt;
         bool playersOwn = _isForceRebuffing && !_isAutoBatchRebuff;
-        bool wait = fight && (!playersOwn || hurt);
         DateTime now = RynthClock.Now;
+        if (_buffFightPass)
+        {
+            // The pass ends with the fight or once nothing is due.
+            if ((now - _buffFightPassCheckedAt).TotalMilliseconds >= 1000)
+            {
+                _buffFightPassCheckedAt = now;
+                _buffFightPassNeed = NeedsAnyBuff();
+            }
+            if (!fight || !_buffFightPassNeed)
+            {
+                _buffFightPass = false;
+                _host.Log($"[Buff] the rebuff pass in the fight is done ({(fight ? "nothing left to cast" : "the fight is over")}).");
+            }
+        }
+        else if (fight && _buffFightWaitOn && (now - _buffFightWaitSince).TotalSeconds >= BuffFightWaitMaxSec)
+        {
+            _buffFightPass = true;
+            _buffFightPassNeed = true;
+            _buffFightPassCheckedAt = now;
+            _host.Log($"[Buff] buffs have waited {(now - _buffFightWaitSince).TotalSeconds:0} s for a fight that doesn't end (a monster always within range): " +
+                      "a full rebuff pass goes now, in the fight, as Force Rebuff does (never under Heal At).");
+        }
+        bool wait = fight && (!(playersOwn || _buffFightPass) || hurt);
         if (!wait)
         {
             if (_buffFightWaitOn)
-                _host.Log($"[Buff] buffs go on: {(fight ? $"health {_vitals.HealthPct}%, back over Heal At, for the Force Rebuff you asked for" : "the fight is over")} (they waited {(now - _buffFightWaitSince).TotalSeconds:0} s).");
+                _host.Log($"[Buff] buffs go on: {(!fight ? "the fight is over" : _buffFightPass ? "the fight doesn't end, so they go in it" : $"health {_vitals.HealthPct}%, back over Heal At, for the Force Rebuff you asked for")} (they waited {(now - _buffFightWaitSince).TotalSeconds:0} s).");
             _buffFightWaitOn = false;
             return false;
         }
@@ -1324,8 +1358,28 @@ public partial class BuffManager : IDisposable
     /// monster near or hitting must not lower the line. Top Off HP applies then (2026-11-22: Combat off,
     /// Heal At 0, a monster hitting; every hit made it "a fight", Heal At 0 healed nothing, and the
     /// character stood until it died).
+    /// Nor while Boost Loot Priority's looting has the tick over the fight (BoostLootHealsToTopOff): the
+    /// looter isn't fighting either, so Top Off HP applies and the heal goes before the next pickup.
     /// </summary>
-    private bool FightHealthLine(bool inCombat) => UseFightVitalLines(inCombat && _settings.EnableCombat);
+    private bool FightHealthLine(bool inCombat)
+        => UseFightVitalLines(inCombat && _settings.EnableCombat && !BoostLootTopsOffNow());
+
+    /// <summary>
+    /// Boost Loot Priority (2026-11-23, the owner: "for loot boost below health max it keeps looting. I
+    /// think it should interrupt looting and heal"). The looter puts corpses ahead of a close monster at
+    /// or over Heal At (RynthAiPlugin.BoostLootFirst.cs), and with a monster within Monster Range the
+    /// health line was Heal At: a looter hit to 70% with Heal At 60 (or 0) looted on and healed nothing.
+    /// While that looting would have the tick, health uses Top Off HP (the between-fights line): under
+    /// it the heal wins the arbiter (Buffing halts the loot and keeps the claim), then looting resumes.
+    /// Set by RynthAiPlugin; null (tests, no plugin) = never.
+    /// </summary>
+    internal Func<bool>? BoostLootHealsToTopOff { get; set; }
+
+    private bool BoostLootTopsOffNow()
+    {
+        if (BoostLootHealsToTopOff == null) return false;
+        try { return BoostLootHealsToTopOff(); } catch { return false; }
+    }
 
     // ── What the activity display says while the arbiter's slot is "Buffing" ──
     // BotAction stays "Buffing" for every vitals job: it is a control string (CombatManager's

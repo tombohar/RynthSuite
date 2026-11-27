@@ -277,6 +277,8 @@ public sealed partial class RynthAiPlugin
         if (f.Kits >= f.Below) return f;
         // Getting ready, the client is busy with our own peace-mode switch: not a reason to give up.
         f.BusyWhy = KitBusyWhy(s, starting: true, clientBusyCounts: !readying);
+        // Make ammo when low getting ready (RynthAiPlugin.Ammo.cs; its run is "crafting ammunition" above).
+        if (f.BusyWhy.Length == 0 && _missileCraftingManager?.Auto.Readying == true) f.BusyWhy = "making ammunition";
         f.VitalsWhy = KitVitalsWhy(s);
         f.NearestMonsterYd = NearestMonsterYards(f.RadiusYd, now, force: false);
         f.SinceHurtMs = _kitHurtAt <= long.MinValue / 4 ? long.MaxValue : Math.Max(0, now - _kitHurtAt);

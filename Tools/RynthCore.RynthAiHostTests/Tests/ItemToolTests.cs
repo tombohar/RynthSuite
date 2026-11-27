@@ -32,6 +32,7 @@ internal static class ItemToolTests
         // Chest looter state machine
         r.Add("chest looter: key, open, loot, wait for the re-lock, repeat until the key is used up", ChestHappyPath);
         r.Add("chest looter: the next cycle waits for the chest's regen timer", ChestWaitsForRegen);
+        r.Add("chest looter: the main pack full -> no key spent; room again in time -> it goes on; full 30 s -> stops with the reason (#rynth-issues 2026-11-24)", ChestStopsWhenPackFull);
         r.Add("chest looter: a chest that was unlocked is opened without spending the key; later 'already unlocked' answers are probes, bounded", ChestAlreadyUnlockedProbes);
         r.Add("chest looter: a second key of the same name takes over when the first is gone", ChestSwitchesKey);
         r.Add("chest looter: wrong key, not a lock, chest open elsewhere -> stops with the reason", ChestKeyErrors);
@@ -43,6 +44,7 @@ internal static class ItemToolTests
         r.Add("chest looter: after a short re-lock wait the asks follow it (never under 5 s apart), bounded; a long wait still ends when the chest reads locked", ChestRelockProbes);
         // Quick give state machine
         r.Add("quick give: one give at a time, each after the last landed, paced; done when none is left", GiveOneAtATime);
+        r.Add("quick give: an NPC that takes one per give: each stack is given again until it is gone (R-20261125-205340-1218)", GiveOnePerStack);
         r.Add("quick give: a refused item is left out; three refusals in a row stop it", GiveRefusals);
         r.Add("quick give: stops when the target vanishes, changes, moves away or a fight starts", GiveStopConditions);
         r.Add("quick give: refuses to start with the target far, unloaded, no item or in a fight; busy client waits", GiveStartRefusals);
@@ -98,6 +100,8 @@ internal static class ItemToolTests
             return 0;
         }
         public string? HoldReason() => Hold;
+        public string? NoRoom;
+        public string? NoRoomReason() => NoRoom;
         public int UseDoneSeq() => Seq;
         public bool LastUseDone(out int seq, out uint error) { seq = Seq; error = LastErr; return true; }
         public bool SendKey(int keyId, int chestId)
@@ -218,6 +222,33 @@ internal static class ItemToolTests
         // The second key is spent too -> out of keys.
         Check.False(ck.Running, "out of keys after the second chest");
         Check.Eq(ck.Looted, 2, "two chests looted");
+    }
+
+    // #rynth-issues 2026-11-24: "when the pack is full it keeps unlocking chests and using keys but fails to loot them".
+    private static void ChestStopsWhenPackFull()
+    {
+        var env = NewChest(out var ck);
+        env.Keys.Clear(); env.Keys.Add(11); env.Keys.Add(12);
+        Serve(env, ck);
+        env.AutoLootMs = 1000;
+        env.NoRoom = "the main pack is full";
+        ck.Start(out _);
+        env.Run(10_000);
+        Check.Eq(env.Sent.Count, 0, "the main pack full: no key used");
+        Check.True(ck.Running, "10 s: still waiting for room");
+        Check.True(env.Logs.Any(l => l.Contains("waits before the next key - the main pack is full")), "the wait is logged");
+
+        env.NoRoom = null;   // Auto Cram made room
+        env.Run(5000, () => env.Sent.Count > 0);
+        Check.Eq(env.Sent.FirstOrDefault(), "key 11", "room again: the key goes on the chest");
+        env.Run(5000, () => ck.State == ChestKeyLooter.Phase.Waiting);
+
+        env.NoRoom = "the main pack is full";
+        int sent = env.Sent.Count;
+        env.Run(ChestKeyLooter.RegenWaitMs + ChestKeyLooter.NoRoomMaxMs + 5000, () => !ck.Running);
+        Check.False(ck.Running, "full for 30 s before the next key: the run stops");
+        Check.Eq(env.Sent.Count, sent, "no second key spent");
+        Check.True(Said(env).Contains("stopped before the next key: the main pack is full"), "says why: " + Said(env));
     }
 
     private static void ChestAlreadyUnlockedProbes()
@@ -545,7 +576,12 @@ internal static class ItemToolTests
             itemId = 0; count = 0; return false;
         }
         public int CountCarried(GiveItemKey key) => Items.Count;
-        public bool Landed(int itemId, int count) => !Items.Contains(itemId);
+        public bool TakesOneAtATime;                                // the NPC takes one unit of a stack per give
+        public bool Landed(int itemId, int count, out int left)
+        {
+            left = Items.Contains(itemId) ? (Counts.TryGetValue(itemId, out int c) ? c : 1) : 0;
+            return !Items.Contains(itemId) || left < count;
+        }
         public bool Send(int itemId, int targetId)
         {
             Sent.Add((T, itemId));
@@ -564,7 +600,12 @@ internal static class ItemToolTests
             while (T < end && (until == null || !until()))
             {
                 T += 50;
-                if (PendingLand != 0 && T >= LandAt) { Items.Remove(PendingLand); PendingLand = 0; }
+                if (PendingLand != 0 && T >= LandAt)
+                {
+                    if (TakesOneAtATime && Counts.TryGetValue(PendingLand, out int c) && c > 1) Counts[PendingLand] = c - 1;
+                    else Items.Remove(PendingLand);
+                    PendingLand = 0;
+                }
                 Gv.Tick();
             }
         }
@@ -593,6 +634,21 @@ internal static class ItemToolTests
         Check.False(qg.Running, "done");
         Check.True(env.Said.Last().Contains("done"), "says it is done: " + env.Said.Last());
         Check.True(qg.Status.Contains("3 item(s)"), "the status keeps the result: " + qg.Status);
+    }
+
+    // DreamWeave: a Collector took one Kirit Zefir Wing per give; the run gave one from each of 6 stacks and stopped.
+    private static void GiveOnePerStack()
+    {
+        var env = NewGive(out var qg);
+        env.Items.Clear(); env.Items.Add(1); env.Items.Add(2);
+        env.Counts[1] = 3; env.Counts[2] = 2;
+        env.TakesOneAtATime = true;
+        qg.Start(out _);
+        env.Run(60_000, () => !qg.Running);
+        Check.Eq(string.Join(",", env.Sent.Select(s => s.Item)), "1,1,1,2,2", "each stack given again until it is gone");
+        Check.Eq(qg.Given, 5, "five gives");
+        Check.Eq(qg.Units, 5, "five units (not the stacks' sizes added up)");
+        Check.True(env.Said.Last().Contains("done"), "done when none is left: " + env.Said.Last());
     }
 
     private static void GiveRefusals()

@@ -1216,6 +1216,7 @@ public partial class CombatManager : IDisposable
             attackType = DetermineAttackTypeForLOS();
         bool losDebug = _settings.LosDebugLog;
         if (losDebug) LogLosDebugWeapon();
+        bool noteLos = BeginLosVerdicts();   // Show Line of Sight (CombatManager.LosVerdicts.cs)
 
         // The player's position once per scan: Distance(player, mob) re-read it for every
         // creature, two host reads per monster 20 times a second (2026-10-02 flood work).
@@ -1361,15 +1362,22 @@ public partial class CombatManager : IDisposable
             }
 
             bool losBlocked = false;
+            bool losTested = false;
+            TargetingFSM.LosDetail losDetail = default;
             if (LosBlockedOverride != null)
+            {
                 losBlocked = LosBlockedOverride(wo.Id);
+                losTested = true;
+            }
             else if (_settings.EnableRaycasting && RaycastInitialized && _raycastSystem?.TargetingFSM != null)
             {
                 RaycastCheckCount++;
-                losBlocked = _raycastSystem.TargetingFSM.IsTargetBlocked(_host, (uint)wo.Id, attackType, out var losDetail);
+                losBlocked = _raycastSystem.TargetingFSM.IsTargetBlocked(_host, (uint)wo.Id, attackType, out losDetail);
+                losTested = losDetail.Checked;
                 if (losBlocked) RaycastBlockCount++;
                 if (losDebug) LogLosDebug(wo, losBlocked, losDetail);
             }
+            if (noteLos) NoteLosVerdict(wo.Id, losBlocked, losTested, in losDetail, dist, attackType);
 
             // Melee reaches through walls, on both sides: a monster this close is a target when
             // melee is, or is about to be, the attack (the owner, 2026-11-06). It was left out while
@@ -1390,6 +1398,7 @@ public partial class CombatManager : IDisposable
                     if (notePassed) NotePassedOver(wo.Id, dist, PassedOverLos);
                     continue;
                 }
+                if (noteLos) NoteLosMeleeThrough(wo.Id);
                 losBlocked = false;
             }
 

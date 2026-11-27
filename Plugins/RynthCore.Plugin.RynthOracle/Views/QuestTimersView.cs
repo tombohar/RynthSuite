@@ -55,7 +55,7 @@ internal sealed class QuestTimersView
         {
             string flag = q.Flag;
             Quest row = q;
-            w.Selectable(Cut(q.Label, 26), "qt.r." + flag, false, () => _c.PrintQuest(row), StatusX - 10f);
+            w.Selectable(Cut(q.ShortLabel, 26), "qt.r." + flag, false, () => _c.PrintQuest(row), StatusX - 10f);
             string reward = _c.Book.RewardText(flag);
             w.Tooltip((reward.Length > 0 ? $"{q.Label}\n{flag}\nRewards: {reward}" : $"{q.Label}\n{flag}") + "\nClick: prints its texts in chat.");
             w.SameLine(StatusX);

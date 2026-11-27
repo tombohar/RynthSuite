@@ -25,7 +25,7 @@ namespace RynthCore.Plugin.RynthAi;
 /// waypoint. A waypoint in a different area (another dungeon, dungeon vs landscape)
 /// holds nav instead: nothing can path there.
 /// </summary>
-internal sealed class NavigationEngine
+internal sealed partial class NavigationEngine
 {
     // ── Motion constants ─────────────────────────────────────────────────────
     private const uint MotionTurnRight = 0x6500000D;
@@ -685,10 +685,14 @@ internal sealed class NavigationEngine
                 if (TeleportAlreadyDone(route, idx)) return;
                 HandlePortalOrRecall(pt, route);
                 return;
+            case NavPointType.Npc when _npcTalkIdx == idx && ReferenceEquals(_npcTalkRoute, route):
+                HandleNpcTalk(pt, route);
+                return;
         }
 
         // ── Standard coordinate waypoint ─────────────────────────────────────
         _portalState = PortalState.None;
+        _npcTalkIdx  = -1;
         _inPause     = false;
         _teleportedRoute = null;
         _firedRoute      = null;
@@ -743,6 +747,7 @@ internal sealed class NavigationEngine
             UpdateStatusLine(idx, dist, route, 0.0);
             // Advance before the jump: the Jumper pauses nav and later restores what it
             // saw, so jumping first turned a finished Once route back on (re-run from [0]).
+            if (BeginNpcTalk(pt, route, idx)) return;   // an NPC point advances once the NPC was used (NavigationEngine.NpcTalk.cs)
             Advance(route);
             if (pt.Type == NavPointType.Jump) FireJump(pt, idx);
             return;
@@ -759,6 +764,7 @@ internal sealed class NavigationEngine
             _host.Log($"Nav: passed [{idx}] dist={dist:F1}yd → advancing");
             _closestDist = double.MaxValue;
             UpdateStatusLine(idx, dist, route, 0.0);
+            if (BeginNpcTalk(pt, route, idx)) return;   // an NPC point advances once the NPC was used (NavigationEngine.NpcTalk.cs)
             Advance(route);
             if (pt.Type == NavPointType.Jump) FireJump(pt, idx);
             return;
@@ -770,6 +776,7 @@ internal sealed class NavigationEngine
         {
             _host.Log($"Nav: sweep-pass [{idx}] closest={_closestDist:F1} now={dist:F1}yd → advancing");
             _closestDist = double.MaxValue;
+            if (BeginNpcTalk(pt, route, idx)) return;   // an NPC point advances once the NPC was used (NavigationEngine.NpcTalk.cs)
             Advance(route);
             if (pt.Type == NavPointType.Jump) FireJump(pt, idx);
             return;
@@ -1760,9 +1767,9 @@ internal sealed class NavigationEngine
     /// Returns true iff UseObject was actually called (caller uses this to gate
     /// retries — a "no match" is retried by the caller until the cache catches up).
     /// </summary>
-    private bool FirePortalNpcUse(NavPoint pt)
+    private bool FirePortalNpcUse(NavPoint pt, string kind = "portal")
     {
-        _settings.NavStatusLine = $"Nav: portal '{pt.TargetName}'...";
+        _settings.NavStatusLine = $"Nav: {kind} '{pt.TargetName}'...";
         if (_objectCache == null || string.IsNullOrWhiteSpace(pt.TargetName) || !_host.HasUseObject)
         {
             _host.Log($"Nav: PortalNPC — cache/target/UseObject unavailable for '{pt.TargetName}'");
@@ -1920,14 +1927,14 @@ internal sealed class NavigationEngine
         // A use the engine did not send (UseObject said no) is not a use: false lets the caller ask again.
         if (!_host.UseFor((uint)bestId, "Nav", $"portal/NPC waypoint '{target}'"))
         {
-            _host.Log($"Nav: UseObject portal '{target}' (0x{bestId:X8}) was not sent - will retry");
+            _host.Log($"Nav: UseObject {kind} '{target}' (0x{bestId:X8}) was not sent - will retry");
             return false;
         }
         // Publish the resolved object so the marker renderer can draw a ring +
         // line to the portal's real position (the waypoint coord is a placeholder).
         _settings.ActivePortalObjId = (uint)bestId;
         _portalUseDistYd = bestDist;
-        _host.Log($"Nav: UseObject portal '{target}' (dist={bestDist:F1}yd src={fallbackSource}) → 0x{bestId:X8}");
+        _host.Log($"Nav: UseObject {kind} '{target}' (dist={bestDist:F1}yd src={fallbackSource}) → 0x{bestId:X8}");
         return true;
     }
 

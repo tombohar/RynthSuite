@@ -18,7 +18,12 @@ internal enum SortScope
     Clean,
     /// <summary>Every side pack (or one) emptied into the main pack ("Unpack").</summary>
     Unpack,
+    /// <summary>The items the last sort moved go back to the packs they came from ("Put back").</summary>
+    PutBack,
 }
+
+/// <summary>A move RynthSort made (an item to another pack), kept so "Put back" can undo it.</summary>
+internal readonly record struct MadeMove(uint ItemId, string Name, uint FromId, uint ToId, long AtMs);
 
 /// <summary>What a move does.</summary>
 internal enum MoveKind : byte
@@ -42,8 +47,13 @@ internal readonly struct SortMove
     /// <summary>The slot in <see cref="Dest"/> it should end at (counted without it), or -1: the first empty slot.</summary>
     public readonly int Placement;
     public readonly MoveKind Kind;
+    /// <summary>The pack the item is in before the move (its object id; the player for the main pack), 0 when not known. "Put back" uses it.</summary>
+    public readonly uint FromId;
+    /// <summary>The pack it is in before the move: 0 = main pack, else the side pack's number (1-based); -1 when not known.</summary>
+    public readonly int FromIndex;
 
-    public SortMove(SortItem item, SortPack dest, int destIndex, uint mergeInto, int placement = -1, MoveKind kind = MoveKind.Route)
+    public SortMove(SortItem item, SortPack dest, int destIndex, uint mergeInto, int placement = -1, MoveKind kind = MoveKind.Route,
+                    uint fromId = 0, int fromIndex = -1)
     {
         Item = item;
         Dest = dest;
@@ -51,6 +61,8 @@ internal readonly struct SortMove
         MergeInto = mergeInto;
         Placement = placement;
         Kind = kind;
+        FromId = fromId;
+        FromIndex = fromIndex;
     }
 
     /// <summary>The item is already in <see cref="Dest"/> (a stack joined or a slot changed there).</summary>
@@ -78,6 +90,13 @@ internal struct PlanOptions
     public bool Place;
     /// <summary>Stacks of the same kind in one pack are joined (the engine can merge stacks).</summary>
     public bool Merge;
+    /// <summary>
+    /// Handy items (<see cref="HandyItems"/>) are kept in the main pack's first slots: null = off.
+    /// Only with <see cref="Place"/> (moves to a slot) and the main pack's slot order known.
+    /// </summary>
+    public Func<SortItem, bool>? Handy;
+    /// <summary>The carried packs' jobs and RynthAi's answers (<see cref="PackJobs"/>): null = no pack has a job.</summary>
+    public JobPlan? Jobs;
 
     /// <summary>Everything on: an engine with API v80 and the default settings.</summary>
     public static PlanOptions Full => new() { Order = true, Place = true, Merge = true };
@@ -139,7 +158,38 @@ internal sealed class SortView
     public readonly List<RulePackIssue> Issues = new();
     /// <summary>Clean or Unpack found the main pack full.</summary>
     public bool MainFull;
+    /// <summary>
+    /// Items a rule wants in a side pack that is full, with no overflow pack (another pack with the
+    /// same rule) that has room: they stay where they are. In the order met, main pack first.
+    /// </summary>
+    public readonly List<NoFitLine> NoFit = new();
+    /// <summary>Handy items are kept at the front of the main pack (the option is on and the engine can do it).</summary>
+    public bool Handy;
+    /// <summary>Handy items that could move and aren't in the main pack's front slots yet.</summary>
+    public int HandyBehind;
+
+    // Why items wait (they add up to Waiting).
+    /// <summary>New items in the main pack still inside the settle time.</summary>
+    public int WaitSettle;
+    /// <summary>Items whose pack is full.</summary>
+    public int WaitFull;
+    /// <summary>Items whose rule's pack isn't carried.</summary>
+    public int WaitNoPack;
+    /// <summary>Items Clean or Unpack can't put in the full main pack.</summary>
+    public int WaitMainFull;
+    /// <summary>How long until the next settling item may move (ms), or -1 when none is settling.</summary>
+    public long NextSettleMs = -1;
+    /// <summary>The new main-pack items counted in <see cref="WaitSettle"/> (their ids): the window's settling rings.</summary>
+    public readonly HashSet<uint> Settling = new();
+    /// <summary>Items a rule (or Clean) would move that the player touched lately: left where they are.</summary>
+    public readonly List<HeldLine> Held = new();
 }
+
+/// <summary>An item left alone because the player touched it lately: in pack <see cref="From"/>, it would go to <see cref="To"/> (0 = main pack).</summary>
+internal readonly record struct HeldLine(SortItem Item, int From, int To);
+
+/// <summary>An item that didn't fit: its rule's side pack <see cref="Pack"/> (and every overflow pack) is full; it stays in <see cref="From"/> (0 = main pack).</summary>
+internal readonly record struct NoFitLine(SortItem Item, int Pack, int From);
 
 /// <summary>
 /// The sorting rules applied to the packs: which items move where, one planning pass at a time.
@@ -173,6 +223,15 @@ internal sealed class SortPlanner
     private readonly Dictionary<uint, (int Count, long Since)> _reorders = new();
 
     public SortView View { get; private set; } = new();
+
+    /// <summary>
+    /// Items the player touched lately (<see cref="TouchWatch"/>): they don't move, stacks don't
+    /// join into them and they aren't put in order (other items still are, around them). Unpack
+    /// and Put back ignore it (the player asked to move everything). Null = nothing held.
+    /// </summary>
+    public Func<uint, bool>? Held;
+
+    private bool IsHeld(SortItem it) => Held != null && Held(it.Id);
 
     /// <summary>Forget everything (logout, another character).</summary>
     public void Reset()
@@ -216,12 +275,12 @@ internal sealed class SortPlanner
     /// A stack in <paramref name="pack"/> that <paramref name="it"/> can join (the same kind, with room
     /// left), or 0. That is what lets a full pack still take the item.
     /// </summary>
-    public static uint StackTarget(SortItem it, SortPack pack)
+    public static uint StackTarget(SortItem it, SortPack pack, Func<uint, bool>? skip = null)
     {
         if (it.MaxStack <= 1) return 0;
         foreach (SortItem other in pack.Items)
         {
-            if (other.Id == it.Id || !SameKind(it, other)) continue;
+            if (other.Id == it.Id || !SameKind(it, other) || (skip != null && skip(other.Id))) continue;
             int max = other.MaxStack > 1 ? other.MaxStack : it.MaxStack;
             if (other.Stack < max) return other.Id;
         }
@@ -239,25 +298,27 @@ internal sealed class SortPlanner
     /// the pack's order; the same answer for the same pack. False when every kind has at most one
     /// stack with room.
     /// </summary>
-    public static bool StackJoin(SortPack pack, Func<SortItem, bool> movable, out SortItem from, out SortItem into)
+    public static bool StackJoin(SortPack pack, Func<SortItem, bool> movable, out SortItem from, out SortItem into, Func<SortItem, bool>? joinable = null)
     {
         from = into = null!;
         List<SortItem> items = pack.Items;
         var seen = new bool[items.Count];
+        // A stack that may take part at all (joinable: not one the player is holding).
+        bool Part(SortItem it) => HasRoom(it) && Sortable(it) && (joinable == null || joinable(it));
         for (int i = 0; i < items.Count; i++)
         {
-            if (seen[i] || !HasRoom(items[i]) || !Sortable(items[i])) continue;
+            if (seen[i] || !Part(items[i])) continue;
             SortItem? small = null, big = null;
             for (int j = i; j < items.Count; j++)
             {
                 SortItem it = items[j];
-                if (j > i && (seen[j] || !HasRoom(it) || !Sortable(it) || !SameKind(items[i], it))) continue;
+                if (j > i && (seen[j] || !Part(it) || !SameKind(items[i], it))) continue;
                 seen[j] = true;
                 if (big == null || it.Stack > big.Stack || (it.Stack == big.Stack && it.Id < big.Id)) big = it;
             }
             foreach (SortItem it in items)
             {
-                if (ReferenceEquals(it, big) || !HasRoom(it) || !Sortable(it) || !SameKind(items[i], it) || !movable(it)) continue;
+                if (ReferenceEquals(it, big) || !Part(it) || !SameKind(items[i], it) || !movable(it)) continue;
                 if (small == null || it.Stack < small.Stack || (it.Stack == small.Stack && it.Id > small.Id)) small = it;
             }
             if (small != null && big != null) { from = small; into = big; return true; }
@@ -288,27 +349,99 @@ internal sealed class SortPlanner
         int mainUsed = inv.Main.Items.Count;
         int mainCap = CapacityOf(inv.Main, MainCapacityFallback);
         bool kindFirst = opt.KindFirst;
+        Func<SortItem, bool>? handy = opt.Place ? opt.Handy : null;
+        Comparison<SortItem>? mainOrder = handy != null ? PackOrder.HandyFirst(handy, kindFirst) : null;
+        bool MovableNow(SortItem it) => Sortable(it) && !IsBlocked(it.Id, nowMs) && !IsHeld(it);
 
-        int PlaceIn(SortPack dest, SortItem wo, uint joins) =>
-            opt.Place && joins == 0 && dest.OrderKnown ? PackOrder.InsertAt(dest.Items, wo, kindFirst) : -1;
+        int PlaceIn(SortPack dest, SortItem wo, uint joins)
+        {
+            if (!opt.Place || joins != 0 || !dest.OrderKnown) return -1;
+            if (handy != null && ReferenceEquals(dest, inv.Main))
+            {
+                // Into the main pack with handy items kept in front: in order (handy first), or a
+                // handy item at the end of the handy run and anything else at the end.
+                if (opt.Order) return PackOrder.InsertAt(dest.Items, wo, mainOrder!);
+                return handy(wo) ? PackOrder.FrontRun(dest.Items, handy, MovableNow) : -1;
+            }
+            return PackOrder.InsertAt(dest.Items, wo, kindFirst);
+        }
 
-        void Consider(SortItem wo, int from, bool settled)
+        uint PackIdOf(int index) => index == 0 ? inv.Main.Id : inv.Packs[index - 1].Id;
+
+        // The next pack with the same rule as the item's (another rule that is on and matches it, in
+        // the order RuleFor ranks them) when the first one's pack (first) is full: one with room, or a
+        // stack the item can join; the pack it is in already when that is one of them (it stays). 0 = none.
+        int Overflow(SortItem wo, int first, int from, out uint into)
+        {
+            into = 0;
+            foreach (SortRule other in SortRules.RulesFor(rules, wo))
+            {
+                int n = SortRules.Resolve(other, inv, out _);
+                if (n == 0 || n == first) continue;
+                if (n == from) return n;
+                SortPack p = inv.Packs[n - 1];
+                uint join = StackTarget(wo, p, Held);
+                if (used[n] < CapacityOf(p, SideCapacityFallback) || join != 0) { into = join; return n; }
+            }
+            return 0;
+        }
+
+        void Consider(SortItem wo, int from, bool settled, long settleLeftMs)
         {
             if (!Sortable(wo) || IsBlocked(wo.Id, nowMs)) return;
+            bool held = IsHeld(wo);
             SortRule? r = SortRules.RuleFor(rules, wo);
+            JobPlan? jobs = opt.Jobs;
+            if (jobs != null && (r == null || !SortRules.MatchesName(r, wo)))
+            {
+                // A name rule first (the player named it), then a pack whose job picks it, then a kind rule.
+                if (jobs.Frozen(from)) return;   // its pack's job can't be told now (RynthAi): it stays
+                int firstJob = 0, jobTo = 0;
+                uint jobInto = 0;
+                foreach (int n in jobs.PacksFor(wo))
+                {
+                    if (n == from) return;       // in a pack whose job takes it already
+                    if (firstJob == 0) firstJob = n;
+                    if (jobTo != 0) continue;
+                    SortPack jp = inv.Packs[n - 1];
+                    uint join = StackTarget(wo, jp, Held);
+                    if (used[n] < CapacityOf(jp, SideCapacityFallback) || join != 0) { jobTo = n; jobInto = join; }
+                }
+                if (firstJob != 0)
+                {
+                    if (held) { view.Held.Add(new HeldLine(wo, from, firstJob)); return; }
+                    if (jobTo == 0)
+                    {
+                        view.Full.Add(firstJob);
+                        view.Waiting++;
+                        view.WaitFull++;
+                        view.NoFit.Add(new NoFitLine(wo, firstJob, from));
+                        return;
+                    }
+                    if (jobTo != firstJob) view.Full.Add(firstJob);
+                    Go(wo, from, jobTo, jobInto, settled, settleLeftMs);
+                    return;
+                }
+            }
             if (r == null && evict && from > 0)
             {
                 // In a side pack and no rule wants it: back to the main pack, while there is room.
-                uint joins = StackTarget(wo, inv.Main);
+                if (held)
+                {
+                    view.Held.Add(new HeldLine(wo, from, 0));
+                    return;
+                }
+                uint joins = StackTarget(wo, inv.Main, Held);
                 if (mainUsed < mainCap || joins != 0)
                 {
-                    moves.Add(new SortMove(wo, inv.Main, 0, joins, PlaceIn(inv.Main, wo, joins)));
+                    moves.Add(new SortMove(wo, inv.Main, 0, joins, PlaceIn(inv.Main, wo, joins), MoveKind.Route, PackIdOf(from), from));
                     if (joins == 0) mainUsed++;
                 }
                 else
                 {
                     view.MainFull = true;
                     view.Waiting++;
+                    view.WaitMainFull++;
                 }
                 return;
             }
@@ -317,23 +450,49 @@ internal sealed class SortPlanner
             if (to == 0)
             {
                 view.Waiting++;   // reported once per rule below (Issues / Missing)
+                view.WaitNoPack++;
                 return;
             }
             if (to == from) return;
-            SortPack dest = inv.Packs[to - 1];
-            uint into = StackTarget(wo, dest);
-            if (used[to] >= CapacityOf(dest, SideCapacityFallback) && into == 0)
+            if (held)
             {
-                view.Full.Add(to);
-                view.Waiting++;
+                view.Held.Add(new HeldLine(wo, from, to));
                 return;
             }
+            SortPack dest = inv.Packs[to - 1];
+            uint into = StackTarget(wo, dest, Held);
+            if (used[to] >= CapacityOf(dest, SideCapacityFallback) && into == 0)
+            {
+                // Its pack is full: the next pack with the same rule (an overflow pack) that has room,
+                // else it waits where it is and the window and chat say what didn't fit.
+                view.Full.Add(to);
+                int first = to;
+                to = Overflow(wo, first, from, out into);
+                if (to == from && to != 0) return;   // in an overflow pack already: it stays there
+                if (to == 0)
+                {
+                    view.Waiting++;
+                    view.WaitFull++;
+                    view.NoFit.Add(new NoFitLine(wo, first, from));
+                    return;
+                }
+            }
+            Go(wo, from, to, into, settled, settleLeftMs);
+        }
+
+        // The item goes to side pack `to` (joining stack `into`), once it has settled.
+        void Go(SortItem wo, int from, int to, uint into, bool settled, long settleLeftMs)
+        {
             if (!settled)
             {
                 view.Waiting++;
+                view.WaitSettle++;
+                view.Settling.Add(wo.Id);
+                if (view.NextSettleMs < 0 || settleLeftMs < view.NextSettleMs) view.NextSettleMs = Math.Max(0, settleLeftMs);
                 return;
             }
-            moves.Add(new SortMove(wo, dest, to, into, PlaceIn(dest, wo, into)));
+            SortPack dest = inv.Packs[to - 1];
+            moves.Add(new SortMove(wo, dest, to, into, PlaceIn(dest, wo, into), MoveKind.Route, PackIdOf(from), from));
             if (into == 0) used[to]++;
         }
 
@@ -345,7 +504,7 @@ internal sealed class SortPlanner
             if (!_firstSeen.TryGetValue(wo.Id, out long seen)) _firstSeen[wo.Id] = seen = nowMs;
             bool settled = force || nowMs - seen >= settleMs;
             if (!settled) mainSettled = false;
-            Consider(wo, 0, settled);
+            Consider(wo, 0, settled, settleMs - (nowMs - seen));
         }
         if (_firstSeen.Count > inMain.Count)
         {
@@ -356,7 +515,7 @@ internal sealed class SortPlanner
         if (everyPack)
         {
             for (int i = 0; i < inv.Packs.Count; i++)
-                foreach (SortItem wo in inv.Packs[i].Items) Consider(wo, i + 1, true);
+                foreach (SortItem wo in inv.Packs[i].Items) Consider(wo, i + 1, true, 0);
         }
 
         bool ordering = inPack && opt.Order;
@@ -364,7 +523,8 @@ internal sealed class SortPlanner
         {
             // Nothing changes packs: tidy each pack in place. Side packs first, then the main pack
             // once nothing in it is new (loot still settling there would be ordered twice).
-            bool Movable(SortItem it) => Sortable(it) && !IsBlocked(it.Id, nowMs);
+            bool Movable(SortItem it) => Sortable(it) && !IsBlocked(it.Id, nowMs) && !IsHeld(it);
+            bool Joinable(SortItem it) => !IsHeld(it);
             var stacks = new List<SortMove>();
             var reorders = new List<SortMove>();
             for (int i = 0; i <= inv.Packs.Count; i++)
@@ -373,20 +533,29 @@ internal sealed class SortPlanner
                 if (main && !mainSettled) break;
                 SortPack pack = main ? inv.Main : inv.Packs[i];
                 int index = main ? 0 : i + 1;
-                if (opt.Merge && StackJoin(pack, Movable, out SortItem from, out SortItem into))
+                if (opt.Merge && StackJoin(pack, Movable, out SortItem from, out SortItem into, Joinable))
                 {
-                    stacks.Add(new SortMove(from, pack, index, into.Id, -1, MoveKind.Stack));
+                    stacks.Add(new SortMove(from, pack, index, into.Id, -1, MoveKind.Stack, pack.Id, index));
+                    continue;
+                }
+                bool Reorderable(SortItem it) => Movable(it) && !ReorderLimited(it.Id, nowMs);
+                if (main && handy != null && pack.OrderKnown)
+                {
+                    // Handy items at the front: in order with them first, or (ordering off) only them moved.
+                    if (ordering ? PackOrder.AllNamed(pack.Items) && PackOrder.NextMove(pack.Items, mainOrder!, Reorderable, out SortItem hi, out int hat)
+                                 : PackOrder.FrontMove(pack.Items, handy, Reorderable, out hi, out hat))
+                        reorders.Add(new SortMove(hi, pack, index, 0, hat, MoveKind.Reorder, pack.Id, index));
                     continue;
                 }
                 if (ordering && pack.OrderKnown && PackOrder.AllNamed(pack.Items)
-                    && PackOrder.NextMove(pack.Items, kindFirst, it => Movable(it) && !ReorderLimited(it.Id, nowMs), out SortItem item, out int at))
-                    reorders.Add(new SortMove(item, pack, index, 0, at, MoveKind.Reorder));
+                    && PackOrder.NextMove(pack.Items, kindFirst, Reorderable, out SortItem item, out int at))
+                    reorders.Add(new SortMove(item, pack, index, 0, at, MoveKind.Reorder, pack.Id, index));
             }
             moves.AddRange(stacks);
             moves.AddRange(reorders);
         }
 
-        FillPacks(view, inv, ordering, kindFirst);
+        FillPacks(view, inv, ordering, kindFirst, handy, MovableNow);
         FillIssues(view, inv, rules);
         View = view;
         return moves;
@@ -411,13 +580,63 @@ internal sealed class SortPlanner
                 uint joins = StackTarget(wo, inv.Main);
                 if (used < cap || joins != 0)
                 {
-                    moves.Add(new SortMove(wo, inv.Main, 0, joins));
+                    moves.Add(new SortMove(wo, inv.Main, 0, joins, -1, MoveKind.Route, inv.Packs[i].Id, i + 1));
                     if (joins == 0) used++;
                 }
                 else waiting++;
             }
         }
-        var view = new SortView { Waiting = waiting, MainFull = waiting > 0 };
+        var view = new SortView { Waiting = waiting, WaitMainFull = waiting, MainFull = waiting > 0 };
+        FillPacks(view, inv, false, false);
+        View = view;
+        return moves;
+    }
+
+    /// <summary>
+    /// Putting back what the last sort moved (<paramref name="made"/>, oldest first): newest first,
+    /// each item still in the pack it was sent to goes back to the pack it came from, while that pack
+    /// is carried and has room. An item gone (sold, joined into a stack) or moved since is skipped.
+    /// Never joins stacks (it was a stack of its own), never holds (the player asked).
+    /// </summary>
+    public List<SortMove> PlanPutBack(SortInventory inv, IReadOnlyList<MadeMove> made, long nowMs)
+    {
+        var moves = new List<SortMove>();
+        var used = new int[inv.Packs.Count + 1];
+        used[0] = inv.Main.Items.Count;
+        for (int i = 0; i < inv.Packs.Count; i++) used[i + 1] = inv.Packs[i].Items.Count;
+        var where = new Dictionary<uint, (SortItem Item, int Index)>();
+        foreach (SortItem it in inv.Main.Items) where[it.Id] = (it, 0);
+        for (int i = 0; i < inv.Packs.Count; i++)
+            foreach (SortItem it in inv.Packs[i].Items) where[it.Id] = (it, i + 1);
+
+        var view = new SortView();
+        var taken = new HashSet<uint>();
+        for (int k = made.Count - 1; k >= 0; k--)
+        {
+            MadeMove m = made[k];
+            if (!taken.Add(m.ItemId)) continue;   // only its latest move counts
+            if (!where.TryGetValue(m.ItemId, out var at) || !Sortable(at.Item) || IsBlocked(m.ItemId, nowMs)) continue;
+            SortPack here = at.Index == 0 ? inv.Main : inv.Packs[at.Index - 1];
+            if (here.Id != m.ToId) continue;      // moved since: not ours to undo
+            int to = m.FromId == inv.Main.Id ? 0 : inv.IndexOf(m.FromId);
+            if (to == 0 && m.FromId != inv.Main.Id)
+            {
+                view.Waiting++;
+                view.WaitNoPack++;
+                continue;
+            }
+            SortPack dest = to == 0 ? inv.Main : inv.Packs[to - 1];
+            if (used[to] >= CapacityOf(dest, to == 0 ? MainCapacityFallback : SideCapacityFallback))
+            {
+                if (to == 0) { view.MainFull = true; view.WaitMainFull++; }
+                else { view.Full.Add(to); view.WaitFull++; }
+                view.Waiting++;
+                continue;
+            }
+            moves.Add(new SortMove(at.Item, dest, to, 0, -1, MoveKind.Route, here.Id, at.Index));
+            used[to]++;
+            used[at.Index]--;
+        }
         FillPacks(view, inv, false, false);
         View = view;
         return moves;
@@ -435,12 +654,21 @@ internal sealed class SortPlanner
         ColumnSlot = p.ColumnSlot,
     };
 
-    private static void FillPacks(SortView view, SortInventory inv, bool ordering, bool kindFirst)
+    private static void FillPacks(SortView view, SortInventory inv, bool ordering, bool kindFirst,
+                                  Func<SortItem, bool>? handy = null, Func<SortItem, bool>? movable = null)
     {
         view.MainUsed = inv.Main.Items.Count;
         view.MainCapacity = CapacityOf(inv.Main, MainCapacityFallback);
         view.Main = LineOf(inv.Main, MainCapacityFallback, ordering, kindFirst);
         view.Main.Name = "Main pack";
+        view.Handy = handy != null && inv.Main.OrderKnown;
+        if (view.Handy)
+        {
+            // What is left to do in the main pack: out of the order with handy items first, or the handy items not in front yet.
+            Func<SortItem, bool> canMove = movable ?? Sortable;
+            view.HandyBehind = PackOrder.HandyBehind(inv.Main.Items, handy!, canMove);
+            view.Main.OutOfPlace = ordering ? PackOrder.OutOfPlace(inv.Main.Items, PackOrder.HandyFirst(handy!, kindFirst)) : view.HandyBehind;
+        }
         view.PackOrderKnown = inv.PackOrderKnown;
         view.OrderSource = inv.OrderSource;
         view.Ordering = ordering;

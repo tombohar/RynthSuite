@@ -434,12 +434,94 @@ internal sealed class UiWindow
         U32(0); // BlockLength, patched by EndChild
     }
 
-    public void EndChild()
+    public void EndChild() => EndBlock();
+
+    private void EndBlock()
     {
         if (_blockDepth == 0) return;
         int at = _blocks[--_blockDepth];
         if (at < 0) return;
         BinaryPrimitives.WriteUInt32LittleEndian(_body.AsSpan(at), (uint)(_len - (at + 4)));
+    }
+
+    // ── Op level 3 (the caller checks the engine's level first) ─────────────
+
+    /// <summary>Text in one of the engine's faces (<see cref="UiFormat.FontBold"/> ...) until <see cref="PopFont"/>. Op level 3.</summary>
+    public void PushFont(byte font)
+    {
+        if (!Room()) return;
+        int p = BeginOp(UiFormat.OpPushFont);
+        U8(font);
+        EndOp(p);
+    }
+
+    /// <summary>The engine pops what is left at the scope's end, so a pop cut off with the list is harmless.</summary>
+    public void PopFont(int count = 1)
+    {
+        if (!Room()) return;
+        int p = BeginOp(UiFormat.OpPopFont);
+        U8((byte)Math.Clamp(count, 1, 255));
+        EndOp(p);
+    }
+
+    /// <summary>
+    /// A table (op level 3): columns set up with <see cref="TableSetupColumn"/>, then rows of cells
+    /// (<see cref="TableNextRow"/>, <see cref="TableNextColumn"/>), closed with <see cref="EndTable"/>.
+    /// Anything before the first row or cell is dropped by the engine.
+    /// </summary>
+    public void BeginTable(string id, int columns, uint flags, float outerW = 0f, float outerH = 0f)
+    {
+        if (_blockDepth >= _blocks.Length) throw new InvalidOperationException("tables nested too deep");
+        if (!Room())
+        {
+            _blocks[_blockDepth++] = -1;
+            return;
+        }
+        uint key = KeyOf(id);
+        int p = BeginOp(UiFormat.OpTable, UiFormat.OpHasBlock);
+        U32(key);
+        Str(id);
+        U8((byte)Math.Clamp(columns, 1, 32));
+        U32(flags);
+        F32(outerW);
+        F32(outerH);
+        F32(0f);    // inner width
+        I32(-1);    // known sort: none (not sortable)
+        EndOp(p);
+        _blocks[_blockDepth++] = _len;
+        U32(0); // BlockLength, patched by EndTable
+    }
+
+    public void EndTable() => EndBlock();
+
+    public void TableSetupColumn(string label, uint flags = 0, float widthOrWeight = 0f)
+    {
+        if (!Room()) return;
+        int p = BeginOp(UiFormat.OpTableSetupColumn);
+        Str(label);
+        U32(flags);
+        F32(widthOrWeight);
+        EndOp(p);
+    }
+
+    public void TableHeadersRow()
+    {
+        if (!Room()) return;
+        EndOp(BeginOp(UiFormat.OpTableHeadersRow));
+    }
+
+    public void TableNextRow(float minHeight = 0f)
+    {
+        if (!Room()) return;
+        int p = BeginOp(UiFormat.OpTableNextRow);
+        F32(minHeight);
+        EndOp(p);
+    }
+
+    public void TableNextColumn()
+    {
+        if (!Room()) return;
+        EndOp(BeginOp(UiFormat.OpTableNextColumn));
     }
 
     // ── Writing ─────────────────────────────────────────────────────────────

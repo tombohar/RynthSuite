@@ -41,8 +41,9 @@ internal interface IQuickGiveEnv
     bool NextItem(GiveItemKey key, ISet<int> skip, out int itemId, out int count);
     /// <summary>How many matching items are still carried (whole objects).</summary>
     int CountCarried(GiveItemKey key);
-    /// <summary>The item left the pack, or its stack shrank below <paramref name="count"/>.</summary>
-    bool Landed(int itemId, int count);
+    /// <summary>The item left the pack, or its stack shrank below <paramref name="count"/>;
+    /// <paramref name="left"/>: the units still in that stack in the pack (0 when it is gone).</summary>
+    bool Landed(int itemId, int count, out int left);
     /// <summary>AC's give action for the whole object. False when the engine refused to send it.</summary>
     bool Send(int itemId, int targetId);
     /// <summary>A count of the server's refusals so far (rises when one arrives).</summary>
@@ -203,11 +204,14 @@ internal sealed class QuickGive
 
     private void TickInFlight(long now)
     {
-        if (_env.Landed(_inFlightId, _inFlightCount))
+        if (_env.Landed(_inFlightId, _inFlightCount, out int left))
         {
             Given++;
-            Units += _inFlightCount;
-            _skip.Add(_inFlightId);   // it is the target's now, whatever a stale inventory read still says
+            Units += left > 0 ? _inFlightCount - left : _inFlightCount;
+            // An NPC that takes one per give (R-20261125-205340-1218, DreamWeave: a Collector took one
+            // Kirit Zefir Wing from each stack): the rest stays in the pack and is given again. Skipping
+            // it ended the run after one give per stack ("gave 6", with 446 wings left).
+            if (left <= 0) _skip.Add(_inFlightId);   // it is the target's now, whatever a stale inventory read still says
             _refusals = 0;
             _left = Math.Max(0, _left - 1);
             State = Phase.Pending;

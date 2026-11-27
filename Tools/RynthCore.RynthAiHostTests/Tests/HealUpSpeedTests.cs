@@ -28,6 +28,7 @@ internal static class HealUpSpeedTests
         r.Add("heal up: Combat off, Heal At 0, a monster hitting, the animation busy between hits: a kit goes within 1.1 s", CombatOffHitAnimatingHealsFast);
         r.Add("heal up: Combat off, a monster in range: Top Off HP is the health line (not Heal At)", CombatOffUsesTopOffLine);
         r.Add("heal up: Combat on keeps Heal At in a fight; Heal At 0 with no emergency line heals nothing and says so", CombatOnFightLineUnchanged);
+        r.Add("heal up (11-23): while Boost Loot's looting has the tick, Top Off HP is the health line and a kit goes; Heal At again once it hasn't", BoostLootLootingUsesTopOffLine);
         r.Add("heal up: the animation cap counts only animation holds, and resets once the vitals step is reached", AnimationCapCountsOnlyAnimation);
         r.Add("heal up: peace with the weapon in hand gets the weapon-out kit bar (30%); the wand in hand or Magic keep Kit Min Success", PeaceWeaponOutKitBar);
         r.Add("heal up: [HealLatency] ends an episode at a macro stop; the heal after the restart counts from the restart", HealLatencyMacroOff);
@@ -194,6 +195,33 @@ internal static class HealUpSpeedTests
             Check.True(b.WantsHealNow(), "Combat off: Top Off HP 80% applies with a monster in range");
             Check.True(b.CheckVitals(), "the vitals act");
             Check.True(KitSent, "a kit went out");
+        }
+        finally { Done(); }
+    }
+
+    private static void BoostLootLootingUsesTopOffLine()
+    {
+        try
+        {
+            var (b, s, v, h) = Rig(enableCombat: true, healAt: 30);
+            b.InCombatOverride = () => true;   // a monster within Monster Range
+            bool looting = true;
+            b.BoostLootHealsToTopOff = () => looting;
+            v.CurrentHealth = 300;   // 60%: over Heal At 30, under Top Off HP 80
+            Check.True(b.WantsHealNow(), "Boost Loot looting: Top Off HP 80% is the line");
+            Check.True(b.CheckVitals(), "the vitals act");
+            Check.True(KitSent, "a kit went out: " + string.Join(" | ", FakeHost.Logs.Where(l => l.Contains("Vitals")).Take(6)));
+
+            var (b2, s2, v2, h2) = Rig(enableCombat: true, healAt: 30);
+            b2.InCombatOverride = () => true;
+            b2.BoostLootHealsToTopOff = () => false;   // the looting doesn't have the tick (no loot work, or Boost Loot off)
+            v2.CurrentHealth = 300;
+            Check.False(b2.WantsHealNow(), "not looting: Heal At 30% is the fight's line, as before");
+            b2.CheckVitals();
+            Check.False(KitSent, "no kit");
+
+            b2.BoostLootHealsToTopOff = () => throw new InvalidOperationException("hook threw");
+            Check.False(b2.WantsHealNow(), "a hook that throws counts as not looting");
         }
         finally { Done(); }
     }

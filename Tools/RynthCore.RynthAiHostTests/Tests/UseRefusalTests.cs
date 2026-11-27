@@ -44,7 +44,8 @@ internal static class UseRefusalTests
         r.Add("use check (looting): Drakkon's stall - stop once, retry, say it once in chat, stop opening corpses, probe, recover", LootingStall);
         r.Add("use check (looting): normal opens never trip it", LootingNormalOpens);
         r.Add("loot only rare corpses: only a corpse whose description says it generated a rare is opened; off, both are", RareCorpsesOnly);
-        r.Add("corpse behind a wall (R-20261121-190950-ee4e): set aside after its first open, no clean stop or abandon; looted once the line is clear", CorpseBehindWallSetAside);
+        r.Add("corpse behind a wall (R-20261121-190950-ee4e, R-20261124-001522-b582): set aside before any open, no clean stop or abandon; looted once the line is clear", CorpseBehindWallSetAside);
+        r.Add("corpse behind a wall: still there after 20 s, one open anyway (the ray may be wrong); a failed one sets it aside the old way", CorpseBehindWallTryAnyway);
         r.Add("use check (looting): opens with monsters about never trip it (a fight cancels them)", OpensInAFightDontCount);
         r.Add("flight recorder: the use check asks the engine for a dump (clean stop, stuck); normal opens never do", FlightDumpRequests);
         r.Add("corpse open: a corpse claimed while Combat owns the tick is opened only on the Looting tick", OpenWaitsForLootingTick);
@@ -399,8 +400,8 @@ internal static class UseRefusalTests
                 if (answerAt != 0 && now() >= answerAt) { FakeHost.UseDone(0); answerAt = 0; if (FakeHost.Uses.Last() == CorpseB) bot.P.OnViewObjectContents(CorpseB); }
             }
             for (int i = 0; i < 80; i++) Step();   // 8 s: the old way had four opens and the clean stop by now
-            Check.Eq(FakeHost.Uses.Count(u => u == CorpseA), 1, "one open of the corpse behind the wall, then it is set aside");
-            Check.True(FakeHost.Logs.Any(l => l.Contains("a wall stands between: set aside")), "logged");
+            Check.Eq(FakeHost.Uses.Count(u => u == CorpseA), 0, "no open of the corpse behind the wall (it used to get one, and a walk into the wall)");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("has a wall between: set aside before any open")), "logged");
             Check.False(FakeHost.Logs.Any(l => l.Contains("one clean stop")), "no clean stop or jump at the wall");
             Check.False(FakeHost.Logs.Any(l => l.Contains("abandon #")), "not an abandon");
             Check.True(FakeHost.Uses.Contains(CorpseB), "the corpse in the open is tried meanwhile");
@@ -413,6 +414,35 @@ internal static class UseRefusalTests
             for (int i = 0; i < 80 && FakeHost.Uses.Count(u => u == CorpseA) == before; i++) Step();
             Check.True(FakeHost.Uses.Count(u => u == CorpseA) > before, "the line clear: opened again");
             Check.True(FakeHost.Logs.Any(l => l.Contains("is clear now")), "and said so");
+        });
+    }
+
+    private static void CorpseBehindWallTryAnyway()
+    {
+        World();
+        var host = FakeHost.Create(Player);
+        var bot = new Bot(host);
+        bot.P.CorpseWallOverride = id => id == unchecked((int)CorpseA);   // the ray always says wall
+        WithClock((now, advance) =>
+        {
+            long answerAt = 0;
+            void Step()
+            {
+                int uses = FakeHost.Uses.Count;
+                bot.Tick(BotActivity.Looting);
+                if (FakeHost.Uses.Count > uses) answerAt = now() + 60;
+                advance(100);
+                if (answerAt != 0 && now() >= answerAt) { FakeHost.UseDone(0); answerAt = 0; if (FakeHost.Uses.Last() == CorpseB) bot.P.OnViewObjectContents(CorpseB); }
+            }
+            for (int i = 0; i < 180; i++) Step();   // 18 s
+            Check.Eq(FakeHost.Uses.Count(u => u == CorpseA), 0, "18 s behind the wall: never opened");
+            for (int i = 0; i < 60; i++) Step();    // past 20 s
+            Check.True(FakeHost.Logs.Any(l => l.Contains("one open anyway")), "after 20 s: one open anyway, said");
+            Check.Eq(FakeHost.Uses.Count(u => u == CorpseA), 1, "one open");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("a wall stands between: set aside")), "it didn't open: set aside the old way");
+            for (int i = 0; i < 300; i++) Step();   // 30 s more
+            Check.Eq(FakeHost.Uses.Count(u => u == CorpseA), 1, "and no more opens while the wall stays");
+            Check.False(FakeHost.Logs.Any(l => l.Contains("abandon #")), "never an abandon");
         });
     }
 

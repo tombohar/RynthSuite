@@ -1585,10 +1585,20 @@ public class WorldObjectCache
     }
 
     /// <summary>
+    /// Free main-pack slots kept for loot when a weapon with no known home goes to the main pack
+    /// (loot goes only into the main pack).
+    /// </summary>
+    internal const int UnknownHomeMainPackMargin = 4;
+
+    /// <summary>
     /// As <see cref="FindPackFor(RynthCoreHost, WorldObjectCache?, bool, int)"/>, for putting
     /// <paramref name="forItems"/> away: the pack they all came from when it still has
-    /// <paramref name="requireFree"/> free slots (the main pack only with <paramref name="includeMainPack"/>),
-    /// else the usual choice.
+    /// <paramref name="requireFree"/> free slots (the main pack only with <paramref name="includeMainPack"/>);
+    /// with no home known for any of them (wielded since login, never seen in a pack), the main pack
+    /// while it keeps <see cref="UnknownHomeMainPackMargin"/> slots more, as the game itself unwields;
+    /// else the usual choice. R-20261125-040855-4588: "If I manually swap out wands from my main pack the
+    /// one being disarmed goes into the main pack ... If the macro does this ... it puts the wand it is
+    /// removing into the 1st pack down".
     /// </summary>
     public static int FindPackFor(RynthCoreHost host, WorldObjectCache? cache,
                                   bool includeMainPack, int requireFree, IReadOnlyList<int> forItems)
@@ -1598,15 +1608,20 @@ public class WorldObjectCache
         if (playerId == 0) return 0;
         var inv = cache.GetDirectInventory(forceRefresh: true);
         int home = 0;
+        bool anyKnown = false;
         foreach (int id in forItems)
         {
             int h = id == 0 ? 0 : cache.HomePackOf(id);
+            if (h != 0) anyKnown = true;
             if (h == 0 || (home != 0 && h != home)) { home = 0; break; }
             home = h;
         }
         if (home != 0 && (home != playerId || includeMainPack)
             && FreeSlotsIn(inv, playerId, home, host) >= Math.Max(1, requireFree))
             return home;
+        if (!anyKnown && forItems.Count > 0 && includeMainPack
+            && FreeSlotsIn(inv, playerId, playerId, host) >= Math.Max(1, requireFree) + UnknownHomeMainPackMargin)
+            return playerId;
         return FindPackFor(inv, playerId, includeMainPack, requireFree, host);
     }
 

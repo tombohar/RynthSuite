@@ -28,6 +28,7 @@ internal static class Program
         ItemInfoPartColorsTests.Register(runner);
         KitPlannerTests.Register(runner);
         KitAutoTests.Register(runner);
+        TradeShopTests.Register(runner);
         return runner.Run("RynthAi tests", args.Length > 0 ? args[0] : null);
     }
 }

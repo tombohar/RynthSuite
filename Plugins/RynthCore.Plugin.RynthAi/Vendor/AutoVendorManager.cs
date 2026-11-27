@@ -124,6 +124,8 @@ internal sealed class AutoVendorManager
     // Stacks a split made to be sold, and the rule that sold the stack they came from: sold even when
     // a rule matches them differently at their new size ("Value = 250,000" on a one-note stack).
     private readonly Dictionary<uint, string> _splitOffForSale = new();
+    // The count each of those stacks was made with: its Value reads fresh only while it still has it.
+    private readonly Dictionary<uint, int> _splitOffAmount = new();
     // Per item key: the unit value read off a stack a split made (fresh from the server). Kept across
     // sessions, since the stale stacks it corrects stay stale until relog.
     private readonly Dictionary<string, int> _freshUnit = new(StringComparer.Ordinal);
@@ -1017,7 +1019,10 @@ internal sealed class AutoVendorManager
                 // Only a stack the split made is sold past the rules; one it joined was already
                 // there and keeps whatever the profile says about it.
                 if (outcome.Kind == SplitOutcomeKind.NewStack && outcome.StackCount == ps.Amount)
+                {
                     _splitOffForSale[outcome.StackId] = ps.RuleName;
+                    _splitOffAmount[outcome.StackId] = outcome.StackCount;
+                }
                 _host.Log(outcome.Kind == SplitOutcomeKind.NewStack
                     ? $"[RynthAi] AutoVendor: split {ps.Amount} off {ps.Name}: new stack 0x{outcome.StackId:X8} (x{outcome.StackCount}) after {now - ps.SentAt} ms"
                     : $"[RynthAi] AutoVendor: split {ps.Amount} off {ps.Name}: no new object; the units went onto stack 0x{outcome.StackId:X8} (now x{outcome.StackCount}) at the split's slot");
@@ -1143,7 +1148,10 @@ internal sealed class AutoVendorManager
         {
             var have = new HashSet<uint>(inv.Select(w => unchecked((uint)w.Id)));
             foreach (uint gone in _splitOffForSale.Keys.Where(k => !have.Contains(k)).ToList())
+            {
                 _splitOffForSale.Remove(gone);
+                _splitOffAmount.Remove(gone);
+            }
         }
 
         foreach (var wo in inv)
@@ -1766,7 +1774,8 @@ internal sealed class AutoVendorManager
             if (!votes.TryGetValue(key, out var byUnit)) votes[key] = byUnit = new Dictionary<int, long>();
             int unit = value / stack;
             byUnit[unit] = byUnit.GetValueOrDefault(unit) + stack;
-            if (_splitOffForSale.ContainsKey(unchecked((uint)wo.Id)) && unit > 0)
+            if (unit > 0 && _splitOffForSale.ContainsKey(unchecked((uint)wo.Id))
+                && AutoVendorPlanner.FreshSplitReading(_splitOffAmount.GetValueOrDefault(unchecked((uint)wo.Id)), stack))
                 _freshUnit[key] = unit;
         }
         var result = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -1829,6 +1838,54 @@ internal sealed class AutoVendorManager
     {
         if (_playerId == 0) _playerId = _host.GetPlayerId();
         return _playerId;
+    }
+
+    // ── Read only, for other plugins (RynthAi.Hub VendorSells) ───────────────
+
+    private VTankLootProfile? _askProfile;
+    private string _askPath = string.Empty;
+    private DateTime _askTime;
+
+    /// <summary>
+    /// Read only (RynthAi.Hub VendorSells, RynthSort's Sell packs): whether AutoVendor would sell each
+    /// item with no particular vendor open: the profile it falls back to (default.utl, by the folders it
+    /// searches), the same rule judgement (a Sell rule that surely matches, no Keep that could) and the
+    /// same safety checks (identified, not equipped, retained, rare, attuned, tinkered, imbued,
+    /// inscribed), "only from the main pack" left out (the item may be anywhere). What a vendor buys
+    /// and pays can't be judged without one. Changes nothing: its own copy of the profile, no chat, no
+    /// log. False with <paramref name="error"/> when there is no profile. Pump thread.
+    /// </summary>
+    public bool WouldSell(uint[] ids, byte[] sells, out string profileFile, out string? error)
+    {
+        Array.Clear(sells);
+        error = null;
+        string path = ResolveProfilePath("default.utl", false);
+        profileFile = Path.GetFileName(path);
+        if (!File.Exists(path)) { error = "AutoVendor has no default.utl profile"; return false; }
+        try
+        {
+            DateTime t = File.GetLastWriteTimeUtc(path);
+            if (_askProfile == null || !string.Equals(_askPath, path, StringComparison.OrdinalIgnoreCase) || _askTime != t)
+            {
+                _askProfile = VTankLootParser.Load(path);
+                _askPath = path;
+                _askTime = t;
+            }
+        }
+        catch (Exception ex) { error = "AutoVendor's profile could not be read: " + ex.Message; return false; }
+
+        uint player = PlayerId();
+        VTankLootContext ctx = NewContext();
+        for (int i = 0; i < ids.Length && i < sells.Length; i++)
+        {
+            WorldObject? wo = _cache[unchecked((int)ids[i])];
+            if (wo == null || wo.Id == 0) continue;
+            SafetyFacts safety = ReadSafety(wo, player);
+            if (AutoVendorPlanner.UnsafeReason(safety, onlyFromMainPack: false) != null) continue;
+            ProfileVerdict verdict = AutoVendorRules.Decide(_askProfile.Rules, Judge(EvalObject(wo), InventoryFacts(wo, safety.Appraised), ctx));
+            if (AutoVendorRules.JudgeSell(verdict).Sell) sells[i] = 1;
+        }
+        return true;
     }
 
     private string VendorName(uint id)

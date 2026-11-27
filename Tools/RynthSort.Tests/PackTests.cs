@@ -301,7 +301,8 @@ namespace RynthSort.Tests
         {
             SortStore st = TempStore("packids");
             CharacterSortData d = st.Load("S", "A", out _);
-            Check(!d.PacksFixed, "new character: the defaults get tied to packs on the first read");
+            Check(!d.PacksFixed, "new character: rules made by number get tied to packs on the first read");
+            d.Rules = SortRules.Defaults();
             d.Rules[0].PackId = 0x8000ABCD;
             d.Rules[0].PackNote = "Sack - Components";
             d.PacksFixed = true;

@@ -132,6 +132,7 @@ internal static class Program
         ChestLootTests.Register(runner);
         ItemToolTests.Register(runner);
         TimedCommandsTests.Register(runner);
+        CommandButtonsTests.Register(runner);
         VanishedItemTests.Register(runner);
         KitUsedUpTests.Register(runner);
         VitalWandGateTests.Register(runner);
@@ -240,6 +241,7 @@ internal static class Program
         TinkerTests.Register(runner);
         KitRunnerTests.Register(runner);
         KitAutoPluginTests.Register(runner);
+AmmoAutoPluginTests.Register(runner);
         LauncherSwapTests.Register(runner);
         MissileCraftingTests.Register(runner);
         SelfRatingsTests.Register(runner);
@@ -257,9 +259,13 @@ internal static class Program
         FellowOpenTests.Register(runner);
         WieldBanTests.Register(runner);
         ActiveGearTests.Register(runner);
+        TradeShopPluginTests.Register(runner);
         FeatureSearchTests.Register(runner);
         FeatureCatalogTests.Register(runner);
+        AcMapsTests.Register(runner);
         LootProfilePickerTests.Register(runner);
+        RechargeHoldTests.Register(runner);
+        LosLineTests.Register(runner);
         return runner.Run("RynthAi host tests", args.Length > 0 ? args[0] : null);
     }
 }

@@ -535,7 +535,7 @@ public sealed partial class RynthNavPlugin : RynthPluginBase
         _enterName = enter; _enterType = enterType;
         if (enter.Length > 0) _route = Entrance.EndingInPortal(_route, tns, tew, enter);
         _shownRoute = _route ?? new List<RouteStep> { new(tns, tew, false, false, "walk") };
-        _shownRouteFor = name; _shownRouteEst = est; _shownRouteLive = true; _routeVersion++;
+        _shownRouteFor = name; SetShownRouteGoal(tns, tew); _shownRouteEst = est; _shownRouteLive = true; _routeVersion++;
         SetSubGoalToCurrentLeg();
         if (_route != null && portalsUsed > 0) _arrow.SetRoute(_route, name, type, tns, tew);
         else _arrow.SetTarget(name, type, tns, tew);

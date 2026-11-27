@@ -82,6 +82,9 @@ internal static class NavEngineTests
         r.Add("nav engine: a chat point that loads another route hands over to it", ChatLoadsRoute);   // was a known failure; fixed by a8e5de0
         r.Add("nav engine: a recall that never fires, next waypoint far: stops instead of walking off", RecallTimeoutFar);   // was a known failure; fixed by 5cfbcea
         r.Add("nav engine: a portal/NPC use the engine did not send is not logged as sent and is asked again", PortalNpcUseNotSent);
+        r.Add("nav engine: an NPC point (VTank type 7) uses its NPC on arrival, once, waits for the answer, then goes on", NpcPointUsesTheNpc);
+        r.Add("nav engine: an NPC point waits while the client is busy with the use, 20 s at most", NpcPointWaitsWhileBusy);
+        r.Add("nav engine: an NPC point whose NPC can't be found says so once and goes on after 15 s", NpcPointNotFound);
     }
 
     // ── Rig ───────────────────────────────────────────────────────────────────
@@ -407,13 +410,93 @@ internal static class NavEngineTests
         var point = new NavPoint { Type = T.PortalNPC, TargetName = "Gateway" };
 
         FakeHost.UseObjectAccepts = false;
-        Check.False((bool)fire.Invoke(nav.E, new object[] { point })!, "the engine did not send the use: not fired, the caller asks again");
+        Check.False((bool)fire.Invoke(nav.E, new object[] { point, "portal" })!, "the engine did not send the use: not fired, the caller asks again");
         Check.Eq(LogCount("UseObject portal 'Gateway' (dist="), 0, "and no 'used' line is logged");
         Check.Eq(LogCount("was not sent - will retry"), 1, "the refusal is logged");
 
         FakeHost.UseObjectAccepts = true;
-        Check.True((bool)fire.Invoke(nav.E, new object[] { point })!, "once the engine sends it the portal counts as fired");
+        Check.True((bool)fire.Invoke(nav.E, new object[] { point, "portal" })!, "once the engine sends it the portal counts as fired");
         Check.Eq(LogCount("UseObject portal 'Gateway' (dist="), 1, "and the 'used' line is logged");
+    }
+
+    // ── NPC points (VTank type 7, #rynth-meta-and-expression-issues 11-23: "NPC 'talk' nav nodes do nothing") ──
+
+    private const uint NpcId = 0x7A000002, NpcMe = 0x50000F01;
+
+    private static Nav NpcRoute(bool npcThere, bool busyCalls = false)
+    {
+        FakeHost.Reset(); At(0, 0);
+        FakeHost.WeaponCalls = true;   // UseObject
+        FakeHost.BusyCalls = busyCalls;
+        var pose = FakeHost.PlayerPose;
+        FakeHost.Names[NpcMe] = "Tester";
+        FakeHost.Positions[NpcMe] = pose;
+        if (npcThere)
+        {
+            FakeHost.Names[NpcId] = "Royal Guard";
+            FakeHost.Positions[NpcId] = (pose.Cell, pose.X + 2f, pose.Y, pose.Z);
+        }
+        var host = FakeHost.Create(NpcMe);
+        var cache = FakeHost.MakeCache(host, NpcMe, npcThere ? new[] { NpcId } : Array.Empty<uint>());
+        var npc = Pt(0, 0, T.Npc); npc.TargetName = "Royal Guard";
+        var nav = new Nav(Route(RT.Once, npc, Pt(20, 0), Pt(40, 0)));
+        nav.E.SetWorldObjectCache(cache);
+        nav.E.SetPlayerId(NpcMe);
+        return nav;
+    }
+
+    private static void NpcPointUsesTheNpc()
+    {
+        var nav = NpcRoute(npcThere: true);
+        nav.Tick();
+        Check.Eq(nav.Idx, 0, "arrived at the NPC point: it doesn't go on yet (it used to advance at once)");
+        Check.False(FakeHost.AutoRun, "it stops there");
+        nav.Run(1.0);
+        Check.Eq(FakeHost.Uses.Count(u => u == NpcId), 1, $"the NPC is used, once (uses: {string.Join(",", FakeHost.Uses.Select(u => u.ToString("X8")))})");
+        Check.Eq(LogCount("UseObject NPC 'Royal Guard'"), 1, "logged as an NPC use");
+        nav.Run(2.0);
+        Check.Eq(nav.Idx, 0, "under 3 s after the use: still waiting for the NPC's answer");
+        nav.Run(1.5);
+        Check.Eq(nav.Idx, 1, "then on to [1]");
+        Check.Eq(FakeHost.Uses.Count(u => u == NpcId), 1, "never used twice");
+        At(19.5, 0); nav.Tick();
+        Check.Eq(nav.Idx, 2, "the next plain waypoint is walked as before");
+    }
+
+    private static void NpcPointWaitsWhileBusy()
+    {
+        var nav = NpcRoute(npcThere: true, busyCalls: true);
+        nav.Tick();
+        nav.Run(1.0);
+        Check.Eq(FakeHost.Uses.Count(u => u == NpcId), 1, "used");
+        FakeHost.BusyStateValue = 1;   // the walk over and the use still running
+        nav.Run(8.0);
+        Check.Eq(nav.Idx, 0, "busy 8 s after the use: still waiting");
+        FakeHost.BusyStateValue = 0;
+        nav.Run(0.3);
+        Check.Eq(nav.Idx, 1, "the use done: on to [1]");
+
+        var stuck = NpcRoute(npcThere: true, busyCalls: true);
+        stuck.Tick();
+        stuck.Run(1.0);
+        FakeHost.BusyStateValue = 1;
+        stuck.Run(18.0);
+        Check.Eq(stuck.Idx, 0, "busy 18 s: still waiting");
+        stuck.Run(2.5);
+        Check.Eq(stuck.Idx, 1, "busy past 20 s: goes on anyway");
+    }
+
+    private static void NpcPointNotFound()
+    {
+        var nav = NpcRoute(npcThere: false);
+        nav.Tick();
+        nav.Run(14.0);
+        Check.Eq(nav.Idx, 0, "14 s looking for the NPC: still there");
+        Check.Eq(FakeHost.Uses.Count, 0, "nothing used");
+        nav.Run(1.5);
+        Check.Eq(nav.Idx, 1, "15 s: goes on without it");
+        Check.Eq(FakeHost.Chat.Count(l => l.Contains("NPC 'Royal Guard'") && l.Contains("wasn't found")), 1, "one chat line says so");
+        Check.True(nav.S.EnableNavigation, "nav stays on");
     }
 
     private static void RecallTimeoutNear()

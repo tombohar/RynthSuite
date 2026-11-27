@@ -38,6 +38,7 @@ internal static partial class Program
         Run(nameof(RecallListFromSpellbookAndMemory), RecallListFromSpellbookAndMemory);
         Run(nameof(RecallListColdSpellbook), RecallListColdSpellbook);
         Run(nameof(RecallMemoryRoundTrip), RecallMemoryRoundTrip);
+        Run(nameof(PortalRecallNoRecall), PortalRecallNoRecall);
         Run(nameof(RecallMessages), RecallMessages);
         Run(nameof(HandCastOnALifestone), HandCastOnALifestone);
         Run(nameof(HandCastPortalTie), HandCastPortalTie);
@@ -67,6 +68,7 @@ internal static partial class Program
         RunArrival();
         RunRealWalks();
         RunTripTimes();
+        RunTargetSwitch();
 
         Console.WriteLine();
         Console.WriteLine(_fails == 0 && _asserts > 0
@@ -226,6 +228,31 @@ internal static partial class Program
         var list = RecallPlanner.Build(atlas, null, mem, "c", notes);
         Check(list.Count == 1 && list[0].Command == "@lifestone", "only @lifestone while the spellbook isn't read");
         Check(notes.Exists(n => n.Contains("Spellbook not read")), "says why");
+    }
+
+    // R-20261126-024033-5d60 (Conquest): from the Dark Isle, which can't be recalled to, a goto cast Portal Recall and
+    // landed in a dungeon visited earlier. ACE keeps a portal as the last portal only if it isn't NoRecall.
+    private static void PortalRecallNoRecall()
+    {
+        Check(RecallPlanner.ForPortal(1) == RecallPlanner.LastPortalUpdate.Set, "an ordinary portal: Portal Recall goes there");
+        Check(RecallPlanner.ForPortal(0x20) == RecallPlanner.LastPortalUpdate.Keep, "a no-recall portal: the last portal stays the one before");
+        Check(RecallPlanner.ForPortal(0x20 | 0x2) == RecallPlanner.LastPortalUpdate.Keep, "no-recall among other rules");
+        Check(RecallPlanner.ForPortal(null) == RecallPlanner.LastPortalUpdate.SetUnconfirmed, "a portal not in the list: unconfirmed");
+
+        Atlas atlas = Atlas.Parse(AtlasJson);
+        var known = new HashSet<int> { RecallPlanner.PortalRecall };
+        var mem = new RecallMemory();
+        mem.Set("c", RecallSlot.LastPortal, new RecallSpot { OnMap = true, Ns = 10, Ew = 20, Label = "Somewhere", Unconfirmed = true });
+        var notes = new List<string>();
+        var list = RecallPlanner.Build(atlas, known, mem, "c", notes);
+        Check(!list.Exists(o => o.Name == "Portal Recall"), "an unconfirmed landing isn't used for routes");
+        Check(notes.Exists(n => n.StartsWith("Portal Recall") && n.Contains("cast Portal Recall once")), "...and says so");
+
+        var back = RecallMemory.Parse(mem.Serialize());
+        Check(back.Get("c", RecallSlot.LastPortal)?.Unconfirmed == true, "unconfirmed survives a save");
+        mem.Set("c", RecallSlot.LastPortal, new RecallSpot { OnMap = true, Ns = 10, Ew = 20, Label = "Somewhere" });
+        Check(RecallPlanner.Build(atlas, known, mem, "c", null).Exists(o => o.Name == "Portal Recall"), "confirmed: used again");
+        Check(RecallMemory.Parse(mem.Serialize()).Get("c", RecallSlot.LastPortal)?.Unconfirmed == false, "a confirmed spot reads back confirmed");
     }
 
     private static void RecallMemoryRoundTrip()

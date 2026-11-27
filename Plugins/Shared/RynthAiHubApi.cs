@@ -223,4 +223,43 @@ public unsafe struct RynthAiHubApiV1
     /// 1 = taken, 0 = not such a counter. Any thread.
     /// </summary>
     public delegate* unmanaged[Cdecl]<uint, long, int> SetPlayerCounter;
+
+    // ── Appended 2026-11-26 (check with Has before calling) ─────────────────
+    // Read only, for RynthSort's pack jobs: answers about items in the player's packs. Each one
+    // changes nothing in RynthAi (its own copy of the profile, no chat, no setting written).
+    // text/textCapacity: on 1 the profile's file name, on 0 why there is no answer (UTF-8,
+    // truncated to fit). out[i] is 0 for an item RynthAi doesn't know yet. Pump thread.
+
+    /// <summary>The byte offset of <see cref="LootActions"/> (for <see cref="Has"/>): right after SetPlayerCounter.</summary>
+    public static int LootActionsOffset => (int)BaseStructSize + 4 * sizeof(nint);
+
+    /// <summary>
+    /// LootActions(ids, count, actions, text, textCapacity): per item, the action of the first rule of
+    /// the loot profile in use that matches it (.utl or .json), in VTank numbers (1 Keep, 2 Salvage,
+    /// 3 Sell, 4 Read, 10 Keep #); 0 = no rule matches. The profile's rules only (no Keep # counts,
+    /// no built-in keeps). 0 = no answer: not logged in, no profile, or Loot Mode "rares only".
+    /// </summary>
+    public delegate* unmanaged[Cdecl]<uint*, int, byte*, byte*, int, int> LootActions;
+
+    /// <summary>The byte offset of <see cref="VendorSells"/> (for <see cref="Has"/>).</summary>
+    public static int VendorSellsOffset => (int)BaseStructSize + 5 * sizeof(nint);
+
+    /// <summary>
+    /// VendorSells(ids, count, sells, text, textCapacity): sells[i] = 1 when AutoVendor would sell the
+    /// item with no particular vendor open: its default.utl, a Sell rule that surely matches and no
+    /// Keep that could, and its safety checks (identified, not equipped, rare, retained, attuned,
+    /// tinkered, imbued or inscribed). What a vendor buys and pays isn't judged. 0 = no answer.
+    /// </summary>
+    public delegate* unmanaged[Cdecl]<uint*, int, byte*, byte*, int, int> VendorSells;
+
+    /// <summary>The byte offset of <see cref="TradeGives"/> (for <see cref="Has"/>).</summary>
+    public static int TradeGivesOffset => (int)BaseStructSize + 6 * sizeof(nint);
+
+    /// <summary>
+    /// TradeGives(partner, ids, count, gives, text, textCapacity): gives[i] = 1 when AutoTrade would add
+    /// the item to a trade with <c>partner</c> (UTF-8; "" = anyone): the profile it would load
+    /// (&lt;partner&gt;.utl, else default.utl), a Keep or Keep # rule that matches, and its safety
+    /// checks. 0 = no answer (no AutoTrade profile).
+    /// </summary>
+    public delegate* unmanaged[Cdecl]<byte*, uint*, int, byte*, byte*, int, int> TradeGives;
 }

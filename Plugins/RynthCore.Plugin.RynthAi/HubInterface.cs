@@ -47,6 +47,9 @@ internal static unsafe class HubInterface
             t->VaultedDungeonsEnabled = &VaultedDungeonsEnabled;
             t->BackAwayFrom = &BackAwayFrom;
             t->SetPlayerCounter = &SetPlayerCounter;
+            t->LootActions = &LootActions;
+            t->VendorSells = &VendorSells;
+            t->TradeGives = &TradeGives;
             t->Version = RynthAiHubApiV1.InterfaceVersion;
             _table = t;
         }
@@ -275,6 +278,51 @@ internal static unsafe class HubInterface
     {
         try { return !_released && T11ItemSupport.SetCounter(propertyId, value) ? 1 : 0; }
         catch { return 0; }
+    }
+
+    // ── Read only answers about items in the packs (RynthSort's pack jobs; RynthAiPlugin.HubReadOnly.cs) ──
+
+    private delegate bool ItemAnswer(uint[] ids, byte[] result, out string profileFile, out string? error);
+
+    /// <summary>Copies the ids in, runs <paramref name="answer"/>, copies the bytes out and the profile's name or the reason into text.</summary>
+    private static int Answer(uint* ids, int count, byte* result, byte* text, int textCapacity, ItemAnswer? answer)
+    {
+        if (answer == null) { WriteUtf8("RynthAi isn't ready (log in first).", text, textCapacity); return 0; }
+        if (count < 0 || count > 4096 || (count > 0 && (ids == null || result == null))) { WriteUtf8("bad arguments", text, textCapacity); return 0; }
+        var a = new uint[count];
+        for (int i = 0; i < count; i++) a[i] = ids[i];
+        var r = new byte[count];
+        bool ok = answer(a, r, out string file, out string? error);
+        for (int i = 0; i < count; i++) result[i] = ok ? r[i] : (byte)0;
+        WriteUtf8(ok ? file : error ?? "no answer", text, textCapacity);
+        return ok ? 1 : 0;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int LootActions(uint* ids, int count, byte* actions, byte* text, int textCapacity)
+    {
+        try { return Answer(ids, count, actions, text, textCapacity, Plugin is { } p ? p.LootActionsForHub : null); }
+        catch (Exception ex) { WriteUtf8("loot match failed: " + ex.Message, text, textCapacity); return 0; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int VendorSells(uint* ids, int count, byte* sells, byte* text, int textCapacity)
+    {
+        try { return Answer(ids, count, sells, text, textCapacity, Plugin is { } p ? p.VendorSellsForHub : null); }
+        catch (Exception ex) { WriteUtf8("AutoVendor match failed: " + ex.Message, text, textCapacity); return 0; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int TradeGives(byte* partner, uint* ids, int count, byte* gives, byte* text, int textCapacity)
+    {
+        try
+        {
+            string who = Utf8(partner) ?? string.Empty;
+            RynthAiPlugin? p = Plugin;
+            ItemAnswer? answer = p == null ? null : (uint[] a, byte[] r, out string f, out string? e) => p.TradeGivesForHub(who, a, r, out f, out e);
+            return Answer(ids, count, gives, text, textCapacity, answer);
+        }
+        catch (Exception ex) { WriteUtf8("AutoTrade match failed: " + ex.Message, text, textCapacity); return 0; }
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]

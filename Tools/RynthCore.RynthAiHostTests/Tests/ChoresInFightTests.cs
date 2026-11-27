@@ -24,6 +24,7 @@ internal static class ChoresInFightTests
         r.Add("chores: a fight is a monster in Monster Range or on top of us; never with the macro or combat off", FightSignal);
         r.Add("chores: AutoCram waits while a monster is on us, and crams once the fight is over", CramWaitsForFight);
         r.Add("chores: AutoCram stands down while RynthSort's auto-sort is on (they fought); off again, it crams; /ub autocram by hand still runs", CramOffWithAutoSort);
+        r.Add("chores: AutoCram runs with the macro off while the Item Tool's chest looter runs (#rynth-issues 2026-11-24)", CramDuringChestLooter);
     }
 
     private static CombatManager.ScannedTarget At(double yards) =>
@@ -91,6 +92,40 @@ internal static class ChoresInFightTests
 
     // Owner, 2026-11-03: "Auto sort and auto cram are fighting each other. When auto sort is on, auto
     // cram should be disabled". RynthAi reads RynthSort's auto-sort (LegacyUiSettings.AutoSortOn).
+    // #rynth-issues 2026-11-24, "Inventory Autocram does not actively run while looting chests with
+    // ItemTool": the chest looter runs with the macro off as well, and Auto Cram needed the macro.
+    private static void CramDuringChestLooter()
+    {
+        try
+        {
+            var bot = new TickIsolationTests.Bot(heal: false, arrange: () =>
+            {
+                FakeHost.Names[Gem] = "Black Opal";
+                FakeHost.ItemTypes[Gem] = ItemTypeGem;
+                FakeHost.Containers[Gem] = Player;
+                FakeHost.Names[SidePack] = "Backpack";
+                FakeHost.ItemTypes[SidePack] = ItemTypeContainer;
+                FakeHost.Ints[(SidePack, ItemsCapacityKey)] = 24;
+                FakeHost.Containers[SidePack] = Player;
+            });
+            _ = bot.Cache[unchecked((int)Gem)];
+            _ = bot.Cache[unchecked((int)SidePack)];
+            bot.S.EnableAutocram = true;
+            bot.S.IsMacroRunning = false;
+            bool looterRunning = false;
+            var inv = new InventoryManager(bot.Host, bot.S, bot.Cache) { KeepsPacksWithoutMacro = () => looterRunning };
+            bot.Set("_inventoryManager", inv);
+            for (int i = 0; i < 5; i++) bot.Call("TickCramStack", bot.S);
+            Check.Eq(FakeHost.Moves.Count, 0, "macro off, no chest looter: Auto Cram waits, as before");
+
+            looterRunning = true;
+            bot.Call("TickCramStack", bot.S);
+            Check.True(FakeHost.Moves.Any(m => m.Id == Gem && m.Pack == SidePack),
+                "the chest looter running, macro off: the gem is crammed into the side pack (moves: " + string.Join(",", FakeHost.Moves.Select(m => $"{m.Id:X8}->{m.Pack:X8}")) + ")");
+        }
+        finally { TickIsolationTests.Done(); }
+    }
+
     private static void CramOffWithAutoSort()
     {
         try

@@ -6,17 +6,31 @@ using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthSort.Views;
 
+/// <summary>The window's four pages.</summary>
+internal enum PanelTab { Packs, Moves, Layouts, Settings }
+
 /// <summary>
-/// The RynthSort window: the auto-sort box and status, the job buttons, then one collapsing
-/// section per side pack ("Pack 1: Sack (12/24) - Components", top pack first) holding a line
-/// that says which pack in the game it is (its icon, "Select in game", and its place in the
-/// pack column), that pack's warnings and its rules (A-Z), a section for rules whose pack isn't
-/// carried, and the settings. A rule is one row (on/off box, its classes and names); selecting it opens its
-/// editor beneath: the classes and names as chips (click one to take it out), a class picker and
-/// a name box to add, the pack it sends to, and Remove. Recorded on the pump thread, replayed by
-/// the engine.
+/// The RynthSort window (redesigned 2026-11-26 after #rynth-issues "The bag sort feature is lacking
+/// in UX"). Always on top: the Auto-sort box with one coloured line that says what it is doing
+/// (off, on and tidy, moving, paused and why), a line or two on what waits and what is left alone,
+/// the Sort now / Clean packs / Put back buttons and any warning. Below, four pages:
+/// <list type="bullet">
+/// <item>Packs (SortPanel.Packs.cs): "what goes in this pack", one section per side pack, top pack
+/// first: which pack in the game it is (icon, Select in game, its place in the column), a strip of
+/// what is in it, its rules with how many items they hold and bring, a kind picker, + Add rule,
+/// + Add selected, Empty this pack, Merge rules; rules for packs not carried; an Undo for the last
+/// big rule change.</item>
+/// <item>Moves (SortPanel.Moves.cs): what a sort would move now (a table at op level 3), what waits,
+/// the items left alone because the player used them (and "Sort them too"), the last moves and Put back.</item>
+/// <item>Layouts (SortPanel.Layouts.cs): the starter layouts, fitted to the packs carried and
+/// previewed before anything changes.</item>
+/// <item>Settings (SortPanel.Settings.cs): when to sort, how long to leave used items alone, order
+/// inside packs, Empty side packs.</item>
+/// </list>
+/// It works at script-window op level 2 (released engines); with op level 3 the status line is bold
+/// and the move lists are tables. Recorded on the pump thread, replayed by the engine.
 /// </summary>
-internal sealed class SortPanel
+internal sealed partial class SortPanel
 {
     private const float RowIndent = 6f, EditorIndent = 22f;
     private const int ChipsPerLine = 3;
@@ -32,13 +46,30 @@ internal sealed class SortPanel
     public Func<string> Character = () => string.Empty;
     /// <summary>The engine draws item icons in script windows (op level 2).</summary>
     public Func<bool> Icons = () => false;
+    /// <summary>The engine's script-window op level (UiGetInfo; 0 when unknown). 3 adds tables and fonts.</summary>
+    public Func<int> OpLevel = () => 0;
     /// <summary>The engine can select objects (else no Select button).</summary>
     public Func<bool> CanSelect = () => false;
     /// <summary>Selects an object in the game (Host.SelectItem); false when it couldn't.</summary>
     public Func<uint, bool> SelectInGame = _ => false;
+    /// <summary>The item selected in the game, read against the packs now (the plugin's host read; "unavailable" by default).</summary>
+    public Func<SelectedItem> ReadSelected = () => SelectedItem.Of(SelectionKind.Unavailable);
+    /// <summary>The clock for notes that fade (the tests set it).</summary>
+    public Func<long> Now = () => Environment.TickCount64;
 
     private uint _selectedPack;
     private string _selectNote = string.Empty;
+    private const long NoteMs = 60_000;
+    private uint _notePack;
+    private string _note = string.Empty;
+    private bool _noteGood;
+    private long _noteUntilMs;
+
+    private PanelTab _tab = PanelTab.Packs;
+    private bool _tabChosen;
+    private string _forCharacter = string.Empty;
+    /// <summary>This pass's preview of a sort (from the last read), or null before the first read.</summary>
+    private SortPreview? _preview;
 
     public SortPanel(SortController c, Action save)
     {
@@ -48,307 +79,206 @@ internal sealed class SortPanel
 
     /// <summary>The rule whose editor is open, or null.</summary>
     public SortRule? Selected => _selected;
+    /// <summary>The page shown.</summary>
+    public PanelTab Tab => _tab;
+
+    private bool Rich => OpLevel() >= UiFormat.OpLevelRich;
 
     public void Draw(UiWindow w)
     {
-        if (Character().Length == 0)
+        string who = Character();
+        if (who.Length == 0)
         {
             w.TextDisabled("Log in to sort your packs.");
             return;
         }
-        SortSettings s = _c.Data.Settings;
+        if (!string.Equals(who, _forCharacter, StringComparison.Ordinal)) ForgetCharacter(who);
         List<SortRule> rules = _c.Data.Rules;
         if (_selected != null && !rules.Contains(_selected)) _selected = null;
-        SortView view = _c.Planner.View;
-
-        w.Checkbox("Auto-sort", "auto", s.Auto, v => _c.SetAuto(v));
-        w.Tooltip("Keeps every pack tidy: new items go to their pack after the settle time, items in the wrong pack move to theirs, "
-                  + "stacks of one kind are joined and items are put in order (A-Z) inside each pack");
-        w.SameLine();
-        w.TextColored(_c.Paused ? UiColors.Amber : UiColors.Grey, _c.Status);
-        if (view.Waiting > 0)
+        if (!_tabChosen)
         {
-            w.SameLine();
-            w.TextDisabled($"({view.Waiting} waiting)");
+            // A character with no rules yet starts on the layouts: the quickest way to a sensible setup.
+            _tab = rules.Count == 0 ? PanelTab.Layouts : PanelTab.Packs;
+            _tabChosen = true;
+        }
+        SortView view = _c.Planner.View;
+        SortInventory? inv = _c.LastInventory;
+        _preview = inv != null ? SortPreview.Build(inv, rules, _c.CurrentOptions, _c.IsHeld) : null;
+
+        DrawStatus(w, view, rules);
+        DrawTabs(w);
+        switch (_tab)
+        {
+            case PanelTab.Moves: DrawMovesTab(w, view); break;
+            case PanelTab.Layouts: DrawLayoutsTab(w, rules); break;
+            case PanelTab.Settings: DrawSettingsTab(w); break;
+            default: DrawPacksTab(w, view, rules); break;
+        }
+    }
+
+    /// <summary>Another character: the window starts fresh (its page, picks and undo are the last one's).</summary>
+    private void ForgetCharacter(string who)
+    {
+        _forCharacter = who;
+        _tabChosen = false;
+        _selected = null;
+        _nameDraft = string.Empty;
+        _layoutKey = null;
+        _layoutNote = string.Empty;
+        _undo = null;
+        _undoWhat = string.Empty;
+        _note = _selectNote = string.Empty;
+    }
+
+    /// <summary>Shows a page ("Pick a layout" and the like); the next pass draws it.</summary>
+    internal void ShowTab(PanelTab tab)
+    {
+        _tab = tab;
+        _tabChosen = true;
+    }
+
+    // ── Always on top ───────────────────────────────────────────────────────
+
+    private void DrawStatus(UiWindow w, SortView view, List<SortRule> rules)
+    {
+        SortSettings s = _c.Data.Settings;
+        w.Checkbox("Auto-sort", "auto", s.Auto, v => _c.SetAuto(v));
+        w.Tooltip(AutoTooltip);
+        w.SameLine();
+        var (text, color) = Headline(_c, view, rules.Count == 0);
+        // Wrapped beside the box (a narrow window wraps it in a column of its own, never off the edge).
+        if (Rich) w.PushFont(UiFormat.FontBold);
+        w.PushStyleColor(UiFormat.ColText, color);
+        w.TextWrapped(text);
+        w.PopStyleColor();
+        if (Rich) w.PopFont();
+        w.Tooltip(HeadlineTooltip);
+
+        List<string> details = Details(_c, view, _preview, rules.Count == 0);
+        if (details.Count > 0)
+        {
+            w.PushStyleColor(UiFormat.ColText, UiColors.Soft);
+            foreach (string line in details) w.TextWrapped(line);
+            w.PopStyleColor();
         }
 
         w.Button("Sort now", "job.all", () => _c.StartJob(SortScope.All));
-        w.Tooltip("Sort every pack now, without waiting for new items to settle");
+        w.Tooltip("Sort every pack once, now: items go to their packs, stacks are joined and packs put in order. "
+                  + "It doesn't wait for new items to settle; items you used lately are still left alone.");
         w.SameLine();
         w.Button("Clean packs", "job.clean", () => _c.StartJob(SortScope.Clean));
         w.Tooltip("Sort now, and side-pack items no rule wants go back to the main pack");
-        w.SameLine();
-        w.Button("Empty side packs", "job.unpack", () => _c.StartUnpack(null));
-        w.Tooltip("Move everything from your side packs into the main pack. Turns auto-sort off first, so nothing moves back.");
+        int back = _c.PutBackCount;
+        if (back > 0)
+        {
+            w.SameLine();
+            w.Button("Put back", "job.back", () => _c.StartPutBack());
+            w.Tooltip($"Undo the last sort: the {Count(back, "item")} it moved go back where they were. "
+                      + "Turns auto-sort off first, so nothing moves again. Also: /rsort back");
+        }
 
-        w.TextDisabled($"Main pack ({view.Main.Used}/{view.Main.Capacity}){OrderNote(view, view.Main, " - ")}");
-        w.Tooltip("Items no rule names stay in the main pack");
         if (view.MainFull) w.TextColored(UiColors.Amber, "The main pack is full");
         if (s.Auto && _c.LastBot is RynthAiActivity bot && (bot & RynthAiActivity.AutoCram) != 0 && (bot & RynthAiActivity.MacroRunning) != 0)
             w.TextColored(UiColors.Amber, "RynthAi's AutoCram also moves loot out of the main pack; turn one of them off");
         foreach (string warning in Warnings()) w.TextColored(UiColors.Amber, warning);
-
-        string numbering = NumberingNote(view);
-        if (numbering.Length > 0)
-        {
-            w.PushStyleColor(UiFormat.ColText, UiColors.Grey);
-            w.TextWrapped(numbering);
-            w.PopStyleColor();
-        }
-
-        Dictionary<int, List<SortRule>> byPack = Group(rules, view);
-        Dictionary<int, List<string>> conflicts = Conflicts(rules, view);
-        for (int i = 1; i <= view.Packs.Count; i++)
-            DrawPack(w, view, rules, i, byPack.TryGetValue(i, out List<SortRule>? list) ? list : new List<SortRule>(),
-                     conflicts.TryGetValue(i, out List<string>? c) ? c : null);
-        if (byPack.TryGetValue(0, out List<SortRule>? missing)) DrawMissing(w, view, rules, missing);
-        if (view.Packs.Count == 0) w.TextDisabled("No side packs: items stay in the main pack.");
-
-        if (w.CollapsingHeader("Settings", "settings"))
-        {
-            w.SliderInt("Settle (s)", "settle", s.SettleSec, SortSettings.SettleMin, SortSettings.SettleMax, v => { s.SettleSec = v; _save(); });
-            w.Tooltip("How long a new item sits in the main pack before it is moved");
-            w.SliderInt("Gap (ms)", "gap", s.GapMs, SortSettings.GapMin, SortSettings.GapMax, v => { s.GapMs = v; _save(); });
-            w.Tooltip("Auto-sort's pause between two moves, to leave the bot room. Sort now, Clean and Empty don't wait.");
-            w.Checkbox("Sort during fights", "combat", s.SortInCombat, v => { s.SortInCombat = v; _save(); });
-            w.Tooltip("Off: nothing moves while RynthAi fights. On: moves go between its attacks and casts (never while one is unanswered)");
-            w.Checkbox("Put items in order inside packs", "order", s.OrderInPacks, v => { s.OrderInPacks = v; _save(); });
-            w.Tooltip("Like items side by side, A-Z by name, in every pack. Off: items only go to their packs (and stacks are still joined).");
-            w.Checkbox("Group by kind first", "orderkind", s.OrderKindFirst, v => { s.OrderKindFirst = v; _save(); });
-            w.Tooltip("Order by kind (Armor, Gem, Spell Component ...) and then A-Z by name, instead of A-Z by name only");
-            if (!(_c.Abilities.ReadOrder && _c.Abilities.PlaceMoves))
-                w.TextWrapped("This RynthCore can't read the order inside packs (it needs plugin API 80): items go to their packs but aren't put in order.");
-        }
-
-        if (_c.Log.Count > 0)
-        {
-            w.Separator();
-            foreach (string line in _c.Log) w.TextDisabled(line);
-        }
     }
 
-    // ── Pack sections ───────────────────────────────────────────────────────
-
-    private void DrawPack(UiWindow w, SortView view, List<SortRule> rules, int number, List<SortRule> packRules, List<string>? conflicts)
+    private void DrawTabs(UiWindow w)
     {
-        PackLine p = view.Packs[number - 1];
-        bool full = view.Full.Contains(number);
-        List<string> warnings = FallbackWarnings(view, number);
-        if (conflicts != null) warnings.AddRange(conflicts);
-        bool attention = full || warnings.Count > 0;
-        if (attention) w.PushStyleColor(UiFormat.ColText, UiColors.Amber);
-        bool open = w.CollapsingHeader($"Pack {number}: {p.Label}", $"pack.{p.Id:X8}", defaultOpen: true);
-        if (attention) w.PopStyleColor();
-        w.Tooltip(PackHeaderTooltip(view, number));
-        if (!open) return;
-
-        w.Indent(RowIndent);
-        DrawWhere(w, view, p, number);
-        if (full) w.TextColored(UiColors.Amber, "This pack is full: items for it wait where they are");
-        foreach (string line in warnings) w.TextColored(UiColors.Amber, line);
-        packRules.Sort(SortRules.CompareForList);
-        foreach (SortRule r in packRules) DrawRule(w, view, rules, r);
-        if (packRules.Count == 0) w.TextDisabled("No rules send items here.");
-
-        uint id = p.Id;
-        w.SmallButton("+ Add rule", $"add.{id:X8}", () => AddRule(rules, view, number));
-        w.Tooltip("A rule sends items to this pack: items of any of its classes, or with any of its names in their name. A name beats a class.");
+        TabButton(w, "Packs", "tab.packs", PanelTab.Packs, "What goes in each pack: its rules, what is in it, and where it is in the game");
         w.SameLine();
-        w.SmallButton("Empty this pack", $"unpack.{id:X8}", () => _c.StartUnpack(number));
-        w.Tooltip($"Move everything in pack {number} into the main pack. Turns auto-sort off first, so nothing moves back. Also: /rsort unpack {number}");
-        int on = 0;
-        foreach (SortRule r in packRules) if (r.On && !r.IsEmpty) on++;
-        if (on >= 2)
-        {
-            w.SameLine();
-            w.SmallButton("Merge rules", $"merge.{id:X8}", () => MergeRules(rules, packRules));
-            w.Tooltip("Make this pack's rules (the ones that are on) one rule with all their classes and names");
-        }
-        string order = OrderNote(view, p, "");
-        if (order.Length > 0) w.TextDisabled(order);
-        w.Unindent(RowIndent);
-    }
-
-    /// <summary>The pack's first line: its icon, Select in game, and where it is in the pack column.</summary>
-    private void DrawWhere(UiWindow w, SortView view, PackLine p, int number)
-    {
-        if (Icons())
-        {
-            w.Image(UiFormat.IconKindObject, p.Id, WhereIcon, WhereIcon);
-            w.SameLine();
-        }
-        if (CanSelect())
-        {
-            uint id = p.Id;
-            string name = p.Name;
-            w.SmallButton("Select in game", $"select.{id:X8}", () =>
-            {
-                _selectedPack = id;
-                _selectNote = SelectInGame(id) ? $"Selected: the game has your {name} selected now" : "The game didn't take the selection";
-            });
-            w.Tooltip(SelectTooltip);
-            w.SameLine();
-        }
-        w.TextDisabled(WhereText(view, p, number));
-        if (_selectedPack == p.Id && _selectNote.Length > 0) w.TextDisabled(_selectNote);
-    }
-
-    private const float WhereIcon = 20f;
-
-    internal const string SelectTooltip =
-        "Selects this pack in the game, as clicking it in your inventory would, so the game shows you which one it is "
-        + "(its name in the selection bar). Nothing moves.";
-
-    private void DrawMissing(UiWindow w, SortView view, List<SortRule> rules, List<SortRule> missing)
-    {
-        w.PushStyleColor(UiFormat.ColText, UiColors.Amber);
-        bool open = w.CollapsingHeader($"Rules for packs you don't have ({missing.Count})", "missing", defaultOpen: true);
-        w.PopStyleColor();
-        if (!open) return;
-        w.Indent(RowIndent);
-        w.TextWrapped("Their items stay where they are. Pick one of your packs in a rule's editor, or remove the rule.");
-        var groups = new List<List<SortRule>>();
-        foreach (SortRule r in missing)
-        {
-            List<SortRule>? g = groups.Find(x => SamePackOf(x[0], r));
-            if (g == null) groups.Add(g = new List<SortRule>());
-            g.Add(r);
-        }
-        foreach (List<SortRule> g in groups)
-        {
-            SortRule first = g[0];
-            w.TextColored(UiColors.Amber, first.PackNote.Length > 0 ? $"A pack you don't have (it was {first.PackNote}):" : $"Pack {first.Pack}, which you don't have:");
-            g.Sort(SortRules.CompareForList);
-            foreach (SortRule r in g) DrawRule(w, view, rules, r);
-        }
-        w.Unindent(RowIndent);
-    }
-
-    private static bool SamePackOf(SortRule a, SortRule b) =>
-        a.PackId != 0 || b.PackId != 0 ? a.PackId == b.PackId : a.Pack == b.Pack;
-
-    // ── Rules ───────────────────────────────────────────────────────────────
-
-    private void DrawRule(UiWindow w, SortView view, List<SortRule> rules, SortRule r)
-    {
-        string k = "r" + r.Uid;
-        w.Checkbox("", k + ".on", r.On, v => { r.On = v; _save(); });
-        w.Tooltip(r.On ? "Rule on: click to turn it off" : "Rule off: click to turn it on");
+        int moves = _preview?.Moves.Count ?? 0;
+        TabButton(w, moves > 0 ? $"Moves ({moves})" : "Moves", "tab.moves", PanelTab.Moves,
+            "What a sort would move now, the items left alone because you used them, and the last moves");
         w.SameLine();
-        bool selected = ReferenceEquals(_selected, r);
-        w.Selectable(Shown(SortRules.Describe(r)), k + ".row", selected, () =>
-        {
-            _selected = ReferenceEquals(_selected, r) ? null : r;
-            _nameDraft = string.Empty;
-        });
-        w.Tooltip(selected ? "Click to close the editor" : "Click to change this rule");
-        if (selected) DrawEditor(w, view, rules, r);
+        TabButton(w, "Layouts", "tab.layouts", PanelTab.Layouts, "Ready-made rules for typical packs: see where things would go, then use one in a click");
+        w.SameLine();
+        TabButton(w, "Settings", "tab.settings", PanelTab.Settings, "When to sort, how long to leave items you use alone, order inside packs");
+        w.Separator();
     }
 
-    private void DrawEditor(UiWindow w, SortView view, List<SortRule> rules, SortRule r)
+    private void TabButton(UiWindow w, string label, string id, PanelTab tab, string tip)
     {
-        string k = "r" + r.Uid;
-        w.Indent(EditorIndent);
-
-        List<int> classes = SortRules.SortedClasses(r);
-        if (classes.Count > 0)
-        {
-            w.TextDisabled("Classes:");
-            for (int i = 0; i < classes.Count; i++)
-            {
-                if (i % ChipsPerLine != 0 || i == 0) w.SameLine();
-                int cls = classes[i];
-                string label = ObjectClasses.Label(cls);
-                w.SmallButton(label + "  x", $"{k}.c{cls}", () => { r.RemoveClass(cls); _save(); });
-                w.Tooltip($"Take {label} out of this rule");
-            }
-        }
-        var offered = new List<int>();
-        var labels = new List<string> { "Add a class..." };
-        foreach (int cls in ObjectClasses.Choices)
-        {
-            if (r.HasClass(cls)) continue;
-            offered.Add(cls);
-            labels.Add(ObjectClasses.Label(cls));
-        }
-        if (offered.Count > 0 && r.Classes.Count < SortRule.MaxClasses)
-            w.Combo("Class", k + ".addclass", 0, labels, v =>
-            {
-                if (v >= 1 && v <= offered.Count && r.AddClass(offered[v - 1])) _save();
-            });
-
-        List<string> names = SortRules.SortedNames(r);
-        if (names.Count > 0)
-        {
-            w.TextDisabled("Names:");
-            for (int i = 0; i < names.Count; i++)
-            {
-                if (i % ChipsPerLine != 0 || i == 0) w.SameLine();
-                string name = names[i];
-                w.SmallButton($"\"{Shown(name)}\"  x", $"{k}.n{i}", () => { r.RemoveName(name); _save(); });
-                w.Tooltip($"Take \"{name}\" out of this rule");
-            }
-        }
-        if (r.Names.Count < SortRule.MaxNames)
-        {
-            w.InputText("Name has", k + ".draft", _nameDraft, SortRule.MaxNameLength, (text, enter) =>
-            {
-                _nameDraft = text;
-                if (enter) AddDraft(r);
-            }, UiFormat.InputEnterReturnsTrue);
-            w.Tooltip("Part of an item's name, any case: \"Opal\" takes every item with Opal in its name. Enter or Add puts it in the rule.");
-            w.SameLine();
-            w.SmallButton("Add", k + ".addname", () => AddDraft(r));
-        }
-
-        int shown = ShownPack(view, r);
-        w.Combo("Pack", k + ".pack", Math.Max((shown > 0 ? shown : r.Pack) - 1, 0), PackChoices(view, r.Pack), v =>
-        {
-            SetPack(r, view, v + 1);
-            _save();
-        });
-        w.Tooltip("Where this rule sends items. " + PackTooltip(view));
-        w.SmallButton("Remove rule", k + ".remove", () =>
-        {
-            rules.Remove(r);
-            if (ReferenceEquals(_selected, r)) _selected = null;
-            _save();
-        });
-        w.Unindent(EditorIndent);
+        w.ToggleButton(label, id, _tab == tab, () => ShowTab(tab));
+        w.Tooltip(tip);
     }
 
-    private void AddDraft(SortRule r)
+    internal const string AutoTooltip =
+        "On: RynthSort keeps your packs tidy by itself. New items go to their pack once they have sat in the main pack for the settle time, "
+        + "items in the wrong pack move to theirs, stacks are joined and items are put in order. "
+        + "It waits while you loot, trade, use a vendor or cast, and leaves items you used lately alone. Off: nothing moves unless you press Sort now.";
+
+    internal const string HeadlineTooltip =
+        "What RynthSort is doing now. Green: all is well. Blue: moving items. Amber: something is in the way (see the line below). Grey: off.";
+
+    // ── Status words (pure, for the tests) ──────────────────────────────────
+
+    /// <summary>The coloured line beside the Auto-sort box: what it is doing, in a few words.</summary>
+    internal static (string Text, uint Color) Headline(SortController c, SortView v, bool noRules)
     {
-        if (r.AddName(_nameDraft)) _save();
-        _nameDraft = string.Empty;
+        string status = c.Status;
+        if (c.Paused) return ("Paused: " + PausedWords(status["paused: ".Length..]), UiColors.Amber);
+        if (c.Job is SortScope job)
+            return (job switch
+            {
+                SortScope.Unpack => "Emptying side packs",
+                SortScope.PutBack => "Putting items back",
+                SortScope.Clean => "Cleaning packs",
+                _ => "Sorting now",
+            }, UiColors.Blue);
+        if (!c.Data.Settings.Auto) return ("Off: nothing moves by itself", UiColors.Grey);
+        if (status == "sorting") return ("On: moving items", UiColors.Blue);
+        if (status is "starting" or "reading your packs" or "waiting for the inventory") return ("On: reading your packs", UiColors.Grey);
+        int stuck = v.WaitFull + v.WaitNoPack + v.WaitMainFull;
+        if (stuck > 0) return ($"On: {Count(stuck, "item")} can't move", UiColors.Amber);
+        if (v.WaitSettle > 0)
+            return ($"On: {Count(v.WaitSettle, "new item")} {(v.WaitSettle == 1 ? "moves" : "move")} in {Seconds(v.NextSettleMs)}", UiColors.Green);
+        if (noRules) return ("On: no rules yet", UiColors.Amber);
+        return ("On: all tidy", UiColors.Green);
     }
 
-    private void AddRule(List<SortRule> rules, SortView view, int number)
+    /// <summary>The lines under it: what waits and why, what is left alone, what moved last.</summary>
+    internal static List<string> Details(SortController c, SortView v, SortPreview? p, bool noRules)
     {
-        if (rules.Count >= SortStore.MaxRules) return;
-        var added = new SortRule();
-        SetPack(added, view, number);
-        rules.Add(added);
-        _selected = added;
-        _nameDraft = string.Empty;
-        _save();
+        var lines = new List<string>();
+        if (noRules)
+            lines.Add("No rules yet, so nothing goes to your side packs. Pick a starter layout, or add rules to each pack.");
+        else if (!c.Data.Settings.Auto && c.Job == null && p != null && !p.Empty)
+            lines.Add($"{Count(p.Moves.Count, "item")} would move when you sort (see Moves).");
+
+        var wait = new List<string>();
+        if (v.WaitFull > 0) wait.Add($"{Count(v.WaitFull, "item")} {(v.WaitFull == 1 ? "waits" : "wait")} for a full pack");
+        if (v.WaitNoPack > 0) wait.Add($"{Count(v.WaitNoPack, "item")} for a pack you don't carry");
+        if (v.WaitMainFull > 0) wait.Add($"{Count(v.WaitMainFull, "item")} for room in the main pack");
+        if (wait.Count > 0) lines.Add(Capital(string.Join("; ", wait)) + ".");
+
+        int held = p?.View.Held.Count ?? v.Held.Count;
+        if (held > 0) lines.Add($"{Count(held, "item")} left alone because you used {(held == 1 ? "it" : "them")} lately (see Moves).");
+        if (c.Log.Count > 0) lines.Add("Last: " + c.Log[0]);
+        return lines;
     }
 
-    /// <summary>The pack's rules that are on become one (the first A-Z keeps its place in the list, so a tie still goes its way).</summary>
-    private void MergeRules(List<SortRule> rules, List<SortRule> packRules)
+    /// <summary>Why it is paused, for a player: "a corpse or chest is open" for "looting".</summary>
+    internal static string PausedWords(string reason) => reason switch
     {
-        SortRule? keep = null;
-        foreach (SortRule r in rules)
-        {
-            if (!packRules.Contains(r) || !r.On || r.IsEmpty) continue;
-            if (keep == null) { keep = r; continue; }
-            keep.TakeEntriesOf(r);
-        }
-        if (keep == null) return;
-        rules.RemoveAll(r => !ReferenceEquals(r, keep) && packRules.Contains(r) && r.On && !r.IsEmpty);
-        _selected = keep;
-        _save();
-    }
+        "portal space" => "in portal space",
+        "looting" => "a corpse or chest is open",
+        "vendor open" => "a vendor is open",
+        "trading" => "a trade is open",
+        "busy" => "you are casting or using something",
+        _ => reason,
+    };
+
+    /// <summary>"1 item", "3 items".</summary>
+    internal static string Count(int n, string what) => n == 1 ? "1 " + what : $"{n} {what}s";
+
+    /// <summary>"3 s", or "a moment" under a second.</summary>
+    internal static string Seconds(long ms) => ms < 1000 ? "a moment" : $"{(ms + 999) / 1000} s";
+
+    private static string Capital(string s) => s.Length > 0 ? char.ToUpperInvariant(s[0]) + s[1..] : s;
+
+    /// <summary>"main pack", "pack 3".</summary>
+    internal static string PackWord(int index) => index == 0 ? "main pack" : "pack " + index;
 
     /// <summary>Text as a label shows it: "##" would start ImGui's id part.</summary>
     private static string Shown(string text) => text.Replace("##", "# #");
@@ -366,6 +296,10 @@ internal sealed class SortPanel
         "Right now the pack numbers here may not match your inventory's pack column (they go oldest pack first): "
         + "go by the pack's name, its item count and what's in it, or open the pack here and use Select in game. "
         + "A rule remembers the pack itself, so items still go to the right one.";
+
+    internal const string SelectTooltip =
+        "Selects this pack in the game, as clicking it in your inventory would, so the game shows you which one it is "
+        + "(its name in the selection bar). Nothing moves.";
 
     /// <summary>The header's tooltip: which pack in the game this is, in plain words.</summary>
     internal static string PackHeaderTooltip(SortView view, int number)
@@ -530,5 +464,47 @@ internal sealed class SortPanel
             else list.Add($"Pack {i} (none)");
         }
         return list;
+    }
+
+    /// <summary>
+    /// The kinds of item in a pack for its icon strip: one entry per kind (same class id, else the
+    /// same name), the commonest first (then A-Z), at most <paramref name="most"/>.
+    /// </summary>
+    internal static List<(SortItem First, int Count)> Kinds(SortPack pack, int most)
+    {
+        var kinds = new List<(SortItem First, int Count)>();
+        foreach (SortItem it in pack.Items)
+        {
+            int at = kinds.FindIndex(k => SortPlanner.SameKind(k.First, it));
+            if (at >= 0) kinds[at] = (kinds[at].First, kinds[at].Count + Math.Max(1, it.Stack));
+            else kinds.Add((it, Math.Max(1, it.Stack)));
+        }
+        kinds.Sort((a, b) => a.Count != b.Count ? b.Count.CompareTo(a.Count) : string.Compare(a.First.Name, b.First.Name, StringComparison.OrdinalIgnoreCase));
+        if (kinds.Count > most) kinds.RemoveRange(most, kinds.Count - most);
+        return kinds;
+    }
+
+    /// <summary>For each rule: how many items it keeps in its pack now, and how many a sort would bring in.</summary>
+    internal static Dictionary<SortRule, (int Here, int Coming)> RuleCounts(IReadOnlyList<SortRule> rules, SortView view, SortInventory? inv, SortPreview? preview)
+    {
+        var map = new Dictionary<SortRule, (int Here, int Coming)>(ReferenceEqualityComparer.Instance);
+        if (inv == null) return map;
+        for (int i = 0; i < inv.Packs.Count; i++)
+            foreach (SortItem it in inv.Packs[i].Items)
+            {
+                SortRule? r = SortRules.RuleFor(rules, it);
+                if (r == null || ShownPack(view, r) != i + 1) continue;
+                map.TryGetValue(r, out var c);
+                map[r] = (c.Here + 1, c.Coming);
+            }
+        if (preview != null)
+            foreach (SortMove m in preview.Moves)
+            {
+                SortRule? r = SortRules.RuleFor(rules, m.Item);
+                if (r == null || m.DestIndex == 0 || ShownPack(view, r) != m.DestIndex) continue;
+                map.TryGetValue(r, out var c);
+                map[r] = (c.Here, c.Coming + 1);
+            }
+        return map;
     }
 }

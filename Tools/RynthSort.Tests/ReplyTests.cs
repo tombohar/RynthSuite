@@ -16,7 +16,8 @@ namespace RynthSort.Tests
                 ("on quiet", SortVerb.On, true, null), ("OFF Quiet", SortVerb.Off, true, null),
                 ("now", SortVerb.Now, false, null), ("tidy", SortVerb.Now, false, null), ("clean", SortVerb.Clean, false, null),
                 ("unpack", SortVerb.Unpack, false, null), ("unpack 2", SortVerb.Unpack, false, 2), ("unpack x", SortVerb.Unpack, false, null),
-                ("unpack 0", SortVerb.Unpack, false, null), ("status", SortVerb.Status, false, null), ("help", SortVerb.Help, false, null),
+                ("unpack 0", SortVerb.Unpack, false, null), ("back", SortVerb.Back, false, null), ("undo", SortVerb.Back, false, null), ("add 3", SortVerb.Add, false, 3), ("add", SortVerb.Add, false, null), ("add x", SortVerb.Add, false, null),
+                ("status", SortVerb.Status, false, null), ("help", SortVerb.Help, false, null),
                 ("?", SortVerb.Help, false, null), ("sortt", SortVerb.Unknown, false, null),
             };
             var seen = new HashSet<SortVerb>();
@@ -35,6 +36,8 @@ namespace RynthSort.Tests
             Check(SortCommand.Started(SortVerb.Clean).StartsWith("Cleaning", StringComparison.Ordinal), "clean");
             Check(SortCommand.Unpacking(3).StartsWith("Emptying pack 3", StringComparison.Ordinal), "unpack 3");
             Check(SortCommand.Unpacking(null).StartsWith("Emptying your side packs", StringComparison.Ordinal), "unpack");
+            Check(SortCommand.PuttingBack(3).StartsWith("Putting back the 3 items", StringComparison.Ordinal) && SortCommand.PuttingBack(1).Contains("1 item the"), "back");
+            Check(SortCommand.PuttingBack(0).StartsWith("Nothing to put back", StringComparison.Ordinal), "back with nothing to do");
             string unknown = SortCommand.Unknown("sortt");
             Check(unknown.StartsWith("Unknown '/rsort sortt'.", StringComparison.Ordinal) && unknown.Contains(SortCommand.Usage), "an unknown word: named, with the usage");
         }

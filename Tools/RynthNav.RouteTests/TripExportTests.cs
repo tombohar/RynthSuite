@@ -31,6 +31,7 @@ internal static partial class Program
         Run(nameof(MarkersEmitNearTheCharacter), MarkersEmitNearTheCharacter);
         Run(nameof(MarkersNextWaypointAdvances), MarkersNextWaypointAdvances);
         Run(nameof(MarkersClearOffTheTrip), MarkersClearOffTheTrip);
+        Run(nameof(PlanMarkersGoAtTheGoal), PlanMarkersGoAtTheGoal);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
@@ -385,5 +386,28 @@ internal static partial class Program
         var hubTrip = Trip(steps, 0, 0, "Eastwatch", 40, 40);
         Check(hubTrip.Covers(0x0007, null, net.Contains), "inside the Town Network on a trip that takes it");
         Check(!trip.Covers(0x0007, path, net.Contains), "...but not on one that doesn't");
+    }
+
+    // 2026-11-26 (a player's report): a plan's markers (Route, an Oracle quest pick) stayed on the
+    // ground after the character walked there; now they go at the goal, as a walked trip's do.
+    private static void PlanMarkersGoAtTheGoal()
+    {
+        var (plan, _) = MarkerTrip();
+        double arrive = ArrowGuide.DefaultArriveUnits;
+        Check(PathMarkers.PlanReached(plan, true, 50.4, 50.3, arrive), "standing on a plan's goal: done");
+        Check(PathMarkers.PlanReached(plan, true, 50.4 + 5 / 240.0, 50.3, arrive), "a few yards off it: done");
+        Check(!PathMarkers.PlanReached(plan, true, 50.4 + 40 / 240.0, 50.3, arrive), "40 yd off: still shown");
+        Check(!PathMarkers.PlanReached(plan, true, 10, 10, arrive), "where it starts: still shown");
+        Check(!PathMarkers.PlanReached(plan, false, 50.4, 50.3, arrive), "no map position (a dungeon, portal space): still shown");
+
+        var steps = plan.Steps.ToList();
+        WorldPt start = WorldPt.FromMap(10, 10, 5.0);
+        var walked = new PlannedTrip(2, steps, "Far Goal", 50.4, 50.3, true, start, (start.Landblock << 16) | 1, null, live: true);
+        Check(!PathMarkers.PlanReached(walked, true, 50.4, 50.3, arrive), "a walked trip reports its own arrival (FinishGoto)");
+
+        var entrance = new List<RouteStep> { new(50.4, 50.3, true, false, "Dungeon Portal", -1, 0, 0) };
+        var intoDungeon = Trip(entrance, 10, 10, "A Dungeon", 50.4, 50.3, enterPortal: "Dungeon Portal", enterName: "A Dungeon");
+        Check(intoDungeon.EndsInEntrance, "the test's plan ends in a dungeon's entrance");
+        Check(!PathMarkers.PlanReached(intoDungeon, true, 50.4, 50.3, arrive), "a plan into a dungeon goes through its entrance (the landblock check), not at it");
     }
 }

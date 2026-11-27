@@ -255,6 +255,21 @@ internal static class SortRules
         return null;
     }
 
+    /// <summary>
+    /// Every rule (that is on) the item matches, in the order <see cref="RuleFor"/> picks them: name
+    /// matches first, then class matches, each in rule order. The first is the item's rule; the
+    /// others name the overflow packs it may go to when that rule's pack is full.
+    /// </summary>
+    public static List<SortRule> RulesFor(IReadOnlyList<SortRule> rules, SortItem item)
+    {
+        var list = new List<SortRule>(2);
+        for (int i = 0; i < rules.Count; i++)
+            if (rules[i].On && MatchesName(rules[i], item)) list.Add(rules[i]);
+        for (int i = 0; i < rules.Count; i++)
+            if (rules[i].On && !list.Contains(rules[i]) && MatchesClass(rules[i], item)) list.Add(rules[i]);
+        return list;
+    }
+
     /// <summary>"Gem, Key, Mana Stone, name has "Opal"": the classes (A-Z), then the names (A-Z).</summary>
     public static string Describe(SortRule r)
     {

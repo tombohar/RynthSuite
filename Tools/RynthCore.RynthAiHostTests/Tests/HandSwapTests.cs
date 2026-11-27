@@ -26,6 +26,35 @@ internal static class HandSwapTests
     private const int Melee = HandSwapSequence.MeleeSlot, Off = HandSwapSequence.ShieldSlot, Missile = HandSwapSequence.MissileSlot,
                       Ammo = HandSwapSequence.AmmoSlot, Held = HandSwapSequence.HeldSlot, Two = HandSwapSequence.TwoHandedSlot;
 
+    // 2026.11.23.3: a wand wielded since login has no home pack; the swap put it into a side pack, the game
+    // itself puts what it unwields into the main pack.
+    private static void UnknownHomeMainPack()
+    {
+        const uint PackA = 0x80000801, Filler = 0x80000810;
+        FakeHost.Reset();
+        FakeHost.ContentsCalls = true;
+        var ids = new List<uint>();
+        FakeHost.Names[PackA] = "Pack A"; FakeHost.ItemTypes[PackA] = 0x200; FakeHost.Ints[(PackA, 6)] = 24;
+        FakeHost.Containers[PackA] = Player; ids.Add(PackA);
+        FakeHost.Names[Sceptre] = "Sceptre"; FakeHost.ItemTypes[Sceptre] = 0x8000;
+        FakeHost.Wielders[Sceptre] = Player; ids.Add(Sceptre);   // wielded since login: never in a pack
+        var host = FakeHost.Create(Player);
+        var cache = FakeHost.MakeCache(host, Player, ids);
+        var clock = new DateTime(2026, 11, 25, 4, 0, 0);
+        cache.WalkClock = () => clock;
+        cache.GetDirectInventory(forceRefresh: true);
+        Check.Eq(cache.HomePackOf(I(Sceptre)), 0, "no home known");
+        Check.Eq(WorldObjectCache.FindPackFor(host, cache, includeMainPack: true, requireFree: 1, new[] { I(Sceptre) }), I(Player),
+                 "put away: the main pack, as the game unwields (it was the side pack)");
+        Check.Eq(WorldObjectCache.FindPackFor(host, cache, includeMainPack: true, requireFree: 1), I(PackA), "without the item list: the usual choice");
+
+        // The main pack down to 4 free slots: the side pack (loot keeps its room).
+        for (uint i = 0; i < 98; i++) { FakeHost.Names[Filler + i] = $"Gem {i}"; FakeHost.ItemTypes[Filler + i] = 0x800; FakeHost.Containers[Filler + i] = Player; _ = cache[I(Filler + i)]; }
+        clock = clock.AddSeconds(2);
+        Check.Eq(WorldObjectCache.FindPackFor(host, cache, includeMainPack: true, requireFree: 1, new[] { I(Sceptre) }), I(PackA),
+                 "main pack with 4 free: the side pack instead");
+    }
+
     // 2026.11.19.1: "When the macro swaps out wands it randomly throws them into pack 1, 2 or 4": every put-away
     // took the side pack with the most free slots at that moment.
     private static void HomePackFirst()
@@ -72,6 +101,7 @@ internal static class HandSwapTests
     {
         r.Add("hand swap: dual wield -> wand: the off hand, then the main hand, then the wand, each once the last landed", DualWieldOrder);
         r.Add("weapon put away (R-20261121-040524-f6ed): back to the pack it came from while that has room, not the emptiest pack", HomePackFirst);
+        r.Add("weapon put away (R-20261125-040855-4588): never seen in a pack (wielded since login): the main pack, as the game unwields, while it keeps 4 slots for loot", UnknownHomeMainPack);
         r.Add("hand swap: sword + shield, two-hander, bow (arrows stay on), empty hands, a wand already in hand", Loadouts);
         r.Add("hand swap: peace first from a combat mode, then the hands (answered at once in peace), then the wand", PeaceFirst);
         r.Add("hand swap: an unanswered step is sent again once, then the swap fails (bounded)", Bounded);

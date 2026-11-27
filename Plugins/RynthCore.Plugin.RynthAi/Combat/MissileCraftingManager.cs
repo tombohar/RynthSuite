@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using RynthCore.PluginSdk;
 using RynthCore.Plugin.RynthAi.LegacyUi;
+using RynthCore.Plugin.RynthAi.MiniRemote.Crafting;
 using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthAi;
@@ -17,9 +18,81 @@ namespace RynthCore.Plugin.RynthAi;
 ///
 /// Crafting is chat-driven: issues UseObjectOn (ApplyItem), waits for "You make" chat,
 /// then advances to the next combine or equips. Retries every 2s if no response.
+///
+/// Make ammo when low (a players' request, 2026-11-23; MakeAmmoWhenLow, off by default): a top-off
+/// between fights, so the empty-slot path above is rarely needed. The plugin (RynthAiPlugin.Ammo.cs)
+/// decides when, on the Make kits when low rules (<see cref="Auto"/>, a KitAuto of its own): fewer
+/// than MakeAmmoBelow arrows, quarrels or darts for the launcher in hand (quiver and pack), nothing
+/// else going, no monster near, no hit for 20 s, in peace mode. <see cref="StartTopOff"/> then makes
+/// enough combines of the best recipe the pack and Fletching make reliably (the same choice as the
+/// empty-slot path, never a risky one) to reach MakeAmmoUpTo, and wields ammo only if the slot is
+/// empty. A fight, a launcher swap or leaving peace mode stops it at once (<see cref="StopTopOff"/>).
 /// </summary>
 public class MissileCraftingManager
 {
+    // ── Make ammo when low ──────────────────────────────────────────────
+    /// <summary>A plain bundle makes 100, so one combine always lifts you back over this.</summary>
+    public const int DefaultAmmoBelow = 100;
+    /// <summary>Five plain combines, or one wrapped bundle (1000).</summary>
+    public const int DefaultAmmoUpTo = 500;
+    public const int MaxAmmoBelow = 5000;
+    public const int MaxAmmoUpTo = 10000;
+    /// <summary>The most combines one top-off makes.</summary>
+    public const int MaxTopOffCombines = 10;
+
+    /// <summary>When a top-off may start, and the waits after one (ticked by RynthAiPlugin.Ammo.cs).</summary>
+    internal KitAuto Auto { get; } = new KitAuto { Name = "Make ammo when low", Doing = "make ammo" };
+    /// <summary>The chat line for the top-off's own lines (the plugin's ChatLine; null = the host's chat).</summary>
+    public Action<string>? Say { get; set; }
+
+    private bool _topOff, _topOffManual;
+    private int _topOffTarget, _topOffYield, _topOffFailed;
+    private WeaponCategory _topOffCategory;
+    private string _topOffOutput = string.Empty;
+    private KitStopKind? _topOffEndKind;
+    private string _topOffWhy = string.Empty;
+    private Func<KitStopKind, int, string>? _topOffEnded;
+    private volatile bool _makeNowAsked, _stopAsked;
+
+    /// <summary>A top-off is under way (it holds the bot while it goes).</summary>
+    public bool TopOffRunning => _topOff && State != CraftState.Idle;
+    /// <summary>The top-off going was asked for (Make ammo now), not started by the low line.</summary>
+    public bool TopOffManual => _topOff && _topOffManual;
+    /// <summary>Combines made in the top-off going.</summary>
+    public int TopOffMade => _topOff ? _combinesCompleted : 0;
+    /// <summary>Combines the top-off going plans.</summary>
+    public int TopOffPlanned => _topOff ? _totalCombines : 0;
+    /// <summary>The last top-off's summary line ("" = none this session).</summary>
+    public string LastTopOffSummary { get; private set; } = string.Empty;
+    /// <summary>The last look at the launcher and the ammo (for the panels; null = none yet).</summary>
+    internal AmmoLook? LastLook { get; private set; }
+    /// <summary>Make ammo now: asked until this (plugin clock, ms; 0 = not asked).</summary>
+    internal long MakeNowUntilMs { get; set; }
+
+    /// <summary>A panel's Make ammo now (any thread): the plugin takes it on its next tick.</summary>
+    public void RequestMakeNow() => _makeNowAsked = true;
+    /// <summary>A panel's Stop (any thread): the plugin takes it on its next tick.</summary>
+    public void RequestStop() => _stopAsked = true;
+    internal bool TakeMakeNowRequest() { if (!_makeNowAsked) return false; _makeNowAsked = false; return true; }
+    internal bool TakeStopRequest() { if (!_stopAsked) return false; _stopAsked = false; return true; }
+
+    /// <summary>The launcher in hand and its ammo: what a top-off would make and why not.</summary>
+    internal sealed record AmmoLook(bool Launcher, WeaponCategory Category, int Carried, bool Wielded,
+                                    AmmoRecipe? Recipe, int Combines, string PackWhy)
+    {
+        public string CarriedText => AmmoText(Carried, Category);
+    }
+
+    /// <summary>"1 arrow", "230 quarrels", "12 darts".</summary>
+    public static string AmmoText(int n, WeaponCategory c) => $"{n} {AmmoNoun(c, n)}";
+
+    public static string AmmoNoun(WeaponCategory c, int n = 2) => c switch
+    {
+        WeaponCategory.Crossbow => n == 1 ? "quarrel" : "quarrels",
+        WeaponCategory.Atlatl   => n == 1 ? "dart" : "darts",
+        _                       => n == 1 ? "arrow" : "arrows",
+    };
+
     private readonly RynthCoreHost _host;
     private readonly LegacyUiSettings _settings;
     private WorldObjectCache? _objectCache;
@@ -105,6 +178,7 @@ public class MissileCraftingManager
         // crafting off mid-craft must let go too.
         if (!_settings.EnableMissileCrafting)
         {
+            if (_topOff) _topOffEndKind = KitStopKind.Other;
             if (State != CraftState.Idle) Reset("Missile crafting turned off");
             return;
         }
@@ -132,6 +206,191 @@ public class MissileCraftingManager
     }
 
     // ══════════════════════════════════════════════════════════════════
+    //  MAKE AMMO WHEN LOW (the top-off between fights)
+    // ══════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// The launcher in hand, the ammo carried for it (quiver and pack, stacks summed), and what a
+    /// top-off would make: the best recipe the pack and Fletching make reliably (the empty-slot path's
+    /// own choice, AmmoRecipes.BestCraftable; never one under its 90% line) and how many combines the
+    /// bundles allow. <paramref name="forceRefresh"/> false re-reads a scan under a second old.
+    /// </summary>
+    internal AmmoLook LookTopOff(bool forceRefresh = true)
+    {
+        var inv = GetInventory(forceRefresh);
+        AmmoLook look = LookTopOff(inv);
+        LastLook = look;
+        return look;
+    }
+
+    private AmmoLook LookTopOff(List<WorldObject> inv)
+    {
+        if (!TryGetWieldedMissileCategory(inv, out WeaponCategory category, out _))
+            return new AmmoLook(false, _lastWeaponCategory, 0, false, null, 0, "no bow, crossbow or atlatl in hand");
+        _lastWeaponCategory = category;
+        int carried = CountAmmo(inv, category);
+        bool wielded = HasWieldedAmmo(inv, category);
+
+        var fletching = _charSkills?[AcSkillType.Fletching];
+        if (fletching != null && fletching.Training < 2)
+            return new AmmoLook(true, category, carried, wielded, null, 0, "Fletching is untrained");
+        int skill = fletching?.Buffed ?? 250;
+        var best = AmmoRecipes.BestCraftable(inv.Select(i => i.Name), category, skill, out var tooHard);
+        if (best == null)
+        {
+            string why = tooHard != null
+                ? $"{tooHard.OutputName} is about {AmmoRecipes.SuccessChance(skill, tooHard.Difficulty):P0} with Fletching {skill}, under the 90% line (a failed combine destroys both bundles)"
+                : $"no heads and shafts for {AmmoNoun(category)} carried";
+            return new AmmoLook(true, category, carried, wielded, null, 0, why);
+        }
+        int pairs = PairsCarried(best, inv);
+        return new AmmoLook(true, category, carried, wielded, best, pairs,
+                            pairs > 0 ? string.Empty : $"no bundles for {best.OutputName}");
+    }
+
+    /// <summary>Loose ammo for the launcher: the stack in the quiver and every stack in the packs.</summary>
+    private int CountAmmo(List<WorldObject> inv, WeaponCategory category)
+    {
+        int n = 0;
+        var seen = new HashSet<int>();
+        foreach (var item in WornCandidates(inv))
+        {
+            if (!seen.Add(item.Id) || !IsLooseAmmo(item, category)) continue;
+            n += Math.Max(1, item.Values(LongValueKey.StackCount, 1));
+        }
+        return n;
+    }
+
+    /// <summary>Combines the first head and shaft stacks allow (an Infinite head is never used up).</summary>
+    private static int PairsCarried(AmmoRecipe recipe, List<WorldObject> inv)
+    {
+        var head = inv.FirstOrDefault(i => recipe.IsHead(i.Name));
+        var shaft = inv.FirstOrDefault(i => recipe.IsShaft(i.Name));
+        if (head == null || shaft == null) return 0;
+        int heads = AmmoRecipes.HeadIsInfinite(recipe) ? int.MaxValue : Math.Max(1, head.Values(LongValueKey.StackCount, 1));
+        int shafts = Math.Max(1, shaft.Values(LongValueKey.StackCount, 1));
+        return Math.Min(heads, shafts);
+    }
+
+    /// <summary>
+    /// Starts a top-off toward <paramref name="target"/> (the caller has checked it is safe: no fight,
+    /// no monster near, in peace mode). <paramref name="why"/> is the start line's reason ("under 100").
+    /// <paramref name="ended"/> hears how it ended and the combines made, and returns what the summary
+    /// adds (the next try). Returns "" or why not.
+    /// </summary>
+    internal string StartTopOff(int target, bool manual, string why, Func<KitStopKind, int, string>? ended)
+    {
+        if (!_settings.EnableMissileCrafting) return "Enable Missile Crafting is off";
+        if (State != CraftState.Idle) return "ammo crafting is already under way";
+        if (HoldWhile?.Invoke() == true) return "a launcher swap is under way";
+        if (InFight()) return "a fight is on";
+        var inv = GetInventory(forceRefresh: true);
+        AmmoLook look = LookTopOff(inv);
+        LastLook = look;
+        if (!look.Launcher || look.Recipe == null || look.Combines <= 0) return look.PackWhy;
+        if (look.Carried >= target) return $"{look.CarriedText} carried already (makes up to {target})";
+
+        var recipe = look.Recipe;
+        int yield = AmmoRecipes.EstimatedYield(recipe);
+        int combines = Math.Clamp((target - look.Carried + yield - 1) / yield, 1, Math.Min(MaxTopOffCombines, look.Combines));
+        _topOffQuiet = true;
+        try { StartCrafting(recipe, inv, upgrade: false, pairs: combines); }
+        finally { _topOffQuiet = false; }
+        if (State != CraftState.Combining) return StatusMessage.Length > 0 ? StatusMessage : "the bundles couldn't be read";
+
+        _topOff = true;
+        _topOffManual = manual;
+        _topOffTarget = target;
+        _topOffYield = yield;
+        _topOffFailed = 0;
+        _topOffCategory = look.Category;
+        _topOffOutput = recipe.OutputName;
+        _topOffEndKind = null;
+        _topOffWhy = string.Empty;
+        _topOffEnded = ended;
+        string line = $"[RynthAi] Make ammo when low: {look.CarriedText} carried ({why}); making {Combines(combines)} of "
+                      + $"{recipe.OutputName}, about {combines * yield}, toward {target}.";
+        SayLine(line);
+        RynthLog.Write(LogCat.Crafting, "[Ammo] start: " + line);
+        return string.Empty;
+    }
+
+    /// <summary>Stops the top-off going (a monster, a hit, the player's Stop, ...): one summary line.</summary>
+    internal void StopTopOff(string why, KitStopKind kind)
+    {
+        if (!_topOff) return;
+        _topOffEndKind = kind;
+        _topOffWhy = why;
+        Reset(why);
+    }
+
+    /// <summary>What stops a top-off from inside crafting ("" = go on): a fight, a launcher swap, leaving peace mode.</summary>
+    private string TopOffDanger()
+    {
+        if (InFight()) return "a fight";
+        if (HoldWhile?.Invoke() == true) return "a launcher swap";
+        try
+        {
+            if (_peaceSent && _host.HasGetCurrentCombatMode && _host.GetCurrentCombatMode() != CombatMode.NonCombat)
+                return "left peace mode";
+        }
+        catch { }
+        return string.Empty;
+    }
+
+    /// <summary>The top-off's summary line and the end callback (from <see cref="Reset"/>, before it clears the craft).</summary>
+    private void FinishTopOff(string reason)
+    {
+        int made = _combinesCompleted, planned = _totalCombines, failed = _topOffFailed;
+        KitStopKind kind = _topOffEndKind ?? (made > 0 ? KitStopKind.Finished : KitStopKind.Refused);
+        string why = _topOffWhy.Length > 0 ? _topOffWhy : reason;
+        if (why.StartsWith("Done", StringComparison.Ordinal))
+            why = made >= planned ? $"made the {Combines(planned)} planned" : "done";
+        var ended = _topOffEnded;
+        string noun = AmmoNoun(_topOffCategory);
+        int yield = _topOffYield;
+        string output = _topOffOutput;
+        _topOff = false;
+        _topOffManual = false;
+        _topOffEnded = null;
+        _topOffEndKind = null;
+        _topOffWhy = string.Empty;
+
+        string tail = string.Empty;
+        try { tail = ended?.Invoke(kind, made) ?? string.Empty; }
+        catch (Exception ex) { RynthLog.Exception(LogCat.Crafting, ex, "Make ammo when low: the end of a top-off"); }
+        string madeText = made == 0 ? "made nothing" : $"made {Combines(made)} of {output} (about {made * yield} {noun})";
+        string failText = failed == 0 ? "" : $", {Combines(failed)} failed (a failed combine destroys both bundles)";
+        string line = $"[RynthAi] Make ammo when low: {madeText}{failText}. Stopped: {why}.{tail}";
+        LastTopOffSummary = line;
+        SayLine(line);
+        RynthLog.Write(LogCat.Crafting, "[Ammo] " + line);
+    }
+
+    private static string Combines(int n) => n == 1 ? "1 combine" : $"{n} combines";
+
+    /// <summary>All combines answered (or a timeout after some): wield only if the slot is empty, else done.</summary>
+    private bool TopOffSlotFilled()
+    {
+        var inv = GetInventory(forceRefresh: true);
+        return HasWieldedAmmo(inv, ResolveWeaponCategory(inv));
+    }
+
+    private void SayLine(string line)
+    {
+        try
+        {
+            if (Say != null) Say(line);
+            else if (_host.HasWriteToChat) _host.WriteToChat(line, 1);
+        }
+        catch { }
+    }
+
+    // While a top-off starts or goes, crafting's own "[RynthAi Craft]" lines go to the log only:
+    // the top-off says one line when it starts and one when it stops.
+    private bool _topOffQuiet;
+
+    // ══════════════════════════════════════════════════════════════════
     //  CHAT HANDLER — called from RynthAiPlugin.OnChatWindowText
     // ══════════════════════════════════════════════════════════════════
 
@@ -139,10 +398,15 @@ public class MissileCraftingManager
     {
         if (State != CraftState.Combining) return;
         if (string.IsNullOrEmpty(text)) return;
-        if (text.IndexOf("You make", StringComparison.OrdinalIgnoreCase) < 0) return;
+        bool made = text.IndexOf("You make", StringComparison.OrdinalIgnoreCase) >= 0;
+        // A top-off counts a failed combine and goes on with the next (the empty-slot path never
+        // matched failures and retries until its timeout, as before).
+        bool failed = _topOff && !made && text.IndexOf("You fail to make", StringComparison.OrdinalIgnoreCase) >= 0;
+        if (!made && !failed) return;
 
-        _combinesCompleted++;
-        ChatLog($"Craft confirmed ({_combinesCompleted}/{_totalCombines})");
+        if (made) _combinesCompleted++; else _topOffFailed++;
+        if (_topOff) _phaseStart = RynthClock.Now;   // each combine of a top-off gets its own timeout
+        ChatLog(made ? $"Craft confirmed ({_combinesCompleted}/{_totalCombines})" : $"Combine failed ({_topOffFailed})");
 
         if (_pendingBundlePairs.Count > 0)
         {
@@ -254,7 +518,8 @@ public class MissileCraftingManager
             Reset("No ammo and no bundles available");
     }
 
-    private void StartCrafting(AmmoRecipe recipe, List<WorldObject> inv, bool upgrade = false)
+    /// <param name="pairs">Combines to queue (a top-off's count); 0 = the empty-slot path's up to 2.</param>
+    private void StartCrafting(AmmoRecipe recipe, List<WorldObject> inv, bool upgrade = false, int pairs = 0)
     {
         _craftIsUpgrade = upgrade;
         _currentRecipe = recipe;
@@ -278,7 +543,7 @@ public class MissileCraftingManager
         // Check stack sizes to decide how many combines (1 or 2)
         int availableHeads = headItems[0].Values(LongValueKey.StackCount, 1);
         int availableShafts = shaftItems[0].Values(LongValueKey.StackCount, 1);
-        int pairCount = Math.Min(2, Math.Min(availableHeads, availableShafts));
+        int pairCount = pairs > 0 ? pairs : Math.Min(2, Math.Min(availableHeads, availableShafts));
 
         // Queue combines with same IDs — server decrements stacked bundles
         for (int i = 0; i < pairCount; i++)
@@ -317,6 +582,14 @@ public class MissileCraftingManager
 
     private void ProcessCombining()
     {
+        // Make ammo when low: a top-off never holds the bot into a fight, a launcher swap or out of
+        // peace mode. It stops at once; the combine already sent finishes on the server.
+        if (_topOff)
+        {
+            string danger = TopOffDanger();
+            if (danger.Length > 0) { StopTopOff(danger, KitStopKind.Danger); return; }
+        }
+
         // In a fight, with ammo to shoot (carried before the craft, or a combine already made):
         // stop holding combat and wield the best ammo carried now.
         if (!_allCombinesDone && (_craftIsUpgrade || _combinesCompleted > 0) && InFight())
@@ -334,6 +607,8 @@ public class MissileCraftingManager
 
         if (_allCombinesDone)
         {
+            // A top-off wields only into an empty slot; the ammo in the quiver stays.
+            if (_topOff && TopOffSlotFilled()) { Reset("Done"); return; }
             StatusMessage = $"Equipping {_currentRecipe!.OutputName}...";
             _equipTargetId = 0;
             SetState(CraftState.EquippingAmmo);
@@ -342,7 +617,14 @@ public class MissileCraftingManager
 
         if ((RynthClock.Now - _phaseStart).TotalMilliseconds > CRAFT_TIMEOUT_MS)
         {
-            if (_combinesCompleted > 0)
+            if (_topOff && (_combinesCompleted > 0 || _topOffFailed > 0))
+            {
+                _topOffWhy = $"no answer to the next combine after {Combines(_combinesCompleted + _topOffFailed)}";
+                if (_combinesCompleted == 0 || TopOffSlotFilled()) { Reset("Craft timed out"); return; }
+                _equipTargetId = 0;
+                SetState(CraftState.EquippingAmmo);
+            }
+            else if (_combinesCompleted > 0)
             {
                 ChatLog($"Timeout after {_combinesCompleted} combine(s). Equipping what we have.");
                 _equipTargetId = 0;
@@ -642,7 +924,9 @@ public class MissileCraftingManager
 
     private void Reset(string reason)
     {
-        if (State != CraftState.Idle || reason.IndexOf("bundle", StringComparison.OrdinalIgnoreCase) >= 0)
+        if (_topOff)
+            FinishTopOff(reason);   // the top-off's own summary line (crafting's are quiet for it)
+        else if (State != CraftState.Idle || reason.IndexOf("bundle", StringComparison.OrdinalIgnoreCase) >= 0)
             ChatLog(reason);
 
         StatusMessage = reason;
@@ -667,6 +951,11 @@ public class MissileCraftingManager
 
     private void ChatLog(string msg)
     {
+        if (_topOff || _topOffQuiet)
+        {
+            try { _host.Log($"[RynthAi] MissileCraft (Make ammo when low): {msg}"); } catch { }
+            return;
+        }
         try { _host.WriteToChat($"[RynthAi Craft] {msg}", 1); } catch { }
     }
 }

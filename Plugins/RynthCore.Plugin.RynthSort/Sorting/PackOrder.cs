@@ -49,12 +49,15 @@ internal static class PackOrder
     }
 
     /// <summary>Each item's place in the target order (0 = first), in the items' current order.</summary>
-    public static int[] Ranks(IReadOnlyList<SortItem> items, bool kindFirst)
+    public static int[] Ranks(IReadOnlyList<SortItem> items, bool kindFirst) => Ranks(items, (a, b) => Compare(a, b, kindFirst));
+
+    /// <summary>As <see cref="Ranks(IReadOnlyList{SortItem}, bool)"/>, for any total order (the main pack's, handy items first).</summary>
+    public static int[] Ranks(IReadOnlyList<SortItem> items, Comparison<SortItem> order)
     {
         int n = items.Count;
         var idx = new int[n];
         for (int i = 0; i < n; i++) idx[i] = i;
-        Array.Sort(idx, (x, y) => Compare(items[x], items[y], kindFirst));
+        Array.Sort(idx, (x, y) => order(items[x], items[y]));
         var rank = new int[n];
         for (int r = 0; r < n; r++) rank[idx[r]] = r;
         return rank;
@@ -85,10 +88,13 @@ internal static class PackOrder
     }
 
     /// <summary>How many items are out of place (would move): 0 = in order.</summary>
-    public static int OutOfPlace(IReadOnlyList<SortItem> items, bool kindFirst)
+    public static int OutOfPlace(IReadOnlyList<SortItem> items, bool kindFirst) => OutOfPlace(items, (a, b) => Compare(a, b, kindFirst));
+
+    /// <summary>As <see cref="OutOfPlace(IReadOnlyList{SortItem}, bool)"/>, for any total order.</summary>
+    public static int OutOfPlace(IReadOnlyList<SortItem> items, Comparison<SortItem> order)
     {
         if (items.Count < 2) return 0;
-        bool[] kept = Kept(Ranks(items, kindFirst));
+        bool[] kept = Kept(Ranks(items, order));
         int n = 0;
         foreach (bool k in kept) if (!k) n++;
         return n;
@@ -99,13 +105,17 @@ internal static class PackOrder
     /// that <paramref name="movable"/> allows, and the slot it goes to (counted without it). False
     /// when the pack is in order, or only items that can't move now are out of place.
     /// </summary>
-    public static bool NextMove(IReadOnlyList<SortItem> items, bool kindFirst, Func<SortItem, bool> movable, out SortItem item, out int placement)
+    public static bool NextMove(IReadOnlyList<SortItem> items, bool kindFirst, Func<SortItem, bool> movable, out SortItem item, out int placement) =>
+        NextMove(items, (a, b) => Compare(a, b, kindFirst), movable, out item, out placement);
+
+    /// <summary>As <see cref="NextMove(IReadOnlyList{SortItem}, bool, Func{SortItem, bool}, out SortItem, out int)"/>, for any total order.</summary>
+    public static bool NextMove(IReadOnlyList<SortItem> items, Comparison<SortItem> order, Func<SortItem, bool> movable, out SortItem item, out int placement)
     {
         item = null!;
         placement = -1;
         int n = items.Count;
         if (n < 2) return false;
-        int[] rank = Ranks(items, kindFirst);
+        int[] rank = Ranks(items, order);
         bool[] kept = Kept(rank);
         int pick = -1;
         for (int i = 0; i < n; i++)
@@ -125,12 +135,66 @@ internal static class PackOrder
     /// The slot an item arriving in a pack should take so it lands where the order wants it: after
     /// every item there that comes before it. In a pack already in order that is its final place.
     /// </summary>
-    public static int InsertAt(IReadOnlyList<SortItem> items, SortItem arriving, bool kindFirst)
+    public static int InsertAt(IReadOnlyList<SortItem> items, SortItem arriving, bool kindFirst) => InsertAt(items, arriving, (a, b) => Compare(a, b, kindFirst));
+
+    /// <summary>As <see cref="InsertAt(IReadOnlyList{SortItem}, SortItem, bool)"/>, for any total order.</summary>
+    public static int InsertAt(IReadOnlyList<SortItem> items, SortItem arriving, Comparison<SortItem> order)
     {
         int at = 0;
         for (int i = 0; i < items.Count; i++)
-            if (Compare(items[i], arriving, kindFirst) < 0) at = i + 1;
+            if (order(items[i], arriving) < 0) at = i + 1;
         return at;
+    }
+
+    // ── Handy items at the front of the main pack ──────────────────────────
+
+    /// <summary>The main pack's order with handy items first: handy items before the rest, each part in the usual order (<see cref="Compare"/>).</summary>
+    public static Comparison<SortItem> HandyFirst(Func<SortItem, bool> handy, bool kindFirst) => (a, b) =>
+    {
+        if (ReferenceEquals(a, b)) return 0;
+        bool ha = handy(a), hb = handy(b);
+        if (ha != hb) return ha ? -1 : 1;
+        return Compare(a, b, kindFirst);
+    };
+
+    /// <summary>
+    /// How many slots at the front are taken by handy items, or by items that can't move now (left
+    /// alone, blocked): those are the player's, so handy items go after them rather than push them on.
+    /// </summary>
+    public static int FrontRun(IReadOnlyList<SortItem> items, Func<SortItem, bool> handy, Func<SortItem, bool> movable)
+    {
+        int front = 0;
+        while (front < items.Count && (handy(items[front]) || !movable(items[front]))) front++;
+        return front;
+    }
+
+    /// <summary>
+    /// Handy items to the front without putting the pack in order (the "order inside packs" setting
+    /// off): the first handy item behind the front run that can move goes to the end of the run. The
+    /// other items keep their order; each move makes the run one longer, so a pack needs at most one
+    /// move per handy item. False when every handy item that can move is in front.
+    /// </summary>
+    public static bool FrontMove(IReadOnlyList<SortItem> items, Func<SortItem, bool> handy, Func<SortItem, bool> movable, out SortItem item, out int placement)
+    {
+        item = null!;
+        placement = -1;
+        int front = FrontRun(items, handy, movable);
+        for (int i = front; i < items.Count; i++)
+        {
+            if (!handy(items[i]) || !movable(items[i])) continue;
+            item = items[i];
+            placement = front;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>Handy items that can move and aren't in front yet (0 = done).</summary>
+    public static int HandyBehind(IReadOnlyList<SortItem> items, Func<SortItem, bool> handy, Func<SortItem, bool> movable)
+    {
+        int front = FrontRun(items, handy, movable), n = 0;
+        for (int i = front; i < items.Count; i++) if (handy(items[i]) && movable(items[i])) n++;
+        return n;
     }
 
     /// <summary>

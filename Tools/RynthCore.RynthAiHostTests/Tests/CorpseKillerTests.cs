@@ -16,6 +16,7 @@ internal static class CorpseKillerTests
         r.Add("corpse killer: CRLF and multi-word names", CrLfMultiWord);
         r.Add("corpse killer: no 'Killed by' line reads as unknown", Missing);
         r.Add("corpse killer: radar column reads the same name", RadarMatches);
+        r.Add("fellowship kills: a known killer outside the read member list is not looted; unknown killer, a fellow or no list yet still are", FellowModeLoots);
     }
 
     private static void Plain()
@@ -46,7 +47,17 @@ internal static class CorpseKillerTests
         Check.Null(RynthAiPlugin.ExtractCorpseKillerName("Killed by .\nCorpse will decay in 56s"), "empty killer");
     }
 
-    private static void RadarMatches()
+    // #rynth-issues 2026-11-25: "Rynth treats all corpses as fellowship kills, both player corpses and monster corpses".
+    private static void FellowModeLoots()
+    {
+        Check.False(RynthAiPlugin.FellowModeLoots("Someone Else", killerIsFellow: false, membersKnown: 4), "someone else's kill, the list read: left");
+        Check.False(RynthAiPlugin.FellowModeLoots("Mite Defiler", killerIsFellow: false, membersKnown: 4), "a player's death corpse (a monster killed them): left");
+        Check.True(RynthAiPlugin.FellowModeLoots("A Fellow", killerIsFellow: true, membersKnown: 4), "a fellow's kill: looted");
+        Check.True(RynthAiPlugin.FellowModeLoots("", killerIsFellow: false, membersKnown: 4), "killer not known yet: looted pending the ID");
+        Check.True(RynthAiPlugin.FellowModeLoots("Someone Else", killerIsFellow: false, membersKnown: 0), "member list not read yet: the server decides, as before");
+    }
+
+        private static void RadarMatches()
     {
         Check.Eq(RynthRadarUi.ExtractKiller("Killed by Silentkelpie.\nCorpse will decay in 56s"), "Silentkelpie", "radar decay line");
         Check.Eq(RynthRadarUi.ExtractKiller(null), "", "radar unknown is empty");

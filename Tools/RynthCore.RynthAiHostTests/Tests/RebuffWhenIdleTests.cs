@@ -32,6 +32,7 @@ internal static class RebuffWhenIdleTests
         r.Add("rebuff when idle: idle, a buff inside Rebuff With + the margin is rebuffed early", IdleInsideMarginRebuffed);
         r.Add("rebuff when idle: in a fight, a buff inside the margin but over Rebuff With is not rebuffed", FightInsideMarginWaits);
         r.Add("rebuff when idle: in a fight, a buff at or under Rebuff With (or dispelled) waits for the fight's end, then is rebuffed (2026-11-20)", FightRegularRebuff);
+        r.Add("rebuff: a fight that never ends (constant respawn): after 2 min of waiting a full pass goes in it, never under Heal At (R-20261125-130039-e3bc)", FightThatNeverEnds);
         r.Add("rebuff when idle: a rebuff run under way when a monster comes: the cast sent resolves, the rest waits for the fight's end", RunPausesForFight);
         r.Add("rabuffsdue[seconds]: how many buffs a rebuff with that line would cast (a dispelled one too); -1 with buffing off or no buff manager; asking casts nothing", BuffsDueCount);
         r.Add("rebuff when idle: margin 0, or the option off, adds nothing", MarginZeroAddsNothing);
@@ -136,6 +137,7 @@ internal static class RebuffWhenIdleTests
         }
 
         public bool Running => B.GetStateSnapshot().IsForceRebuffing;
+        public DateTime Now => _now;
         public int Logged(string part) => FakeHost.Logs.Count(l => l.Contains(part, StringComparison.Ordinal));
     }
 
@@ -221,6 +223,38 @@ internal static class RebuffWhenIdleTests
         up.Live((Strength, 3000), (Willpower, 3000));
         up.Beats(5);
         Check.Eq(up.Logged("[Buff] buffs wait"), 0, "no wait logged with nothing due");
+    }
+
+    // Conquest, constant respawn, Monster Range 10: buffs waited almost 7 hours, ran out, and the character died.
+    private static void FightThatNeverEnds()
+    {
+        var rig = new Rig(rebuffWhenIdle: false) { Idle = false };
+        RynthClock.TestNow = () => rig.Now;
+        try
+        {
+            rig.Live((Strength, 2900), (Willpower, 3000));
+            rig.Beats(2);
+            rig.Live((Strength, 290), (Willpower, 3000));
+            Check.Eq(Show(rig.Beats(110)), "(none)", "110 s of an unbroken fight: Strength (290 s left) still waits");
+            Check.Eq(rig.Logged("[Buff] buffs wait: a fight"), 1, "the wait is logged once");
+            Check.Eq(rig.Arbiter(), BotActivity.Combat, "combat keeps the tick meanwhile");
+            Check.Eq(Show(rig.Beats(20)), Strength, "past 2 min: the pass goes in the fight and Strength is rebuffed");
+            Check.Eq(rig.Logged("for a fight that doesn't end"), 1, "the pass is logged");
+            Check.Eq(Show(rig.Beats(10)), "(none)", "nothing more to cast");
+            Check.Eq(rig.Logged("the rebuff pass in the fight is done (nothing left to cast)"), 1, "its end is logged");
+
+            // Under Heal At the pass never starts.
+            var hurt = new Rig(rebuffWhenIdle: false) { Idle = false };
+            RynthClock.TestNow = () => hurt.Now;
+            hurt.S.HealAt = 50;
+            hurt.Live((Strength, 2900), (Willpower, 3000));
+            hurt.Beats(2);
+            hurt.Live((Strength, 290), (Willpower, 3000));
+            var v = (PlayerVitalsCache)typeof(BuffManager).GetField("_vitals", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(hurt.B)!;
+            v.CurrentHealth = 30;
+            Check.Eq(Show(hurt.Beats(150)), "(none)", "health 30% under Heal At 50%: no buff cast however long the fight");
+        }
+        finally { RynthClock.TestNow = null; }
     }
 
     // A script asks before a Thread (2026-11-20): Lua sees only the character's enchantments, not the item spells.

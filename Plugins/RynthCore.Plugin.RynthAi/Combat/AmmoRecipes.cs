@@ -89,6 +89,19 @@ public static partial class AmmoRecipes
         return null;
     }
 
+    /// <summary>
+    /// About how much ammo one combine makes, for planning a top-off (Make ammo when low). The world
+    /// database's success amounts (read 2026-11-23): a plain "Bundle of" shaft makes 100 (Crystal
+    /// heads 250), a "Wrapped Bundle of" shaft 1000 (a few Greater Deadly and elemental wrapped
+    /// bundles 2500). The shaft decides, so this reads the shaft: 100 or 1000, never more than made.
+    /// </summary>
+    public static int EstimatedYield(AmmoRecipe recipe) =>
+        recipe.ShaftName.StartsWith("Wrapped", StringComparison.OrdinalIgnoreCase) ? 1000 : 100;
+
+    /// <summary>Infinite heads are not used up by a combine (only the shaft bundle is).</summary>
+    public static bool HeadIsInfinite(AmmoRecipe recipe) =>
+        recipe.HeadName.StartsWith("Infinite", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Rank of finished ammo on the recipes' scale (<see cref="AmmoRecipe.Rank"/>), or 1
     /// for ammo no recipe makes (quest arrows and the like) so crafted ammo outranks it.</summary>
     public static int OutputRank(string name, WeaponCategory category)

@@ -54,6 +54,11 @@ internal interface IChestKeyEnv
     int FindKey(int keyId, string keyName, int excludeId);
     /// <summary>Why nothing may be sent now (combat, the client is busy, portal space, the server owes an answer); null = free.</summary>
     string? HoldReason();
+    /// <summary>
+    /// Why no key should be spent now: the loot would have nowhere to go (the main pack is full; loot
+    /// goes only there). Null = room. Asked before each key use only.
+    /// </summary>
+    string? NoRoomReason();
     bool HasUseDone { get; }
     int UseDoneSeq();
     bool LastUseDone(out int seq, out uint error);
@@ -322,10 +327,31 @@ internal sealed class ChestKeyLooter
         return true;
     }
 
+    // ── No room for the loot (2026-11-24, #rynth-issues "Inventory Autocram does not actively run while
+    // looting chests with ItemTool": "when the pack is full it keeps unlocking chests and using keys but
+    // fails to loot them ... continues to burn keys anyway") ──
+    // Before each key use the looter asks whether the loot has anywhere to go. With the main pack full it
+    // waits (Auto Cram, which runs during a chest run, may make room), and after NoRoomMaxMs of it the
+    // run ends: no key is spent on a chest whose loot would only be left behind.
+    public const long NoRoomMaxMs = 30_000;
+    private long _noRoomSince;
+
+    /// <summary>True while the loot has nowhere to go; ends the run after NoRoomMaxMs of it.</summary>
+    private bool NoRoom(long now)
+    {
+        string? why = _env.NoRoomReason();
+        if (why == null) { _noRoomSince = 0; return false; }
+        _holdWhy = why;
+        if (_noRoomSince == 0) { _noRoomSince = now; _env.Log($"[RynthAi] Chest looter: waits before the next key - {why}"); }
+        else if (now - _noRoomSince >= NoRoomMaxMs) Finish($"stopped before the next key: {why} (no key spent on a chest whose loot would be left)");
+        return true;
+    }
+
     private void TickKeyPending(long now)
     {
         if (now < _nextTryAt) return;
         if (Held(now)) return;
+        if (_keyUsesThisCycle == 0 && NoRoom(now)) return;
         int key = _env.FindKey(KeyId, KeyName, _keyUsedUp ? KeyId : 0);
         if (key == 0) { Finish($"out of keys - no '{KeyName}' left"); return; }
         KeyId = key;

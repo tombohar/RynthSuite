@@ -99,11 +99,34 @@ internal static class RecallPlanner
         RecallSpot? spot = memory.Get(charKey, slot);
         if (spot == null) { notes?.Add(name + ": where it lands isn't known yet (" + howToLearn + ")."); return; }
         if (!spot.OnMap) { notes?.Add(name + " lands " + Where(spot) + ": not used for routes."); return; }
+        if (spot.Unconfirmed)
+        {
+            notes?.Add(name + ": the last portal you used (" + (spot.Label.Length > 0 ? spot.Label : "unknown") + ") isn't in RynthNav's portal list, "
+                       + "so whether the server lets Portal Recall go back there isn't known: not used for routes until you cast " + name + " once.");
+            return;
+        }
         list.Add(new RecallOption
         {
             Name = name, SpellId = spellId, Ns = spot.Ns, Ew = spot.Ew, CastSeconds = SpellCastSeconds, Learned = true,
         });
     }
+
+    /// <summary>What a portal walk does to Portal Recall's landing (RynthNavPlugin.Travel).</summary>
+    internal enum LastPortalUpdate { Set, SetUnconfirmed, Keep }
+
+    /// <summary>ACE's PortalBitmask.NoRecall: the server doesn't keep such a portal as your last portal.</summary>
+    internal const int PortalNoRecall = 0x20;
+
+    /// <summary>
+    /// A teleport through a portal with this PortalBitmask (null: not in the portal list). ACE keeps
+    /// a portal as your last portal only if it isn't NoRecall (Portal.ActOnUse), so Portal Recall then
+    /// still goes to the one before (R-20261126-024033-5d60, Conquest: from the Dark Isle, which can't
+    /// be recalled to, a goto cast Portal Recall and landed in a dungeon visited earlier).
+    /// </summary>
+    internal static LastPortalUpdate ForPortal(int? bitmask) =>
+        bitmask is not int b ? LastPortalUpdate.SetUnconfirmed
+        : (b & PortalNoRecall) != 0 ? LastPortalUpdate.Keep
+        : LastPortalUpdate.Set;
 
     private static void AddLearnedCommand(List<RecallOption> list, List<string>? notes, RecallMemory memory, string charKey,
         RecallSlot slot, string name, bool alwaysAvailable, string howToLearn)

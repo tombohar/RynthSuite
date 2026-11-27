@@ -51,6 +51,18 @@
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\MiniRemote\Crafting\KitPlanner.cs" Link="Linked\KitPlanner.cs" />
     <!-- Make kits when low: when a run may start, what stops one, the waits (System only). -->
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\MiniRemote\Crafting\KitAuto.cs" Link="Linked\KitAuto.cs" />
+    <!-- Trade Shop: payment by WCID, prices, tells and their limits, and the whole sale flow behind
+         ITradeShopGame (System only; the tests drive it with Fakes\FakeShopGame.cs). -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Trade\TradeShopCurrencyTable.cs" Link="Linked\TradeShopCurrencyTable.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Trade\TradeShopRates.cs" Link="Linked\TradeShopRates.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Trade\TradeShopPayment.cs" Link="Linked\TradeShopPayment.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Trade\TradeShopSettings.cs" Link="Linked\TradeShopSettings.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Trade\TradeShopAdvertise.cs" Link="Linked\TradeShopAdvertise.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Trade\TradeShopTellParse.cs" Link="Linked\TradeShopTellParse.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Trade\TradeShopMessages.cs" Link="Linked\TradeShopMessages.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Trade\TradeShopTellLimiter.cs" Link="Linked\TradeShopTellLimiter.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Trade\ITradeShopGame.cs" Link="Linked\ITradeShopGame.cs" />
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthAi\Trade\TradeShopManager.cs" Link="Linked\TradeShopManager.cs" />
   </ItemGroup>
 
   <ItemGroup>

@@ -184,6 +184,11 @@ NAVIGATION / GEOMETRY
 /ra lostest
     Run a line-of-sight raycast test from the player to the current target.
 
+/ra losline [on|off]
+    Show Line of Sight: a line in the world from you to the combat target, green when the
+    targeting raycast says clear, red when it says blocked (a yellow marker where it hit),
+    dashed when it wasn't tested. No argument toggles.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FELLOWSHIP
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

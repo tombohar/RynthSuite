@@ -80,6 +80,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
     private NavMarkerRenderer? _navMarkerRenderer;
     private RadarWallRenderer? _radarWallRenderer;
     private TerrainPassabilityOverlay? _terrainOverlay;
+    private LosLineOverlay? _losLineOverlay;   // Show Line of Sight (ShowLosLine, /ra losline)
     private MainLogic? _raycast;
     // The session's _raycast once its background init has finished (null until then), and the
     // gate both the init thread and the session setup take to hand it to the CombatManager.
@@ -315,6 +316,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         try { _sessionStats?.Shutdown(); } catch { }
         try { ShutdownMonsterStats(); } catch { }   // kept for the next copy, with the session
         try { SaveTimedCommands(); } catch { }      // an edit made just before the unload
+        try { SaveCommandButtons(); } catch { }     // the same for the Command Buttons
         try { GameInput.Shutdown(); } catch { }   // keys still held for /mt movement | jump | strafe
         // Release the Monster Editor process handle (if the toggle button
         // launched one) rather than leaking it on plugin unload/hot-reload.
@@ -374,6 +376,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         try { _sessionStats?.OnLogout(); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "session stats logout"); }
         try { OnLogoutMonsterStats(); } catch (Exception ex) { RynthLog.Exception(LogCat.Huds, ex, "monster stats logout"); }
         try { OnLogoutTimedCommands(); } catch (Exception ex) { RynthLog.Exception(LogCat.Commands, ex, "timed commands logout"); }
+        try { OnLogoutCommandButtons(); } catch (Exception ex) { RynthLog.Exception(LogCat.Commands, ex, "command buttons logout"); }
         Loot.T11ItemSupport.Reset();
         _boostNavNoticeSaid = false;   // the Boost Nav Priority notice: once per session
         // A real logout: the next OnLoginComplete is a fresh login, not a hot reload.
@@ -488,6 +491,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         // The dungeon cell graph is a static single-landblock cache; nothing may outlive the session.
         DungeonPathfinder.InvalidateCache();
         _navMarkerRenderer = null;
+        _losLineOverlay = null;
         long tFlush0 = Environment.TickCount64;
         _radarWallRenderer?.Flush();
         long tFlushMs = Environment.TickCount64 - tFlush0;
@@ -522,6 +526,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _aetheriaUnboxer?.Reset();
         _aetheriaUnboxer = null;
         ResetKitTracking();   // Make kits when low (RynthAiPlugin.Kits.cs)
+        ResetAmmoTracking();  // Make ammo when low (RynthAiPlugin.Ammo.cs)
         _manaStoneManager = null;
         _petManager = null;
         _buffManager?.Dispose();
@@ -534,6 +539,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _autoVendor = null;
         _autoTrade?.Reset();
         _autoTrade = null;
+        _tradeShop?.Reset();
+        _tradeShop = null;
         TeardownLocalFeatures(disposeTranslator: false);
         _playerId = 0;
         _loginComplete = false;
@@ -649,6 +656,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         CreateNavOverlay();
         _radarWallRenderer = new RadarWallRenderer(Host, _dashboard.Settings);
         _terrainOverlay = new TerrainPassabilityOverlay(Host);
+        _losLineOverlay = new LosLineOverlay(Host, () => _dashboard?.Settings, () => _combatManager);
         Log($"RynthAi: NavMarkerRenderer created, HasNav3D={Host.HasNav3D}, version={Host.Version}");
 
         // Init raycast on background thread — .dat parsing takes ~700ms and blocks the client
@@ -821,6 +829,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         {
             _buffManager.OffhandStowed = id => _combatManager?.NoteOffhandStowed(id);
             _buffManager.IdleForTopOff = IdleForBuffTopOff;   // Rebuff When Idle's early top-off (RynthAiPlugin.Chores.cs)
+            _buffManager.BoostLootHealsToTopOff = BoostLootHealsToTopOff;   // Boost Loot heals at Top Off HP (RynthAiPlugin.BoostLootFirst.cs)
         }
         _combatManager.SetCharacterSkills(_charSkills);
         _combatManager.SetPlayerId(_playerId);
@@ -841,6 +850,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _missileCraftingManager.HoldWhile = () => _combatManager?.AmmoSwapInProgress == true;
         _missileCraftingManager.FightIsOn = () => FightIsOn();   // optional crafts wait for the fight (RynthAiPlugin.Chores.cs)
         _combatManager.AmmoWieldedElsewhereAt = () => _missileCraftingManager?.LastAmmoEquipAt ?? DateTime.MinValue;   // no second wield on top of crafting's
+        WireAmmoTopOff(_missileCraftingManager);   // Make ammo when low (RynthAiPlugin.Ammo.cs)
         _dashboard.SetMissileCraftingManager(_missileCraftingManager);
 
         _fellowshipTracker?.Dispose();
@@ -875,6 +885,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         if (_objectCache != null)
         {
             _inventoryManager  = new InventoryManager(Host, _dashboard.Settings, _objectCache);
+            _inventoryManager.KeepsPacksWithoutMacro = () => _chestKey?.Running == true;   // the Item Tool's chest looter, macro on or off
             _manaStoneManager  = new ManaStoneManager(Host, _dashboard.Settings, _objectCache);
             LegacyUi.NavPoint.SpellNameLookup = id => SpellTableStub.GetById(id)?.Name;   // recall steps by name
             _manaStoneManager.IsLootKept = IsKeptByLootProfile;
@@ -922,6 +933,9 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 () => dashForAv?.CharFolder ?? string.Empty);
             var atForUi = _autoTrade;
             _dashboard.SetAutoTradeStatusProvider(() => atForUi.Status);
+
+            // The Trade Shop (RynthAiPlugin.TradeShop.cs): off until the player turns it on.
+            CreateTradeShop();
         }
 
         Log("RynthAi: login complete, legacy ImGui dashboard ready.");
@@ -1713,6 +1727,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             Guard(TickStep.GiveQueue, DrainGiveQueue);
             Guard(TickStep.ItemTool, TickItemTool);   // the Item Tool: chest looter + Quick give (RynthAiPlugin.ItemTool.cs)
             Guard(TickStep.TimedCommands, TickTimedCommands);   // commands every N seconds (RynthAiPlugin.TimedCommands.cs)
+            Guard(TickStep.CommandButtons, TickCommandButtons);   // the Command Buttons lists (RynthAiPlugin.CommandButtons.cs)
             if (diag) Host.Log("[RynthAi] OnTick: after drain give queue");
             Guard(TickStep.Jumper, () => _jumper?.Tick());
             if (diag) Host.Log("[RynthAi] OnTick: after jumper tick");
@@ -2029,6 +2044,8 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 // After the decision, ahead of every hold below (buffing above all), so a monster, a
                 // heal or a fight ends a kit run on this tick (RynthAiPlugin.Kits.cs).
                 Guard(TickStep.AutoKits, () => CheckAutoKitsDanger(settings));
+                // The same for a Make ammo when low top-off (RynthAiPlugin.Ammo.cs), on the notes just taken.
+                Guard(TickStep.AutoAmmo, () => CheckAutoAmmoDanger(settings));
 
                 // ── Travel back to your corpse (TravelToOwnCorpse) ─────────────────
                 // After the decision, ahead of every early return below: RynthNav walks only
@@ -2090,6 +2107,17 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     return;
                 }
 
+                // ── Trade Shop (a player-run shop) ───────────────────────────────
+                // Only trades with the macro off and no hunt running (it pauses itself otherwise).
+                // While a sale is under way inventory chores wait, as for AutoTrade.
+                if (_tradeShop != null && GuardHold(TickStep.TradeShop, TickTradeShop))
+                {
+                    KeepThreatScanFresh(settings);
+                    FreezeCorpseTimeout(CorpseNowMs);
+                    ThinkMeta();
+                    return;
+                }
+
                 Guard(TickStep.WeaponElements, TickWeaponElements);
 
                 // ── Priority 1: Buffing ───────────────────────────────────────────
@@ -2120,6 +2148,20 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                 // chores, crafting, combat, looting and navigation. A fault holds nothing.
                 if (inventorySettled && settings.IsMacroRunning
                     && GuardHold(TickStep.AutoKits, () => TickAutoKits(settings)))
+                {
+                    StopNavFor(BotActivity.Idle);
+                    KeepThreatScanFresh(settings);
+                    FreezeCorpseTimeout(CorpseNowMs);   // a claimed corpse must not time out while held
+                    ThinkMeta();
+                    return;
+                }
+
+                // Make ammo when low (RynthAiPlugin.Ammo.cs): the same hold while a top-off gets ready or
+                // goes, ahead of crafting's empty-slot path. Make ammo now also runs with the macro off
+                // (then nothing below moves the character anyway).
+                if (inventorySettled
+                    && GuardHold(TickStep.AutoAmmo, () => TickAutoAmmo(settings))
+                    && settings.IsMacroRunning)
                 {
                     StopNavFor(BotActivity.Idle);
                     KeepThreatScanFresh(settings);
@@ -2306,6 +2348,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
                     // (Buffing / missile-crafting / BoostNavPriority branches).
                     if (Host.HasNav3D)
                     {
+                        _losLineOverlay?.Submit();   // first: the route's lines can't crowd it out
                         _navMarkerRenderer?.SubmitNav3D();
                         _navOverlay?.SubmitNav3D();
                     }
@@ -2592,6 +2635,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
         _aetheriaUnboxer?.OnChat(text);
         _metaManager?.HandleChat(text, chatType);
         _questTracker?.OnChatLine(text);
+        TradeShopChat(text, chatType);   // incoming tells to the Trade Shop (RynthAiPlugin.TradeShop.cs)
         CheckChatForSafetyStops(text);
         try { OnOwnCorpseChat(text); } catch { }
     }
@@ -4090,6 +4134,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "offhand":      HandleOffhandCommand(parts); break;
             case "raycast":      HandleRaycastCommand(parts); break;
             case "lostest":      HandleLosTestCommand(parts); break;
+            case "losline":      HandleLosLineCommand(parts); break;
             case "landtest":     HandleLandTestCommand(); break;
             case "rayland":      HandleRaylandCommand(); break;
             case "cast":         HandleCastCommand(parts); break;
@@ -4205,10 +4250,14 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             case "mstats":       HandleMonsterStatsCommand(parts); break;   // RynthAiPlugin.MonsterStats.cs
             case "gear":         HandleGearCommand(parts); break;           // RynthAiPlugin.ActiveGear.cs
             case "timed":        HandleTimedCommand(parts); break;          // RynthAiPlugin.TimedCommands.cs
+            case "button":
+            case "buttons":      HandleButtonsCommand(parts); break;        // RynthAiPlugin.CommandButtons.cs
             case "find":         HandleFindCommand(parts); break;           // RynthAiPlugin.FeatureSearch.cs
+            case "acmaps":       HandleAcMapsCommand(parts); break;         // RynthAiPlugin.AcMaps.cs
             case "aetheria":     HandleAetheriaCommand(parts); break;       // RynthAiPlugin.Aetheria.cs
             case "autoconfirm":  HandleAutoConfirmCommand(parts); break;    // RynthAiPlugin.AutoConfirm.cs
             case "kits":         HandleKitsCommand(parts); break;           // RynthAiPlugin.Kits.cs
+            case "ammo":         HandleAmmoCommand(parts); break;           // RynthAiPlugin.Ammo.cs
             case "petelement":   HandlePetElementCommand(parts); break;     // RynthAiPlugin.PetElement.cs
             case "why":          HandleWhyCommand(); break;
             case "ghost":
@@ -4249,6 +4298,7 @@ public sealed partial class RynthAiPlugin : RynthPluginBase
             // /ra equipfor <monster>: VTank's /vt equipitemsfor (MagToolsCommands.Extra.cs)
             case "equipfor":     HandleEquipForCommand(parts); break;
             case "autotrade":    HandleAutoTradeRaCommand(parts); break;
+            case "tradeshop":    HandleTradeShopRaCommand(parts); break;
             case "trade":        HandleTradeCommand(parts); break;
             case "busyinfo":     HandleBusyInfoCommand(); break;
             // /ra quit | /ra exit: close the client (the engine's /rc quit: as its close button)

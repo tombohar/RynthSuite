@@ -431,7 +431,7 @@ public sealed partial class RynthNavPlugin
         {
             // As /rnav route: the panel shows the plan and the markers its path (worked out below, once).
             _shownRoute = plan.Steps ?? new List<RouteStep> { new(ns, ew, false, false, "walk") };
-            _shownRouteFor = name; _shownRouteEst = plan.Est; _shownRouteLive = false; _routeVersion++;
+            _shownRouteFor = name; SetShownRouteGoal(ns, ew); _shownRouteEst = plan.Est; _shownRouteLive = false; _routeVersion++;
             trip = SetTrip(plan.Steps, name, ns, ew, recalls, "", live: false, buildPath: false);
         }
         else trip = NewTrip(plan.Steps, name, ns, ew, recalls, "", live: false);

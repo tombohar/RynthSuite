@@ -22,6 +22,8 @@
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\AtlasStore.cs" Link="Linked\AtlasStore.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\NavReplies.cs" Link="Linked\NavReplies.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\ArrowGuide.cs" Link="Linked\ArrowGuide.cs" />
+    <!-- One target at a time (TargetSwitchTests). -->
+    <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\TargetSwitch.cs" Link="Linked\TargetSwitch.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\RecallMemory.cs" Link="Linked\RecallMemory.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\RecallPlanner.cs" Link="Linked\RecallPlanner.cs" />
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthNav\NavDataConfig.cs" Link="Linked\NavDataConfig.cs" />

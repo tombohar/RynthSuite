@@ -172,6 +172,12 @@ public static unsafe class PluginExports
                 int drawn = plugin.RenderTimedCommands(popped, out want);
                 if (drawn != 1) return drawn;
             }
+            else if (name.SequenceEqual("window:commandbuttons"u8))
+            {
+                // The Command Buttons window (RynthAiPlugin.CommandButtons.cs): 1 drawn, 0 not ready, -2 failed.
+                int drawn = plugin.RenderCommandButtons(popped, out want);
+                if (drawn != 1) return drawn;
+            }
             else if (name.SequenceEqual("window:monsterstats"u8))
             {
                 // The Monster Stats window (RynthAiPlugin.MonsterStats.cs): 1 drawn, 0 not ready, -2 failed.
@@ -184,10 +190,22 @@ public static unsafe class PluginExports
                 int drawn = plugin.RenderActiveGear(popped, out want);
                 if (drawn != 1) return drawn;
             }
+            else if (name.SequenceEqual("window:tradeshop"u8))
+            {
+                // The Trade Shop window (RynthAiPlugin.TradeShop.cs): 1 drawn, 0 not ready, -2 failed.
+                int drawn = plugin.RenderTradeShop(popped, out want);
+                if (drawn != 1) return drawn;
+            }
             else if (name.SequenceEqual("window:featuresearch"u8))
             {
                 // The Find a Feature window (RynthAiPlugin.FeatureSearch.cs): 1 drawn, 0 not ready, -2 failed.
                 int drawn = plugin.RenderFeatureSearch(popped, out want);
+                if (drawn != 1) return drawn;
+            }
+            else if (name.SequenceEqual("window:acmaps"u8))
+            {
+                // The ACMAPS Maps window (RynthAiPlugin.AcMaps.cs): 1 drawn, 0 not ready, -2 failed.
+                int drawn = plugin.RenderAcMaps(popped, out want);
                 if (drawn != 1) return drawn;
             }
             else if (name.StartsWith("section:"u8))
@@ -953,7 +971,7 @@ public static unsafe class PluginExports
     public static int LootEditRevision()
     {
         try { return Runtime.Plugin?.LootEditor.Revision() ?? 0; }
-        catch { return 0; }
+        catch (Exception ex) { LootEditFailed(ex); return 0; }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetLootEditJson", CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -964,7 +982,7 @@ public static unsafe class PluginExports
             string? json = Runtime.Plugin?.LootEditor.StateJson();
             return json == null ? IntPtr.Zero : Utf8Swap(ref _lootStatePtr, json);
         }
-        catch { return IntPtr.Zero; }
+        catch (Exception ex) { LootEditFailed(ex); return IntPtr.Zero; }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetLootEditRuleJson", CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -975,7 +993,7 @@ public static unsafe class PluginExports
             string? json = Runtime.Plugin?.LootEditor.RuleJson(index);
             return json == null ? IntPtr.Zero : Utf8Swap(ref _lootRulePtr, json);
         }
-        catch { return IntPtr.Zero; }
+        catch (Exception ex) { LootEditFailed(ex); return IntPtr.Zero; }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetLootEditVocabJson", CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -986,7 +1004,7 @@ public static unsafe class PluginExports
             string? json = Runtime.Plugin?.LootEditor.VocabJson();
             return json == null ? IntPtr.Zero : Utf8Swap(ref _lootVocabPtr, json);
         }
-        catch { return IntPtr.Zero; }
+        catch (Exception ex) { LootEditFailed(ex); return IntPtr.Zero; }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginSendLootEditCommand", CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -999,7 +1017,13 @@ public static unsafe class PluginExports
             if (string.IsNullOrEmpty(json)) return;
             Runtime.Plugin?.LootEditor.Command(json);
         }
-        catch { }
+        catch (Exception ex) { LootEditFailed(ex); }
+    }
+
+    /// <summary>A Loot Editor call threw: RynthAi says why (an older core's loot library, R-20261124-085015-5215).</summary>
+    private static void LootEditFailed(Exception ex)
+    {
+        try { Runtime.Plugin?.NoteLootEditorFailure(ex); } catch { }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginAddSelectedWeapon", CallConvs = new[] { typeof(CallConvCdecl) })]

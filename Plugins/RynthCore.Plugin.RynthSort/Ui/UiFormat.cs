@@ -48,6 +48,28 @@ internal static class UiFormat
     public const byte OpChild = 0x40;
     public const byte OpCollapsingHeader = 0x41;
 
+    // Op level 3 (a newer engine, not released yet; Docs/RYNTHLUA_WINDOWS_DESIGN.md §10.2 on
+    // feature/lua-rich-windows). Only recorded when UiGetInfo says OpLevel >= 3: an older engine
+    // would skip them by length, which would leave a table's rows out.
+    public const int OpLevelRich = 3;
+    public const byte OpPushFont = 0x36;
+    public const byte OpPopFont = 0x37;
+    public const byte OpTable = 0x50;
+    public const byte OpTableSetupColumn = 0x51;
+    public const byte OpTableHeadersRow = 0x52;
+    public const byte OpTableNextRow = 0x53;
+    public const byte OpTableNextColumn = 0x54;
+
+    // PushFont faces (the engine's baked fonts by number).
+    public const byte FontBold = 4;
+
+    // ImGuiTableFlags / ImGuiTableColumnFlags (ImGui.NET 1.91.6.1) the engine's whitelist keeps.
+    public const uint TableRowBg = 1u << 6;
+    public const uint TableBordersInnerH = 1u << 7;
+    public const uint TableSizingStretchProp = 3u << 13;
+    public const uint ColumnWidthStretch = 1u << 3;
+    public const uint ColumnWidthFixed = 1u << 4;
+
     // Window flags
     public const uint FlagVisible = 1u << 0;
     public const uint FlagShowInBar = 1u << 1;
@@ -127,4 +149,8 @@ internal static class UiColors
     public static readonly uint White = UiFormat.Rgb(255, 255, 255);
     /// <summary>The Lua script's amber (paused, full packs): 1.0, 0.75, 0.25.</summary>
     public static readonly uint Amber = UiFormat.Rgb(255, 191, 64);
+    /// <summary>Something is happening now (moving items).</summary>
+    public static readonly uint Blue = UiFormat.Rgb(120, 175, 240);
+    /// <summary>Text a little quieter than normal, louder than disabled (hints).</summary>
+    public static readonly uint Soft = UiFormat.Rgb(185, 185, 185);
 }

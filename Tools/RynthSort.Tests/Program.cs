@@ -92,6 +92,46 @@ namespace RynthSort.Tests
                 Run("plan: a fixed inventory runs out of moves", Converges);
                 Run("loop: auto-sort tidies every pack, then stays still", ConvergesInTheLoop);
                 Run("remote: another plugin's \"rsort\" command reaches /rsort, anything else is not ours", RemoteCommand);
+                Run("add selected: the rule text from an item's name", AddSelectedText);
+                Run("add selected: finding the selected object in the packs", AddSelectedLookup);
+                Run("add selected: nothing selected, not an item, no pack", AddSelectedRefusals);
+                Run("add selected: where the name goes", AddSelectedAdds);
+                Run("add selected: duplicates", AddSelectedDuplicates);
+                Run("add selected: an item another pack's rule takes", AddSelectedOtherPack);
+                Run("add selected: the window button and the command", AddSelectedWindow);
+                Run("hold: what counts as the player touching an item", HoldWatch);
+                Run("hold: touched items are left where they are (moves, stacks, order)", HoldPlan);
+                Run("hold: in the loop (taken out, selected, released, off)", HoldLoop);
+                Run("hold: the setting in the file (old files, clamps, Lua import)", HoldStore);
+                Run("put back: the last sort undone, in the loop", PutBackLoop);
+                Run("put back: what can go back (room, packs, gone)", PutBackPlan);
+                Run("layouts: the starter layouts", LayoutCatalog);
+                Run("layouts: fitted to the packs carried (contents first, then room)", LayoutFit);
+                Run("preview: what a sort would move, before anything moves", PreviewMoves);
+                Run("window: what the status line says (off, on, settling, stuck, paused, jobs)", PanelStatusWords);
+                Run("window: starter layouts picked, previewed, used and undone", PanelLayouts);
+                Run("window: the moves page (preview, left alone, Sort them too, Put back, op level 3)", PanelMoves);
+                Run("window: the packs page (counts, kind picker, Undo) and the hold setting", PanelPacks);
+                Run("window: a full character fits on every page at op levels 2 and 3", PanelBudget);
+                Run("layouts: a pack keeps the kind it already holds, before kinds no pack holds", LayoutHeldKindsFirst);
+                Run("hold: one item left alone, or let go", HoldOneItem);
+                Run("send: an item sent to a pack from the window (Just move it, Send to)", SendFromWindow);
+                Run("screen: the activity feed with times, and settling items", ScreenFeedAndSettling);
+                Run("screen: the view-model's packs, tiles, chips, moves, left alone and status", ScreenModelPacks);
+                Run("screen: rules for packs not carried, and the layouts popup", ScreenModelOrphansAndLayouts);
+                Run("screen: rule changes (All a kind, Only a name, the x), toasts and Undo", ScreenRuleEdits);
+                Run("window: the sections manifest (frameless, drawn at its own size)", WindowManifest);
+                Run("window: tiles that just arrived pop in", WindowArrivals);
+                Run("feed: packs by name, with the number when two share it", FeedPackNames);
+                Run("drop: an item from RynthCore's Inventory on a pack card (one drop, the engine's payload)", DropFromInventory);
+                Run("handy: kits, stones, food, potions and elixirs at the front of the main pack", HandyFront);
+                Run("handy: in the loop, held items, the window and the file", HandyLoopAndStore);
+                Run("fold: packs fold to their header and rules, saved by pack id", FoldedPacks);
+                Run("rules: a typed name on \"+ Add a rule\" (no item needed)", TypedNameRule);
+                Run("full pack: overflow into the next pack with the same rule, else it waits", FullPackSpill);
+                Run("full pack: one chat line per sort, the banner, the red bar, overflow chips", FullPackWarnings);
+                Run("jobs: Salvage, Sell and Mule packs in the planner (name, job, kind; RynthAi can't answer)", JobsPlan);
+                Run("jobs: in the loop, the window and the file", JobsLoopWindowStore);
             }
             finally
             {
@@ -596,9 +636,17 @@ namespace RynthSort.Tests
             return false;
         }
 
-        private static SortController Controller(bool auto = true, int gapMs = 300, int settleSec = 0)
+        /// <summary>A controller with the old script's three rules (components 1, salvage 2, gems/stones/keys 3): a new character has none now.</summary>
+        private static SortController Sorter()
         {
             var c = new SortController();
+            c.Data.Rules = SortRules.Defaults();
+            return c;
+        }
+
+        private static SortController Controller(bool auto = true, int gapMs = 300, int settleSec = 0)
+        {
+            var c = Sorter();
             c.Data.Settings.Auto = auto;
             c.Data.Settings.GapMs = gapMs;
             c.Data.Settings.SettleSec = settleSec;
@@ -833,11 +881,13 @@ namespace RynthSort.Tests
         {
             SortStore st = TempStore("roundtrip");
             CharacterSortData d = st.Load("DreamWeave", "Drakkon", out string? problem);
-            Check(problem == null && d.Rules.Count == 3 && d.ImportedFrom.Length == 0, "no file: the defaults");
+            Check(problem == null && d.Rules.Count == 0 && d.ImportedFrom.Length == 0, "no file: no rules (the window offers starter layouts)");
             Check(!d.Settings.WindowOpen, "no file: the window starts closed (the bar button opens it)");
+            Check(!d.Settings.Auto, "no file: auto-sort starts off until it is turned on");
+            d.Rules = SortRules.Defaults();
             d.Rules.Add(SortRule.ForName("Pyreal \"Mote\"", 6));
             d.Rules[0].On = false;
-            d.Settings.Auto = false;
+            d.Settings.Auto = true;
             d.Settings.SettleSec = 12;
             d.Settings.GapMs = 900;
             d.Settings.SortInCombat = true;
@@ -849,7 +899,7 @@ namespace RynthSort.Tests
             Eq(back.Rules.Count, 4, "rules");
             Check(!back.Rules[0].On && back.Rules[3].Classes.Count == 0 && back.Rules[3].Names.Count == 1 && back.Rules[3].Names[0] == "Pyreal \"Mote\"" && back.Rules[3].Pack == 6, "rule fields");
             Check(back.Rules[2].SameAs(SortRules.Defaults()[2]), "a rule with three classes comes back whole");
-            Check(!back.Settings.Auto && back.Settings.SettleSec == 12 && back.Settings.GapMs == 900 && back.Settings.SortInCombat && back.Settings.WindowOpen, "settings");
+            Check(back.Settings.Auto && back.Settings.SettleSec == 12 && back.Settings.GapMs == 900 && back.Settings.SortInCombat && back.Settings.WindowOpen, "settings");
             Eq(SortStore.FileStem("Dream:Weave", "Con"), "Dream_Weave_Con", "unsafe characters replaced like RynthLua");
             Eq(SortStore.SafeFileName("CON"), "_CON", "reserved names guarded");
         }
@@ -890,7 +940,7 @@ namespace RynthSort.Tests
             Directory.CreateDirectory(Path.GetDirectoryName(own)!);
             File.WriteAllText(own, "{ not json");
             CharacterSortData d = st.Load("S", "A", out string? problem);
-            Check(problem != null && d.Rules.Count == 3, "broken file: defaults, problem reported");
+            Check(problem != null && d.Rules.Count == 0, "broken file: no rules, problem reported");
 
             // The Lua script saved an empty rule list as {}; numbers as doubles; out-of-range values clamped.
             File.WriteAllText(own, "{\"rules\":{},\"settings\":{\"auto\":true,\"settleSec\":99.0,\"gapMs\":5,\"x\":1}}");
@@ -923,7 +973,7 @@ namespace RynthSort.Tests
 
         private static (SortController, SortPanel, UiHost, UiWindow) Window()
         {
-            var c = new SortController();
+            var c = Sorter();
             var panel = new SortPanel(c, () => { }) { Character = () => "Drakkon" };
             var host = new UiHost();
             UiWindow w = host.Add(new UiWindow("RynthSort/Main", "RynthSort") { Visible = true });
@@ -1002,11 +1052,13 @@ namespace RynthSort.Tests
             ParseAll(host, "default rules", out int ops);
             Check(ops > 10 && ops < 1500, $"ops in range ({ops})");
             string body = BodyText(w);
-            Check(body.Contains("Auto-sort") && body.Contains("Sort now") && body.Contains("Clean packs") && body.Contains("Empty side packs"), "buttons and toggle");
+            Check(body.Contains("Auto-sort") && body.Contains("Sort now") && body.Contains("Clean packs") && body.Contains("Off: nothing moves by itself"), "buttons, toggle and what it is doing");
+            Check(body.Contains("Packs###tab.packs") && body.Contains("Moves###tab.moves") && body.Contains("Layouts###tab.layouts") && body.Contains("Settings###tab.settings"), "the four pages");
+            Check(!body.Contains("Empty side packs"), "Empty side packs is on the Settings page, not beside Sort now");
             Check(body.Contains("Main pack (1/102)"), "the main pack's line");
             Check(body.Contains("Pack 1: Pack 1 (24/24) - Junk 0, Junk 1, Junk 2"), "a section per pack, named with its room and contents");
             Check(body.Contains("Pack 3: Pack 3 (0/24) - empty") && body.Contains("Gem, Key, Mana Stone"), "a rule with three classes as one row under its pack");
-            Check(body.Contains("Pack 4: Pack 4 (0/24) - empty") && body.Contains("No rules send items here."), "a pack without rules says so");
+            Check(body.Contains("Pack 4: Pack 4 (0/24) - empty") && body.Contains("Nothing goes here yet."), "a pack without rules says so");
             Check(body.IndexOf("Pack 1: ", StringComparison.Ordinal) < body.IndexOf("Spell Component", StringComparison.Ordinal)
                   && body.IndexOf("Spell Component", StringComparison.Ordinal) < body.IndexOf("Pack 2: ", StringComparison.Ordinal), "a rule sits under its pack");
             Check(!body.Contains("Classes:"), "no editor until a rule is picked");
@@ -1015,7 +1067,6 @@ namespace RynthSort.Tests
             // The gem rule's editor, the settings open, warnings and a log.
             SortRule gemRule = c.Data.Rules[2];
             Apply(host, Event(1, 1, w.Hash, w.KeyOf($"r{gemRule.Uid}.row"), Click));
-            Apply(host, Event(6, 2, w.Hash, w.KeyOf("settings"), new byte[] { 1 }));
             c.Note("Prismatic Taper -> pack 1");
             panel.Warnings = () => new[] { "The RynthSort Lua script is set to start too" };
             Draw(w, panel);
@@ -1024,11 +1075,20 @@ namespace RynthSort.Tests
             Check(body.Contains("Classes:") && body.Contains("Gem  x") && body.Contains("Key  x") && body.Contains("Mana Stone  x"), "the rule's classes as chips");
             Check(body.Contains("Add a class...") && body.Contains("Name has") && body.Contains("Remove rule"), "add a class, add a name, remove");
             Check(body.Contains("Pack 3: Pack 3 (0/24) - empty") && body.Contains("Pack 7 (none)"), "the pack picker");
-            Check(body.Contains("Settle (s)") && body.Contains("Gap (ms)") && body.Contains("Sort during fights")
-                  && body.Contains("Put items in order inside packs") && body.Contains("Group by kind first"), "settings shown");
-            Check(body.Contains("plugin API 80"), "an engine that can't read orders: said in the settings");
             Check(body.Contains("Lua script is set to start"), "warning shown");
+            Check(body.Contains("Last: Prismatic Taper -> pack 1"), "the last move under the status");
             w.MarkSubmitted(true);
+
+            Apply(host, Event(1, 2, w.Hash, w.KeyOf("tab.settings"), Click));
+            Draw(w, panel);
+            ParseAll(host, "settings page", out _);
+            body = BodyText(w);
+            Check(body.Contains("Settle (s)") && body.Contains("Gap (ms)") && body.Contains("Sort during fights") && body.Contains("Leave alone (min)")
+                  && body.Contains("Put items in order inside packs") && body.Contains("Group by kind first") && body.Contains("Empty side packs"), "settings shown");
+            Check(body.Contains("plugin API 80"), "an engine that can't read orders: said in the settings");
+            Check(!body.Contains("Classes:"), "the packs aren't drawn on the settings page");
+            w.MarkSubmitted(true);
+            Apply(host, Event(1, 3, w.Hash, w.KeyOf("tab.packs"), Click));
 
             gemRule.AddName("Opal");
             gemRule.AddName("a##b");
@@ -1160,7 +1220,7 @@ namespace RynthSort.Tests
             Check(!c.Data.Rules.Contains(r) && panel.Selected == null, "Remove");
 
             // Settings and buttons.
-            Send(6, "settings", new byte[] { 1 });
+            Send(1, "tab.settings", Click);
             Send(3, "settle", BitConverter.GetBytes(12));
             Send(3, "gap", BitConverter.GetBytes(50_000));
             Send(2, "combat", new byte[] { 1 });
@@ -1168,8 +1228,10 @@ namespace RynthSort.Tests
             Send(2, "order", new byte[] { 0 });
             Send(2, "orderkind", new byte[] { 1 });
             Check(!c.Data.Settings.OrderInPacks && c.Data.Settings.OrderKindFirst, "the order boxes");
+            Send(2, "auto", new byte[] { 1 });
+            Check(c.Data.Settings.Auto, "auto-sort box on");
             Send(2, "auto", new byte[] { 0 });
-            Check(!c.Data.Settings.Auto, "auto-sort box");
+            Check(!c.Data.Settings.Auto, "auto-sort box off");
             Send(1, "job.all", Click);
             Eq(c.Job, SortScope.All, "Sort now button");
             Send(1, "job.unpack", Click);

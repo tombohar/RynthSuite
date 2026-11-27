@@ -19,7 +19,15 @@ namespace RynthCore.Plugin.RynthSort;
 /// each pack. Clean also sends items no rule wants back to the main pack; Unpack empties the side
 /// packs. A rule lists classes and parts of names and the pack they go to; a name match beats a
 /// class match. Rules and settings are kept per character; the RynthSort Lua script's saved rules
-/// are taken over on a character's first run.
+/// are taken over on a character's first run. A character it hasn't seen starts with auto-sort off
+/// and no rules; the window offers starter layouts fitted to its packs (Sorting/StarterLayouts.cs),
+/// previews what a sort would move, and Put back undoes the last sort. Items the player is using
+/// (moved, selected, dragged, taken off, picked up) are left alone for a few minutes
+/// (Sorting/TouchWatch.cs; the selection is polled each tick, drags come from the v77 UI hooks).
+///
+/// The window (0.5.0, 2026-11-26): drawn by RynthSort with ImGui in RynthCore's frameless plugin
+/// window (RynthSortPlugin.Window.cs, Window/SortWindow.cs) on engines with plugin API v90; the
+/// script-window panel (Views/SortPanel.cs) on older ones.
 ///
 /// It stays out of the way (Sorting/SortGate.cs): nothing moves while a corpse or chest is being
 /// looted, a vendor or trade window is open, the character is busy or animating, in portal space,
@@ -29,9 +37,9 @@ namespace RynthCore.Plugin.RynthSort;
 /// Everything runs on the plugin pump (OnTick and the events the engine drains into it) except
 /// OnChatBarEnter, which the engine may call on AC's thread: it only queues the command.
 /// </summary>
-public sealed class RynthSortPlugin : RynthPluginBase
+public sealed partial class RynthSortPlugin : RynthPluginBase
 {
-    public const string Version = "0.3.1";
+    public const string Version = "0.6.1";
     private const long IdentityRetryMs = 1000;
     private const long SaveDelayMs = 750;
     private const long PassIntervalMs = 500;
@@ -95,22 +103,35 @@ public sealed class RynthSortPlugin : RynthPluginBase
         _world = new HostSortWorld(Host, _reader, _loot, () => _vendorOpen);
         _sort.SettingsChanged = RequestSave;
         _sort.PacksFixed = OnPacksFixed;
+        _sort.Warn = text => _reply.Fail(text);   // what didn't fit, once per sort
+        _direct = UsesDirectWindow(Host);
+        if (_direct)
+        {
+            // The window drawn with ImGui.NET bound to the engine's cimgui, in the engine's look (as RynthDefective's bar).
+            RynthCore.Plugin.Shared.ImGuiNativeBinding.Ensure(msg => Host.Log("[RynthSort] " + msg));
+            RynthCore.Plugin.Shared.RynthUi.RynthUi.Init(Host);
+        }
         _panel = new SortPanel(_sort, RequestSave)
         {
             Warnings = () => _warnings,
             Character = () => _identityKnown ? _character : string.Empty,
             Icons = IconsOn,
+            OpLevel = OpLevelNow,
             CanSelect = () => Host.HasSelectItem,
             SelectInGame = id => Host.HasSelectItem && Host.SelectItem(id),
+            ReadSelected = () => _world?.ReadSelected() ?? SelectedItem.Of(SelectionKind.Unavailable),
         };
         // No bar button of its own: opened from the engine Inventory window's Sort button, the
-        // Scripts menu or /rsort.
-        _window = _ui.Add(new UiWindow("RynthSort/Main", "RynthSort")
-        {
-            DefaultWidth = 360f, DefaultHeight = 420f, MinWidth = 300f, MinHeight = 200f,
-            BarButton = false,
-        });
-        Host.Log($"[RynthSort] {Version} initialized. /rsort shows or hides the window; /rsort on|off|now|tidy|clean|unpack. Files: {_store.Root}");
+        // Scripts menu or /rsort. Only on an engine without frameless plugin windows: the window
+        // drawn with ImGui takes the "RynthSort" title, which a script window would hold.
+        if (!_direct)
+            _window = _ui.Add(new UiWindow("RynthSort/Main", "RynthSort")
+            {
+                // Room for the status lines, the four page buttons and a pack's buttons on one line each.
+                DefaultWidth = 440f, DefaultHeight = 560f, MinWidth = 330f, MinHeight = 260f,
+                BarButton = false,
+            });
+        Host.Log($"[RynthSort] {Version} initialized ({(_direct ? "its own window" : "script window")}). /rsort shows or hides the window; /rsort on|off|now|tidy|clean|unpack|back|add. Files: {_store.Root}");
         return 0;
     }
 
@@ -124,6 +145,8 @@ public sealed class RynthSortPlugin : RynthPluginBase
         _reader.Reset();
         _loot.Reset();
         _warnings.Clear();
+        _session.Reset();
+        _screenDirty = true;
     }
 
     public override void OnLogout()
@@ -147,6 +170,17 @@ public sealed class RynthSortPlugin : RynthPluginBase
 
     public override void OnVendorOpen(uint vendorId) => _vendorOpen = true;
     public override void OnVendorClose(uint vendorId) => _vendorOpen = false;
+
+    // The player's own hands on an item (API v77 drag and drop, on the pump): left alone for a while.
+    public override void OnDragStart(uint objectId, uint spellId, uint iconId)
+    {
+        if (objectId != 0 && _identityKnown) _sort.Touch.NoteDrag(objectId, Environment.TickCount64);
+    }
+
+    public override void OnItemDropped(uint objectId, uint spellId, uint targetElementId)
+    {
+        if (objectId != 0 && _identityKnown) _sort.Touch.NoteDrop(objectId, Environment.TickCount64);
+    }
 
     // ── Chat ────────────────────────────────────────────────────────────────
 
@@ -175,7 +209,13 @@ public sealed class RynthSortPlugin : RynthPluginBase
         switch (c.Verb)
         {
             case SortVerb.Window:
-                if (_window != null)
+                if (_direct)
+                {
+                    int state = ToggleWindow();
+                    if (state >= 0) Print(SortCommand.Window(state == 1));
+                    else PrintFail("The RynthSort window isn't ready yet; try again in a moment.");
+                }
+                else if (_window != null)
                 {
                     _window.Visible = !_window.Visible; _window.NeedsPass = true;
                     if (Host.HasUi) Print(SortCommand.Window(_window.Visible));
@@ -202,6 +242,30 @@ public sealed class RynthSortPlugin : RynthPluginBase
             case SortVerb.Status:
                 PrintStatus();
                 break;
+            case SortVerb.Back:
+            {
+                int count = _sort.PutBackCount;
+                if (_sort.StartPutBack()) Print(SortCommand.PuttingBack(count));
+                else PrintFail(SortCommand.PuttingBack(0));
+                break;
+            }
+            case SortVerb.Add:
+                // The selected item's name into a pack's rules: the window's "+ Add selected".
+                if (c.Pack == null) PrintFail(SortCommand.AddUsage);
+                else if (_direct)
+                {
+                    AddOutcome added = AddSelectedHere(c.Pack.Value);
+                    if (added.Status == AddStatus.Refused) PrintFail(added.Message);
+                    else Print(added.Message);
+                }
+                else if (_panel == null) PrintFail("The RynthSort window isn't ready yet.");
+                else
+                {
+                    AddOutcome added = _panel.AddSelected(c.Pack.Value);
+                    if (added.Status == AddStatus.Refused) PrintFail(added.Message);
+                    else Print(added.Message);
+                }
+                break;
             case SortVerb.Help:
                 Print(SortCommand.Usage);
                 break;
@@ -210,13 +274,15 @@ public sealed class RynthSortPlugin : RynthPluginBase
                 break;
         }
         if (_window != null) _window.NeedsPass = true;
+        _screenDirty = true;
     }
 
     private void PrintStatus()
     {
         SortView v = _sort.Planner.View;
+        string held = v.Held.Count > 0 ? $", {v.Held.Count} left alone (you used them)" : string.Empty;
         Print($"{_character}: auto-sort {(_sort.Data.Settings.Auto ? "on" : "off")}, {_sort.Status}; {_sort.Data.Rules.Count} rules, "
-              + $"{v.Packs.Count} side packs, main pack {v.MainUsed}/{v.MainCapacity}; moved {_sort.Moved}, failed {_sort.Failed} this session.");
+              + $"{v.Packs.Count} side packs, main pack {v.MainUsed}/{v.MainCapacity}{held}; moved {_sort.Moved}, failed {_sort.Failed} this session.");
     }
 
     // Chat lines wait in the shared reply queue (the host drops a line within 100 ms of another
@@ -241,6 +307,8 @@ public sealed class RynthSortPlugin : RynthPluginBase
             if (!_identityKnown && now >= _nextIdentityTryMs) TryStartCharacter(now);
             if (_identityKnown && _world != null)
             {
+                // The item selected in the game counts as in use while it is selected (and for the hold after).
+                if (Host.HasGetSelectedItemId) _sort.Touch.NoteSelected(Host.GetSelectedItemId(), now);
                 try { _sort.Tick(_world, now); }
                 catch (Exception ex)
                 {
@@ -254,7 +322,8 @@ public sealed class RynthSortPlugin : RynthPluginBase
         _movedSeen = _sort.Moved;
         _moving = _inWorld && _identityKnown && (_sort.HasMoveOut || (_lastMoveMs != 0 && now - _lastMoveMs < MovingHoldMs));
 
-        if (!Host.HasUi || _window == null || _panel == null) return;
+        TickWindow(now);
+        if (_direct || !Host.HasUi || _window == null || _panel == null) return;
         Record(_window, now);
         _ui.Submit(Host, now);
 
@@ -265,13 +334,16 @@ public sealed class RynthSortPlugin : RynthPluginBase
         }
     }
 
-    // Item icons in script windows need op level 2 (engines from 2026-09-30); asked until it says yes.
-    private bool _icons;
-    private bool IconsOn()
+    // The engine's script-window op level: 2 draws item icons (engines from 2026-09-30), 3 tables
+    // and fonts (not released yet). Asked until it answers.
+    private int _opLevel = -1;
+    private int OpLevelNow()
     {
-        if (!_icons) _icons = Host.HasUi && Host.TryGetUiInfo(out RynthCore.PluginSdk.UiInfoNative info) && info.OpLevel >= 2;
-        return _icons;
+        if (_opLevel < 0 && Host.HasUi && Host.TryGetUiInfo(out RynthCore.PluginSdk.UiInfoNative info)) _opLevel = info.OpLevel;
+        return Math.Max(_opLevel, 0);
     }
+
+    private bool IconsOn() => OpLevelNow() >= 2;
 
     private void TryStartCharacter(long now)
     {
@@ -283,10 +355,10 @@ public sealed class RynthSortPlugin : RynthPluginBase
         _server = server;
         _character = name;
         CharacterSortData data = _store.Load(server, name, out string? problem);
-        if (problem != null) Host.Log($"[RynthSort] couldn't read the saved rules ({problem}); using defaults.");
+        if (problem != null) Host.Log($"[RynthSort] couldn't read the saved rules ({problem}); starting with none (the file is kept as .bak at the next save).");
         _sort.Data = data;
         _identityKnown = true;
-        _backupOnSave = false;
+        _backupOnSave = problem != null;   // a broken file is kept beside the new one (.bak)
 
         string own = _store.PathFor(server, name);
         if (data.ImportedFrom.Length > 0 && !File.Exists(own))
@@ -299,6 +371,12 @@ public sealed class RynthSortPlugin : RynthPluginBase
         }
         CheckLuaScriptAutostart(server, name);
         if (_window != null) { _window.Visible = data.Settings.WindowOpen; _window.NeedsPass = true; }
+        if (_direct)
+        {
+            _session.Reset();
+            _screenDirty = true;
+            _openUntilMs = data.Settings.WindowOpen ? now + OpenWhenHostedMs : 0;
+        }
         Host.Log($"[RynthSort] sorting for {name} on {server}: {data.Rules.Count} rules, auto-sort {(data.Settings.Auto ? "on" : "off")}; file {own}");
     }
 
@@ -363,6 +441,7 @@ public sealed class RynthSortPlugin : RynthPluginBase
     private void RequestSave()
     {
         if (_window != null) _window.NeedsPass = true;
+        _screenDirty = true;
         if (_saveDueMs == 0) _saveDueMs = Environment.TickCount64 + SaveDelayMs;
     }
 

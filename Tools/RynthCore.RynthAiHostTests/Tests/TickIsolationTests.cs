@@ -29,6 +29,7 @@ internal static class TickIsolationTests
     {
         r.Add("tick isolation: a step before healing that throws every tick (quest tracker) doesn't stop the heal", HealDespiteEarlierFault);
         r.Add("tick guard: a member missing from a shared RynthCore library says to install the core update (R-20261123-203520-9756)", GuardSaysNeedsNewerCore);
+        r.Add("loot editor: a call that fails on an older core's loot library says to install the core update, once in 5 min; other failures are logged (R-20261124-085015-5215)", LootEditorSaysNeedsNewerCore);
         r.Add("tick isolation: chores that throw every tick (mana stones, AutoCram) don't stop combat's heartbeat", CombatDespiteChoreFault);
         r.Add("tick isolation: a chore failing every tick is switched off with one chat line, retried every 60 s, back on when it works", ChoreTripsAndRecovers);
         r.Add("tick isolation: healing failing every tick is never switched off; one chat line, and combat still runs", HealingNeverTrips);
@@ -266,6 +267,23 @@ internal static class TickIsolationTests
         long now = 1_000_000;
         var g = new TickGuard(log.Add, chat.Add) { Clock = () => now };
         return (g, log, chat, () => now += stepMs);
+    }
+
+    private static void LootEditorSaysNeedsNewerCore()
+    {
+        var bot = new Bot();
+        var missing = new MissingFieldException("Field not found: 'RynthCore.Loot.Editing.LootEditRule.PerDayStatus'.");
+        bot.P.NoteLootEditorFailure(missing);
+        bot.P.NoteLootEditorFailure(missing);
+        int said = FakeHost.Chat.Count(l => l.Contains("The Loot Editor can't load: this RynthAi needs a newer RynthCore core: install the core update in the launcher"));
+        Check.Eq(said, 1, "said once in chat, not once per call: " + string.Join(" | ", FakeHost.Chat));
+        Check.True(FakeHost.Logs.Any(l => l.Contains("The Loot Editor can't load") && l.Contains("PerDayStatus")), "and logged with the missing member");
+
+        int chatBefore = FakeHost.Chat.Count;
+        bot.P.NoteLootEditorFailure(new InvalidOperationException("a broken profile"));
+        Check.Eq(FakeHost.Chat.Count, chatBefore, "another failure says nothing in chat");
+        Check.True(FakeHost.Logs.Any(l => l.Contains("A Loot Editor call failed: InvalidOperationException: a broken profile")), "but is logged (it used to vanish)");
+        Check.Null(RynthAiPlugin.LootEditorNeedsCoreLine(new InvalidOperationException("x")), "no core line for an ordinary failure");
     }
 
     private static void GuardSaysNeedsNewerCore()

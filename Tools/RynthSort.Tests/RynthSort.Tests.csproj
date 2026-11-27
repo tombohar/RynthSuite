@@ -37,9 +37,26 @@
     <Compile Include="..\..\Plugins\RynthCore.Plugin.RynthSort\**\*.cs" Exclude="..\..\Plugins\RynthCore.Plugin.RynthSort\obj\**;..\..\Plugins\RynthCore.Plugin.RynthSort\bin\**" Link="RynthSort\%(RecursiveDir)%(Filename)%(Extension)" />
     <Compile Include="..\..\Plugins\Shared\RynthAiActivityApi.cs" Link="Shared\RynthAiActivityApi.cs" />
     <Compile Include="..\..\Plugins\Shared\RynthAiStatusApi.cs" Link="Shared\RynthAiStatusApi.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthAiHubApi.cs" Link="Shared\RynthAiHubApi.cs" />
     <Compile Include="..\..\Plugins\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
     <Compile Include="..\..\Plugins\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
-    <Compile Include="..\..\..\RynthCore\src\RynthCore.Engine\UI\ScriptWindows\DisplayListParser.cs" Link="Engine\DisplayListParser.cs" />
+    <!-- The window drawn with ImGui (Window/*.cs) compiles here too; nothing native is called. -->
+    <Compile Include="..\..\Plugins\Shared\ImGuiNativeBinding.cs" Link="Shared\ImGuiNativeBinding.cs" />
+    <Compile Include="..\..\Plugins\Shared\SafeImGui.cs" Link="Shared\SafeImGui.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthUi\RynthUi.cs" Link="Shared\RynthUi\RynthUi.cs" />
+    <Compile Include="..\..\Plugins\Shared\RynthUi\RynthIcons.cs" Link="Shared\RynthUi\RynthIcons.cs" />
+    <Compile Include="$(EngineParser)" Link="Engine\DisplayListParser.cs" />
   </ItemGroup>
+
+  <!--
+    The engine parser the window's lists are checked against: the sibling RynthCore checkout's (op
+    level 2, the released engine). To check the op level 3 lists (tables, fonts) against an engine
+    that has them, point it at that engine's parser:
+      dotnet run -c Release -p:EngineParser=<path>\DisplayListParser.cs
+    (in that engine's src\RynthCore.Engine\UI\ScriptWindows\).
+  -->
+  <PropertyGroup>
+    <EngineParser Condition="'$(EngineParser)' == ''">..\..\..\RynthCore\src\RynthCore.Engine\UI\ScriptWindows\DisplayListParser.cs</EngineParser>
+  </PropertyGroup>
 
 </Project>

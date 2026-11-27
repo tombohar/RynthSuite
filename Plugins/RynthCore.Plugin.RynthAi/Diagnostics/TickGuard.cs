@@ -29,6 +29,7 @@ internal enum TickStep
     GiveQueue,
     ItemTool,
     TimedCommands,
+    CommandButtons,
     Jumper,
     Dashboard,
     // In world.
@@ -46,8 +47,10 @@ internal enum TickStep
     PatrolReroute,
     AutoVendor,
     AutoTrade,
+    TradeShop,
     WeaponElements,
     AutoKits,
+    AutoAmmo,
     CramStack,
     InventoryStatus,
     CombatTelemetry,
@@ -121,6 +124,7 @@ internal sealed class TickGuard
         Add(TickStep.GiveQueue,         "give queue",               LogCat.Inventory);
         Add(TickStep.ItemTool,          "item tool",                LogCat.Inventory);
         Add(TickStep.TimedCommands,     "timed commands",           LogCat.Commands);
+        Add(TickStep.CommandButtons,    "command buttons",          LogCat.Commands);
         Add(TickStep.Jumper,            "jumper",                   LogCat.Jumper, essential: true);
         Add(TickStep.Dashboard,         "dashboard window",         LogCat.UI);
 
@@ -138,8 +142,10 @@ internal sealed class TickGuard
         Add(TickStep.PatrolReroute,     "patrol reroute",           LogCat.Navigation);
         Add(TickStep.AutoVendor,        "AutoVendor",               LogCat.Vendor);
         Add(TickStep.AutoTrade,         "AutoTrade",                LogCat.Vendor);
+        Add(TickStep.TradeShop,         "Trade Shop",               LogCat.Vendor);
         Add(TickStep.WeaponElements,    "weapon elements",          LogCat.Combat);
         Add(TickStep.AutoKits,          "make kits when low",       LogCat.Crafting);
+        Add(TickStep.AutoAmmo,          "make ammo when low",       LogCat.Crafting);
         Add(TickStep.CramStack,         "AutoCram/AutoStack",       LogCat.Inventory);
         Add(TickStep.InventoryStatus,   "inventory status",         LogCat.Inventory);
         Add(TickStep.CombatTelemetry,   "combat telemetry",         LogCat.Combat);

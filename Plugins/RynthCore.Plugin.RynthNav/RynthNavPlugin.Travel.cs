@@ -342,6 +342,7 @@ public sealed partial class RynthNavPlugin
             _castRecallSpell = 0;
             RecallSlot? learned = spell switch
             {
+                RecallPlanner.PortalRecall => RecallSlot.LastPortal,   // a cast confirms where it goes
                 RecallPlanner.LifestoneRecall => RecallSlot.Lifestone,
                 RecallPlanner.PrimaryPortalTieRecall => RecallSlot.Tie1,
                 RecallPlanner.SecondaryPortalTieRecall => RecallSlot.Tie2,
@@ -365,13 +366,41 @@ public sealed partial class RynthNavPlugin
         // hand, or dying and waking at the lifestone) isn't a portal.
         if (landing.OnMap && LandsLikeARecall(landing)) return;
         string label = landing.Label;
+        int? bitmask = null;
         if (havePre && IsOnMap(preCell))
         {
-            AtlasLocation? p = _atlas.Nearest("Portal", NavCoords.NsFromWorld(preWy), NavCoords.EwFromWorld(preWx), PortalNearUnits);
+            double ns = NavCoords.NsFromWorld(preWy), ew = NavCoords.EwFromWorld(preWx);
+            AtlasLocation? p = _atlas.Nearest("Portal", ns, ew, PortalNearUnits);
             if (p != null) label = p.Name + (landing.Label.Length > 0 ? " → " + landing.Label : "");
+            bitmask = PortalBitmaskNear(ns, ew);
         }
         landing.Label = label;
+        switch (RecallPlanner.ForPortal(bitmask))
+        {
+            case RecallPlanner.LastPortalUpdate.Keep:
+                Host.Log($"[RynthNav] {label}: a no-recall portal, so Portal Recall still goes to the last portal before it");
+                return;
+            case RecallPlanner.LastPortalUpdate.SetUnconfirmed:
+                landing.Unconfirmed = true;
+                Host.Log($"[RynthNav] {label}: not in the portal list; Portal Recall isn't used for routes until a cast confirms where it goes");
+                break;
+        }
         _memory.Set(who, RecallSlot.LastPortal, landing);
+    }
+
+    /// <summary>The PortalBitmask of the listed portal whose entrance is nearest (within PortalNearUnits), or null.</summary>
+    private int? PortalBitmaskNear(double ns, double ew)
+    {
+        EnsurePortalsLoaded();
+        if (_portals == null) return null;
+        double best = PortalNearUnits;
+        int? mask = null;
+        foreach (PortalLink p in _portals)
+        {
+            double d = NavCoords.Distance(ns, ew, p.SrcNs, p.SrcEw);
+            if (d < best) { best = d; mask = p.Bitmask; }
+        }
+        return mask;
     }
 
     private bool LandsLikeARecall(RecallSpot s)
@@ -701,12 +730,14 @@ public sealed partial class RynthNavPlugin
     /// <summary>The Atlas place the last ResolveTarget picked (null for bare coordinates). Tick thread.</summary>
     private AtlasLocation? _resolvedPlace;
 
-    private void SetArrow(string name, string type, double ns, double ew, bool announce)
+    /// <param name="ended">What the new target ended (ApplyTargetChange: "stopped the walk to ..."), said after it.</param>
+    private void SetArrow(string name, string type, double ns, double ew, bool announce, string ended = "")
     {
         _arrow.SetTarget(name, type, ns, ew);
         _store.Touch(new SavedPlace { Name = name, Type = type, Ns = ns, Ew = ew });
         _openArrowSeq++;
-        if (announce) Say($"Arrow: {name}{(type.Length > 0 ? " (" + type + ")" : "")} at {NavCoords.Fmt(ns, ew)}{DistanceFromHere(ns, ew)}.");
+        if (announce) Say($"Arrow: {name}{(type.Length > 0 ? " (" + type + ")" : "")} at {NavCoords.Fmt(ns, ew)}{DistanceFromHere(ns, ew)}"
+            + (ended.Length > 0 ? $" ({ended})." : "."));
     }
 
     private string DistanceFromHere(double ns, double ew)
@@ -932,6 +963,8 @@ public sealed partial class RynthNavPlugin
           .Append(",\"avoidWalls\":").Append(_avoidWalls ? 1 : 0).Append(",\"avoidWallM\":").Append(_wallClearance.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture))
           .Append(",\"cornerM\":").Append(_cornerReach.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture));
         sb.Append(",\"openArrow\":").Append(_openArrowSeq);
+        // /rnav clear is there (from 11-26): the arrow window's x sends it (older RynthNavs get "arrow off").
+        sb.Append(",\"clearCmd\":1");
 
         // Arrow
         sb.Append(",\"arrow\":");
@@ -956,7 +989,11 @@ public sealed partial class RynthNavPlugin
         if (_shownRoute == null) sb.Append("null");
         else
         {
-            sb.Append("{\"for\":\"").Append(Esc(_shownRouteFor)).Append("\",\"est\":").Append(_shownRouteEst.ToString("F0", ci))
+            sb.Append("{\"for\":\"").Append(Esc(_shownRouteFor)).Append("\",\"est\":").Append(_shownRouteEst.ToString("F0", ci));
+            // Where it goes (from 11-26): the arrow window shows the route only under an arrow to the same place.
+            if (!double.IsNaN(_shownRouteNs) && !double.IsNaN(_shownRouteEw))
+                sb.Append(",\"gns\":").Append(_shownRouteNs.ToString("F3", ci)).Append(",\"gew\":").Append(_shownRouteEw.ToString("F3", ci));
+            sb
               .Append(",\"active\":").Append(_gotoActive && _shownRouteLive ? 1 : 0)
               .Append(",\"idx\":").Append(_gotoActive && _shownRouteLive ? (_route != null ? routeIdx : 0) : -1);
             // How long the trip takes, in seconds (RynthNavPlugin.TripTime.cs; -1 = not known).
@@ -1023,7 +1060,8 @@ public sealed partial class RynthNavPlugin
     }
 
     private const string HelpText =
-        "/rnav arrow <place|coords> | arrow off | arrow route <place> — the arrow\n" +
+        "/rnav arrow <place|coords> | arrow off | arrow route <place> — the arrow (one target: a new one replaces the route, and a walk elsewhere)\n" +
+        "/rnav clear — no target: the walk stops, the route goes, the arrow goes off\n" +
         "/rnav go <place|coords> — walk there (route with portals/recalls when /rnav portals on)\n" +
         "/rnav route <place|coords> — plan a route (portals and recalls), no walking\n" +
         "/rnav route next — another way to the same place (switches a running goto) | route go — walk the way shown\n" +
@@ -1032,7 +1070,7 @@ public sealed partial class RynthNavPlugin
         "/rnav pause — stop walking, keep the trip on the map (drive by hand meanwhile) | resume — carry on\n" +
         "/rnav times — how long this character's trips take (run speed, portals, recalls, portal space)\n" +
         "/rnav avoid — show; avoid portals on|off|<m> | walls on|off|<m> | corners <m>\n" +
-        "/rnav markers on|off | markers labels on|off | markers guide on|off — the trip on the ground\n" +
+        "/rnav markers on|off | markers clear | markers labels on|off | markers guide on|off — the trip on the ground (clear: this trip's, now)\n" +
         "/rnav mesh on|off | floor on|off | walls on|off | radius <m> | triangles <n> — draw the navmesh: green floor, red walls\n" +
         "/rnav saveroute [name] [overwrite] — save the last trip as a RynthAi nav route (NavProfiles)\n" +
         "/rnav makeroute <name> to <place|coords> [overwrite] — plan a trip and save it as a nav route in one go, no walking\n" +
@@ -1082,6 +1120,7 @@ public sealed partial class RynthNavPlugin
                 break;
             case "route": CmdRoute(rest); break;
             case "arrow": CmdArrow(rest); break;
+            case "clear": CmdClear(); break;   // RynthNavPlugin.Target.cs
             case "atlas": CmdAtlas(rest); break;
             case "fav": CmdFav(rest); break;
             case "recent":
@@ -1119,24 +1158,39 @@ public sealed partial class RynthNavPlugin
         if (rest.Equals("off", StringComparison.OrdinalIgnoreCase) || rest.Equals("clear", StringComparison.OrdinalIgnoreCase))
         {
             _arrow.Clear();
-            Say("arrow off");
+            // One target: a plan goes with the arrow. A walk carries on (Stop, or /rnav clear, ends it).
+            string dropped = _gotoActive ? "" : ApplyTargetChange(new TargetChange(true, false, false), Held());
+            Say("arrow off" + (dropped.Length > 0 ? " (" + dropped + ")" : ""));
             return;
         }
         if (rest.StartsWith("route ", StringComparison.OrdinalIgnoreCase))
         {
             string where = rest.Substring(6);
             if (!ResolveTarget(where, out string n, out string t, out double rns, out double rew, out string err)) { Note(err); return; }
+            HeldTarget rheld = Held();
+            TargetChange rc = TargetSwitch.For(NewTarget.Plan, rheld, rns, rew);
+            if (rc.KeepArrow) { _openArrowSeq++; Say($"arrow route: already walking to {n}; the arrow follows the trip."); return; }
+            string rended = ApplyTargetChange(rc, rheld);
             List<RouteStep>? steps = PlanAndShow(n, rns, rew, out int used, out double est, out string refusal);
             if (refusal.Length > 0) Note("arrow route: " + refusal);
-            if (steps == null || used == 0) { SetArrow(n, t, rns, rew, announce: true); return; }
+            if (steps == null || used == 0) { SetArrow(n, t, rns, rew, announce: true, rended); return; }
             _arrow.SetRoute(steps, n, t, rns, rew);
             _store.Touch(new SavedPlace { Name = n, Type = t, Ns = rns, Ew = rew });
             _openArrowSeq++;
-            Say($"arrow route to {n}: {used} teleport(s). First: {StepText(_arrow.Current!)}.");
+            Say($"arrow route to {n}: {used} teleport(s). First: {StepText(_arrow.Current!)}{(rended.Length > 0 ? $" ({rended})" : "")}.");
             return;
         }
         if (!ResolveTarget(rest, out string name, out string type, out double ns, out double ew, out string error)) { Note(error); return; }
-        SetArrow(name, type, ns, ew, announce: true);
+        HeldTarget held = Held();
+        TargetChange c = TargetSwitch.For(NewTarget.Arrow, held, ns, ew);
+        if (c.KeepArrow)
+        {
+            // Walking there already: the arrow stays the trip's (along its portals and recalls).
+            _openArrowSeq++;
+            Say($"Arrow: already walking to {(held.TripFor.Length > 0 ? held.TripFor : name)}; the arrow follows the trip.");
+            return;
+        }
+        SetArrow(name, type, ns, ew, announce: true, ApplyTargetChange(c, held));
     }
 
     private void CmdGo(string rest)
@@ -1309,6 +1363,7 @@ public sealed partial class RynthNavPlugin
         used = plan.Teleports; est = plan.Est; refusal = plan.Refusal;
         _shownRoute = steps ?? new List<RouteStep> { new(ns, ew, false, false, "walk") };
         _shownRouteFor = name;
+        SetShownRouteGoal(ns, ew);
         _shownRouteEst = est;
         _shownRouteLive = false;
         _routeVersion++;

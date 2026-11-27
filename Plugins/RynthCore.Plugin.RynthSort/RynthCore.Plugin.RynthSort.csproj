@@ -6,8 +6,10 @@
     time; misplaced items move to theirs, stacks are joined and items are put in order inside
     each pack (slot orders, API v80); Sort now, Clean and Unpack on demand; /rsort. Replaces the RynthSort Lua script (its saved
     rules are imported on first run). Pack moves wait for RynthAi through its read-only
-    "RynthAi.Activity" interface (Shared/RynthAiActivityApi.cs). UI: the engine's script
-    windows (ImGui), no Avalonia.
+    "RynthAi.Activity" interface (Shared/RynthAiActivityApi.cs). UI (0.5.0): its own window drawn with
+    ImGui.NET (plugin API v90), else the engine's script windows; no Avalonia. 0.6.0: pack names in
+    the feed, drops from RynthCore's Inventory, handy items at the front of the main pack, pack jobs
+    (Salvage, Sell, Mule: RynthAi.Hub's read-only answers, Shared/RynthAiHubApi.cs) and full-pack warnings.
   -->
 
   <PropertyGroup>
@@ -24,10 +26,13 @@
     <StripSymbols>false</StripSymbols>
     <RootNamespace>RynthCore.Plugin.RynthSort</RootNamespace>
     <AssemblyName>RynthCore.Plugin.RynthSort</AssemblyName>
+    <!-- The DLL's version (its ProductVersion reads 0.6.1+<commit>); RynthSortPlugin.Version and GetVersion say the same. -->
+    <Version>0.6.1</Version>
     <Platforms>x86</Platforms>
     <!-- Plugin manifest (embedded in the DLL; Plugins\Directory.Build.targets). minEngineApi is the
-         highest API use NOT behind a Has*/version check. Script windows (v71, HasUi) draw the
-         window; vendor info (v67), plugin interfaces (v68), refusals (v70), trade (v72) and slot
+         highest API use NOT behind a Has*/version check. Frameless plugin windows (v90,
+         HasFramelessWindows, HasShortcuts for item pictures) draw its own window, else script
+         windows (v71, HasUi) draw the old one; vendor info (v67), plugin interfaces (v68), refusals (v70), trade (v72) and slot
          orders / moves to a slot (v80: in-pack order, top-to-bottom pack numbers) are each checked first. Below v71 it still sorts (/rsort on|off|now|tidy|clean|unpack). -->
     <RynthPluginMinEngineApi>66</RynthPluginMinEngineApi>
     <RynthPluginDescription>Keeps your packs sorted: new loot goes to the pack its rule names.</RynthPluginDescription>
@@ -38,10 +43,25 @@
     <Compile Include="..\Shared\RynthAiActivityApi.cs" Link="Shared\RynthAiActivityApi.cs" />
     <!-- An older RynthAi without RynthAi.Activity: its RynthAi.Status bot state instead. -->
     <Compile Include="..\Shared\RynthAiStatusApi.cs" Link="Shared\RynthAiStatusApi.cs" />
+    <!-- Pack jobs (0.6.0): RynthAi's read-only answers about items (loot profile actions, AutoVendor, AutoTrade). -->
+    <Compile Include="..\Shared\RynthAiHubApi.cs" Link="Shared\RynthAiHubApi.cs" />
     <!-- Install-folder resolver (env, HKCU, HKLM, default C:\Games). Read only; same file as RynthCore src\Shared. -->
     <Compile Include="..\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
     <!-- How a chat command answers (2026-10-28): the shared reply queue and colours. -->
     <Compile Include="..\Shared\CommandReply.cs" Link="Shared\CommandReply.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The window (2026-11-26): drawn with ImGui.NET bound to the engine's cimgui, in the engine's
+         look (Shared\RynthUi; plugin API v90 hosts the frameless window and gives item pictures),
+         as RynthDefective's shortcut bar. -->
+    <Compile Include="..\Shared\ImGuiNativeBinding.cs" Link="Shared\ImGuiNativeBinding.cs" />
+    <Compile Include="..\Shared\SafeImGui.cs" Link="Shared\SafeImGui.cs" />
+    <Compile Include="..\Shared\RynthUi\RynthUi.cs" Link="Shared\RynthUi\RynthUi.cs" />
+    <Compile Include="..\Shared\RynthUi\RynthIcons.cs" Link="Shared\RynthUi\RynthIcons.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+    <TrimmerRootAssembly Include="ImGui.NET" />
   </ItemGroup>
 
   <ItemGroup>

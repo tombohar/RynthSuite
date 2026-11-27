@@ -86,7 +86,24 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         public static bool IsLinearPathBlocked(Vector3 origin, Vector3 target,
                                                List<BoundingVolume> geometry,
                                                bool multiRay = false)
+            => IsLinearPathBlockedCore(origin, target, geometry, multiRay, wantHit: false, out _);
+
+        /// <summary>
+        /// As <see cref="IsLinearPathBlocked(Vector3, Vector3, List{BoundingVolume}, bool)"/> (the same verdict),
+        /// and where it is blocked: <paramref name="hit"/> is the nearest blocking point on the ray that
+        /// was blocked (the centre ray first, then the silhouette rays in order), in the callers' frame.
+        /// Zero when the path is clear. For the Show Line of Sight overlay (2026-11-26).
+        /// </summary>
+        public static bool IsLinearPathBlocked(Vector3 origin, Vector3 target,
+                                               List<BoundingVolume> geometry,
+                                               bool multiRay, out Vector3 hit)
+            => IsLinearPathBlockedCore(origin, target, geometry, multiRay, wantHit: true, out hit);
+
+        private static bool IsLinearPathBlockedCore(Vector3 origin, Vector3 target,
+                                                    List<BoundingVolume> geometry,
+                                                    bool multiRay, bool wantHit, out Vector3 hit)
         {
+            hit = Vector3.Zero;
             if (geometry == null || geometry.Count == 0)
                 return false;
 
@@ -128,11 +145,11 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     if (near.Count == 0) return false;
 
                     // 5 rays: center, left shoulder, right shoulder, slightly up, slightly down
-                    if (IsSingleRayBlocked(origin,     target,     near)) return true;
-                    if (IsSingleRayBlocked(origin - L, target - L, near)) return true;
-                    if (IsSingleRayBlocked(origin + L, target + L, near)) return true;
-                    if (IsSingleRayBlocked(origin + U, target + U, near)) return true;
-                    if (IsSingleRayBlocked(origin - U, target - U, near)) return true;
+                    if (IsSingleRayBlocked(origin,     target,     near, wantHit, out hit)) return true;
+                    if (IsSingleRayBlocked(origin - L, target - L, near, wantHit, out hit)) return true;
+                    if (IsSingleRayBlocked(origin + L, target + L, near, wantHit, out hit)) return true;
+                    if (IsSingleRayBlocked(origin + U, target + U, near, wantHit, out hit)) return true;
+                    if (IsSingleRayBlocked(origin - U, target - U, near, wantHit, out hit)) return true;
                     return false;
                 }
                 finally
@@ -142,11 +159,18 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 }
             }
 
-            return IsSingleRayBlocked(origin, target, geometry);
+            return IsSingleRayBlocked(origin, target, geometry, wantHit, out hit);
         }
 
-        private static bool IsSingleRayBlocked(Vector3 origin, Vector3 target, List<BoundingVolume> geometry)
+        /// <summary>
+        /// One ray. Without <paramref name="wantHit"/> it stops at the first blocking volume (the verdict
+        /// only); with it, it goes on through the candidates for the nearest one, and
+        /// <paramref name="hit"/> is that point (the verdict is the same either way).
+        /// </summary>
+        private static bool IsSingleRayBlocked(Vector3 origin, Vector3 target, List<BoundingVolume> geometry,
+                                               bool wantHit, out Vector3 hit)
         {
+            hit = Vector3.Zero;
             Vector3 delta = target - origin;
             float distanceToTarget = delta.Length();
             if (distanceToTarget < 1e-4f) return false;
@@ -154,6 +178,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             Vector3 direction = delta / distanceToTarget;
             SegmentBox(origin, target, out Vector3 lo, out Vector3 hi);
 
+            float nearest = float.MaxValue;
             foreach (var volume in geometry)
             {
                 if (volume.IsDoor || OutsideBox(volume, lo, hi)) continue;
@@ -164,11 +189,16 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     // Ignore self-intersection at origin and hits within 0.3m of target
                     // (reduced from 1.0m — the old 1m zone was hiding corner walls next to mobs).
                     if (hitDist > 0.5f && hitDist < distanceToTarget - 0.3f)
-                        return true;
+                    {
+                        if (!wantHit) return true;
+                        if (hitDist < nearest) nearest = hitDist;
+                    }
                 }
             }
 
-            return false;
+            if (nearest == float.MaxValue) return false;
+            hit = origin + direction * nearest;
+            return true;
         }
 
         /// <summary>
@@ -294,6 +324,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             public float Apex;         // highest point of the flight above the launch point (m)
             public float HitAlong;     // horizontal distance from the shooter to the hit (m)
             public float HitZ;         // height of the hit above the launch point (m)
+            public Vector3 HitPoint;   // the hit itself, in the callers' frame (zero when not blocked by geometry)
         }
 
         /// <summary>
@@ -376,6 +407,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                         result.Blocked  = true;
                         result.HitAlong = (float)Math.Sqrt(hx * hx + hy * hy);
                         result.HitZ     = hit.Z - origin.Z;
+                        result.HitPoint = hit;
                         return true;
                     }
                 }

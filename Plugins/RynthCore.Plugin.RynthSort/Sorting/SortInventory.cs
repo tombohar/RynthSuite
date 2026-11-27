@@ -155,6 +155,8 @@ internal sealed class SortInventory
     /// fix of imported Lua pack numbers (<see cref="PackFix"/>) reads the Lua numbers through it.
     /// </summary>
     public readonly List<SortSlot> Slots = new();
+    /// <summary>Worn and wielded things (never sorted): an item that was here and is now in a pack was taken off by the player.</summary>
+    public readonly HashSet<uint> Worn = new();
     /// <summary><see cref="Packs"/> are in the pack column's order, top first.</summary>
     public bool PackOrderKnown;
     /// <summary>Why the packs are numbered the way they are.</summary>

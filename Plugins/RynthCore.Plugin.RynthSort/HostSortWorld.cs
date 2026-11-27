@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using RynthCore.Plugin.RynthSort.Sorting;
+using RynthCore.Plugin.RynthSort.Views;
 using RynthCore.Plugin.Shared;
 using RynthCore.PluginSdk;
 
@@ -28,6 +30,17 @@ internal sealed unsafe class HostSortWorld : ISortWorld
     }
 
     public SortInventory? ReadInventory() => _reader.Read(_host);
+
+    /// <summary>The item selected in the game, looked up in the packs as they are now (for "Add selected").</summary>
+    public SelectedItem ReadSelected()
+    {
+        if (!_host.HasGetSelectedItemId) return SelectedItem.Of(SelectionKind.Unavailable);
+        uint id = _host.GetSelectedItemId();
+        if (id == 0) return SelectedItem.Of(SelectionKind.Nothing);
+        SortInventory? inv = _reader.Read(_host);
+        if (inv == null) return SelectedItem.Of(SelectionKind.NoInventory, id);
+        return SelectionLookup.Find(inv, id, _host.TryGetObjectName(id, out string name) ? name : string.Empty);
+    }
 
     // PutItemInContainer answered "not bound" once: plain moves from then on.
     private bool _putUnbound;
@@ -128,6 +141,102 @@ internal sealed unsafe class HostSortWorld : ISortWorld
 
     public int ErrorSeqNow() =>
         _host.HasGetLastWeenieError && _host.TryGetLastWeenieError(out int seq, out _, out _, out _) ? seq : 0;
+
+    // ── Pack jobs: RynthAi's answers (RynthAi.Hub, read only) ─────────────
+
+    /// <summary>How long RynthAi's answers are used before they are asked again (the items the same).</summary>
+    private const long JobAskMs = 3000;
+    private JobAnswers? _jobAnswers;
+    private long _jobAskedMs = long.MinValue / 2;
+    private string _jobKey = string.Empty;
+
+    /// <summary>
+    /// RynthAi's answers for the jobs <paramref name="wanted"/>: asked again every few seconds, or at
+    /// once when the items carried, the jobs or the mule change. RynthAi not loaded, too old (no
+    /// RynthAi.Hub answers), or with no profile: that job is unknown and says why. Pump thread.
+    /// </summary>
+    public JobAnswers? AskJobs(SortInventory inv, IReadOnlyList<JobKind> wanted, string mule, long nowMs)
+    {
+        var ids = new List<uint>(inv.Main.Items.Count + 64);
+        foreach (SortItem it in inv.Main.Items) if (SortPlanner.Sortable(it)) ids.Add(it.Id);
+        foreach (SortPack p in inv.Packs)
+            foreach (SortItem it in p.Items) if (SortPlanner.Sortable(it)) ids.Add(it.Id);
+        var key = new System.Text.StringBuilder();
+        foreach (JobKind k in wanted) key.Append((int)k).Append(',');
+        key.Append(mule).Append('|').Append(ids.Count);
+        uint sum = 0;
+        foreach (uint id in ids) sum = unchecked(sum * 31 + id);
+        key.Append('|').Append(sum);
+        string k2 = key.ToString();
+        if (_jobAnswers != null && k2 == _jobKey && nowMs - _jobAskedMs < JobAskMs) return _jobAnswers;
+        _jobKey = k2;
+        _jobAskedMs = nowMs;
+        _jobAnswers = AskRynthAi(_host, ids.ToArray(), wanted, mule);
+        return _jobAnswers;
+    }
+
+    /// <summary>Asks RynthAi.Hub for each job (resolved again every call: a RynthAi reload frees nothing but changes the table's version).</summary>
+    internal static JobAnswers AskRynthAi(RynthCoreHost host, uint[] ids, IReadOnlyList<JobKind> wanted, string mule)
+    {
+        var answers = new JobAnswers { Mule = mule };
+        RynthAiHubApiV1* hub = null;
+        string? why = null;
+        if (!host.HasGetPluginInterface) why = "This RynthCore can't reach RynthAi";
+        else
+        {
+            try { hub = (RynthAiHubApiV1*)host.GetPluginInterface(RynthAiHub.PluginName, RynthAiHubApiV1.InterfaceName, RynthAiHubApiV1.InterfaceVersion); }
+            catch { hub = null; }
+            if (hub == null || hub->Version == 0) { hub = null; why = "RynthAi isn't loaded"; }
+        }
+        foreach (JobKind kind in wanted)
+        {
+            if (hub == null) { answers.ByKind[kind] = JobAnswer.Unknown(why!); continue; }
+            int offset = kind switch
+            {
+                JobKind.Salvage => RynthAiHubApiV1.LootActionsOffset,
+                JobKind.Sell => RynthAiHubApiV1.VendorSellsOffset,
+                _ => RynthAiHubApiV1.TradeGivesOffset,
+            };
+            if (!RynthAiHubApiV1.Has(hub, offset)) { answers.ByKind[kind] = JobAnswer.Unknown("This RynthAi is too old to say which items (update RynthAi)"); continue; }
+            answers.ByKind[kind] = Ask(hub, kind, ids, mule);
+        }
+        return answers;
+    }
+
+    private static JobAnswer Ask(RynthAiHubApiV1* hub, JobKind kind, uint[] ids, string mule)
+    {
+        var result = new byte[Math.Max(1, ids.Length)];
+        byte* text = stackalloc byte[256];
+        text[0] = 0;
+        int ok;
+        fixed (uint* pi = ids)
+        fixed (byte* pr = result)
+        {
+            switch (kind)
+            {
+                case JobKind.Salvage:
+                    ok = hub->LootActions == null ? 0 : hub->LootActions(pi, ids.Length, pr, text, 256);
+                    break;
+                case JobKind.Sell:
+                    ok = hub->VendorSells == null ? 0 : hub->VendorSells(pi, ids.Length, pr, text, 256);
+                    break;
+                default:
+                {
+                    byte[] who = System.Text.Encoding.UTF8.GetBytes(mule + "\0");
+                    fixed (byte* pw = who)
+                        ok = hub->TradeGives == null ? 0 : hub->TradeGives(pw, pi, ids.Length, pr, text, 256);
+                    break;
+                }
+            }
+        }
+        string said = Marshal.PtrToStringUTF8((IntPtr)text) ?? string.Empty;
+        if (ok != 1) return JobAnswer.Unknown(said.Length > 0 ? said.TrimEnd('.') : "RynthAi gave no answer");
+        var a = new JobAnswer { Known = true, Text = said };
+        const byte Salvage = 2;   // VTankLootAction.Salvage
+        for (int i = 0; i < ids.Length; i++)
+            if (kind == JobKind.Salvage ? result[i] == Salvage : result[i] == 1) a.Marked.Add(ids[i]);
+        return a;
+    }
 
     // ── RynthAi ─────────────────────────────────────────────────────────────
 

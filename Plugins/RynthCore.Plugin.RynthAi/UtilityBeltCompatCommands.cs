@@ -37,7 +37,7 @@ public sealed partial class RynthAiPlugin
         "chunkaetheria", "chunkdebug", "chunkreset", "chunkstatus", "clapstatus", "dispel", "dispeltool",
         "egg", "element", "enlighten", "enlightenment", "getjob", "getui", "invcache", "joke", "keystore",
         "login", "lsdclearcache", "lsdlb", "mtbridge", "nav", "navfollow", "navfollowarrival",
-        "onetouchheal", "pcap", "perf", "playeroption", "prepclick", "printcolors", "professor",
+        "onetouchheal", "pcap", "perf", "playeroption", "printcolors", "professor",
         "questbonus", "queuestatus", "refreshqueues", "resolution", "revalidate", "setui", "shittalk",
         "soak", "spell", "statushud", "storm", "surgingstrength", "swearallegiance", "testassessor",
         "textures", "tinkcalc", "trace", "tracearmorbuffs", "ubhudrecover", "ucm", "unstack",
@@ -170,6 +170,11 @@ public sealed partial class RynthAiPlugin
             case "combat": return UbStormSwitch(cmd, sub, "enablecombat", w);
             case "sloot":  return UbStormSwitch(cmd, sub, "enablelooting", w);
 
+            // ── Answer the next yes/no prompt (ub-IT's prepclick) ──────────────────
+            case "prepclick":
+                UbPrepClick(sub, w.Length > 1 ? w[1] : "");
+                return true;
+
             case "lps":
             case "lootprofilestatus":
                 {
@@ -186,6 +191,46 @@ public sealed partial class RynthAiPlugin
             return true;
         }
         return false;
+    }
+
+    // ── /ub prepclick yes|no [n] (2026-11-25, R-20261125-144721-b49a) ──────────
+    // Coldeve: a meta turning alt currency in for promissory notes sent "/ub prepclick yes 100" before
+    // each hand-in, and RynthAi only said "no RynthAi equivalent; ignored", so the server's yes/no prompt
+    // waited for a click. The engine answers a server prompt itself (ArmConfirmation, plugin API v85):
+    // "yes" arms a Yes for the next yes/no prompt (ConfirmationRequest YesNo) within the time given in
+    // ms, never under PrepClickMinMs (metas send it again before each hand-in), at most PrepClickMaxMs.
+    // "no" disarms (the engine can't say No to a prompt without a percent: the client shows it).
+    internal const int PrepClickMinMs = 5000, PrepClickMaxMs = 60000;
+
+    private void UbPrepClick(string answer, string number)
+    {
+        if (!Host.HasConfirmationAnswers)
+        {
+            UbNoEquivalent("prepclick", "this RynthCore can't answer prompts (it needs a newer core)");
+            return;
+        }
+        if (answer is "no" or "n" or "off" or "cancel")
+        {
+            Host.ArmConfirmation(RynthCoreHost.ConfirmationKind.YesNo, 0, 0);
+            Reply.Answered();
+            Host.Log("[RynthAi] /ub prepclick no: disarmed; the next yes/no prompt is left to you.");
+            return;
+        }
+        if (answer is not ("yes" or "y" or ""))
+        {
+            ReplyFail("[RynthAi] Usage: /ub prepclick yes|no [ms]");
+            return;
+        }
+        int ms = int.TryParse(number, out int n) ? n : 0;
+        ms = Math.Clamp(ms, PrepClickMinMs, PrepClickMaxMs);
+        int r = Host.ArmConfirmation(RynthCoreHost.ConfirmationKind.YesNo, 0, ms);
+        if (r == 1)
+        {
+            Reply.Answered();   // a meta sends it every few seconds: the log, not chat
+            Host.Log($"[RynthAi] /ub prepclick yes: the next yes/no prompt within {ms / 1000.0:0.#} s is answered Yes.");
+        }
+        else
+            ReplyFail($"[RynthAi] /ub prepclick: RynthCore couldn't arm the answer ({r}).");
     }
 
     /// <summary>

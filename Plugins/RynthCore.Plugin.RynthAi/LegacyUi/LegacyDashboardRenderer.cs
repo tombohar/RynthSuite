@@ -524,7 +524,7 @@ internal sealed partial class LegacyDashboardRenderer
             // The defaults now in memory (and the monster rules just loaded) are not a change: take
             // them as the saved state, so the autosave leaves the unreadable file alone until the
             // player changes something.
-            try { CaptureTransientUiState(); _lastSavedJson = JsonSerializer.Serialize(_settings, RynthAiJsonContext.Default.LegacyUiSettings); }
+            try { CaptureTransientUiState(); _lastSavedJson = SerializeLiveSettings(); }
             catch { _lastSavedJson = string.Empty; }
         }
         _profileLoaded = true;
@@ -621,7 +621,7 @@ internal sealed partial class LegacyDashboardRenderer
         try
         {
             CaptureTransientUiState();
-            json = JsonSerializer.Serialize(_settings, RynthAiJsonContext.Default.LegacyUiSettings);
+            json = SerializeLiveSettings();
         }
         catch (Exception ex) { reason = ex.Message; return false; }
         if (!WriteSettingsFile(_settingsFilePath, json, out reason, callerShows)) return false;
@@ -729,7 +729,7 @@ internal sealed partial class LegacyDashboardRenderer
         try
         {
             CaptureTransientUiState();
-            string json = JsonSerializer.Serialize(_settings, RynthAiJsonContext.Default.LegacyUiSettings);
+            string json = SerializeLiveSettings();
             string path = GetProfileFilePath(name);
             if (!WriteSettingsFile(path, json, out string reason, callerShows: true))
                 return $"Couldn't save profile '{name}' to {path}: {reason}";
@@ -770,7 +770,7 @@ internal sealed partial class LegacyDashboardRenderer
         try
         {
             CaptureTransientUiState();
-            json = JsonSerializer.Serialize(_settings, RynthAiJsonContext.Default.LegacyUiSettings);
+            json = SerializeLiveSettings();
         }
         catch { return; }
         if (json == _lastSavedJson) return;
@@ -1336,6 +1336,7 @@ internal sealed partial class LegacyDashboardRenderer
                 MagicArcVelocity           = s.MagicArcVelocity,
                 MissileArcClearance        = s.MissileArcClearance,
                 LosDebugLog                = s.LosDebugLog,
+                ShowLosLine                = s.ShowLosLine,
                 BlacklistAttempts          = s.BlacklistAttempts,
                 BlacklistTimeoutSec        = s.BlacklistTimeoutSec,
                 BlacklistCastSettleMs      = s.BlacklistCastSettleMs,
@@ -1626,6 +1627,7 @@ internal sealed partial class LegacyDashboardRenderer
             if (p.MagicArcVelocity > 0f) s.MagicArcVelocity = p.MagicArcVelocity;
             if (p.MissileArcClearance >= 0f) s.MissileArcClearance = Math.Min(p.MissileArcClearance, 3f);
             s.LosDebugLog                = p.LosDebugLog;
+            if (p.ShowLosLine is bool losLine) s.ShowLosLine = losLine;   // absent = unchanged
             s.BlacklistAttempts          = p.BlacklistAttempts;
             s.BlacklistTimeoutSec        = p.BlacklistTimeoutSec;
             // -1 = not sent. 0 is never meant (it judges a cast before its damage can land)
@@ -2120,7 +2122,17 @@ internal sealed partial class LegacyDashboardRenderer
     /// Copies all JSON-serializable fields from src into dst without replacing the
     /// object reference (so all existing bindings to _settings remain valid).
     /// </summary>
+    /// <summary>The live settings as saved: a recharge hold's lines at their real values (RechargeHold).</summary>
+    private string SerializeLiveSettings() =>
+        _settings.RechargeHold.WithRealValues(_settings, () => JsonSerializer.Serialize(_settings, RynthAiJsonContext.Default.LegacyUiSettings));
+
     private static void CopySettings(LegacyUiSettings src, LegacyUiSettings dst)
+    {
+        CopySettingsFields(src, dst);
+        dst.RechargeHold.Reapply(dst);   // a recharge hold stays, over the loaded profile's lines
+    }
+
+    private static void CopySettingsFields(LegacyUiSettings src, LegacyUiSettings dst)
     {
         // Re-serialize src, then deserialize over dst's fields via reflection-free copy.
         // Simplest approach: copy field-by-field via JSON round-trip into dst.
@@ -2200,6 +2212,9 @@ internal sealed partial class LegacyDashboardRenderer
         dst.NavOverlay.Sanitize();
         dst.EnableMissileCrafting    = tmp.EnableMissileCrafting;
         dst.MissileCraftAmmoThreshold= tmp.MissileCraftAmmoThreshold;
+        dst.MakeAmmoWhenLow          = tmp.MakeAmmoWhenLow;
+        dst.MakeAmmoBelow            = Math.Clamp(tmp.MakeAmmoBelow, 1, MissileCraftingManager.MaxAmmoBelow);
+        dst.MakeAmmoUpTo             = Math.Clamp(tmp.MakeAmmoUpTo, 1, MissileCraftingManager.MaxAmmoUpTo);
         dst.LootInterItemDelayMs     = tmp.LootInterItemDelayMs;
         dst.LootContentSettleMs      = tmp.LootContentSettleMs;
         dst.LootEmptyCorpseMs        = tmp.LootEmptyCorpseMs;
@@ -2356,6 +2371,7 @@ internal sealed partial class LegacyDashboardRenderer
         dst.MagicArcVelocity         = LegacyUiSettings.MigrateMagicArcVelocity(tmp.MagicArcVelocity);
         dst.MissileArcClearance      = tmp.MissileArcClearance >= 0f ? Math.Min(tmp.MissileArcClearance, 3f) : 0.5f;
         dst.LosDebugLog              = tmp.LosDebugLog;
+        dst.ShowLosLine              = tmp.ShowLosLine;
         dst.EnableFPSLimit           = tmp.EnableFPSLimit;
         dst.TargetFPSFocused         = tmp.TargetFPSFocused;
         dst.TargetFPSBackground      = tmp.TargetFPSBackground;
@@ -2428,6 +2444,10 @@ internal sealed partial class LegacyDashboardRenderer
         dst.AutoTradeOnlyFromMainPack  = tmp.AutoTradeOnlyFromMainPack;
         dst.AutoTradeAutoAccept        = tmp.AutoTradeAutoAccept;
         dst.AutoTradeAutoAcceptChars   = tmp.AutoTradeAutoAcceptChars ?? new();
+        // The Trade Shop's on/off is not in the file: a reload keeps it as it is.
+        bool tradeShopOn = dst.TradeShop?.Enabled == true;
+        dst.TradeShop                  = tmp.TradeShop ?? new();
+        dst.TradeShop.Enabled          = tradeShopOn;
         dst.MetaDebug                = tmp.MetaDebug;
         dst.AllowMetaKeystrokes      = tmp.AllowMetaKeystrokes;
         dst.StartMacroOnLogin        = tmp.StartMacroOnLogin;

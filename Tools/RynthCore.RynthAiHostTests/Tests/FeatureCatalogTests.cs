@@ -51,6 +51,31 @@ internal static class FeatureCatalogTests
         r.Add("find a feature: the window is in the manifest with no bar button", Manifest);
         r.Add("find a feature: /ra find opens the window with the words and says the count", FindCommand);
         r.Add("find a feature: /ra find without plugin windows prints the best matches", FindCommandNoWindows);
+        r.Add("find a feature: streaks and Sense's exact match are found by the words players use", PlayerWords);
+    }
+
+    // 2026-11-26 (#rynthsuite): a new player couldn't find how to cast streaks, and Sense gained Exact.
+    // The words they'd type must bring the entry up near the top of the real catalog.
+    private static void PlayerWords()
+    {
+        List<FeatureEntry> all = Catalog().Entries.ToList();
+        void Finds(string query, string id, int within)
+        {
+            List<string> ids = FeatureSearch.Search(all, query).Select(h => h.Entry.Id).ToList();
+            int at = ids.IndexOf(id);
+            Check.True(at >= 0 && at < within, $"'{query}' finds {id} in the first {within} (at {at}: {string.Join(", ", ids.Take(5))})");
+        }
+        Finds("streak", "ai.use-streaks", 3);
+        Finds("streaks instead of bolts", "ai.use-streaks", 1);
+        Finds("bolt", "ai.use-streaks", 3);
+        Finds("arc", "ai.use-streaks", 5);
+        Finds("war spell type", "ai.use-streaks", 3);
+        Finds("exact match", "core.sense-exact", 1);
+        Finds("sense exact", "core.sense-exact", 1);
+        Finds("whole name", "core.sense-exact", 3);
+        FeatureEntry streaks = all.Single(e => e.Id == "ai.use-streaks");
+        Check.True(streaks.Where.Any(w => w == "Settings > Spell Combat > Use streaks instead of bolts"), "it says where: Settings > Spell Combat");
+        Check.Eq(streaks.Open, "/rc settings Spell Combat", "and opens that tab");
     }
 
     // ── Where things are ─────────────────────────────────────────────────
@@ -364,7 +389,7 @@ internal static class FeatureCatalogTests
     internal static List<string> ManifestSurfaces()
     {
         string json = SectionsManifest.Build(SectionsManifest.Views(), SectionsManifest.OwnSections,
-            dashboard: true, monsterStats: true, timedCommands: true, activeGear: true, featureSearch: true);
+            dashboard: true, monsterStats: true, timedCommands: true, activeGear: true, featureSearch: true, acMaps: true, commandButtons: true, tradeShop: true);
         SectionManifest m = SectionManifestParser.Parse("RynthAi", json, out string error);
         Check.Eq(error, string.Empty, "the manifest parses");
         var names = new List<string>();

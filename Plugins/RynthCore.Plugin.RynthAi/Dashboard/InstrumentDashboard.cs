@@ -93,6 +93,10 @@ internal interface IDashboardHost
     /// <summary>Debuff every monster in range before attacking (combat setting), for the options menu's toggle.</summary>
     bool DebuffAllBeforeAttacking { get; }
     void SetAutoSort(bool on);
+    /// <summary>The vitals whose recharge is held (No recharge for now, LegacyUi/RechargeHold.cs).</summary>
+    RechargeVital RechargeHeld { get; }
+    /// <summary>Holds or releases those vitals' recharge (on the plugin tick).</summary>
+    void SetRechargeHold(RechargeVital vitals, bool on);
     /// <summary>RynthSort's own window, shown or hidden.</summary>
     void ToggleSortWindow();
     void StartPatrol();
@@ -109,8 +113,12 @@ internal interface IDashboardHost
     void ToggleActiveGear();
     /// <summary>The Timed Commands window (commands sent every N seconds) open or closed.</summary>
     void ToggleTimedCommands();
+    /// <summary>The Command Buttons window (buttons that each send one chat line) open or closed.</summary>
+    void ToggleCommandButtons();
     /// <summary>The Find a Feature window (search every feature: where it is, its command) open, its box ready.</summary>
     void OpenFeatureSearch();
+    /// <summary>The ACMAPS Maps window (the player's own ACMAPS map of this dungeon) open or closed.</summary>
+    void ToggleAcMaps();
     /// <summary>The Classic (retail) look: RynthCore's own face comes back for it.</summary>
     void UseClassicLook();
     /// <summary>The Mini Remote, drawn into the current window; the size it wants.</summary>
@@ -700,7 +708,7 @@ internal sealed unsafe class InstrumentDashboard
         (RynthIcons.FileCode, "Lua", "Lua", "Lua scripts"),
         (RynthIcons.Skull, "Monsters", "Monsters", "Monsters: weapons, spells and rules per monster (the Damage panel)"),
         (RynthIcons.Gear, "Settings", "Settings", "Settings"),
-        (RynthIcons.MapPin, "Map", "Dungeon Map", "Dungeon Map (shows while you're in a dungeon)"),
+        (RynthIcons.MapPin, "Map", "Dungeon Map", "Dungeon Map (shows while you're in a dungeon).\nRight-click: ACMAPS Maps, your own ACMAPS map of this dungeon."),
         (RynthIcons.GlobeHemisphereWest, "World", "World Map", "World Map: Dereth, with your position, the route and places"),
         (RynthIcons.Backpack, "Items", "Items", "Items"),
         (RynthIcons.Footprints, "Patrol", "", "Patrol. Click: start dungeon patrol. Right-click: the Patrol drawer (hazards and routes)."),
@@ -783,6 +791,12 @@ internal sealed unsafe class InstrumentDashboard
 
     private void LaunchRight(string label, DashboardPrefs prefs)
     {
+        if (label == "Map")
+        {
+            // ACMAPS Maps (RynthAiPlugin.AcMaps.cs): the player's own ACMAPS map pack, beside the Dungeon Map.
+            _d.ToggleAcMaps();
+            return;
+        }
         if (label == "Patrol")
         {
             prefs.ToggleDrawer(DashboardPrefs.PatrolDrawer);
@@ -931,9 +945,10 @@ internal sealed unsafe class InstrumentDashboard
         y += Px(8);
         if (prefs.ShowVitals)
         {
-            y = Vital(dl, x0, y, w, "HP", _r.Health, _r.MaxHealth, Hp, _hpText, lowWarn: true) + Px(VitalGap);
-            y = Vital(dl, x0, y, w, "ST", _r.Stamina, _r.MaxStamina, St, _stText) + Px(VitalGap);
-            y = Vital(dl, x0, y, w, "MN", _r.Mana, _r.MaxMana, Mn, _mnText);
+            RechargeVital held = _d.RechargeHeld;
+            y = Vital(dl, x0, y, w, "HP", _r.Health, _r.MaxHealth, Hp, _hpText, lowWarn: true, RechargeVital.Health, held) + Px(VitalGap);
+            y = Vital(dl, x0, y, w, "ST", _r.Stamina, _r.MaxStamina, St, _stText, vital: RechargeVital.Stamina, held: held) + Px(VitalGap);
+            y = Vital(dl, x0, y, w, "MN", _r.Mana, _r.MaxMana, Mn, _mnText, vital: RechargeVital.Mana, held: held);
         }
         if (prefs.ShowTarget)
         {
@@ -943,9 +958,13 @@ internal sealed unsafe class InstrumentDashboard
         return y;
     }
 
-    /// <summary>A vital row: its label, a bar with quarter ticks, and "cur/max" in numbers that line up.</summary>
+    /// <summary>
+    /// A vital row: its label, a bar with quarter ticks, and "cur/max" in numbers that line up. The
+    /// label is a switch (No recharge for now): click holds or releases this vital's recharge,
+    /// right-click all three; held, the label is struck through in the faint colour.
+    /// </summary>
     private float Vital(ImDrawListPtr dl, float x0, float y, float w, string label, uint cur, uint max, uint color,
-        NumberText text, bool lowWarn = false)
+        NumberText text, bool lowWarn = false, RechargeVital vital = RechargeVital.None, RechargeVital held = RechargeVital.None)
     {
         float h = Px(VitalH);
         float frac = max == 0 ? 0f : Math.Clamp((float)cur / max, 0f, 1f);
@@ -955,7 +974,31 @@ internal sealed unsafe class InstrumentDashboard
 
         ImFontPtr lf = Font(RynthUiFont.NarrowBold11);
         float lsize = lf.FontSize * 10f / 11f;
-        dl.AddText(lf, lsize, new Vector2(x0, MathF.Round(y + (h - lsize) * 0.5f)), low ? HpText : color, label);
+        bool isHeld = vital != RechargeVital.None && (held & vital) != 0;
+        Vector2 lpos = new(x0, MathF.Round(y + (h - lsize) * 0.5f));
+        dl.AddText(lf, lsize, lpos, isHeld ? _faint : low ? HpText : color, label);
+        if (vital != RechargeVital.None)
+        {
+            ImGui.SetCursorScreenPos(new Vector2(x0 - Px(2), y - Px(1)));
+            bool click = ImGui.InvisibleButton("##recharge_" + label, new Vector2(Px(VitalLabelW) + Px(4), h + Px(2)),
+                             ImGuiButtonFlags.MouseButtonLeft | ImGuiButtonFlags.MouseButtonRight)
+                         && ImGui.IsMouseReleased(ImGuiMouseButton.Left);
+            bool right = ImGui.IsItemClicked(ImGuiMouseButton.Right);
+            string name = RechargeHold.Describe(vital);
+            SafeImGui.SetItemTooltip((isHeld
+                    ? $"No recharge for now: {name} isn't recharged (its lines are held at 0; your settings are kept). Click to recharge it again."
+                    : $"Click: no {name} recharge for now (no wand out for it mid-fight; your settings are kept).")
+                + (vital == RechargeVital.Health ? "\nEmergency Heal At still heals." : "")
+                + "\nRight-click: " + (held == RechargeVital.None ? "no recharge at all for now." : "recharge everything again."));
+            if (click) _d.SetRechargeHold(vital, !isHeld);
+            if (right) _d.SetRechargeHold(RechargeVital.All, held == RechargeVital.None);
+            if (isHeld)
+            {
+                float tw = lf.CalcTextSizeA(lsize, float.MaxValue, 0f, label).X;
+                float sy = MathF.Round(lpos.Y + lsize * 0.55f) + 0.5f;
+                dl.AddLine(new Vector2(lpos.X - Px(1), sy), new Vector2(lpos.X + tw + Px(1), sy), _text, Px(1.5f));
+            }
+        }
 
         float bx = x0 + Px(VitalLabelW) + Px(VitalColGap);
         float bw = w - Px(VitalLabelW) - Px(VitalNumW) - 2 * Px(VitalColGap);
@@ -1156,12 +1199,30 @@ internal sealed unsafe class InstrumentDashboard
                 ImGui.CloseCurrentPopup();
                 _d.Command("/ra debuffall");
             }
+            // No recharge for now (RynthAiPlugin.RechargeHold.cs): all three vitals' recharge held, or released.
+            RechargeVital rechargeHeld = _d.RechargeHeld;
+            if (MenuItem(dl, ref p, w, "##m_norecharge", RynthIcons.BatteryCharging,
+                    "No recharge for now", rechargeHeld == RechargeVital.None ? "OFF" : rechargeHeld == RechargeVital.All ? "ON" : "SOME",
+                    "On: health, stamina and mana aren't recharged (no wand out for them mid-fight); your settings are kept and come back\n" +
+                    "when it goes off (/ra norecharge). Emergency Heal At still heals. Click HP, ST or MN by the bars for one vital."))
+            {
+                ImGui.CloseCurrentPopup();
+                _d.SetRechargeHold(RechargeVital.All, rechargeHeld == RechargeVital.None);
+            }
             // Which worn items have their magic on (RynthAiPlugin.ActiveGear.cs): its own window, no bar button.
             if (MenuItem(dl, ref p, w, "##m_gear", RynthIcons.BatteryCharging, "Active gear", "/ra gear",
                     "Which worn items have their magic on, their mana and how long it lasts (the Active Gear window)."))
             {
                 ImGui.CloseCurrentPopup();
                 _d.ToggleActiveGear();
+            }
+            // The player's own ACMAPS dungeon maps (RynthAiPlugin.AcMaps.cs): its own window, no bar button.
+            if (MenuItem(dl, ref p, w, "##m_acmaps", RynthIcons.MapTrifold, "ACMAPS maps", "/ra acmaps",
+                    "Your own ACMAPS dungeon maps (the map pack you have), with where you are on them\n" +
+                    "(the ACMAPS Maps window; also the Map button, right-click)."))
+            {
+                ImGui.CloseCurrentPopup();
+                _d.ToggleAcMaps();
             }
             // Commands sent every N seconds (RynthAiPlugin.TimedCommands.cs): its own window, no bar button.
             if (MenuItem(dl, ref p, w, "##m_timed", RynthIcons.HourglassMedium, "Timed commands", "/ra timed",
@@ -1170,6 +1231,22 @@ internal sealed unsafe class InstrumentDashboard
             {
                 ImGui.CloseCurrentPopup();
                 _d.ToggleTimedCommands();
+            }
+            // Buttons that each send one chat line (RynthAiPlugin.CommandButtons.cs): its own window, no bar button.
+            if (MenuItem(dl, ref p, w, "##m_buttons", RynthIcons.SquaresFour, "Command buttons", "/ra buttons",
+                    "A window of buttons you make, each sending one chat line: /ra start, *wave*, @home,\n" +
+                    "/lua start <script>... (the Command Buttons window)."))
+            {
+                ImGui.CloseCurrentPopup();
+                _d.ToggleCommandButtons();
+            }
+            // The Trade Shop (RynthAiPlugin.TradeShop.cs): its own window, no bar button.
+            if (MenuItem(dl, ref p, w, "##m_tradeshop", RynthIcons.Coins, "Trade shop", "/ra tradeshop",
+                    "A shop run from tells: buyers !list and !buy, the shop checks their payment (the Trade Shop window).\n" +
+                    "Off at every login; Confirm each sale asks you before every accept."))
+            {
+                ImGui.CloseCurrentPopup();
+                _d.Command("/ra tradeshop");
             }
             // Dirty Fighting rotation: opens its window (the checkbox, order and default height are there).
             if (MenuItem(dl, ref p, w, "##m_dfheight", RynthIcons.Knife,

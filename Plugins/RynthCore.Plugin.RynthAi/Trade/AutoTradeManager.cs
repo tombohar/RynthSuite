@@ -919,6 +919,56 @@ internal sealed class AutoTradeManager
 
     private static bool IsKeepAction(VTankLootAction a) => a is VTankLootAction.Keep or VTankLootAction.KeepUpTo;
 
+    // ── Read only, for other plugins (RynthAi.Hub TradeGives) ────────────────
+
+    private VTankLootProfile? _askProfile;
+    private string _askPath = string.Empty;
+    private DateTime _askTime;
+
+    /// <summary>
+    /// Read only (RynthAi.Hub TradeGives, RynthSort's Mule packs): whether AutoTrade would add each item
+    /// when a trade opens with <paramref name="partner"/>: the profile it would load for them
+    /// (&lt;partner&gt;.utl, else default.utl, character, server, main folder), a Keep or Keep # rule
+    /// that matches, and its safety checks (identified, not equipped, not on RynthAi's item lists, not
+    /// attuned, retained, a container, a focus, tinkered, imbued or inscribed). Keep # counts are a
+    /// trade's own business and aren't applied. Changes nothing: its own copy of the profile, no chat.
+    /// False with <paramref name="error"/> when there is no profile. Pump thread.
+    /// </summary>
+    public bool WouldGive(string partner, uint[] ids, byte[] gives, out string profileFile, out string? error)
+    {
+        Array.Clear(gives);
+        error = null;
+        string name = string.IsNullOrWhiteSpace(partner) ? "default.utl" : partner.Trim() + ".utl";
+        string path = GetProfilePath(name);
+        profileFile = Path.GetFileName(path);
+        if (!File.Exists(path)) { error = "AutoTrade has no " + name + " or default.utl profile"; return false; }
+        try
+        {
+            DateTime t = File.GetLastWriteTimeUtc(path);
+            if (_askProfile == null || !string.Equals(_askPath, path, StringComparison.OrdinalIgnoreCase) || _askTime != t)
+            {
+                _askProfile = VTankLootParser.Load(path);
+                _askPath = path;
+                _askTime = t;
+            }
+        }
+        catch (Exception ex) { error = "AutoTrade's profile could not be read: " + ex.Message; return false; }
+
+        uint player = PlayerId();
+        var ctx = NewContext();
+        HashSet<int> keepIds = ReadKeepIds();
+        for (int i = 0; i < ids.Length && i < gives.Length; i++)
+        {
+            WorldObject? wo = _cache[unchecked((int)ids[i])];
+            if (wo == null || wo.Id == 0 || keepIds.Contains(wo.Id)) continue;
+            bool appraised = Appraised(ids[i]);
+            if (UnsafeReason(wo, player, appraised) != null) continue;
+            ProfileVerdict verdict = AutoVendorRules.Decide(_askProfile.Rules, Judge(EvalObject(wo), Facts(wo, appraised), ctx));
+            if (verdict.Rule != null && verdict.Certain && IsKeepAction(verdict.Rule.Action)) gives[i] = 1;
+        }
+        return true;
+    }
+
     /// <summary>Null when the item may be traded away; otherwise why it never will be.</summary>
     private string? UnsafeReason(WorldObject wo, uint player, bool appraised)
     {

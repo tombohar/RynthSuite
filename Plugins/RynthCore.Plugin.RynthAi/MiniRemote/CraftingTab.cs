@@ -16,6 +16,8 @@
 // ingredients, one combine at a time, only while the macro is off (also /ra kits). Under it,
 // "Make kits when low" (KitAuto; the macro side is RynthAiPlugin.Kits.cs) does the same by itself
 // while the macro runs, when the kits carried fall under the line and nothing is around.
+// The Ammo sub-tab: "Make ammo when low" and "Make ammo now" (MissileCraftingManager's top-off; the
+// macro side is RynthAiPlugin.Ammo.cs), arrows, quarrels or darts for the launcher in hand.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -45,6 +47,16 @@ internal sealed class CraftingTab
     private volatile bool _selectKits;
     public void SelectKitsTab() => _selectKits = true;
     private static readonly byte[] KitsTabLabel = System.Text.Encoding.UTF8.GetBytes("Kits\0");
+
+    /// <summary>Make ammo when low / Make ammo now (the Ammo sub-tab): the plugin's crafting manager (null = not logged in).</summary>
+    public Func<MissileCraftingManager?>? Ammo { get; set; }
+    /// <summary>What Make ammo when low is doing (RynthAiPlugin.AmmoAutoStatusText).</summary>
+    public Func<LegacyUiSettings, string>? AmmoStatus { get; set; }
+    /// <summary>A command asked for the Ammo sub-tab (the next frame selects it).</summary>
+    private volatile bool _selectAmmo;
+    public void SelectAmmoTab() => _selectAmmo = true;
+    private static readonly byte[] AmmoTabLabel = System.Text.Encoding.UTF8.GetBytes("Ammo\0");
+    private long _ammoLookAskedAt;
 
     // Custom-row editor (render thread only)
     private int _newMaterial = TinkerCatalog.Steel;
@@ -146,7 +158,101 @@ internal sealed class CraftingTab
         bool selectKits = _selectKits;
         _selectKits = false;
         if (BeginTab(KitsTabLabel, selectKits ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None)) { RenderKits(); ImGui.EndTabItem(); }
+        bool selectAmmo = _selectAmmo;
+        _selectAmmo = false;
+        if (BeginTab(AmmoTabLabel, selectAmmo ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None)) { RenderAmmo(); ImGui.EndTabItem(); }
         ImGui.EndTabBar();
+    }
+
+    // ── Ammo (render thread) ────────────────────────────────────────────────
+
+    /// <summary>The Ammo sub-tab: what is carried, Make ammo when low with its two numbers, Make ammo now / Stop.</summary>
+    private void RenderAmmo()
+    {
+        var settings = _ctx.Settings;
+        var cm = Ammo?.Invoke();
+        if (settings == null || cm == null) { SafeImGui.TextDisabled("Log in to make ammo."); return; }
+
+        // A fresh look at the quiver and the pack every 2 s while the tab shows (the pump thread walks it).
+        long now = MiniRemoteContext.NowMs;
+        if (now - _ammoLookAskedAt > 2000)
+        {
+            _ammoLookAskedAt = now;
+            _ctx.Post(() => cm.LookTopOff(forceRefresh: false));
+        }
+
+        SafeImGui.TextWrapped("Makes arrows, quarrels or darts for the launcher in hand from the head and shaft bundles in your pack, "
+                              + "between fights: only with no monster near, and it stops at once if one comes close or something hits you. "
+                              + "It never goes to peace mode in a fight. Fletching must be trained; it only makes ammo your skill makes reliably.");
+        if (!settings.EnableMissileCrafting)
+            SafeImGui.TextColored(LegacyDashboardRenderer.ColAmber, "Enable Missile Crafting is off (Settings > Combat): turn it on first.");
+        ImGui.Spacing();
+
+        var look = cm.LastLook;
+        if (look == null) SafeImGui.TextDisabled("Reading your pack...");
+        else if (!look.Launcher) SafeImGui.TextDisabled("No bow, crossbow or atlatl in hand.");
+        else
+        {
+            ImGui.TextUnformatted($"Carried: {look.CarriedText} (quiver and pack)");
+            if (look.Recipe != null && look.Combines > 0)
+                SafeImGui.TextDisabled($"Your pack makes {look.Recipe.OutputName}, about {AmmoRecipes.EstimatedYield(look.Recipe)} a combine.");
+            else
+                SafeImGui.TextDisabled("None can be made now: " + look.PackWhy + ".");
+        }
+
+        ImGui.Separator();
+        bool on = settings.MakeAmmoWhenLow;
+        if (ImGui.Checkbox("Make ammo when low##ammoauto", ref on))
+        {
+            bool value = on;
+            _ctx.Post(() => { settings.MakeAmmoWhenLow = value; _ctx.SaveCombatSettings?.Invoke(); });
+        }
+        if (ImGui.IsItemHovered())
+            SafeImGui.SetTooltip("While the macro runs: when you carry fewer arrows, quarrels or darts for the launcher in hand than the\n"
+                                 + "first number (quiver and pack), make them up to the second number from your bundles.\n"
+                                 + $"Only when nothing is around: no monster within {KitAuto.DefaultRadiusYd:0} yd (or your Monster Range, if bigger),\n"
+                                 + $"no hit for {KitAuto.HurtQuietMs / 1000} s, no healing, buffing, looting or fight. The macro waits meanwhile;\n"
+                                 + "a monster, a hit, a heal or moving stops it at once. Also /ra ammo auto on|off.");
+        ImGui.SameLine();
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("when fewer than");
+        ImGui.SameLine();
+        int below = Math.Clamp(settings.MakeAmmoBelow, 1, MissileCraftingManager.MaxAmmoBelow);
+        ImGui.SetNextItemWidth(100);
+        if (ImGui.InputInt("##ammobelow", ref below, 10, 100))
+        {
+            int value = Math.Clamp(below, 1, MissileCraftingManager.MaxAmmoBelow);
+            _ctx.Post(() => { settings.MakeAmmoBelow = value; _ctx.SaveCombatSettings?.Invoke(); });
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip($"A top-off starts when you carry fewer than this (1-{MissileCraftingManager.MaxAmmoBelow}). A plain bundle makes 100. Also /ra ammo auto below N.");
+        ImGui.SameLine();
+        ImGui.TextUnformatted(", make up to");
+        ImGui.SameLine();
+        int upTo = Math.Clamp(settings.MakeAmmoUpTo, 1, MissileCraftingManager.MaxAmmoUpTo);
+        ImGui.SetNextItemWidth(100);
+        if (ImGui.InputInt("##ammoupto", ref upTo, 100, 1000))
+        {
+            int value = Math.Clamp(upTo, 1, MissileCraftingManager.MaxAmmoUpTo);
+            _ctx.Post(() => { settings.MakeAmmoUpTo = value; _ctx.SaveCombatSettings?.Invoke(); });
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip($"A top-off makes combines until about this many are carried (1-{MissileCraftingManager.MaxAmmoUpTo}, at most {MissileCraftingManager.MaxTopOffCombines} combines;\n"
+                             + "a plain bundle makes 100, a wrapped one 1000, so it can go over). Never under the first number. Also /ra ammo auto upto M.");
+
+        ImGui.BeginDisabled(!settings.EnableMissileCrafting || cm.TopOffRunning);
+        if (ImGui.Button("Make ammo now##ammonow")) cm.RequestMakeNow();
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            SafeImGui.SetTooltip("Make ammo up to the second number at the next safe moment (macro on or off), waiting up to a minute. Also /ra ammo make.");
+        ImGui.SameLine();
+        ImGui.BeginDisabled(!cm.TopOffRunning && cm.MakeNowUntilMs <= 0);
+        if (ImGui.Button("Stop##ammostop")) cm.RequestStop();
+        ImGui.EndDisabled();
+        ImGui.SameLine();
+        SafeImGui.TextDisabled("Make ammo when low: " + (AmmoStatus?.Invoke(settings) ?? ""));
+        if (cm.LastTopOffSummary.Length > 0) SafeImGui.TextWrapped("Last top-off: " + cm.LastTopOffSummary.Replace("[RynthAi] Make ammo when low: ", ""));
+        SafeImGui.TextDisabled("When the quiver runs dry, Enable Missile Crafting still makes ammo on its own, as before. Also /ra ammo.");
     }
 
     /// <summary>BeginTabItem with flags and no close button (ImGui.NET only wraps flags with p_open).</summary>

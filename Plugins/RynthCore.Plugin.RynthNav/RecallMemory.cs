@@ -43,6 +43,12 @@ internal sealed class RecallSpot
     public string Label = "";
     /// <summary>The chat command that does this recall, when it's a command (@lifestone, @house recall).</summary>
     public string Command = "";
+    /// <summary>
+    /// Portal Recall only: learned from walking through a portal RynthNav's portal list doesn't know, so
+    /// it can't tell whether the server keeps it as your last portal (a no-recall portal isn't kept).
+    /// Routes don't use it until a cast of Portal Recall confirms where it lands.
+    /// </summary>
+    public bool Unconfirmed;
 }
 
 /// <summary>What a chat line tells RynthNav about recalls.</summary>
@@ -149,7 +155,7 @@ internal sealed class RecallMemory
 
     // ── recalls.txt ──────────────────────────────────────────────────────────
     // # comment
-    // <character>\t<slot>\t<ns or ->\t<ew or ->\t<label>\t<command>
+    // <character>\t<slot>\t<ns or ->\t<ew or ->\t<label>\t<command>[\t? when unconfirmed]
 
     public string Serialize()
     {
@@ -169,7 +175,8 @@ internal sealed class RecallMemory
                 sb.Append(Clean(c)).Append('\t').Append(SlotName(slot)).Append('\t')
                   .Append(s.OnMap ? s.Ns.ToString("F2", ci) : "-").Append('\t')
                   .Append(s.OnMap ? s.Ew.ToString("F2", ci) : "-").Append('\t')
-                  .Append(Clean(s.Label)).Append('\t').Append(Clean(s.Command)).Append("\r\n");
+                  .Append(Clean(s.Label)).Append('\t').Append(Clean(s.Command))
+                  .Append(s.Unconfirmed ? "\t?" : "").Append("\r\n");
             }
         }
         return sb.ToString();
@@ -189,6 +196,7 @@ internal sealed class RecallMemory
             {
                 Label = f.Length > 4 ? f[4] : "",
                 Command = f.Length > 5 ? f[5] : "",
+                Unconfirmed = f.Length > 6 && f[6] == "?",
             };
             s.OnMap = double.TryParse(f[2], NumberStyles.Float, CultureInfo.InvariantCulture, out s.Ns)
                     & double.TryParse(f[3], NumberStyles.Float, CultureInfo.InvariantCulture, out s.Ew);

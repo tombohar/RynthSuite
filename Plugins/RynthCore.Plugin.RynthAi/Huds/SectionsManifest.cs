@@ -106,20 +106,45 @@ internal static class SectionsManifest
     public const string FeatureSearchTitle = RynthAiPlugin.FeatureSearchTitle, FeatureSearchSurface = RynthAiPlugin.FeatureSearchSurface;
 
     /// <summary>
+    /// The ACMAPS Maps window (RynthAiPlugin.AcMaps.cs, 2026-11-26): the player's own ACMAPS map of the dungeon
+    /// they're in, drawn by RynthAi in the engine's frame (plugin API v89). No bar button (the bar is full): the
+    /// dashboard's Map button (right-click), its options menu (ACMAPS maps) and /ra acmaps open it.
+    /// </summary>
+    public const string AcMapsTitle = RynthAiPlugin.AcMapsTitle, AcMapsSurface = RynthAiPlugin.AcMapsSurface;
+
+    /// <summary>
+    /// The Command Buttons window (RynthAiPlugin.CommandButtons.cs, 2026-11-26): buttons that each send one
+    /// chat line, per character, server and for all, drawn by RynthAi in the engine's frame (plugin API v89).
+    /// No bar button (the bar is full): the dashboard's options menu (Command buttons), /ra buttons and Find
+    /// a Feature open it.
+    /// </summary>
+    public const string CommandButtonsTitle = RynthAiPlugin.CommandButtonsTitle, CommandButtonsSurface = RynthAiPlugin.CommandButtonsSurface;
+
+    /// <summary>
+    /// The Trade Shop window (RynthAiPlugin.TradeShop.cs, 2026-11-24): the shop's switch, the sale waiting for
+    /// Accept sale, the catalog, payment and advertising, drawn by RynthAi (plugin API v89). No bar button
+    /// (the bar is full): the dashboard's options menu (Trade shop) and /ra tradeshop open it.
+    /// </summary>
+    public const string TradeShopTitle = RynthAiPlugin.TradeShopTitle, TradeShopSurface = RynthAiPlugin.TradeShopSurface;
+
+    /// <summary>
     /// The manifest JSON for <paramref name="views"/> (UTF-8 text, schema version 1), with the dashboard
     /// window when <paramref name="dashboard"/>, the Monster Stats window when <paramref name="monsterStats"/>,
     /// the Timed Commands window when <paramref name="timedCommands"/>, the Active Gear window when
-    /// <paramref name="activeGear"/> and the Find a Feature window when <paramref name="featureSearch"/>.
+    /// <paramref name="activeGear"/>, the Find a Feature window when <paramref name="featureSearch"/>, the ACMAPS
+    /// Maps window when <paramref name="acMaps"/>, the Command Buttons window when <paramref name="commandButtons"/>
+    /// and the Trade Shop window when <paramref name="tradeShop"/>.
     /// </summary>
     public static string Build(IReadOnlyList<View> views, IReadOnlyList<Section> sections, bool dashboard = false, bool monsterStats = false,
-        bool timedCommands = false, bool activeGear = false, bool featureSearch = false)
+        bool timedCommands = false, bool activeGear = false, bool featureSearch = false, bool acMaps = false,
+        bool commandButtons = false, bool tradeShop = false)
     {
         using var stream = new MemoryStream(4096);
         using (var w = new Utf8JsonWriter(stream))
         {
             w.WriteStartObject();
             w.WriteNumber("version", 1);
-            bool windows = dashboard || monsterStats || timedCommands || activeGear || featureSearch;
+            bool windows = dashboard || monsterStats || timedCommands || activeGear || featureSearch || acMaps || commandButtons || tradeShop;
             if (windows)
                 w.WriteStartArray("windows");
             if (dashboard)
@@ -196,6 +221,51 @@ internal static class SectionsManifest
                 w.WriteNumber("height", 460);
                 w.WriteNumber("minWidth", 360);
                 w.WriteNumber("minHeight", 200);
+                w.WriteBoolean("bar", false);
+                w.WriteBoolean("edgeToEdge", true);
+                w.WriteEndObject();
+            }
+            if (acMaps)
+            {
+                w.WriteStartObject();
+                w.WriteString("id", "acmaps");
+                w.WriteString("title", AcMapsTitle);
+                w.WriteString("surface", AcMapsSurface);
+                w.WriteString("icon", RynthCore.Plugin.Shared.RynthUi.RynthIcons.MapTrifold);
+                w.WriteNumber("width", 620);
+                w.WriteNumber("height", 560);
+                w.WriteNumber("minWidth", 420);
+                w.WriteNumber("minHeight", 260);
+                w.WriteBoolean("bar", false);
+                w.WriteBoolean("edgeToEdge", true);
+                w.WriteEndObject();
+            }
+            if (commandButtons)
+            {
+                w.WriteStartObject();
+                w.WriteString("id", "commandbuttons");
+                w.WriteString("title", CommandButtonsTitle);
+                w.WriteString("surface", CommandButtonsSurface);
+                w.WriteString("icon", RynthCore.Plugin.Shared.RynthUi.RynthIcons.SquaresFour);
+                w.WriteNumber("width", 380);
+                w.WriteNumber("height", 180);
+                w.WriteNumber("minWidth", 140);
+                w.WriteNumber("minHeight", 80);
+                w.WriteBoolean("bar", false);
+                w.WriteBoolean("edgeToEdge", true);
+                w.WriteEndObject();
+            }
+            if (tradeShop)
+            {
+                w.WriteStartObject();
+                w.WriteString("id", "tradeshop");
+                w.WriteString("title", TradeShopTitle);
+                w.WriteString("surface", TradeShopSurface);
+                w.WriteString("icon", RynthCore.Plugin.Shared.RynthUi.RynthIcons.Coins);
+                w.WriteNumber("width", 560);
+                w.WriteNumber("height", 520);
+                w.WriteNumber("minWidth", 420);
+                w.WriteNumber("minHeight", 240);
                 w.WriteBoolean("bar", false);
                 w.WriteBoolean("edgeToEdge", true);
                 w.WriteEndObject();

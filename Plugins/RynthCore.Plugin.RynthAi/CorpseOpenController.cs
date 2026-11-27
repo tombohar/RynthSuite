@@ -158,6 +158,10 @@ public sealed partial class RynthAiPlugin
     private bool _currentLootItemPipelined;   // sent while the last pickup's Return played (ACE queues it)
     private bool _currentLootItemJumped;      // jump-loot: sent in the air, its own jump or the last one's (not a resend)
     private bool _currentLootItemSentInAirWindow; // sent on the strength of the last no-bend-down pickup (JumpPickupInAir)
+    // 2026-11-22: a corpse that closed while a jump-loot pickup was under way (the hop took the
+    // character outside its use radius at the client's once-a-second check). Its later pickups
+    // bend down; jumping again closed it again, every time, for minutes (NoteCorpseClosedMidPickup).
+    private int _noJumpLootCorpseId;
     private int _currentLootItemErrSeqAtSend; // TryGetLastWeenieError seq at the send (0 = unknown)
     private int _currentLootItemFreeRetries;  // resends after a too-busy answer (not counted as attempts)
     // 2026-10-29 (R-20261029-122319-321f): what the server said to the last send, and what the
@@ -650,11 +654,38 @@ public sealed partial class RynthAiPlugin
 
             if (wasOpenCorpse)
             {
+                NoteCorpseClosedMidPickup(sid);
                 _lastCorpseOpenAttemptAt = 0;
                 _lastLootActionAt = CorpseNowMs;
                 LootDiag($"[RynthAi] Corpse loot: container 0x{objectId:X8} closed before completion; will retry open until timeout.");
             }
         }
+    }
+
+    /// <summary>Most closes of a corpse during one item's pickups before the item is left (with the unanswered-try limit, 3).</summary>
+    internal const int MaxClosesPerLootItem = 3;
+
+    /// <summary>
+    /// The open corpse closed while an item's move was out (2026-11-22). A reopen starts the item's
+    /// tries over (ResetCurrentLootItem), so a corpse that closes on every pickup was opened again
+    /// and again for minutes. Each such close is one of the item's tries on this corpse
+    /// (_corpseItemAttempts survives a reopen of the same corpse): after
+    /// <see cref="MaxClosesPerLootItem"/> it is left. A close during a jump-loot pickup turns
+    /// jump-loot off for the corpse: the hop is what takes the character outside its use radius.
+    /// </summary>
+    private void NoteCorpseClosedMidPickup(int corpseId)
+    {
+        int itemId = _currentLootItemId;
+        if (itemId == 0 || !_currentLootItemMovePending)
+            return;
+        if (_currentLootItemJumped && _noJumpLootCorpseId != corpseId)
+        {
+            _noJumpLootCorpseId = corpseId;
+            LootDiag($"[RynthAi] {LootTag}: corpse 0x{(uint)corpseId:X8} closed during a jump-loot pickup of 0x{(uint)itemId:X8}; jump-loot is off for this corpse, its pickups bend down.");
+        }
+        int closes = IncrementCorpseItemAttempt(itemId);
+        if (closes >= MaxClosesPerLootItem && _processedCorpseItems.Add(itemId))
+            LootDiag($"[RynthAi] {LootTag}: leaving 0x{(uint)itemId:X8}{(_currentLootItemName.Length > 0 ? $" '{_currentLootItemName}'" : "")}: corpse 0x{(uint)corpseId:X8} closed during its pickup {closes} times.");
     }
 
     public override void OnVendorOpen(uint vendorId)
@@ -927,6 +958,14 @@ public sealed partial class RynthAiPlugin
 
             if (corpse == null)
                 return;
+
+            // A wall between: set aside before any open, or the server's walk drives the character
+            // into it (R-20261124-001522-b582); the next tick claims the next corpse.
+            if (SetAsideBeforeClaim(corpse.Id, now))
+            {
+                _lootSkipWhy = $"corpse 0x{(uint)corpse.Id:X8} is behind a wall";
+                return;
+            }
 
             _targetCorpseId = corpse.Id;
             _corpseTargetSince = now;
@@ -1498,6 +1537,26 @@ public sealed partial class RynthAiPlugin
                 };
             }
 
+            // A killer that is known and not among the fellowship's known members is someone else:
+            // their kill, or a player's death corpse (#rynth-issues 2026-11-25 "Fellowship kills and
+            // looting": "Rynth treats all corpses as fellowship kills, both player corpses and monster
+            // corpses are attempted opened"). Only while the member list isn't read yet does the
+            // server decide, as before.
+            int membersKnown = _fellowshipTracker?.GetMemberNames().Count() ?? 0;
+            if (!FellowModeLoots(killerName, killerIsFellow, membersKnown))
+            {
+                return new CorpseLootDecision
+                {
+                    ShouldLoot = false,
+                    ModeName = modeName,
+                    Reason = $"The corpse killer '{killerName}' is not in your fellowship ({membersKnown} members known).",
+                    KillerName = killerName,
+                    PlayerName = myName,
+                    LongDesc = longDesc,
+                    InFellowship = inFellowship,
+                    KillerIsFellow = killerIsFellow
+                };
+            }
             // When fellowship membership data lags behind the live client, allow the server
             // to be the final authority instead of skipping potentially valid fellowship corpses.
             return new CorpseLootDecision
@@ -1534,6 +1593,14 @@ public sealed partial class RynthAiPlugin
             KillerIsFellow = killerIsFellow
         };
     }
+
+    /// <summary>
+    /// Fellowship kills mode, in a fellowship, the killer not you: loot while the killer isn't known yet
+    /// (the ID is on its way), is a fellow, or the member list isn't read yet (fewer than 2 names);
+    /// a known killer outside a read member list is someone else's corpse.
+    /// </summary>
+    internal static bool FellowModeLoots(string? killerName, bool killerIsFellow, int membersKnown)
+        => string.IsNullOrWhiteSpace(killerName) || killerIsFellow || membersKnown < 2;
 
     private string GetPlayerNameForLootOwnership()
     {
@@ -1996,6 +2063,17 @@ public sealed partial class RynthAiPlugin
                 return;
             }
             _flightHoldLogged = false;
+
+            // The server would refuse it for burden at once, with no code, so it read as "too busy"
+            // and went 6 times a corpse (R-20261123-065337-d200): left now, lighter items still go.
+            if (LootItemOverBurden(firstMatchId, out string overBurden))
+            {
+                LootDiag($"[RynthAi] {LootTag}: leaving 0x{(uint)firstMatchId:X8} '{matchItemName}' on 0x{(uint)corpseId:X8} - too heavy: {overBurden}.");
+                WarnLootOverBurden(matchItemName, overBurden);
+                _processedCorpseItems.Add(firstMatchId);
+                _lastLootActionAt = now;
+                return;
+            }
 
             ChatLine($"[RynthAi] Loot rule: {matchItemName} -> [{matchActionLabel}] {matchRuleLabel}");
             _currentLootItemId = firstMatchId;
@@ -2583,6 +2661,7 @@ public sealed partial class RynthAiPlugin
     private bool ShouldJumpLoot(LegacyUiSettings settings) =>
         settings.LootJumpEnabled
         && !IsChestLoot(_openedContainerId)
+        && !(_noJumpLootCorpseId != 0 && _noJumpLootCorpseId == _openedContainerId)
         && Host.HasTapJump
         && Host.HasMoveItemExternal
         && _vitals.CurrentStamina > 5
@@ -4626,6 +4705,7 @@ public sealed partial class RynthAiPlugin
                     return;
                 }
 
+                NoteCorpseClosedMidPickup(previousOpen);
                 ResetCurrentLootItem();
                 _lastCorpseOpenAttemptAt = 0;
                 _lastLootActionAt = now;

@@ -72,7 +72,12 @@ internal sealed class InventoryReader
             bool capRead = isContainer && host.TryGetObjectIntProperty(id, IntItemsCapacity, out cap);
             // Every container entry, foci too and before the wielded check: the Lua script's count.
             if (isContainer) inv.Slots.Add(new SortSlot(id, capRead ? Math.Max(cap, 0) : -1));
-            if (Wielded(host, id)) continue;
+            if (Wielded(host, id))
+            {
+                // Kept so taking an item off reads as the player's doing (TouchWatch).
+                inv.Worn.Add(id);
+                continue;
+            }
             if (isContainer)
             {
                 // A side pack holds items; foci (containers that hold none) aren't packs or items.

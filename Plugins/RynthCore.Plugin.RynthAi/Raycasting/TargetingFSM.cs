@@ -78,6 +78,11 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
             public RaycastEngine.ArcLosResult Arc;
             public bool  TerrainBlocked;   // outdoors: the ground rises above the path (a hill between)
             public float TerrainAlong;     // where along the path, in meters from the shooter
+            // Where the path is blocked (2026-11-26, Show Line of Sight): the wall or object the line
+            // or the arc hits, or the ground above the path; global meters (landblock * 192 + local,
+            // Z the height). HasHit false: clear, or blocked with no point (an arc out of reach).
+            public bool    HasHit;
+            public Vector3 Hit;
         }
 
         // ── Hills (2026-11-22, R-20261122-203611-ff3d) ─────────────────────────────────────────
@@ -95,8 +100,13 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
         /// its middle (an arc). <paramref name="along"/>: where, in meters from <paramref name="a"/>.
         /// </summary>
         public bool TerrainBetween(Vector3 a, Vector3 b, float sag, out float along)
+            => TerrainBetween(a, b, sag, out along, out _);
+
+        /// <summary>As above; <paramref name="hit"/> is the ground point that rises above the path.</summary>
+        public bool TerrainBetween(Vector3 a, Vector3 b, float sag, out float along, out Vector3 hit)
         {
             along = 0f;
+            hit = Vector3.Zero;
             float dx = b.X - a.X, dy = b.Y - a.Y;
             float flat = (float)Math.Sqrt(dx * dx + dy * dy);
             if (flat <= 2 * TerrainEndSkipMeters) return false;
@@ -107,9 +117,29 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 float ground = _geoLoader.GetTerrainZWorld(x, y);
                 if (float.IsNaN(ground)) continue;
                 float pathZ = a.Z + (b.Z - a.Z) * f + (sag > 0 ? 4f * sag * f * (1f - f) : 0f);
-                if (ground > pathZ + TerrainClearance) { along = s; return true; }
+                if (ground > pathZ + TerrainClearance) { along = s; hit = new Vector3(x, y, ground); return true; }
             }
             return false;
+        }
+
+        /// <summary>
+        /// Fill <see cref="LosDetail.HasHit"/>/<see cref="LosDetail.Hit"/> for a blocked straight line too
+        /// (an arc's hit and the ground point are always given). Off: the straight-line test stops at the first wall
+        /// it finds, as before; on, it looks on for the nearest (Show Line of Sight sets it; the verdict
+        /// is the same either way).
+        /// </summary>
+        public bool ReportHitPoints { get; set; }
+
+        private bool LineTest(Vector3 origin, Vector3 targetPos, List<BoundingVolume> geometry, bool multiRay, ref LosDetail detail)
+        {
+            if (ReportHitPoints)
+            {
+                detail.LineBlocked = RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay, out Vector3 hit);
+                if (detail.LineBlocked) { detail.HasHit = true; detail.Hit = hit; }
+            }
+            else
+                detail.LineBlocked = RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay);
+            return detail.LineBlocked;
         }
 
         private static bool IsMissileArc(AttackType t) =>
@@ -298,11 +328,13 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                 if (!isDungeon)
                 {
                     float sag = missileArc && arc.Valid ? arc.MaxRiseAboveChord : 0f;
-                    if (TerrainBetween(missileArc ? launch : origin, targetPos, sag, out float along))
+                    if (TerrainBetween(missileArc ? launch : origin, targetPos, sag, out float along, out Vector3 ground))
                     {
                         detail.Checked = true;
                         detail.TerrainBlocked = true;
                         detail.TerrainAlong = along;
+                        detail.HasHit = true;
+                        detail.Hit = ground;
                         return true;
                     }
                 }
@@ -321,8 +353,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     // Walls first (cheap, and most blocked targets stop here). In dungeons use
                     // multi-ray: 5 rays covering the player silhouette catch thin corner
                     // geometry that a single center ray slips through.
-                    detail.LineBlocked = RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: isDungeon);
-                    if (detail.LineBlocked)
+                    if (LineTest(origin, targetPos, geometry, isDungeon, ref detail))
                         return true;
 
                     // A short, flat shot is the straight line just tested.
@@ -334,8 +365,14 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     }
 
                     detail.ArcChecked = true;
-                    return RaycastEngine.IsBallisticArcBlocked(launch, targetPos, in arc,
+                    bool arcBlocked = RaycastEngine.IsBallisticArcBlocked(launch, targetPos, in arc,
                         MissileArcClearance, geometry, out detail.Arc);
+                    if (arcBlocked && !detail.Arc.OutOfReach)
+                    {
+                        detail.HasHit = true;
+                        detail.Hit = detail.Arc.HitPoint;
+                    }
+                    return arcBlocked;
                 }
 
                 // In dungeons use multi-ray checks — 5 rays covering the player silhouette
@@ -347,8 +384,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     case AttackType.CrossbowArc:
                     case AttackType.AtlatlArc:
                     case AttackType.MagicArc:
-                        detail.LineBlocked = RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: isDungeon);
-                        return detail.LineBlocked;
+                        return LineTest(origin, targetPos, geometry, isDungeon, ref detail);
 
                     // Melee: nothing flies, so the only question is whether a wall stands
                     // between the two bodies: one ray, chest to chest. The five silhouette rays
@@ -359,8 +395,7 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     // single ray 88, and both block every one of 199 walls, also with the
                     // player and the monster pressed against it.
                     case AttackType.Melee:
-                        detail.LineBlocked = RaycastEngine.IsLinearPathBlocked(origin, targetPos, geometry, multiRay: false);
-                        return detail.LineBlocked;
+                        return LineTest(origin, targetPos, geometry, false, ref detail);
 
                     default:
                         return false;

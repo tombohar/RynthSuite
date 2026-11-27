@@ -9,8 +9,9 @@ namespace RynthCore.Plugin.RynthSort;
 /// <summary>
 /// C ABI exports. Nothing may throw out of an [UnmanagedCallersOnly] method (it would take
 /// acclient.exe down): every export goes through RynthPluginRuntime, which catches and logs.
-/// RynthSort draws through the engine's script windows (host calls from its own tick), so it
-/// exports no render callback and keeps no buffer the engine reads later.
+/// RynthSort draws its window itself (plugin API v90, RynthSortPlugin.Window.cs): the sections
+/// manifest names it and RynthPluginRenderEmbed draws it. On older engines it draws through the
+/// script windows (host calls from its own tick) and the manifest is empty.
 /// </summary>
 public static unsafe class PluginExports
 {
@@ -27,7 +28,7 @@ public static unsafe class PluginExports
     public static IntPtr GetName() => LiteralPointer("RynthSort"u8);
 
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginVersion", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr GetVersion() => LiteralPointer("0.3.1"u8);
+    public static IntPtr GetVersion() => LiteralPointer("0.6.1"u8);
 
     private static IntPtr LiteralPointer(ReadOnlySpan<byte> literal)
     {
@@ -102,6 +103,60 @@ public static unsafe class PluginExports
         catch { }
     }
 
+    // -- The window (plugin API v90; RynthSortPlugin.Window.cs) --
+
+    private static string? _sectionsJson;
+    private static IntPtr _sectionsPtr;
+
+    /// <summary>The sections manifest (polled every ~2 s): the window. Kept until it changes.</summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginGetSectionsJson", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr GetSectionsJson()
+    {
+        try
+        {
+            RynthSortPlugin? plugin = Runtime.Plugin;
+            if (plugin == null) return IntPtr.Zero;
+            string json = plugin.SectionsJson();
+            if (json == _sectionsJson && _sectionsPtr != IntPtr.Zero) return _sectionsPtr;
+            _sectionsJson = json;
+            IntPtr fresh = Marshal.StringToCoTaskMemUTF8(json);
+            IntPtr old = System.Threading.Interlocked.Exchange(ref _sectionsPtr, fresh);
+            if (old != IntPtr.Zero) Marshal.FreeCoTaskMem(old);
+            return fresh;
+        }
+        catch { return IntPtr.Zero; }
+    }
+
+    /// <summary>The window's body ("window:rynthsort"; ":popout" when popped out). 1 drawn, 0 not ready, -2 failed.</summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginRenderEmbed", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int RenderEmbed(byte* surface, float width, float height, float* wantWidth, float* wantHeight)
+    {
+        try
+        {
+            if (surface == null) return 0;
+            ReadOnlySpan<byte> name = MemoryMarshal.CreateReadOnlySpanFromNullTerminated(surface);
+            bool popped = name.EndsWith(":popout"u8);
+            if (popped) name = name[..^":popout"u8.Length];
+            if (!name.SequenceEqual("window:rynthsort"u8)) return 0;
+            RynthSortPlugin? plugin = Runtime.Plugin;
+            if (plugin == null) return 0;
+            int result = plugin.RenderWindow(popped, out float wantH);
+            if (result != 1) return result;
+            if (wantWidth != null) *wantWidth = width;
+            if (wantHeight != null) *wantHeight = wantH > 0 ? wantH : height;
+            return 1;
+        }
+        catch { return 0; }
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnVendorClose", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void OnVendorClose(uint vendorId) => Runtime.OnVendorClose(vendorId);
+
+    // AC's drag and drop (API v77; delivered on the plugin pump): an item the player drags is left
+    // alone for a while ("leave items I use alone", Sorting/TouchWatch.cs). Older engines never call them.
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnDragStart", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void OnDragStart(uint objectId, uint spellId, uint iconId) => Runtime.OnDragStart(objectId, spellId, iconId);
+
+    [UnmanagedCallersOnly(EntryPoint = "RynthPluginOnItemDropped", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static void OnItemDropped(uint objectId, uint spellId, uint targetElementId) => Runtime.OnItemDropped(objectId, spellId, targetElementId);
 }

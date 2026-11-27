@@ -595,20 +595,16 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     {
                         uint numPortals = BitConverter.ToUInt32(data, bOff);
                         bOff += 4;
-                        // Each CBldPortal is variable size; skip conservatively
-                        // We got the building model, which is the main thing we need
-                        // Portal data is complex (flags + cell lists); skip the rest
-                        // for now by breaking out of building loop if we can't parse further
+                        // CBldPortal: Flags, OtherCellId, OtherPortalId, NumStabs (ushorts), then NumStabs ushorts,
+                        // aligned to 4 (RynthNav.Baker CollisionGeometry.ReadLandBlockInfo reads it the same way).
+                        // The old 8-byte skip lost its place after the first building with a stab list (2026-11-26):
+                        // B470 kept 1 of its 28 buildings, the world 2,425 of 6,979, and B470's town wall
+                        // (0x01002CDE) was never loaded, so melee ran into it.
                         for (uint p = 0; p < numPortals && bOff + 8 <= data.Length; p++)
                         {
-                            ushort portalFlags = BitConverter.ToUInt16(data, bOff);
-                            bOff += 2;
-                            // Skip remaining portal data (OtherCellId + OtherPortalId + StabList)
-                            // This is complex; break if we hit something unexpected
-                            if (bOff + 6 <= data.Length)
-                            {
-                                bOff += 6; // Approximate skip for simple portal entries
-                            }
+                            ushort numStabs = BitConverter.ToUInt16(data, bOff + 6);
+                            int size = 8 + numStabs * 2;
+                            bOff += (size + 3) & ~3;
                         }
                     }
 
@@ -877,7 +873,10 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                             Min = bMin,
                             Max = bMax,
                             MeshTriangles = gfxTris.ToArray(),
-                            IsDoor = false
+                            IsDoor = false,
+                            // Triangle hits only: the box round a building's drawing is no wall (doorways,
+                            // courtyards); its rooms' walls come from DungeonLOS, which loads every EnvCell.
+                            NoAabbFallback = true
                         });
                         return result;
                     }
@@ -965,7 +964,8 @@ namespace RynthCore.Plugin.RynthAi.Raycasting
                     Min = new Vector3(minX, minY, minZ),
                     Max = new Vector3(maxX, maxY, maxZ),
                     MeshTriangles = triangles.ToArray(),
-                    IsDoor = false
+                    IsDoor = false,
+                    NoAabbFallback = true
                 });
                 return result;
             }

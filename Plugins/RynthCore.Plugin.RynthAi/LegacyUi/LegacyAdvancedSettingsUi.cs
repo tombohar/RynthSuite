@@ -429,6 +429,10 @@ internal sealed class LegacyAdvancedSettingsUi
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Log each in-range mob's LoS verdict ([LOS] lines: straight line or arc,\n" +
                                      "how high the arc rises, where it hits, distance and cells). For tuning.");
+                ImGui.SameLine();
+                ImGui.Checkbox("Show Line of Sight", ref _settings.ShowLosLine);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(LegacyUiSettings.ShowLosLineTip);
 
                 ImGui.Separator();
                 ImGui.Spacing();

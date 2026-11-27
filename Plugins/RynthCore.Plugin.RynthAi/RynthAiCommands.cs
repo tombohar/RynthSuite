@@ -69,6 +69,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra fellow       — fellowship diagnostics and queries");
         ChatLine("[RynthAi] /ra help          — show this list");
         ChatLine("[RynthAi] /ra find [words]  — Find a Feature: search every RynthSuite feature, where it is and its command");
+        ChatLine("[RynthAi] /ra acmaps [folder <path>|scan|announce on|off] — ACMAPS Maps: your own ACMAPS map of this dungeon");
         ChatLine("[RynthAi] /ra version       — RynthAi version and build date, and the engine it runs on");
         ChatLine("[RynthAi] /ra server        - which server RynthCore says this is, its overrides, and the server plugin's settings");
         ChatLine("[RynthAi] /ra power <0-100|auto> — set attack power (auto = recklessness-aware)");
@@ -101,6 +102,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra use[i|l][p|pi|lp] <name> [on <name2>]  — use item (i=inv, l=land, p=partial)");
         ChatLine("[RynthAi] /ra raycast       — raycast system status");
         ChatLine("[RynthAi] /ra lostest [mode] — LoS test (mode: linear|bow|crossbow|atlatl|magic)");
+        ChatLine("[RynthAi] /ra losline [on|off] — Show Line of Sight: a line to the combat target, green = clear, red = blocked (toggle)");
         ChatLine("[RynthAi] /ra landtest      — terrain heightmap info for player's landblock");
         ChatLine("[RynthAi] /ra rayland       — landscape raycast test (down + 4 cardinals)");
         ChatLine("[RynthAi] /ra buildinfo     — nearby geometry info");
@@ -120,6 +122,8 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra autoconfirm [status|on|off|<50-100>] — Yes to the craft-chance prompt at that % or better (Mini Remote > Crafting)");
         ChatLine("[RynthAi] /ra kits [status|make [N]|stop|floor <0-100>|show] — make Plentiful Healing Kits from their ingredients, macro off (Mini Remote > Crafting > Kits)");
         ChatLine("[RynthAi] /ra kits auto [status|on|off|below N|upto M] — Make kits when low: with the macro on and nothing around, make kits when fewer than N are carried");
+        ChatLine("[RynthAi] /ra ammo [status|make|stop|show] — arrows, quarrels or darts carried for the launcher in hand; make up to M now, at a safe moment (Mini Remote > Crafting > Ammo)");
+        ChatLine("[RynthAi] /ra ammo auto [status|on|off|below N|upto M] — Make ammo when low: with the macro on and nothing around, make ammo between fights when fewer than N are carried");
         ChatLine("[RynthAi] /ra petelement [status|any|fire|cold|acid|lightning|nether|slash|pierce|bludgeon] — the element combat pets are summoned for (Mini Remote > Pets)");
         ChatLine("[RynthAi] /ra offhand [auto|shield|weapon|none] [rule] — the off hand (shield / dual wield), global or for a Monsters rule; dual on|off");
         ChatLine("[RynthAi] /ra dunnav <NS> <EW>  — navigate to NS/EW coords through dungeon (no nav file needed)");
@@ -151,6 +155,7 @@ public sealed partial class RynthAiPlugin
         ChatLine("[RynthAi] /ra combat        — dump combat state machine snapshot");
         ChatLine("[RynthAi] /ra mstats [monster] — its evades, resists, hits, spells and kills this session (list | reset | show | hide)");
         ChatLine("[RynthAi] /ra timed [server|all] list | add <seconds> <command> | remove|on|off|run <n> | show — commands sent every N seconds (window: the RynthAi options menu > Timed commands)");
+        ChatLine("[RynthAi] /ra buttons [server|all] list | add <label> = <command> | remove|press <n> | show|edit — buttons that each send one chat line (window: the RynthAi options menu > Command buttons)");
         ChatLine("[RynthAi] /ra gear          — which worn items have their magic on, mana and time left (check | list | hide; the Active Gear window)");
         ChatLine("[RynthAi] /ra why           — one-glance diagnosis of why the bot is idle/attacking");
         ChatLine("[RynthAi] /ra start | stop   — start/stop the macro from chat");
@@ -381,6 +386,36 @@ public sealed partial class RynthAiPlugin
             ChatLine($"[RynthAi]   Combat LOS: {(_combatManager.RaycastInitialized ? "wired" : "NOT WIRED")}, " +
                      $"{(_dashboard?.Settings.EnableRaycasting == true ? "on" : "off")}, " +
                      $"checks {_combatManager.RaycastCheckCount}, blocked {_combatManager.RaycastBlockCount}");
+    }
+
+    /// <summary>
+    /// /ra losline [on|off]: Show Line of Sight (ShowLosLine), the line from the character to the combat
+    /// target in the scan's raycast colours. No argument toggles; every reply says the state now.
+    /// </summary>
+    private void HandleLosLineCommand(string[] parts)
+    {
+        var dash = _dashboard;
+        var s = dash?.Settings;
+        if (s == null) { ReplyFail("[RynthAi] Settings not ready."); return; }
+        string arg = parts.Length >= 3 ? parts[2].ToLowerInvariant() : "";
+        bool? set = arg switch
+        {
+            "" or "toggle" => !s.ShowLosLine,
+            "on" or "1" or "true" => true,
+            "off" or "0" or "false" => false,
+            _ => null,
+        };
+        if (set is not bool on)
+        {
+            ReplyFail($"[RynthAi] Show Line of Sight: unknown '{arg}'. Usage: /ra losline [on|off] (now {(s.ShowLosLine ? "on" : "off")}).");
+            return;
+        }
+        s.ShowLosLine = on;
+        dash!.SaveSettings();
+        string note = !on ? "" : !s.EnableRaycasting ? " Enable Raycasting is off, so every line is dashed (not tested)."
+            : _combatManager?.RaycastInitialized != true ? " The raycast is still loading: lines are dashed until it is ready." : "";
+        ReplyOk(on ? "[RynthAi] Show Line of Sight: on (green = the raycast says clear, red = blocked, yellow marker = where it hit; dashed = not tested)." + note
+                   : "[RynthAi] Show Line of Sight: off.");
     }
 
     private void HandleLosTestCommand(string[] parts)

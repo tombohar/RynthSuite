@@ -66,6 +66,7 @@ internal static class ExpressionTests
         r.Add("expr doc: unquoted text keeps its spaces, backslash escapes a character", DocStrings);
         r.Add("expr doc: true and false are 1 and 0", DocTrueFalse);
         r.Add("expr doc: @name and &name read pvars and gvars, $ takes an expression", DocVarShorthand);
+        r.Add("expr: pvars read before the character's name is known join the character's file once it is (R-20261125-190541-5671)", PvarsBeforeName);
         r.Add("expr doc: {index}, {key} and slices on lists, dicts and text", DocIndexAndSlice);
         r.Add("expr: $x = value assigns (UB syntax real metas use)", AssignmentSyntax);
         r.Add("expr doc: listadd, listpop and friends change the list in its variable", DocListsChangeInPlace);
@@ -281,6 +282,35 @@ internal static class ExpressionTests
         Is(e, "setvar[t, two words]", "two words");   // unquoted text keeps all its words
         e.SetVariable("host_set", "7");
         Is(e, "$host_set", "7");
+    }
+
+    // Coldeve, "Doesn't seem like getpvar/setpvar works in the meta?": a read before the name loaded "unknown.txt"
+    // for the whole session, and the next save wrote over the character's own file.
+    private static void PvarsBeforeName()
+    {
+        string pvarDir = ExpressionEngine.PvarsDir;
+        Directory.CreateDirectory(pvarDir);
+        string pfile = Path.Combine(pvarDir, "Late Name.txt");
+        File.Delete(Path.Combine(pvarDir, "unknown.txt"));   // another test writes it
+        const string Saved = "saved\t7\nlist\t[a,b]\n";
+        File.WriteAllText(pfile, Saved);
+        FakeHost.Reset();
+        var host = FakeHost.Create();
+        var e = Engine(host, playerId: Player);   // the client has no name for the player yet
+        Is(e, "getpvar[saved]", "0");
+        Is(e, "setpvar[fresh, 3]", "3");
+        e.FlushVars(force: true);
+        Check.Eq(File.ReadAllText(pfile), Saved, "nothing saved before the name is known (the file is kept)");
+        Check.False(File.Exists(Path.Combine(pvarDir, "unknown.txt")), "no unknown.txt");
+
+        FakeHost.Names[Player] = "Late Name";   // the name arrives
+        Is(e, "getpvar[saved]", "7");
+        Is(e, "listcontains[getpvar[list], b]", "1");
+        Is(e, "getpvar[fresh]", "3");
+        e.FlushVars(force: true);
+        string text = File.ReadAllText(pfile);
+        Check.True(text.Contains("saved\t7") && text.Contains("fresh\t3") && text.Contains("list\t[a,b]"), "saved together: " + text);
+        File.Delete(pfile);
     }
 
     private static void PersistentVars()

@@ -86,6 +86,8 @@ public sealed class LegacyUiSettings
     /// its checkboxes are greyed out, as the two fought over the packs (owner, 2026-11-03). Never saved.
     /// </summary>
     [JsonIgnore] public bool AutoSortOn;
+    /// <summary>No recharge for now (RechargeHold.cs): vitals whose recharge lines are held at 0; never saved.</summary>
+    [JsonIgnore] internal readonly RechargeHold RechargeHold = new();
     /// <summary>Meta state — set only by meta actions (SetState, CallState, ReturnFromCall, UI, meta load).</summary>
     [JsonIgnore] public string CurrentState = "Default";
     /// <summary>Bot action state — what the bot is doing right now (Default, Combat, Looting, Navigating, Buffing).
@@ -216,6 +218,13 @@ public sealed class LegacyUiSettings
 
     public bool EnableMissileCrafting = true;
     public int MissileCraftAmmoThreshold = 1000;
+    // Make ammo when low (a players' request, 2026-11-23; default off): with the macro on and nothing
+    // around, when fewer than MakeAmmoBelow arrows, quarrels or darts for the launcher in hand are
+    // carried (quiver and pack), make them up to MakeAmmoUpTo from the pack's bundles, between fights
+    // only (MissileCraftingManager's top-off, RynthAiPlugin.Ammo.cs). Needs Enable Missile Crafting.
+    public bool MakeAmmoWhenLow = false;
+    public int MakeAmmoBelow = MissileCraftingManager.DefaultAmmoBelow;
+    public int MakeAmmoUpTo = MissileCraftingManager.DefaultAmmoUpTo;
 
     /// <summary>Not read by the corpse looting (pickups are paced by the server's confirmations);
     /// kept so saved profiles round-trip. Hidden in Advanced Settings.</summary>
@@ -889,6 +898,19 @@ public sealed class LegacyUiSettings
     /// the arc settings; off by default (a few lines a second in a crowd).
     /// </summary>
     public bool  LosDebugLog;
+    /// <summary>
+    /// Show Line of Sight (2026-11-26, a testing aid): a line in the world from the character to the
+    /// combat target, green when the scan's raycast says the line is clear, red when it says blocked
+    /// (a marker where it is blocked). Dashed green: clear without a geometry test (raycasting off or
+    /// warming up, or no geometry near the path). Thin, dim lines go to the other monsters in range.
+    /// Off by default; /ra losline [on|off].
+    /// </summary>
+    public bool  ShowLosLine;
+    internal const string ShowLosLineTip =
+        "A line from you to the combat target: green when RynthAi's line-of-sight raycast says clear,\n" +
+        "red when it says blocked, with a yellow marker where the raycast hit. Dashed green: clear without\n" +
+        "a geometry test (raycasting off or warming up, or no geometry near the path). Thin dim lines go\n" +
+        "to the other monsters in range. A testing aid; off by default. /ra losline [on|off].";
 
     public bool EnableFPSLimit = true;
     public int TargetFPSFocused = 60;
@@ -955,6 +977,10 @@ public sealed class LegacyUiSettings
     /// <summary>Name patterns (.NET regex) whose accepted trades this character accepts too.
     /// The autoAcceptList.json files (/ub autotrade autoaccept ...) are read as well.</summary>
     public List<string> AutoTradeAutoAcceptChars { get; set; } = new();
+
+    // ── Trade Shop (a player-run shop from tells; /ra tradeshop, the Trade Shop window) ────────
+    /// <summary>The shop's settings and catalog (Trade/TradeShopSettings.cs). Its on/off is never saved: off at every login.</summary>
+    public Trade.TradeShopSettings TradeShop { get; set; } = new();
 
     public List<MonsterRule> MonsterRules { get; set; } = new();
     public List<ItemRule> ItemRules { get; set; } = new();
@@ -1459,6 +1485,7 @@ public sealed class SettingsBridgePayload
     public float MagicArcVelocity { get; set; }
     public float MissileArcClearance { get; set; } = 0.5f;   // absent in older payloads
     public bool LosDebugLog { get; set; }
+    public bool? ShowLosLine { get; set; }   // Show Line of Sight (2026-11-26); absent = unchanged
     public int BlacklistAttempts { get; set; }
     public int BlacklistTimeoutSec { get; set; }
     // -1 = absent from the payload: the overlay's Settings panel didn't send it, and

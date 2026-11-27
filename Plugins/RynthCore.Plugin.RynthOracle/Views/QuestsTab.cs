@@ -686,8 +686,9 @@ internal sealed partial class OracleView
                 bool done = q.IsComplete(flags);
                 if (_qDone != _qNotDone && done != _qDone) continue;
                 if (_qRepeatable != _qOneTime && q.IsRepeatable(flags) != _qRepeatable) continue;
-                if (!MatchesAll(q.Flag + " " + q.DisplayName, terms)) continue;
-                _questRows.Add(new QuestRow { Kind = QuestKind.Quest, Key = q.Flag, Label = q.DisplayName, Done = done, Q = q });
+                // The info and hint too: "Diemos" finds the Gladiator Diemos token timer, whose name is "Colosseum Bosses".
+                if (!MatchesAll(q.Flag + " " + q.Label + " " + q.Info + " " + q.Hint, terms)) continue;
+                _questRows.Add(new QuestRow { Kind = QuestKind.Quest, Key = q.Flag, Label = q.Label, Done = done, Q = q });
             }
         }
 

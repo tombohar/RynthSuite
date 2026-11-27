@@ -171,9 +171,16 @@ public sealed class InventoryManager
     private bool ManualCram  => RynthClock.Now < _manualCramUntil;
     private bool ManualStack => RynthClock.Now < _manualStackUntil;
 
+    /// <summary>
+    /// Auto Cram / Auto Stack also run with the macro off while this says so: the Item Tool's chest
+    /// looter, which loots with the macro off too (2026-11-24, #rynth-issues "Inventory Autocram does
+    /// not actively run while looting chests with ItemTool": the main pack filled and nothing moved).
+    /// </summary>
+    public Func<bool>? KeepsPacksWithoutMacro { get; set; }
+
     public void OnHeartbeat(int busyCount)
     {
-        if (!_settings.IsMacroRunning && !ManualCram && !ManualStack) return;
+        if (!_settings.IsMacroRunning && !ManualCram && !ManualStack && KeepsPacksWithoutMacro?.Invoke() != true) return;
         if (busyCount != 0) return; // don't move items while the client is busy (casting, crafting, etc.)
 
         // Age-prune the per-entry backoff/pending maps (replaces the old wholesale

@@ -13,9 +13,11 @@ namespace RynthCore.Plugin.RynthNav;
 // those and a guide line from your feet to the next waypoint. The same path is what "save as nav
 // route" writes (RynthNavPlugin.SaveRoute.cs).
 //
-// The markers go away when the trip ends (arrived, stopped), is cancelled (Stop, the d-pad), or you
-// land in a landblock that isn't on it (a teleport elsewhere). Switches in rynthnav.json
-// (markers, markerLabels, markerGuide); /rnav markers and the panel's Go tab change them.
+// The markers go away when the trip ends (arrived, stopped), is cancelled (Stop, the d-pad), is
+// cleared (the Go tab's Clear, /rnav markers clear), you land in a landblock that isn't on it (a
+// teleport elsewhere), or, for a plan you aren't walking (Route, an Oracle or map pick), you walk to
+// its goal yourself (2026-11-26: a plan's markers stayed on the ground until Stop). Switches in
+// rynthnav.json (markers, markerLabels, markerGuide); /rnav markers and the panel's Go tab change them.
 //
 // Threads: everything here runs on the tick, except the path worker, which reads only the frozen
 // trip (PlannedTrip), the immutable route graph and Atlas portal list, and the tile files. The
@@ -205,6 +207,12 @@ public sealed partial class RynthNavPlugin
                     HideMarkers($"landblock 0x{lb:X4} isn't on the trip");
             }
         }
+        // A plan (Route, an Oracle or map pick) you walked to yourself: its markers go once you're there.
+        if (_tripShown && !trip.Live && !_gotoActive)
+        {
+            bool hasPos = PlayerMapPos(out double ns, out double ew);
+            if (PathMarkers.PlanReached(trip, hasPos, ns, ew, _arrow.ArriveUnits)) HideMarkers("arrived");
+        }
         if (!_markersOn || !_tripShown || !Host.HasNav3D || !_hasPose) return;
 
         if (!ReferenceEquals(trip, _snapTrip) || !ReferenceEquals(_tripPath, _snapPath))
@@ -232,10 +240,19 @@ public sealed partial class RynthNavPlugin
 
     // ── /rnav markers ────────────────────────────────────────────────────
 
-    /// <summary>/rnav markers [on|off | labels on|off | guide on|off]</summary>
+    /// <summary>/rnav markers [on|off | clear | labels on|off | guide on|off]</summary>
     private void CmdMarkers(string rest)
     {
         string[] a = rest.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (a.Length == 1 && a[0] is "clear" or "hide")
+        {
+            // This trip's markers off the ground, the switch left as it is (the panel's Clear button).
+            if (_trip == null || !_tripShown) { Say("path markers: no trip on the ground"); return; }
+            string goal = _trip.Goal;
+            HideMarkers("cleared");
+            Say($"path markers: the trip to {goal} is off the ground (the next Route or Go shows its own)");
+            return;
+        }
         if (a.Length == 1 && a[0] is "on" or "off")
         {
             _markersOn = a[0] == "on";
@@ -246,7 +263,7 @@ public sealed partial class RynthNavPlugin
         { _markerLabels = a[1] == "on"; NavDataConfig.WriteSwitch("markerLabels", _markerLabels); }
         else if (a.Length == 2 && a[0] == "guide" && a[1] is "on" or "off")
         { _markerGuide = a[1] == "on"; NavDataConfig.WriteSwitch("markerGuide", _markerGuide); }
-        else if (a.Length > 0) { Say("/rnav markers on|off, markers labels on|off, markers guide on|off"); return; }
+        else if (a.Length > 0) { SayFail("/rnav markers on|off, markers clear, markers labels on|off, markers guide on|off"); return; }
         Say($"path markers {(_markersOn ? "ON" : "OFF")}, labels {(_markerLabels ? "on" : "off")}, guide line {(_markerGuide ? "on" : "off")}"
             + (_trip == null ? "" : _tripShown ? $" — showing the trip to {_trip.Goal}" : $" — the trip to {_trip.Goal} isn't shown ({_markerStatus})"));
     }

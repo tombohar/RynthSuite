@@ -104,8 +104,12 @@ internal static partial class Program
             Eq((int)((byte*)&t.VaultedDungeonsEnabled - at), RynthCore.Plugin.Shared.RynthAiHubApiV1.VaultedDungeonsEnabledOffset, "VaultedDungeonsEnabled next");
             Eq((int)((byte*)&t.BackAwayFrom - at), RynthCore.Plugin.Shared.RynthAiHubApiV1.BackAwayFromOffset, "BackAwayFrom next");
             Eq((int)((byte*)&t.SetPlayerCounter - at), RynthCore.Plugin.Shared.RynthAiHubApiV1.SetPlayerCounterOffset, "SetPlayerCounter next");
-            Eq((uint)sizeof(RynthCore.Plugin.Shared.RynthAiHubApiV1), (uint)(RynthCore.Plugin.Shared.RynthAiHubApiV1.SetPlayerCounterOffset + sizeof(nint)),
-               "SetPlayerCounter is the last field (a new one appends here, with its own offset check)");
+            // LootActions, VendorSells and TradeGives (2026-11-26, RynthSort's pack jobs) came after SetPlayerCounter.
+            Eq((int)((byte*)&t.LootActions - at), RynthCore.Plugin.Shared.RynthAiHubApiV1.LootActionsOffset, "LootActions next");
+            Eq((int)((byte*)&t.VendorSells - at), RynthCore.Plugin.Shared.RynthAiHubApiV1.VendorSellsOffset, "VendorSells next");
+            Eq((int)((byte*)&t.TradeGives - at), RynthCore.Plugin.Shared.RynthAiHubApiV1.TradeGivesOffset, "TradeGives next");
+            Eq((uint)sizeof(RynthCore.Plugin.Shared.RynthAiHubApiV1), (uint)(RynthCore.Plugin.Shared.RynthAiHubApiV1.TradeGivesOffset + sizeof(nint)),
+               "TradeGives is the last field (a new one appends here, with its own offset check)");
         }
     }
 

@@ -3,7 +3,7 @@ using RynthCore.Plugin.Shared;
 
 namespace RynthCore.Plugin.RynthSort;
 
-internal enum SortVerb { Window, On, Off, Now, Clean, Unpack, Status, Help, Unknown }
+internal enum SortVerb { Window, On, Off, Now, Clean, Unpack, Back, Add, Status, Help, Unknown }
 
 /// <summary>
 /// A parsed "/rsort ..." and the lines it answers with (2026-10-28: every command answers,
@@ -26,6 +26,8 @@ internal readonly record struct SortCommand(SortVerb Verb, int? Pack = null, boo
             "now" or "tidy" => new(SortVerb.Now),
             "clean" => new(SortVerb.Clean),
             "unpack" => new(SortVerb.Unpack, words.Length > 1 && int.TryParse(words[1], out int p) && p > 0 ? p : null),
+            "back" or "undo" => new(SortVerb.Back),
+            "add" => new(SortVerb.Add, words.Length > 1 && int.TryParse(words[1], out int a) && a > 0 ? a : null),
             "status" => new(SortVerb.Status),
             "help" or "?" => new(SortVerb.Help),
             _ => new(SortVerb.Unknown, Word: word),
@@ -35,10 +37,12 @@ internal readonly record struct SortCommand(SortVerb Verb, int? Pack = null, boo
     /// <summary>The window and help work before the character is known; everything else waits for it.</summary>
     public bool NeedsLogin => Verb is not (SortVerb.Window or SortVerb.Help);
 
-    public const string Usage = "/rsort [on | off | now | tidy | clean | unpack [pack] | status]";
+    public const string Usage = "/rsort [on | off | now | tidy | clean | unpack [pack] | back | add <pack> | status]";
+
+    public const string AddUsage = "/rsort add <pack>: puts the item selected in the game into that pack's rules (pack numbers as the window shows them).";
 
     public const string NoWindows =
-        "This RynthCore engine can't show plugin windows (it needs script windows, API v71, with ImGui on). Sorting still runs: /rsort on|off|now|tidy|clean|unpack.";
+        "This RynthCore engine can't show plugin windows (it needs script windows, API v71, with ImGui on). Sorting still runs: /rsort on|off|now|tidy|clean|unpack|back.";
 
     public static string Window(bool shown) => CommandReply.Shown("RynthSort window", shown);
 
@@ -49,6 +53,11 @@ internal readonly record struct SortCommand(SortVerb Verb, int? Pack = null, boo
 
     public static string Unpacking(int? pack) =>
         (pack != null ? $"Emptying pack {pack}" : "Emptying your side packs") + " into the main pack; auto-sort is off (/rsort on when done).";
+
+    /// <summary>"/rsort back": Put back starts, or there is nothing to put back.</summary>
+    public static string PuttingBack(int count) => count > 0
+        ? $"Putting back the {count} item{(count == 1 ? "" : "s")} the last sort moved; auto-sort is off (/rsort on when done)."
+        : "Nothing to put back: RynthSort hasn't moved anything to another pack lately.";
 
     public static string Unknown(string word) => $"Unknown '/rsort {word}'. Usage: {Usage}";
 }

@@ -197,6 +197,7 @@ internal sealed partial class ExpressionEngine
         {
             FlushVars(force: true);   // persist the old char's pending pvars first
             _pvars = null;
+            _pvarsUnresolved = false;
             _pvarPathCached = null;
             ResetXpMeter();
         }
@@ -680,10 +681,33 @@ internal sealed partial class ExpressionEngine
 
     // ── Persistent variable implementations ───────────────────────────────────
 
+    // ── Before the character's name is known (2026-11-25, R-20261125-190541-5671) ──
+    // Coldeve: "Doesn't seem like getpvar/setpvar works in the meta?". A pvar read before the client had
+    // the character's name loaded the file for "unknown", and that stayed the session's pvars: the
+    // character's own file was never read (every getpvar said 0), and the next save wrote the session's
+    // values over it, so what a meta saved was gone next login. Now pvars read or written before the
+    // name is known are held apart; once it is known the character's file is loaded and they are laid
+    // over it (the session's writes win), and nothing is saved until then.
+    // With no character at all (no player id) they go to unknown.txt as before.
+    private bool _pvarsUnresolved;
+
     private Dictionary<string, string> GetPvars()
     {
-        if (_pvars != null) return _pvars;
-        return _pvars = LoadVarFile(GetPvarPath());
+        string path = GetPvarPath();
+        bool resolved = _pvarPathCached != null || _playerId == 0;   // no character at all: unknown.txt, as before
+        if (_pvars != null)
+        {
+            if (_pvarsUnresolved && resolved)
+            {
+                var real = LoadVarFile(path);
+                foreach (var (k, v) in _pvars) real[k] = v;
+                _pvars = real;
+                _pvarsUnresolved = false;
+            }
+            return _pvars;
+        }
+        _pvarsUnresolved = !resolved;
+        return _pvars = resolved ? LoadVarFile(path) : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     }
 
     private string GetPvarPath()
@@ -778,7 +802,11 @@ internal sealed partial class ExpressionEngine
         if (!_pvarsDirty && !_gvarsDirty) return;
         long now = TickMs();
         if (!force && now - _lastVarFlushMs < VarFlushIntervalMs) return;
-        if (_pvarsDirty && _pvars != null) { SaveVarFile(GetPvarPath(), _pvars); _pvarsDirty = false; }
+        if (_pvarsDirty && _pvars != null)
+        {
+            var pvars = GetPvars();   // joins the character's file once the name is known
+            if (!_pvarsUnresolved) { SaveVarFile(GetPvarPath(), pvars); _pvarsDirty = false; }
+        }
         if (_gvarsDirty && _gvars != null) { SaveVarFile(GvarsPath, _gvars);     _gvarsDirty = false; }
         _lastVarFlushMs = now;
     }
@@ -3650,6 +3678,7 @@ internal sealed partial class ExpressionEngine
             ["EnableRaycasting"]    = (() => B(s.EnableRaycasting),    v => s.EnableRaycasting    = ToDouble(v) != 0),
             ["UseArcs"]             = (() => B(s.UseArcs),             v => s.UseArcs             = ToDouble(v) != 0),
             ["LosDebugLog"]         = (() => B(s.LosDebugLog),         v => s.LosDebugLog         = ToDouble(v) != 0),
+            ["ShowLosLine"]         = (() => B(s.ShowLosLine),         v => s.ShowLosLine         = ToDouble(v) != 0),
             ["BowArcVelocity"]      = (() => F(s.BowArcVelocity),      v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f) && float.IsFinite(f)) s.BowArcVelocity      = Math.Clamp(f, 10f, 60f); }),
             ["CrossbowArcVelocity"] = (() => F(s.CrossbowArcVelocity), v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f) && float.IsFinite(f)) s.CrossbowArcVelocity = Math.Clamp(f, 10f, 80f); }),
             ["AtlatlArcVelocity"]   = (() => F(s.AtlatlArcVelocity),   v => { if (float.TryParse(v, System.Globalization.NumberStyles.Any, CultureInfo.InvariantCulture, out float f) && float.IsFinite(f)) s.AtlatlArcVelocity   = Math.Clamp(f, 10f, 60f); }),

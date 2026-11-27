@@ -393,12 +393,25 @@ public sealed partial class RynthNavPlugin
         if (_wayCount > 1) Say($"  {_wayCount} ways in all: /rnav route next for another, /rnav route go to walk this one");
     }
 
-    /// <summary>Plans (with the way chosen) and shows the route to a place: the panel, the arrow, chat.</summary>
+    /// <summary>
+    /// Plans (with the way chosen) and shows the route to a place: the panel, the arrow, chat. The plan
+    /// is the target now (RynthNavPlugin.Target.cs): the arrow points along it, and a walk to somewhere
+    /// else ends. A walk to the same place goes on with its own arrow.
+    /// </summary>
     private void ShowRoute(string name, string type, double ns, double ew)
     {
+        HeldTarget held = Held();
+        TargetChange change = TargetSwitch.For(NewTarget.Plan, held, ns, ew);
+        string ended = ApplyTargetChange(change, held);
         List<RouteStep>? steps = PlanAndShow(name, ns, ew, out int used, out double est, out string refusal);
         _waysType = type;
-        if (refusal.Length > 0) { Note($"route to {name}: {refusal}"); return; }
+        if (refusal.Length > 0) { Note($"route to {name}: {refusal}{(ended.Length > 0 ? " (" + ended + ")" : "")}"); return; }
+        if (!change.KeepArrow)
+        {
+            if (steps != null && used > 0) _arrow.SetRoute(steps, name, type, ns, ew);
+            else _arrow.SetTarget(name, type, ns, ew);
+        }
+        if (ended.Length > 0) Say($"route to {name}: {ended}");
         SayRoute(name, ns, ew, steps, used, est);
     }
 

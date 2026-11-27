@@ -103,7 +103,7 @@ namespace RynthSort.Tests
 
         private static void PackColumnWindow()
         {
-            var c = new SortController();
+            var c = Sorter();
             var selected = new List<uint>();
             var panel = new SortPanel(c, () => { })
             {

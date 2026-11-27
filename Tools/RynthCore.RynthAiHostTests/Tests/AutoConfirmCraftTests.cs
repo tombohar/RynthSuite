@@ -37,6 +37,7 @@ internal static unsafe class AutoConfirmCraftTests
         r.Add("autoconfirm: logout releases the arm", Logout);
         r.Add("autoconfirm: settings - off at 100 by default, saved, copied, sent to the engine face as nullable fields", Settings);
         r.Add("autoconfirm: /ra autoconfirm on|off|<percent>|status always answers", Command);
+        r.Add("/ub prepclick yes [ms] arms a Yes for the next yes/no prompt (5-60 s); no disarms (R-20261125-144721-b49a)", UbPrepClick);
     }
 
     // ── The fake engine's confirmation calls (static: function pointers can't capture) ──────────
@@ -124,6 +125,38 @@ internal static unsafe class AutoConfirmCraftTests
             _now += advanceMs;
             A.Tick(_now);
         }
+    }
+
+    // Coldeve: a meta turning alt currency in for promissory notes sent "/ub prepclick yes 100" and RynthAi ignored it.
+    private static void UbPrepClick()
+    {
+        var bot = new TickIsolationTests.Bot(arrange: () =>
+        {
+            ResetEngine();
+            FakeHost.ConfigureApi = (ref RynthCoreApiNative api) =>
+            {
+                api.ArmConfirmationFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint, int, int, int>)&FakeArm;
+                api.GetLastConfirmationFn = (IntPtr)(delegate* unmanaged[Cdecl]<uint*, uint*, int*, int*, int*, int>)&FakeLast;
+            };
+        });
+        try
+        {
+            var handle = typeof(RynthAiPlugin).GetMethod("TryHandleUbCompat", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            bool Run(string line) => (bool)handle.Invoke(bot.P, new object[] { line.Split(' ')[1], line })!;
+
+            Check.True(Run("/ub prepclick yes 100"), "taken");
+            Check.Eq(ArmCalls.Count, 1, "one arm");
+            Check.Eq(ArmCalls[0], (RynthCoreHost.ConfirmationKind.YesNo, 0, RynthAiPlugin.PrepClickMinMs), "a Yes for the next yes/no prompt, 100 ms raised to 5 s");
+            Check.Eq(Prompt(0, RynthCoreHost.ConfirmationKind.YesNo), RynthCoreHost.ConfirmationOutcome.Accepted, "the prompt is answered Yes");
+            Check.False(FakeHost.Logs.Any(l => l.Contains("no RynthAi equivalent")), "no longer 'ignored'");
+
+            Run("/ub prepclick yes 999999");
+            Check.Eq(ArmCalls[^1].Timeout, RynthAiPlugin.PrepClickMaxMs, "at most 60 s");
+            Run("/ub prepclick no");
+            Check.Eq(ArmCalls[^1].Timeout, 0, "no: disarmed");
+            Check.Eq(Prompt(0, RynthCoreHost.ConfirmationKind.YesNo), RynthCoreHost.ConfirmationOutcome.Shown, "the next prompt is left to the client");
+        }
+        finally { TickIsolationTests.Done(); FakeHost.ConfigureApi = null; }
     }
 
     private static void ArmsAndReArms()

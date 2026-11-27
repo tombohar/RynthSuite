@@ -44,6 +44,7 @@ namespace RynthOracle.Tests
             Lists();
             QuestLines();
             Catalog();
+            SharedNames();
             Servers();
             EngineServers();
             QuestPackHook();
@@ -199,6 +200,34 @@ namespace RynthOracle.Tests
                   && !s3.AwaitingOurs && s3.Flags.Count == had, "throttle reply: not loading, flags kept");
             Check(s3.ThrottleSecondsLeft(t6 + 1_000) > 50 && !s3.Request(_ => true, t6 + 10_000), "no resend while the server's minute runs");
             Check(s3.ThrottleSecondsLeft(t6 + 61_000) == 0 && s3.Request(_ => true, t6 + 61_000), "refresh allowed again after the minute");
+        }
+
+        // R-20261124-141130-ca54: the weekly Gladiator Diemos token timer (pickedupmarkerboss10x) read
+        // "Colosseum Bosses" like 10 other rows, and a search for "Diemos" never found it.
+        private static void SharedNames()
+        {
+            Check(Quest.DetailOf("Pickup timer for Gladiator Diemos Token. In Yanshi.") == "Gladiator Diemos Token", "detail: the prefix and the place come off");
+            Check(Quest.DetailOf("Timer for how often a player can collect a society stipend. See Master Mhoire.") == "How often a player can collect a society stipend", "detail: 'Timer for' off, capitalised");
+            Check(Quest.DetailOf("") == "", "no info: no detail");
+
+            var cat = new QuestCatalog();
+            cat.Load(null, null);
+            if (!cat.UsingBundled) return;
+            Check(cat.TryGet("pickedupmarkerboss10x", out Quest d) && d.NameShared, "the Diemos timer's name is shared");
+            Check(d.Label == "Colosseum Bosses: Gladiator Diemos Token", "its row says which: " + d.Label);
+            Check(d.ShortLabel == "Gladiator Diemos Token", "the Quest Timers window shows the token: " + d.ShortLabel);
+            Check(d.DisplayName == "Colosseum Bosses", "the display name (chat, details) is unchanged");
+            Quest? unique = cat.Quests.FirstOrDefault(q => !q.NameShared && q.Name.Length > 0 && !q.IsNew);
+            Check(unique != null && unique.Label == unique.DisplayName && unique.ShortLabel == unique.DisplayName, "a quest with its own name keeps it: " + unique?.Label);
+            Check(QuestsTabFinds(cat, "diemos").Contains("pickedupmarkerboss10x"), "the Quests tab's search finds the Diemos timer by its info");
+        }
+
+        /// <summary>The flags the Quests tab's search keeps for <paramref name="search"/> (its rule: every term in flag, label, info or hint).</summary>
+        private static List<string> QuestsTabFinds(QuestCatalog cat, string search)
+        {
+            string[] terms = search.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            return cat.Quests.Where(q => terms.All(t => (q.Flag + " " + q.Label + " " + q.Info + " " + q.Hint).Contains(t, StringComparison.OrdinalIgnoreCase)))
+                .Select(q => q.Flag).ToList();
         }
 
         private static void Catalog()

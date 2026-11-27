@@ -33,8 +33,38 @@ internal sealed class Quest
     /// <summary>The Name column: the curated name, else the one-line info, else "Unknown quest" (upstream's rule).</summary>
     public string DisplayName => Name.Length > 0 ? Name : Info.Length > 0 ? Info : "Unknown quest";
 
-    /// <summary>The list label: the display name, or for a flag no list knows "(new)" and its description or flag.</summary>
-    public string Label => IsNew ? "(new) " + (Name.Length > 0 ? Name : Flag) : DisplayName;
+    /// <summary>Another quest in the list has the same name (set when the list is built).</summary>
+    internal bool NameShared;
+
+    private string? _detail;
+
+    /// <summary>
+    /// What sets this quest apart from the others of its name: its info's first sentence, with
+    /// "Pickup timer for", "Timer for", "Cooldown for" and "Counter for" taken off. "" without info.
+    /// R-20261124-141130-ca54: 11 rows read "Colosseum Bosses", the weekly Gladiator Diemos token
+    /// timer (pickedupmarkerboss10x) among them, and nothing on the row said which was which.
+    /// </summary>
+    public string Detail => _detail ??= DetailOf(Info);
+
+    /// <summary>The list label: the display name ("Name: detail" when the name is shared), or for a flag no list knows "(new)" and its description or flag.</summary>
+    public string Label => IsNew ? "(new) " + (Name.Length > 0 ? Name : Flag)
+        : NameShared && Name.Length > 0 && Detail.Length > 0 ? Name + ": " + Detail : DisplayName;
+
+    /// <summary>The Quest Timers window's label: the detail alone when the name is shared, else the label.</summary>
+    public string ShortLabel => !IsNew && NameShared && Name.Length > 0 && Detail.Length > 0 ? Detail : Label;
+
+    private static readonly string[] DetailPrefixes = { "Pickup timer for ", "Timer for ", "Cooldown for ", "Counter for " };
+
+    internal static string DetailOf(string info)
+    {
+        string s = (info ?? "").Trim();
+        int stop = s.IndexOf(". ", StringComparison.Ordinal);
+        if (stop >= 0) s = s.Substring(0, stop);
+        s = s.TrimEnd('.', ' ');
+        foreach (string p in DetailPrefixes)
+            if (s.StartsWith(p, StringComparison.OrdinalIgnoreCase) && s.Length > p.Length) { s = s.Substring(p.Length); break; }
+        return s.Length > 0 ? char.ToUpperInvariant(s[0]) + s.Substring(1) : s;
+    }
 
     /// <summary>The server is the source of truth where it has spoken (the flag's timer); else the lists.</summary>
     public bool IsRepeatable(QuestFlagStore flags) =>
@@ -266,6 +296,12 @@ internal sealed class QuestCatalog
             foreach (string f in hide) if (_byFlag.TryGetValue(f, out Quest? q) && q.Server.Length == 0) _byFlag.Remove(f);
             retail -= hidden;
         }
+
+        var names = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (Quest q in _quests)
+            if (q.Name.Length > 0) names[q.Name] = names.TryGetValue(q.Name, out int n) ? n + 1 : 1;
+        foreach (Quest q in _quests)
+            q.NameShared = q.Name.Length > 0 && names.TryGetValue(q.Name, out int n) && n > 1;
 
         RetailCount = retail;
         ServerCount = server;

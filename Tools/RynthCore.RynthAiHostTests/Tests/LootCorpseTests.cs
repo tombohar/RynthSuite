@@ -53,6 +53,8 @@ internal static class LootCorpseTests
         r.Add("boost loot: our kill holds the next target until its corpse is looted (one kill, one loot)", BoostLootOneKillOneLoot);
         r.Add("boost loot: the wait ends after BoostLootKillWaitMs, and with Boost Loot off; a close monster waits for the corpse unless health is under Heal At", BoostLootHoldLimits);
         r.Add("boost loot: looting the kill's corpse ends the wait; an older corpse does not", BoostLootWaitEndsOnKillCorpse);
+        r.Add("boost loot (11-23): under Top Off HP mid-loot with a monster close, the heal wins the tick; the claim is kept and looting resumes once healed", BoostLootHealsBeforeLooting);
+        r.Add("boost loot (11-23): Top Off HP only while Boost Loot's looting has the tick: not with Boost Loot off, no loot work, or under Heal At", BoostLootHealLimits);
         r.Add("boost loot / starved loot (11-22): a monster in range hitting us from beyond 5 yd is fought; the corpse waits", HitFromAfarIsAFight);
         r.Add("death wait (11-08, R-20261115-165857-1de7): the learned death + 1 s keeps nav off; a monster in range is locked at once", DeathWaitUsesLearnedTime);
         r.Add("death wait (11-08): not learned yet: 2.5 s + 1 s; the corpse's coming is timed and learned", DeathWaitDefaultAndLearns);
@@ -72,6 +74,7 @@ internal static class LootCorpseTests
         r.Add("corpse close: not while the last item is between the corpse and the pack - it closes once the item is in the inventory", CloseWaitsForInventory);
         r.Add("loot pacing: an item merged into a stack in the pack is confirmed without the 4 s arrival wait", MergedPickupConfirmedQuickly);
         r.Add("loot pacing: each item taken restarts the corpse timeout, so a corpse with many keeps is looted to the end", ManyKeepsBeatTheTimeout);
+        r.Add("jump loot (2026-11-22): a corpse that closes during a jump pickup is reopened with jump-loot off; 3 closes during one item's pickups leave it (no reopen loop)", JumpLootCloseLoopEnds);
     }
 
     // ── World set-up ──────────────────────────────────────────────────────────
@@ -555,12 +558,15 @@ internal static class LootCorpseTests
     /// HoldNewTarget wired to the plugin. The corpse is created only with <paramref name="withCorpse"/>.
     /// </summary>
     private static Bot BoostWorld(float monsterMeters, bool withCorpse, out CombatManager combat, bool boost = true)
+        => BoostWorld(monsterMeters, withCorpse, out combat, out _, boost);
+
+    private static Bot BoostWorld(float monsterMeters, bool withCorpse, out CombatManager combat, out RynthCoreHost host, bool boost = true)
     {
         BaseWorld(corpsePositioned: true);
         FakeHost.Names[Monster] = "Ancient Water Elemental";
         FakeHost.ItemTypes[Monster] = ItemTypeCreature;
         FakeHost.Positions[Monster] = (Me0.Cell, Me0.X + monsterMeters, Me0.Y + 0.5f, Me0.Z);
-        var host = FakeHost.Create(Player);
+        host = FakeHost.Create(Player);
         var bot = new Bot(host);
         bot.S.EnableCombat = true;
         bot.S.MonsterRange = 50;
@@ -716,6 +722,144 @@ internal static class LootCorpseTests
         bot.Call("EndBoostLootKillWait", Fresh);
         Check.Eq(bot.Get<long>("_boostLootKillAt"), 0L, "the kill's corpse (first seen after it) ends the wait");
         Check.False((bool)bot.Call("BoostLootHoldsNewTarget")!, "so combat goes on at once");
+    }
+
+    // ── Boost Loot heals first (2026-11-23, the owner: "for loot boost below health max it keeps
+    //    looting. I think it should interrupt looting and heal") ──
+
+    /// <summary>
+    /// The vitals step on the plugin's settings and vitals, wired as RynthAiPlugin wires it, with a
+    /// monster within Monster Range (InCombatOverride) so the fight's heal line would apply.
+    /// </summary>
+    private static BuffManager BoostVitals(Bot bot, RynthCoreHost host, PlayerVitalsCache v, bool wired = true)
+    {
+        bot.Set("_vitals", v);
+        var sm = new SpellManager(host, bot.S);
+        var b = new BuffManager(host, bot.S, sm, v);
+        b.InCombatOverride = () => true;
+        if (wired) b.BoostLootHealsToTopOff = () => (bool)bot.Call("BoostLootHealsToTopOff")!;
+        return b;
+    }
+
+    private static PlayerVitalsCache Vitals(uint health)
+        => new() { MaxHealth = 500, CurrentHealth = health, MaxStamina = 100, CurrentStamina = 100, MaxMana = 100, CurrentMana = 100 };
+
+    /// <summary>One arbiter tick as RynthAiPlugin.OnTick builds it (the Boost Loot corpses-first part).</summary>
+    private static BotActivity Decide(Bot bot, CombatManager combat, BuffManager b)
+    {
+        bool wantBuff = b.PendingSpellId != 0 || b.WantsVitalRecharge;
+        bool wantLoot = bot.HasLootWork();
+        bot.Set("_lastWantLoot", wantLoot);
+        bool engaged = combat.IsUnderCloseAttack;
+        if (engaged && wantLoot && (bool)bot.Call("BoostLootFirst", bot.S)!) engaged = false;
+        var inputs = new ArbiterInputs(true, wantBuff, combat.HasEngageableTarget, wantLoot, false, false,
+                                       combatEngaged: engaged, boostLoot: bot.S.BoostLootPriority);
+        var act = ActivityArbiter.Decide(in inputs);
+        bot.S.BotAction = ActivityArbiter.ToBotAction(act);
+        return act;
+    }
+
+    private static void BoostLootHealsBeforeLooting()
+    {
+        var bot = BoostWorld(2f, withCorpse: true, out var combat, out var host);
+        bot.S.HealAt = 60;
+        bot.S.TopOffHP = 95;
+        bot.S.EmergencyHealAt = 0;
+        bot.S.StaminaToHealthAt = 0;
+        var v = Vitals(500);
+        var b = BoostVitals(bot, host, v);
+
+        // Full health: the corpse is claimed and opened with a monster 2 m away (corpses first).
+        Check.Eq(Decide(bot, combat, b), BotActivity.Looting, "full health, a monster close: Boost Loot loots first");
+        bot.Tick(BotActivity.Looting);
+        Check.Eq(bot.Get<int>("_targetCorpseId"), unchecked((int)Corpse), "the corpse is claimed");
+        Check.True(FakeHost.Uses.Contains(Corpse), "and opened");
+
+        // Hit to 70%: over Heal At 60, under Top Off HP 95. It used to loot on (the fight's line, Heal At).
+        v.CurrentHealth = 350;
+        var old = BoostVitals(bot, host, v, wired: false);
+        Check.False(old.WantsHealNow(), "the old rule: in a fight the line is Heal At 60, 70% is over it (looting went on)");
+        Check.True((bool)bot.Call("BoostLootHealsToTopOff")!, "Boost Loot's looting has the tick: Top Off HP applies");
+        Check.True(b.WantsHealNow(), "70% < Top Off HP 95: a heal is wanted");
+        Check.Eq(Decide(bot, combat, b), BotActivity.Buffing, "the heal wins the tick over looting");
+
+        // The server opens the corpse while the heal has the tick: nothing is picked up, the claim stays.
+        bot.Cache.OnCreateObject(Gem);
+        bot.Cache.Tick();
+        bot.P.OnViewObjectContents(Corpse);
+        for (int i = 0; i < 20; i++)
+        {
+            bot.Tick(BotActivity.Buffing);
+            Thread.Sleep(10);
+        }
+        Check.False(FakeHost.ExternalMoves.Any(m => m.Id == Gem), "no pickup while healing");
+        Check.Eq(bot.Get<int>("_targetCorpseId"), unchecked((int)Corpse), "the claim is kept through the heal");
+
+        // Healed over Top Off HP: looting resumes on the same corpse.
+        v.CurrentHealth = 480;   // 96%
+        Check.False(b.WantsHealNow(), "96%: over Top Off HP, no heal wanted");
+        Check.Eq(Decide(bot, combat, b), BotActivity.Looting, "looting has the tick again");
+        for (int i = 0; i < 100 && !FakeHost.ExternalMoves.Any(m => m.Id == Gem); i++)
+        {
+            bot.Tick(BotActivity.Looting);
+            Thread.Sleep(10);
+        }
+        Check.True(FakeHost.ExternalMoves.Contains((Gem, Player, 0)), "the gem is looted after the heal");
+
+        // Heal At 0: the fight's line healed nothing; Top Off HP heals while looting.
+        var dw = BoostWorld(2f, withCorpse: true, out var combatDw, out var hostDw);
+        dw.S.HealAt = 0;
+        dw.S.TopOffHP = 80;
+        dw.S.EmergencyHealAt = 0;
+        dw.S.StaminaToHealthAt = 0;
+        var vDw = Vitals(500);
+        var bDw = BoostVitals(dw, hostDw, vDw);
+        Check.Eq(Decide(dw, combatDw, bDw), BotActivity.Looting, "Heal At 0, full health: looting (the tick that records loot work)");
+        vDw.CurrentHealth = 350;   // 70%
+        Check.False(BoostVitals(dw, hostDw, vDw, wired: false).WantsHealNow(), "Heal At 0, the old rule: no heal at 70% in a fight");
+        Check.Eq(Decide(dw, combatDw, bDw), BotActivity.Buffing, "Heal At 0: 70% < Top Off HP 80 while looting: the heal wins");
+        vDw.CurrentHealth = 410;   // 82%
+        Check.Eq(Decide(dw, combatDw, bDw), BotActivity.Looting, "over Top Off HP: looting");
+    }
+
+    private static void BoostLootHealLimits()
+    {
+        // Boost Loot off: the fight's line (Heal At) as before; nothing changes.
+        var off = BoostWorld(2f, withCorpse: true, out _, out var hostOff, boost: false);
+        off.S.HealAt = 60;
+        off.S.TopOffHP = 95;
+        var vOff = Vitals(350);
+        var bOff = BoostVitals(off, hostOff, vOff);
+        off.Set("_lastWantLoot", true);
+        Check.False((bool)off.Call("BoostLootHealsToTopOff")!, "Boost Loot off: no Top Off line");
+        Check.False(bOff.WantsHealNow(), "Boost Loot off, 70%, Heal At 60 in a fight: no heal (unchanged)");
+
+        // Boost Loot on, no loot work: a fight like any other.
+        var idle = BoostWorld(2f, withCorpse: false, out _, out var hostIdle);
+        idle.S.HealAt = 60;
+        idle.S.TopOffHP = 95;
+        var vIdle = Vitals(350);
+        var bIdle = BoostVitals(idle, hostIdle, vIdle);
+        idle.Set("_lastWantLoot", false);
+        Check.False((bool)idle.Call("BoostLootHealsToTopOff")!, "no loot work: no Top Off line");
+        Check.False(bIdle.WantsHealNow(), "no loot work, 70%: Heal At 60 is the line (unchanged)");
+
+        // Under Heal At: a monster on you is fought first, as before (11-22), and the fight's line heals.
+        var low = BoostWorld(2f, withCorpse: true, out var combatLow, out var hostLow);
+        low.S.HealAt = 60;
+        low.S.TopOffHP = 95;
+        low.S.EmergencyHealAt = 0;
+        low.S.StaminaToHealthAt = 0;
+        var vLow = Vitals(250);   // 50%
+        var bLow = BoostVitals(low, hostLow, vLow);
+        low.Set("_lastWantLoot", true);
+        Check.False((bool)low.Call("BoostLootHealsToTopOff")!, "under Heal At: corpses first is off, so no Top Off line");
+        Check.True(bLow.WantsHealNow(), "50% < Heal At 60: the fight's heal");
+        Check.Eq(Decide(low, combatLow, bLow), BotActivity.Buffing, "the heal has the tick");
+        var noHeal = new ArbiterInputs(true, false, combatLow.HasEngageableTarget, true, false, false,
+                                       combatEngaged: combatLow.IsUnderCloseAttack, boostLoot: true);
+        Check.True(combatLow.IsUnderCloseAttack, "the rig: a monster 2 m away is on us");
+        Check.Eq(ActivityArbiter.Decide(in noHeal), BotActivity.Combat, "between heals, a monster on you is fought (not looted past)");
     }
 
     // ── The death wait (2026-11-08, Tom: the bot ran off from its kill, then turned round and ran back
@@ -1319,6 +1463,76 @@ internal static class LootCorpseTests
         var moved = FakeHost.ExternalMoves.Select(m => m.Id).Distinct().ToList();
         Check.Eq(moved.Count, 3, "all three gems are taken (moved: " + string.Join(",", moved.Select(i => $"{i:X8}")) + ")");
         Check.False(FakeHost.Logs.Any(l => l.Contains("abandoning corpse")), "the corpse is not abandoned on the timeout");
+    }
+
+    // 2026-11-22: jump-loot from a corpse about 4 m away. The client closed the corpse 1.5-2 s after
+    // each jump pickup (outside its use radius at the once-a-second check); the reopen started the
+    // item's tries over and the next pickup jumped again, so one corpse was opened and closed for
+    // 1-5 minutes. Now the close turns jump-loot off for the corpse, and each close during one item's
+    // pickups is one of its tries on that corpse: three, and the item is left.
+    private static void JumpLootCloseLoopEnds()
+    {
+        var oldClock = RynthAiPlugin.CorpseClock;
+        var oldPace = ActionPacer.NowMs;
+        long t = 60_000_000;
+        RynthAiPlugin.CorpseClock = () => t;
+        ActionPacer.NowMs = () => t;
+        ActionPacer.ForgetLootJump();
+        try
+        {
+            BaseWorld(corpsePositioned: true);
+            FakeHost.CloseContainerCalls = true;
+            FakeHost.TapJumpCalls = true;
+            var host = FakeHost.Create(Player);
+            var bot = new Bot(host);
+            bot.S.LootJumpEnabled = true;
+            bot.S.LootCorpseTimeoutMs = 120_000;
+            bot.Set("_vitals", new PlayerVitalsCache { MaxHealth = 100, CurrentHealth = 100, MaxStamina = 100, CurrentStamina = 100, MaxMana = 100, CurrentMana = 100 });
+            bot.Cache.OnCreateObject(Corpse);
+            bot.Cache.OnCreateObject(Gem);
+            for (int i = 0; i < 50; i++) bot.Cache.Tick();
+
+            void TickUntil(Func<bool> done, long maxMs)
+            {
+                long end = t + maxMs;
+                while (t < end && !done()) { t += 20; bot.Tick(BotActivity.Looting); }
+            }
+            int Opens() => FakeHost.Uses.Count(u => u == Corpse);
+            int Moves() => FakeHost.ExternalMoves.Count(m => m.Id == Gem);
+
+            int closes = 0;
+            for (int round = 0; round < 8 && !Completed(bot); round++)
+            {
+                int opens = Opens();
+                TickUntil(() => Opens() > opens || Completed(bot), 10_000);
+                if (Opens() == opens) break;
+                FakeHost.GroundContainer = Corpse;
+                bot.P.OnViewObjectContents(Corpse);
+                int moves = Moves();
+                TickUntil(() => Moves() > moves || Completed(bot), 5_000);
+                if (Moves() == moves) break;
+                // The hop: about 1.5 s later the client closes the corpse, the gem still on it.
+                TickUntil(() => false, 1_500);
+                FakeHost.GroundContainer = 0;
+                bot.P.OnStopViewingObjectContents(Corpse);
+                closes++;
+            }
+            TickUntil(() => false, 10_000);
+
+            Check.Eq(FakeHost.TapJumps, 1, "only the first pickup jumps; after the corpse closed on it the pickups bend down");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("jump-loot is off for this corpse")), "the switch is logged");
+            Check.Eq(Moves(), RynthAiPlugin.MaxClosesPerLootItem, $"the gem gets {RynthAiPlugin.MaxClosesPerLootItem} pickups across the reopens, not a fresh 3 tries on every open");
+            Check.Eq(closes, RynthAiPlugin.MaxClosesPerLootItem, "and the corpse closed on each of them");
+            Check.True(FakeHost.Logs.Any(l => l.Contains($"closed during its pickup {RynthAiPlugin.MaxClosesPerLootItem} times")), "leaving the gem is logged");
+            Check.True(Opens() <= RynthAiPlugin.MaxClosesPerLootItem + 1, $"no reopen loop: {Opens()} opens");
+            Check.True(Completed(bot), "the corpse is finished once the gem is left");
+        }
+        finally
+        {
+            RynthAiPlugin.CorpseClock = oldClock;
+            ActionPacer.NowMs = oldPace;
+            ActionPacer.ForgetLootJump();
+        }
     }
 
     private static void TickFor(Bot bot, int ms)

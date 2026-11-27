@@ -11,10 +11,16 @@ namespace RynthCore.Plugin.RynthSort;
 /// <summary>RynthSort's settings for one character (the Lua script's DEFAULTS, plus what the plugin adds).</summary>
 internal sealed class SortSettings
 {
-    public const int SettleMin = 0, SettleMax = 30, GapMin = 100, GapMax = 3000;
+    public const int SettleMin = 0, SettleMax = 30, GapMin = 100, GapMax = 3000, HoldMinMin = 0, HoldMinMax = 30;
+    /// <summary>The hold a character gets until it changes it (minutes).</summary>
+    public const int HoldMinDefault = 3;
 
-    /// <summary>Auto-sort: keeps every pack tidy (new items from the main pack after the settle time, misplaced items, stacks, order).</summary>
-    public bool Auto = true;
+    /// <summary>
+    /// Auto-sort: keeps every pack tidy (new items from the main pack after the settle time, misplaced items, stacks, order).
+    /// Off for a character RynthSort hasn't seen: players found items moving out from under them before they had
+    /// set up any rules (#rynth-issues "The bag sort feature is lacking in UX"). A saved file keeps its own choice.
+    /// </summary>
+    public bool Auto;
     /// <summary>How long a new item sits in the main pack before it moves (seconds).</summary>
     public int SettleSec = 5;
     /// <summary>Auto-sort's pause between two moves (ms), to leave the bot room.</summary>
@@ -32,24 +38,72 @@ internal sealed class SortSettings
     /// script's rules, to show them.
     /// </summary>
     public bool WindowOpen;
+    /// <summary>
+    /// "Leave items I use alone": an item the player moved, selected, dragged, took off or picked up
+    /// isn't sorted for this many minutes (0 = off). Files from before it have the default.
+    /// </summary>
+    public int HoldMin = HoldMinDefault;
+    /// <summary>
+    /// "Keep handy items at the front of the main pack" (0.6.0, <see cref="HandyItems"/>). Off for a
+    /// file from before it and for a new character: it moves items in the main pack, so the player
+    /// turns it on.
+    /// </summary>
+    public bool HandyFront;
+    /// <summary>The kinds that count as handy (ObjectClass numbers), each once.</summary>
+    public List<int> HandyClasses = new(HandyItems.DefaultClasses);
+    /// <summary>Parts of names that count as handy whatever their kind ("Potion"), each once.</summary>
+    public List<string> HandyNames = new(HandyItems.DefaultNames);
+    /// <summary>
+    /// Side packs folded down to their header and rules in the window (0.6.1, by the pack's object
+    /// id, so it stays with the pack when packs are reordered), newest last, at most
+    /// <see cref="MaxCollapsed"/>.
+    /// </summary>
+    public List<uint> CollapsedPacks = new();
+    /// <summary>The main pack's card folded down to its header in the window.</summary>
+    public bool MainCollapsed;
+    public const int MaxCollapsed = 64;
+
+    /// <summary>Side pack <paramref name="id"/> folded or not; true when that changed something.</summary>
+    public bool SetCollapsed(uint id, bool collapsed)
+    {
+        if (id == 0) return false;
+        bool has = CollapsedPacks.Contains(id);
+        if (has == collapsed) return false;
+        if (collapsed)
+        {
+            if (CollapsedPacks.Count >= MaxCollapsed) CollapsedPacks.RemoveAt(0);
+            CollapsedPacks.Add(id);
+        }
+        else CollapsedPacks.Remove(id);
+        return true;
+    }
 
     public void Clamp()
     {
         SettleSec = Math.Clamp(SettleSec, SettleMin, SettleMax);
         GapMs = Math.Clamp(GapMs, GapMin, GapMax);
+        HoldMin = Math.Clamp(HoldMin, HoldMinMin, HoldMinMax);
     }
 }
 
 /// <summary>One character's rules and settings.</summary>
 internal sealed class CharacterSortData
 {
-    public List<SortRule> Rules = SortRules.Defaults();
+    /// <summary>
+    /// None for a character RynthSort hasn't seen (2026-11-26): the window offers starter layouts
+    /// fitted to the packs it carries instead of rules by pack number that may name the wrong packs
+    /// (#rynth-issues "The bag sort feature is lacking in UX": "there is no common-sense default").
+    /// A saved file, or the Lua script's, keeps its own rules.
+    /// </summary>
+    public List<SortRule> Rules = new();
+    /// <summary>Side packs with a job (0.6.0: Salvage, Sell, Mule; <see cref="PackJobs"/>). None for a file from before them.</summary>
+    public List<PackJob> Jobs = new();
     public SortSettings Settings = new();
-    /// <summary>Where these came from on first run ("" = defaults, else the Lua script's file).</summary>
+    /// <summary>Where these came from on first run ("" = RynthSort's own, or none yet; else the Lua script's file).</summary>
     public string ImportedFrom = string.Empty;
     /// <summary>
     /// The rules are tied to pack ids (<see cref="PackFix"/> ran once). False for files saved
-    /// before pack ids, a new character's defaults and a fresh import from the Lua script.
+    /// before pack ids and a fresh import from the Lua script.
     /// </summary>
     public bool PacksFixed;
     /// <summary>
@@ -99,7 +153,7 @@ internal sealed class SortStore
     /// <summary>
     /// The character's rules and settings: RynthSort's own file; else the Lua script's (imported:
     /// <see cref="CharacterSortData.ImportedFrom"/> says so, and the caller saves it as RynthSort's);
-    /// else the defaults. A broken file reads as the defaults (the next save rewrites it).
+    /// else no rules (the window offers starter layouts). A broken file reads as no rules (the plugin keeps a .bak of it at the next save).
     /// </summary>
     public CharacterSortData Load(string server, string character, out string? problem)
     {
@@ -179,7 +233,41 @@ internal sealed class SortStore
             st.OrderInPacks = Bool(s, "orderInPacks", st.OrderInPacks);
             st.OrderKindFirst = Bool(s, "orderKindFirst", st.OrderKindFirst);
             st.WindowOpen = Bool(s, "windowOpen", st.WindowOpen);
+            st.HoldMin = Int(s, "holdMin", st.HoldMin);
+            st.HandyFront = Bool(s, "handyFront", false);
+            st.MainCollapsed = Bool(s, "mainCollapsed", false);
+            if (s.TryGetProperty("collapsed", out JsonElement cp) && cp.ValueKind == JsonValueKind.Array)
+                foreach (JsonElement c in cp.EnumerateArray())
+                    if (c.ValueKind == JsonValueKind.Number && c.TryGetUInt32(out uint id)) st.SetCollapsed(id, true);
+            if (s.TryGetProperty("handyClasses", out JsonElement hc) && hc.ValueKind == JsonValueKind.Array)
+            {
+                st.HandyClasses.Clear();
+                foreach (JsonElement c in hc.EnumerateArray())
+                    if (c.ValueKind == JsonValueKind.Number && c.TryGetDouble(out double v) && v >= 0 && v <= 1000) HandyItems.AddClass(st, (int)Math.Round(v));
+            }
+            if (s.TryGetProperty("handyNames", out JsonElement hn) && hn.ValueKind == JsonValueKind.Array)
+            {
+                st.HandyNames.Clear();
+                foreach (JsonElement n in hn.EnumerateArray())
+                    if (n.ValueKind == JsonValueKind.String) HandyItems.AddName(st, n.GetString());
+            }
             st.Clamp();
+        }
+        if (root.TryGetProperty("jobs", out JsonElement jobs) && jobs.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement e in jobs.EnumerateArray())
+            {
+                if (e.ValueKind != JsonValueKind.Object || d.Jobs.Count >= MaxPack) continue;
+                JobKind kind = PackJobs.Parse(e.TryGetProperty("job", out JsonElement jk) && jk.ValueKind == JsonValueKind.String ? jk.GetString() : null);
+                if (kind == JobKind.None) continue;
+                d.Jobs.Add(new PackJob
+                {
+                    Kind = kind,
+                    PackId = UInt(e, "packId"),
+                    Pack = Math.Clamp(Int(e, "pack", 1), 1, MaxPack),
+                    Mule = kind == JobKind.Mule && e.TryGetProperty("mule", out JsonElement mu) && mu.ValueKind == JsonValueKind.String ? SortRule.Clean(mu.GetString()) : string.Empty,
+                });
+            }
         }
         if (root.TryGetProperty("importedFrom", out JsonElement f) && f.ValueKind == JsonValueKind.String)
             d.ImportedFrom = f.GetString() ?? string.Empty;
@@ -288,7 +376,38 @@ internal sealed class SortStore
             w.WriteBoolean("orderInPacks", d.Settings.OrderInPacks);
             w.WriteBoolean("orderKindFirst", d.Settings.OrderKindFirst);
             w.WriteBoolean("windowOpen", d.Settings.WindowOpen);
+            // 2026-11-26: an older RynthSort reading this file skips it (it keeps no hold).
+            w.WriteNumber("holdMin", d.Settings.HoldMin);
+            // 0.6.0: handy items at the front of the main pack (an older RynthSort skips these).
+            w.WriteBoolean("handyFront", d.Settings.HandyFront);
+            w.WriteStartArray("handyClasses");
+            foreach (int c in d.Settings.HandyClasses) w.WriteNumberValue(c);
+            w.WriteEndArray();
+            w.WriteStartArray("handyNames");
+            foreach (string n in d.Settings.HandyNames) w.WriteStringValue(n);
+            w.WriteEndArray();
+            // 0.6.1: packs folded in the window (an older RynthSort skips these).
+            w.WriteBoolean("mainCollapsed", d.Settings.MainCollapsed);
+            w.WriteStartArray("collapsed");
+            foreach (uint id in d.Settings.CollapsedPacks) w.WriteNumberValue(id);
+            w.WriteEndArray();
             w.WriteEndObject();
+            // 0.6.0: side packs with a job (an older RynthSort skips this).
+            if (d.Jobs.Count > 0)
+            {
+                w.WriteStartArray("jobs");
+                foreach (PackJob j in d.Jobs)
+                {
+                    if (j.Kind == JobKind.None) continue;
+                    w.WriteStartObject();
+                    w.WriteString("job", PackJobs.Key(j.Kind));
+                    if (j.PackId != 0) w.WriteNumber("packId", j.PackId);
+                    w.WriteNumber("pack", j.Pack);
+                    if (j.Kind == JobKind.Mule && j.Mule.Length > 0) w.WriteString("mule", j.Mule);
+                    w.WriteEndObject();
+                }
+                w.WriteEndArray();
+            }
             if (d.ImportedFrom.Length > 0) w.WriteString("importedFrom", d.ImportedFrom);
             w.WriteBoolean("packsFixed", d.PacksFixed);
             w.WriteEndObject();

@@ -19,6 +19,11 @@
 //   - a run that made kits: the next look in 30 s (the count decides then).
 // Before a start, a pack that can't make a kit (out of an ingredient, under the floor, untrained)
 // is said once per reason, then looked at again every 30 s.
+//
+// "Make ammo when low" (MissileCraftingManager.Auto, RynthAiPlugin.Ammo.cs, 2026-11-23) runs on the
+// same rules with its own instance: its Name and Doing, and the facts' CountText ("230 arrows"),
+// BelowMax (ammo counts run to thousands) and IdleWhy ("no launcher in hand"). Their defaults are the
+// kits' own, so a kit look reads exactly as before.
 using System;
 
 namespace RynthCore.Plugin.RynthAi.MiniRemote.Crafting;
@@ -79,6 +84,12 @@ internal sealed class KitAutoFacts
     public string VitalsWhy = string.Empty;
     /// <summary>"" when nothing else needs the character; else what does (buffing, a fight, looting, ...).</summary>
     public string BusyWhy = string.Empty;
+    /// <summary>The most <see cref="Below"/> may be (kits: <see cref="KitAuto.MaxBelow"/>).</summary>
+    public int BelowMax = KitAuto.MaxBelow;
+    /// <summary>"N kits" for the count in the status and chat (null = <see cref="KitAuto.KitsText"/>).</summary>
+    public Func<int, string>? CountText;
+    /// <summary>"" = look as usual; else nothing to do for now, and why (no launcher in hand, ...): no start, no chat.</summary>
+    public string IdleWhy = string.Empty;
 }
 
 internal sealed class KitAuto
@@ -110,6 +121,10 @@ internal sealed class KitAuto
     public Func<long> NowMs = static () => Environment.TickCount64;
     /// <summary>A chat line for the player (a reason said once).</summary>
     public Action<string>? Say;
+    /// <summary>The feature's name in chat ("Make kits when low").</summary>
+    public string Name = "Make kits when low";
+    /// <summary>What a run does, for the status ("stopping to make kits").</summary>
+    public string Doing = "make kits";
 
     private long _nextCheckAt;
     private string _waitWhy = string.Empty;
@@ -135,8 +150,9 @@ internal sealed class KitAuto
     {
         if (!f.Enabled) return (KitBlock.Off, "off");
         if (!f.MacroOn) return (KitBlock.MacroOff, "the macro is off");
-        int below = Math.Clamp(f.Below, 1, MaxBelow);
-        if (f.Kits >= below) return (KitBlock.Enough, $"{KitsText(f.Kits)} carried (makes more under {below})");
+        if (f.IdleWhy.Length > 0) return (KitBlock.Enough, f.IdleWhy);
+        int below = Math.Clamp(f.Below, 1, Math.Max(1, f.BelowMax));
+        if (f.Kits >= below) return (KitBlock.Enough, $"{(f.CountText ?? KitsText)(f.Kits)} carried (makes more under {below})");
         if (f.BusyWhy.Length > 0) return (KitBlock.Busy, f.BusyWhy);
         if (f.VitalsWhy.Length > 0) return (KitBlock.Vitals, f.VitalsWhy);
         if (f.NearestMonsterYd <= f.RadiusYd) return (KitBlock.Monster, $"monster {f.NearestMonsterYd:0} yd away");
@@ -196,7 +212,7 @@ internal sealed class KitAuto
                     if (_said != why && !why.StartsWith("can't read", StringComparison.Ordinal))
                     {
                         _said = why;
-                        SayLine($"[RynthAi] Make kits when low: {KitsText(f.Kits)} left, but none can be made now: {why}.");
+                        SayLine($"[RynthAi] {Name}: {(f.CountText ?? KitsText)(f.Kits)} left, but none can be made now: {why}.");
                     }
                     Wait(now, PackCheckMs, why);
                     break;
@@ -241,7 +257,7 @@ internal sealed class KitAuto
         if (f.Moving)
         {
             _stillSince = -1;
-            _status = "stopping to make kits";
+            _status = "stopping to " + Doing;
             return KitAutoStep.Hold;
         }
         if (_stillSince < 0) _stillSince = now;
@@ -288,7 +304,7 @@ internal sealed class KitAuto
                 return $" Next try in {CooldownMs / 1000} s at the earliest.";
             case KitStopKind.User:
                 Wait(now, BackoffMs, "you stopped the last run");
-                return $" Next try in {BackoffMs / 60_000} min (turn Make kits when low off to stop it for good).";
+                return $" Next try in {BackoffMs / 60_000} min (turn {Name} off to stop it for good).";
             default:
                 if (made <= 0)
                 {

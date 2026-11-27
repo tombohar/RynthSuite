@@ -58,6 +58,8 @@ internal static class ChestLootTests
         r.Add("chest loot: an open chest that closes before the looter gets to it (a fight had the tick) is opened again", ClosedBeforeTakenReopened);
         r.Add("chest loot: no jump-loot from a chest (a hop can take the character out of its use radius)", NoJumpLootFromChest);
         r.Add("chest loot: a chest gets 2 minutes (not the 12 s corpse timeout), restarted by each pickup", ChestTimeoutLongAndRestarted);
+        r.Add("chest loot: an item the server would refuse for burden (past 300%) is left unsent, with a chat line; one that fits still goes", OverBurdenLeft);
+        r.Add("loot burden: ACE's carrying capacity and 300% limit", OverBurdenMath);
     }
 
     // ── World set-up ──────────────────────────────────────────────────────────
@@ -229,6 +231,48 @@ internal static class ChestLootTests
         bot.TickFor(100);
         Check.Eq(FakeHost.Closes.Count, 1, "still one close");
         Check.False(bot.HasLootWork(), "no loot work left");
+    }
+
+    // R-20261123-065337-d200: a kept item past the burden limit was refused 94 ms after each send with
+    // no code, read as "too busy" and sent 6 times a chest (the Item Tool keyed the chest again).
+    private static void OverBurdenLeft()
+    {
+        foreach ((int gemBurden, bool fits) in new[] { (1_500, false), (1_000, true) })
+        {
+            BaseWorld();
+            var host = FakeHost.Create(Player);
+            var bot = new Bot(host);
+            // Strength 100, one carrying capacity augmentation: capacity 18,000, the server's limit 54,000.
+            FakeHost.Attributes[(Player, 1u, 0)] = 100;
+            FakeHost.Ints[(Player, 230u)] = 1;
+            FakeHost.Ints[(Player, 5u)] = 53_000;
+            FakeHost.Ints[(Gem, 5u)] = gemBurden;   // 54,500: over; 54,000: exactly the limit, allowed
+            bot.Create(Chest, Gem, Spoon);
+            bot.ServerOpens(Chest);
+            if (fits)
+            {
+                LootGemAndFinish(bot, Gem);
+                Check.False(FakeHost.Logs.Any(l => l.Contains("too heavy")), "at the limit: nothing left for burden");
+                continue;
+            }
+            bot.TickUntil(() => FakeHost.Closes.Count > 0);
+            Check.False(FakeHost.ExternalMoves.Any(m => m.Item1 == Gem), $"over the limit: no move sent (moves: {Moves()})");
+            Check.True(FakeHost.Logs.Any(l => l.Contains("too heavy") && l.Contains($"{Gem:X8}") && l.Contains("54500")),
+                "the log says why, with the numbers");
+            Check.True(FakeHost.Chat.Any(l => l.Contains("Too heavy to loot") && l.Contains("300%")), "one chat line says why");
+            Check.Eq(FakeHost.Closes.Count, 1, "the chest is still finished and closed");
+        }
+    }
+
+    private static void OverBurdenMath()
+    {
+        Check.Eq(RynthAiPlugin.CarryCapacity(100, 0), 15_000L, "150 per Strength");
+        Check.Eq(RynthAiPlugin.CarryCapacity(100, 5), 30_000L, "plus 30 per Strength per augmentation");
+        Check.False(RynthAiPlugin.PickupOverBurdenLimit(44_000, 1_000, 100, 0, out long limit), "exactly 300%: the server takes it");
+        Check.Eq(limit, 45_000L, "the limit is 3 x capacity");
+        Check.True(RynthAiPlugin.PickupOverBurdenLimit(44_001, 1_000, 100, 0, out _), "one over: refused");
+        Check.False(RynthAiPlugin.PickupOverBurdenLimit(90_000, 1_000, 0, 0, out _), "no Strength known: the server decides");
+        Check.False(RynthAiPlugin.PickupOverBurdenLimit(90_000, 0, 100, 0, out _), "no burden known on the item: the server decides");
     }
 
     private static void ChestTimeoutLongAndRestarted()

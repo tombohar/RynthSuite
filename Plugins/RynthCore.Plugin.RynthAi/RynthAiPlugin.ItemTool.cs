@@ -490,6 +490,19 @@ public sealed partial class RynthAiPlugin
 
         public string? HoldReason() => _p.ItemToolHoldReason(yieldToLooter: true);
 
+        public string? NoRoomReason()
+        {
+            var cache = _p._objectCache;
+            int playerId = unchecked((int)_p._playerId);
+            if (cache == null || playerId == 0) return null;
+            try
+            {
+                int free = WorldObjectCache.MainPackFreeSlots(cache.GetDirectInventory(forceRefresh: false), playerId, Host);
+                return free <= 0 ? "the main pack is full (loot goes only into the main pack); Auto Cram or you can make room" : null;
+            }
+            catch { return null; }
+        }
+
         public bool HasUseDone => Host.HasUseDoneSeq;
         public int UseDoneSeq() => Host.HasUseDoneSeq ? Host.GetUseDoneSeq() : 0;
         public bool LastUseDone(out int seq, out uint error)
@@ -618,12 +631,16 @@ public sealed partial class RynthAiPlugin
             return n;
         }
 
-        public bool Landed(int itemId, int count)
+        public bool Landed(int itemId, int count, out int left)
         {
             // As the give queue reads it (GiveLanded): gone from the cache, out of the packs, or a smaller stack.
+            left = 0;
             if (_p._objectCache?[itemId] is not WorldObject wo) return true;
             if (!_p.InPlayerInventory(wo.Container)) return true;
-            return Math.Max(1, wo.Values(LongValueKey.StackCount, 1)) < count;
+            int now = Math.Max(1, wo.Values(LongValueKey.StackCount, 1));
+            if (now >= count) return false;
+            left = now;
+            return true;
         }
 
         public bool Send(int itemId, int targetId)

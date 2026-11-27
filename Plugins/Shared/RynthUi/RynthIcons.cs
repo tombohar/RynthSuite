@@ -132,4 +132,5 @@ internal static class RynthIcons
     public const string Warning = "\uE4E0";
     public const string Wrench = "\uE5D4";
     public const string X = "\uE4F6";
+    public const string XCircle = "\uE4F8";
 }

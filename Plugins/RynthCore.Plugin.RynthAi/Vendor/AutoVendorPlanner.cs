@@ -577,6 +577,15 @@ internal static class AutoVendorPlanner
     internal static int TrueUnit(IReadOnlyDictionary<int, long> unitsByValue, int freshUnit) =>
         freshUnit > 0 ? freshUnit : MostCarriedUnit(unitsByValue);
 
+    /// <summary>
+    /// A split's new stack reads fresh only while it still holds what the split made: split again or
+    /// partly sold, its Value is as stale as any other. R-20261125-011308-9444: a stack split off with
+    /// 42 peas and later split down to 1 kept the 42 peas' Value, so 2,100,000 became the "true" unit
+    /// and every pea read "worth 2,100,000 each, this vendor pays for items up to 1,000,000": AutoVendor
+    /// finished early, and on every visit after it.
+    /// </summary>
+    internal static bool FreshSplitReading(int madeAmount, int stackNow) => madeAmount > 0 && stackNow == madeAmount;
+
     /// <summary>The unit value carrying the most units (ties: the higher value, the safe side for a vendor's max).</summary>
     internal static int MostCarriedUnit(IReadOnlyDictionary<int, long> unitsByValue)
     {
